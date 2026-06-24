@@ -19,6 +19,7 @@ from fractal.cli.utils import (
     resolve_target,
     validate_config_values,
 )
+from fractal.core.node import Node
 
 __all__ = [
     'node_init',
@@ -30,6 +31,7 @@ __all__ = [
     'node_delete',
     'node_retire',
     'node_unretire',
+    'node_reset',
     'node_attach',
     'node_status',
     'node_list',
@@ -487,6 +489,31 @@ def node_unretire(app: typer.Typer) -> typer.Typer:
         node = resolve_target(path, node)
         result = node.unretire()
         typer.echo(result)
+
+    return app
+
+
+def node_reset(app: typer.Typer) -> typer.Typer:
+    """Register the ``reset`` command."""
+    # force flag
+    force_help = 'Delete remaining worktrees before resetting.'
+    force = typer.Option(False, '--force', '-f', help=force_help)
+    # path option
+    path_help = 'Worktree directory or repo root.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, 'reset')
+    def _reset(
+        force: bool = force,
+        path: str = path,
+    ) -> None:
+        """Remove all worktrees and clean up .worktrees/."""
+        # reset is a repo-wide teardown -- resolve to the repo root from any
+        # cwd inside it (the agent's NODE_DIR, a worktree, or the repo root)
+        repo_root = Node(path)._repo_dir
+        output = Node.reset(repo_root, force=force)
+        if output:
+            typer.echo(output)
 
     return app
 

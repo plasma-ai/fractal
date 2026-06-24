@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -36,6 +37,7 @@ __all__ = [
     'test_merge_refuses_when_parent_worktree_is_dirty',
     'test_merge_event_survives_child_delete',
     'test_destroy_lifecycle',
+    'test_reset_lifecycle',
     'test_init_rejects_inside_worktrees',
     'test_user_init_records_project_and_places_data',
     'test_user_init_repairs_stranded_database',
@@ -54,6 +56,7 @@ __all__ = [
     'test_full_run_lifecycle',
     'test_run_iteration_record_default_agent_model_session',
     'test_step_records_agent_model_session',
+    'test_claude_session_read_finds_on_disk_transcript',
     'test_run_cost_rollup_spans_iterations_and_sync_steps',
     'test_terminal_end_records_reason',
     'test_terminal_writes_are_first_writer_wins',
@@ -67,6 +70,7 @@ __all__ = [
     'test_status_returns_stored_value',
     'test_status_set_validates',
     'test_status_set_stores_value',
+    'test_title_set_updates_central_registry',
     'test_finish_rejects_non_active',
     'test_stop_rejects_non_active',
     'test_signal_rejects_active_node_without_run',
@@ -136,6 +140,7 @@ __all__ = [
     'test_max_cost_enforcement',
     'test_max_cost_bounds_child_by_subtree_remaining',
     'test_parent_run_id_scopes_subtree_cost',
+    'test_cost_lifetime_sums_all_runs_across_subtree',
     'test_init_registers_child',
     'test_spawn_event_recorded_on_parent',
     'test_child_pending_lists_direct_children_only',
@@ -707,6 +712,23 @@ def test_destroy_lifecycle(git_repo: pathlib.Path) -> None:
     assert 'Nothing to destroy' in second
 
 
+def test_reset_lifecycle(git_repo: pathlib.Path) -> None:
+    """Reset fails with worktrees, succeeds with --force."""
+    node = Node(git_repo)
+    node.init(user=True, agent='claude')
+    node.init(name='task')
+
+    # reset without force fails (worktrees still exist)
+    with pytest.raises(RuntimeError):
+        Node.reset(git_repo)
+
+    # reset with force succeeds
+    Node.reset(git_repo, force=True)
+    assert not (git_repo / '.worktrees').exists() or not any(
+        (git_repo / '.worktrees').iterdir()
+    )
+
+
 def test_init_rejects_inside_worktrees(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1244,6 +1266,38 @@ def test_step_records_agent_model_session(node_with_db: Node) -> None:
     assert step['session'] == 'sess-xyz'
 
 
+def test_claude_session_read_finds_on_disk_transcript(
+    node_with_db: Node,
+) -> None:
+    """``claude_session_read`` returns claude's live transcript for the node."""
+    node = node_with_db
+    # claude keys its projects dir by the agent's cwd (the node dir), dashing
+    # every non-alphanumeric char; transcripts live under the node's
+    # CLAUDE_CONFIG_DIR (.claude), on the persisted worktree -- seed one there
+    slug = re.sub(r'[^A-Za-z0-9]', '-', str(node._node_dir))
+    projects = node._node_dir / '.claude' / 'projects' / slug
+    projects.mkdir(parents=True)
+    session = 'abc12300-0000-4def-9000-000000000001'
+    transcript = '{"type": "user"}\n{"type": "assistant"}\n'
+    (projects / f'{session}.jsonl').write_text(transcript, encoding='utf-8')
+
+    # the live file is returned verbatim
+    found = node.claude_session_read(session)
+    assert found == {'session': session, 'exists': True, 'content': transcript}
+
+    # a session with no file on disk reads as absent (empty content)
+    absent = 'ffffffff-0000-4000-8000-000000000000'
+    assert node.claude_session_read(absent) == {
+        'session': absent,
+        'exists': False,
+        'content': '',
+    }
+
+    # a non-id (path separators) is refused at the boundary
+    with pytest.raises(ValueError, match='Invalid session id'):
+        node.claude_session_read('../escape')
+
+
 def test_run_cost_rollup_spans_iterations_and_sync_steps(node_with_db: Node) -> None:
     """Run cost sums every step across iterations, including SYNC (step 0).
 
@@ -1621,6 +1675,47 @@ def test_status_set_stores_value(node_with_db: Node) -> None:
     node.status_set('killed')
     # verify it is read back
     assert node.status() == 'killed'
+
+
+def test_title_set_updates_central_registry(node_with_db: Node) -> None:
+    """Title set writes the node's label into its central registry row.
+
+    The title is registry metadata like status: a child's set updates its
+    row in the central ``nodes`` table. A user node, with no registry row,
+    is a no-op (not an error).
+    """
+    root = node_with_db
+    child_branch = f'{root._branch}.task'
+    # register the child in the central registry, as a spawn would
+    root.db.merge({'node': child_branch, 'status': 'idle'}, 'nodes', conflict=['node'])
+    # give the child a real worktree on its branch and a minimal config
+    child_dir = root._root / '.worktrees' / child_branch
+    subprocess.run(
+        ['git', 'worktree', 'add', '-b', child_branch, f'{child_dir}', 'HEAD'],
+        cwd=root._root,
+        capture_output=True,
+        check=True,
+    )
+    node_dir = child_dir / '.fractal' / child_branch
+    node_dir.mkdir(parents=True)
+    config = {
+        'project': '.',
+        'root': root._branch,
+        'scope': '',
+        'agent': 'claude',
+        'local': False,
+        'detached': False,
+    }
+    (node_dir / 'config.json').write_text(
+        json.dumps(config, indent=2),
+        encoding='utf-8',
+    )
+    # set the child's title and verify the registry row carries the label
+    Node(str(child_dir)).title_set('Pretty Task')
+    row = root.db.read('nodes', where={'node': child_branch})[0]
+    assert row['title'] == 'Pretty Task'
+    # a user node (no registry row) is a no-op, not an error
+    root.title_set('Root Label')
 
 
 # ------ finish / stop
@@ -3664,6 +3759,37 @@ def test_parent_run_id_scopes_subtree_cost(
     # idle-spawned child run -- only the in-run $1 is attributed
     assert parent.cost_spent(run_id=p_run) == pytest.approx(1.0)
     assert parent.cost_breakdown(run_id=p_run) == pytest.approx({child._branch: 1.0})
+
+
+def test_cost_lifetime_sums_all_runs_across_subtree(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifetime cost sums every node's step cost across all runs, unscoped.
+
+    Where per-run ``cost_breakdown`` attributes only the child spend chained to
+    a given parent run, ``cost_lifetime`` sums each node's whole-life step cost
+    -- including a run (here an idle-spawned one) that no parent run links to --
+    and keys the node itself alongside its descendants.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    p_run = _active_run(parent)
+    child_run = _active_run(child)
+
+    # $1 in the in-parent-run child run, then $2 in an idle-spawned run that
+    # links to no parent run (excluded from the parent's per-run breakdown)
+    _record_step_cost(child, run_id=child_run, cost=1.0)
+    child.run_end(run_id=child_run, status='completed', exit_code=0)
+    parent.run_end(run_id=p_run, status='completed', exit_code=0)
+    idle_run = child.run_start()
+    _record_step_cost(child, run_id=idle_run, cost=2.0)
+
+    # per-run breakdown sees only the chained $1; lifetime sees the child's full
+    # $3 and the parent's own $0
+    assert parent.cost_breakdown(run_id=p_run) == pytest.approx({child._branch: 1.0})
+    assert parent.cost_lifetime() == pytest.approx(
+        {parent._branch: 0.0, child._branch: 3.0}
+    )
 
 
 def test_init_registers_child(node_with_db: Node) -> None:

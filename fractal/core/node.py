@@ -6,6 +6,7 @@ import dataclasses
 import datetime as dt
 import fcntl
 import functools
+import io
 import json
 import math
 import os
@@ -18,6 +19,7 @@ import tempfile
 import time
 import typing
 import uuid
+import zipfile
 from collections.abc import Iterator
 from typing import Any, Literal, Optional, Union
 
@@ -1422,6 +1424,51 @@ class Node:
             exclude.write_text(f'{body}\n' if body else '', encoding='utf-8')
         return result.stdout.strip()
 
+    @staticmethod
+    def reset(
+        path: pathlib.Path,
+        *,
+        force: bool = False,
+    ) -> str:
+        """Remove all worktrees and clean up ``.worktrees/``.
+
+        Removes all worktrees from the repo's
+        ``.worktrees/`` directory and prunes stale
+        worktree references.
+
+        Args:
+            path: Git repository root.
+            force: Delete remaining worktrees before resetting.
+
+        Returns:
+            Script output.
+
+        """
+        # capture the user node's registry BEFORE reset.sh runs: reset rm -rf's
+        # .worktrees/.project/, the cache _node_dir reads to locate a sub-project's
+        # data dir, so a Node resolved afterward would point at the wrong path and
+        # miss the rows; reading user.db here caches the resolved handle (the user
+        # database lives outside .worktrees, so it survives the reset)
+        user = Node(path)
+        registry = user.db.read('nodes') if user.exists() else []
+        script_path = pathlib.Path(__file__).parent.parent / '_scripts' / 'reset.sh'
+        args = ['bash', f'{script_path}', f'{path}']
+        if force:
+            args.append('--force')
+        result = subprocess.run(args, capture_output=True, text=True)
+        if result.returncode != 0:
+            error = result.stderr.strip()
+            raise RuntimeError(f'reset.sh failed (exit {result.returncode}): {error!r}')
+        # clear stale child registrations and their subscriptions (both
+        # directions, as delete would) -- the worktrees are gone, so the
+        # registry must not keep pointing at deleted nodes (via the db handle
+        # cached above, now that .project is gone); history rows persist
+        for row in registry:
+            user.db.delete('nodes', where={'node': row['node']})
+            user.db.delete('subs', where={'node': row['node']})
+            user.db.delete('subs', where={'target': row['node']})
+        return result.stdout.strip()
+
     def status(self: Node) -> str:
         """Return the node's current status.
 
@@ -1475,6 +1522,21 @@ class Node:
         self._status_file.write_text(status + '\n', encoding='utf-8')
         # update the node's registry row (the user node has none -- no-op)
         self.db.update({'status': status}, 'nodes', where={'node': self._branch})
+
+    def title_set(self: Node, title: str) -> None:
+        """Set the node's human-readable title.
+
+        The title is registry metadata -- a readable label the GUI shows in
+        place of the branch slug. Like status, it lives in the node's row in
+        the central ``nodes`` registry. A user node has no registry row, so
+        this is a no-op there (its label is the project's, owned by the
+        control plane).
+
+        Args:
+            title: The human-readable name to store.
+
+        """
+        self.db.update({'title': title}, 'nodes', where={'node': self._branch})
 
     def list(
         self: Node,
@@ -2356,6 +2418,38 @@ class Node:
         )
         return cte, params
 
+    def cost_lifetime(
+        self: Node,
+        *,
+        max_depth: Optional[int] = None,
+    ) -> dict[str, float]:
+        """Map this node and each descendant to its lifetime own cost.
+
+        Unlike :meth:`cost_breakdown`, which scopes to a single run's
+        ``parent_run_id`` lineage, this sums every step's cost across all runs
+        -- each node's total spend over its whole life, regardless of which run
+        spawned it. The node itself is always included (keyed by its own
+        branch). Powers the tree view's per-row spend, where one call replaces a
+        per-node step fan-out across the subtree.
+
+        Args:
+            max_depth: Maximum descendant depth to include (``1`` = direct
+                children only); all descendants if omitted.
+
+        Returns:
+            ``{branch: lifetime own cost in USD}`` for this node and each
+            in-subtree descendant.
+
+        """
+        # the central DB holds every node's steps -- one grouped query covers
+        # the whole subtree; scope to self plus the registered descendants
+        branches = {self._branch}
+        for row in self.child_list(max_depth=max_depth) or []:
+            branches.add(row['node'])
+        query = 'SELECT node, COALESCE(SUM(cost), 0) AS total FROM steps GROUP BY node'
+        totals = {row['node']: row['total'] for row in self.db.read(query=query)}
+        return {branch: totals.get(branch, 0.0) for branch in branches}
+
     def commit(
         self: Node,
         message: Optional[str] = None,
@@ -2728,6 +2822,389 @@ class Node:
             sections.append(chat_md.read_text(encoding='utf-8').strip())
         seed = '\n\n'.join(sections)
         return self.render_template(seed, overrides=_CHAT_RUNTIME) if seed else seed
+
+    def _diff_base(self: Node, since: str) -> Optional[str]:
+        """Resolve the ref a ``changed`` listing diffs ``<ref>...HEAD`` against.
+
+        ``since`` chooses how far back the diff reaches:
+
+        - ``base`` -- the node's whole contribution (since its first commit).
+        - ``commit`` -- the previous commit (``HEAD~1``).
+        - ``iteration`` -- the start of the most recent iteration that committed.
+        - ``run`` -- the start of the most recent run that committed.
+
+        ``base``/``iteration``/``run`` anchor just before the first ``commit``
+        event of the relevant scope (the events the commit script records;
+        ``metadata`` is the sha, scoped by ``iter_id``/``run_id``). Those are
+        fixed points in the node's own history, so the diff survives the node
+        being merged into its parent -- a parent-branch anchor would instead
+        collapse to empty once the parent absorbs the node's commits. With no
+        commit events (a node that never ran the loop), falls back to the
+        branch point.
+
+        Returns a git ref, or ``None`` when there is no anchor.
+        """
+        if since not in ('base', 'commit', 'iteration', 'run'):
+            raise ValueError(f'Invalid since: {since!r}')
+        if since == 'commit':
+            # the previous commit, when HEAD has a parent
+            parent = _git(
+                ['rev-parse', '--verify', '--quiet', 'HEAD~1'],
+                cwd=self._root,
+                check=False,
+            )
+            return (parent or '').strip() or None
+        # the first commit of the relevant scope: the node's first ever (base),
+        # else the first of the most recent iteration/run
+        if since == 'base':
+            query = (
+                "SELECT metadata FROM events WHERE event = 'commit'"
+                ' ORDER BY event_id ASC LIMIT 1'
+            )
+        elif since == 'iteration':
+            query = (
+                "SELECT metadata FROM events WHERE event = 'commit' AND iter_id ="
+                " (SELECT MAX(iter_id) FROM events WHERE event = 'commit')"
+                ' ORDER BY event_id ASC LIMIT 1'
+            )
+        else:  # run
+            query = (
+                "SELECT metadata FROM events WHERE event = 'commit' AND run_id ="
+                " (SELECT MAX(run_id) FROM events WHERE event = 'commit')"
+                ' ORDER BY event_id ASC LIMIT 1'
+            )
+        rows = self.db.read(query=query)
+        first = rows[0]['metadata'] if rows and rows[0]['metadata'] else None
+        if first:
+            # diff against the commit just before the scope's first commit -- a
+            # fixed point in history, immune to a merge of the node into its parent
+            return f'{first}^'
+        # the node never committed via the loop -> fall back to the branch point
+        return self.config_get('base') or self._branch.rpartition('.')[0] or None
+
+    def files_list(
+        self: Node,
+        *,
+        path: Optional[str] = None,
+        changed: bool = False,
+        since: str = 'base',
+    ) -> list[dict[str, Any]]:
+        """List the node's project files (git-tracked, minus fractal machinery).
+
+        The work-product surface for the Output tab: every git-tracked file in
+        the worktree except fractal's own dirs (``.fractal/`` and ``wiki/``) --
+        the git-ignored runtime (``.db``/``.status``/logs) never appears in a
+        tracked listing. With ``changed`` the set is instead this node's own
+        contribution (a ``<ref>...HEAD`` diff, the ref chosen by ``since``), for
+        nodes that edit an existing repo in place rather than producing new files.
+
+        Args:
+            path: Restrict to a worktree-relative subtree; all files if ``None``.
+            changed: List diff files instead of every tracked file.
+            since: Diff anchor when ``changed`` -- ``base`` (the branch point;
+                default), ``commit`` (the previous commit), ``iteration``, or
+                ``run`` (see :meth:`_diff_base`). Ignored unless ``changed``.
+
+        Returns:
+            ``[{path, size}]`` sorted by path (``path`` worktree-relative). In
+            ``changed`` mode each entry also carries ``additions``/``deletions``
+            line counts (``None`` for a binary file) -- the git numstat the FE
+            renders as a red/green summary; the render kind is the FE's call,
+            derived from the path.
+
+        """
+        # candidate paths: this node's diff from its base (with line stats) or
+        # every tracked file. numstat maps a changed path -> (additions,
+        # deletions); it stays empty for the default listing (no diff).
+        numstat: dict[str, tuple[Optional[int], Optional[int]]] = {}
+        if changed:
+            base = self._diff_base(since)
+            if not base:
+                return []
+            out = _git(
+                ['diff', '--numstat', '--no-renames', f'{base}...HEAD'],
+                cwd=self._root,
+                check=False,
+            )
+            candidates = []
+            for line in (out or '').splitlines():
+                added, _, rest = line.partition('\t')
+                deleted, _, rel = rest.partition('\t')
+                if not rel:
+                    continue
+                candidates.append(rel)
+                # a binary file reports '-' for both counts -> no line stats
+                numstat[rel] = (
+                    int(added) if added.isdigit() else None,
+                    int(deleted) if deleted.isdigit() else None,
+                )
+        else:
+            out = _git(['ls-files'], cwd=self._root, check=False)
+            candidates = (out or '').splitlines()
+        # drop fractal-owned prefixes (.fractal/ and wiki/, project-relative)
+        prefix = '' if self._project_path == '.' else f'{self._project_path}/'
+        excludes = (f'{prefix}.fractal/', f'{prefix}wiki/')
+        scope = f'{path.rstrip("/")}/' if path else ''
+        files = []
+        for line in candidates:
+            rel = line.strip()
+            # skip machinery and out-of-scope entries
+            if not rel or rel.startswith(excludes):
+                continue
+            if scope and not rel.startswith(scope):
+                continue
+            abs_path = self._root / rel
+            on_disk = abs_path.is_file()
+            # browsing lists only files on disk; a changed listing keeps a
+            # deleted file (gone now) so a diff view can show its removal
+            if not on_disk and not changed:
+                continue
+            entry: dict[str, Any] = {
+                'path': rel,
+                'size': abs_path.stat().st_size if on_disk else 0,
+            }
+            # line-change stats ride along with changed files; absent otherwise
+            if rel in numstat:
+                entry['additions'], entry['deletions'] = numstat[rel]
+            files.append(entry)
+        files.sort(key=lambda entry: entry['path'])
+        return files
+
+    def files_read(
+        self: Node,
+        path: str,
+        *,
+        max_lines: Optional[int] = None,
+        since: str = 'base',
+        version: str = 'current',
+    ) -> dict[str, Any]:
+        """Read a project file's content (allowlist-validated, capped).
+
+        Only files a project listing exposes are readable -- a path to machinery
+        (``.fractal/``, ``.git/``) or outside the worktree (``..``) is rejected,
+        so the read can neither escape the worktree nor reach fractal internals.
+
+        ``version`` picks which side of a diff to read, for a before/after view:
+
+        - ``current`` (default) -- the file in the worktree (the "after").
+        - ``base`` -- the file at the ``since`` diff anchor, via
+          ``git show <ref>:<path>`` (the "before").
+
+        A side that does not exist (an added file has no ``base``; a deleted file
+        has no ``current``) returns ``exists=False`` with empty content.
+
+        Args:
+            path: Worktree-relative file path.
+            max_lines: Cap the returned text to this many lines (full if ``None``).
+            since: Diff anchor for ``version='base'`` (see :meth:`files_list`).
+            version: ``current`` (worktree) or ``base`` (the ``since`` anchor).
+
+        Returns:
+            ``{path, content, truncated, total_lines, size, binary, exists}``. A
+            non-UTF-8 file returns ``binary=True`` with empty ``content`` (the
+            caller downloads it instead); a missing side returns ``exists=False``.
+
+        Raises:
+            ValueError: If ``version`` is unknown, or ``path`` is not a file the
+                live tree or this anchor's diff exposes.
+
+        """
+        if version not in ('current', 'base'):
+            raise ValueError(f'Invalid file version: {version!r}')
+        # allowlist: the live tracked set, plus (only if needed) this anchor's
+        # changed set -- so a diff side can name a file the live tree lacks (an
+        # added file at base, a deleted file now) without exposing anything else
+        if path not in {entry['path'] for entry in self.files_list()}:
+            changed = self.files_list(changed=True, since=since)
+            if path not in {entry['path'] for entry in changed}:
+                raise ValueError(f'Not a readable project file: {path!r}')
+        # fetch the requested side's raw bytes (None when that side is absent)
+        if version == 'current':
+            abs_path = self._root / path
+            raw = abs_path.read_bytes() if abs_path.is_file() else None
+        else:
+            ref = self._diff_base(since)
+            raw = _git_bytes(['show', f'{ref}:{path}'], cwd=self._root) if ref else None
+        if raw is None:
+            # the file does not exist on this side (a pure add or delete)
+            return {
+                'path': path,
+                'content': '',
+                'truncated': False,
+                'total_lines': 0,
+                'size': 0,
+                'binary': False,
+                'exists': False,
+            }
+        size = len(raw)
+        # binary content has nothing to render -- flag it for download
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            return {
+                'path': path,
+                'content': '',
+                'truncated': False,
+                'total_lines': 0,
+                'size': size,
+                'binary': True,
+                'exists': True,
+            }
+        lines = text.splitlines()
+        total_lines = len(lines)
+        truncated = max_lines is not None and total_lines > max_lines
+        if truncated:
+            text = '\n'.join(lines[:max_lines])
+        return {
+            'path': path,
+            'content': text,
+            'truncated': truncated,
+            'total_lines': total_lines,
+            'size': size,
+            'binary': False,
+            'exists': True,
+        }
+
+    def files_read_bytes(self: Node, path: str) -> bytes:
+        """Read a project file's raw bytes for download (allowlist-validated).
+
+        The binary-safe counterpart to :meth:`files_read` (which returns capped
+        UTF-8 text for rendering) -- same allowlist, so only files
+        :meth:`files_list` exposes are reachable.
+
+        Args:
+            path: Worktree-relative file path.
+
+        Returns:
+            The file's raw bytes.
+
+        Raises:
+            ValueError: If ``path`` is not a readable project file.
+
+        """
+        if path not in {entry['path'] for entry in self.files_list()}:
+            raise ValueError(f'Not a readable project file: {path!r}')
+        return (self._root / path).read_bytes()
+
+    def _check_worktree_path(self: Node, path: str) -> str:
+        """Validate a worktree-relative path for writing or committing.
+
+        A write/commit targets a possibly-new path, so there is no tracked-set
+        allowlist as for reads; safety is structural instead. The path must stay
+        inside the worktree (no ``..`` or absolute escape) and clear of fractal's
+        own dirs (``.fractal/``, ``wiki/``) and git internals (``.git/``).
+
+        Args:
+            path: Worktree-relative path.
+
+        Returns:
+            The normalized (POSIX) worktree-relative path.
+
+        Raises:
+            ValueError: If ``path`` escapes the worktree or names machinery.
+
+        """
+        rel = pathlib.PurePosixPath(path)
+        if not path or rel.is_absolute() or '..' in rel.parts:
+            raise ValueError(f'Invalid file path: {path!r}')
+        prefix = '' if self._project_path == '.' else f'{self._project_path}/'
+        excludes = (f'{prefix}.fractal/', f'{prefix}wiki/', '.git/')
+        if rel.as_posix().startswith(excludes):
+            raise ValueError(f'Cannot touch fractal machinery: {path!r}')
+        if not (self._root / rel).resolve().is_relative_to(self._root):
+            raise ValueError(f'Invalid file path: {path!r}')
+        return rel.as_posix()
+
+    def files_write(self: Node, path: str, data: bytes) -> dict[str, Any]:
+        """Write a file into the worktree at ``path`` (validated, not committed).
+
+        The write counterpart to :meth:`files_read_bytes`, for bringing user
+        inputs into the project. Unlike the read allowlist (the tracked set), the
+        path is validated structurally (:meth:`_check_worktree_path`). The bytes
+        are written to disk but not committed, so the file joins
+        :meth:`files_list` only once :meth:`commit_files` (or the loop) commits it.
+
+        Args:
+            path: Worktree-relative destination path (parent dirs are created).
+            data: Raw bytes to write.
+
+        Returns:
+            ``{path, size}`` -- the worktree-relative path and bytes written.
+
+        Raises:
+            ValueError: If ``path`` escapes the worktree or names machinery.
+
+        """
+        norm = self._check_worktree_path(path)
+        # write the bytes, creating parent directories
+        abs_path = self._root / norm
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(data)
+        return {'path': norm, 'size': len(data)}
+
+    def commit_files(self: Node, paths: list[str], message: str) -> dict[str, Any]:
+        """Stage and commit specific worktree paths (no lint, scope, or push).
+
+        A narrow commit for bringing user files (e.g. uploaded inputs) into the
+        tree -- allowed on the root node, unlike the locked ``--init`` baseline,
+        and without the loop's full ``_commit.sh`` (lint/scope/push). Each path is
+        validated like a write, then staged and committed with a pathspec, so
+        nothing else the worktree has staged is swept in. Does not push.
+
+        Args:
+            paths: Worktree-relative paths to stage and commit.
+            message: The commit message.
+
+        Returns:
+            ``{committed, paths}`` -- whether a commit was made (``False`` when
+            the paths held no staged change) and the normalized paths.
+
+        Raises:
+            ValueError: If ``paths`` is empty, ``message`` is blank, or a path
+                escapes the worktree or names machinery.
+
+        """
+        if not paths:
+            raise ValueError('At least one path is required.')
+        if not message:
+            raise ValueError('Commit message is required.')
+        norm = [self._check_worktree_path(path) for path in paths]
+        # stage just these paths (pathspec), so other staged work is untouched
+        _git(['add', '--', *norm], cwd=self._root)
+        # benign no-op when the paths hold nothing new to commit
+        if not _git(['diff', '--cached', '--name-only', '--', *norm], cwd=self._root):
+            return {'committed': False, 'paths': norm}
+        # commit only these paths (pathspec); no push -- the caller owns the branch
+        _git(['commit', '-m', message, '--', *norm], cwd=self._root)
+        return {'committed': True, 'paths': norm}
+
+    def files_archive(
+        self: Node,
+        *,
+        changed: bool = False,
+        since: str = 'base',
+    ) -> bytes:
+        """Bundle the node's project files into a zip for download.
+
+        Read-only: zips a copy of :meth:`files_list`; the worktree is never
+        modified.
+
+        Args:
+            changed: Archive the diff set instead of every file.
+            since: Diff anchor when ``changed`` (see :meth:`files_list`).
+
+        Returns:
+            The zip archive bytes.
+
+        """
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for entry in self.files_list(changed=changed, since=since):
+                abs_path = self._root / entry['path']
+                # a changed listing may include a deletion -- nothing to zip
+                if abs_path.is_file():
+                    archive.write(abs_path, arcname=entry['path'])
+        return buffer.getvalue()
 
     def render_template(
         self: Node,
@@ -3432,6 +3909,48 @@ class Node:
         sessions_path = self._node_dir / '.session'
         sessions_path.write_text('{}\n', encoding='utf-8')
 
+    def claude_session_read(self: Node, session: str) -> dict[str, Any]:
+        """Read a claude session transcript for this node.
+
+        Claude Code persists each session as ``<session>.jsonl`` under
+        ``<node_dir>/.claude/projects/<slug>`` -- ``_agent.sh`` points
+        ``CLAUDE_CONFIG_DIR`` at the node's ``.claude`` dir (on the persisted
+        worktree, not the ephemeral home), and ``<slug>`` is the directory
+        claude runs in (the node dir -- ``_agent.sh`` ``cd``s there before
+        launching claude) with every non-alphanumeric character replaced by
+        ``-``. The file grows live as the session runs, so this returns
+        whatever is on disk.
+
+        Args:
+            session: The claude session id (a ``session`` value off a step or
+                iteration row).
+
+        Returns:
+            ``{session, exists, content}`` -- ``exists`` is whether the
+            transcript file is present, ``content`` its raw JSONL text (empty
+            when absent).
+
+        Raises:
+            ValueError: If ``session`` is not a bare session id (anything but
+                ``[A-Za-z0-9-]`` would let the path escape the projects dir).
+
+        """
+        # validate the id at the boundary: it is interpolated into a file path
+        if not re.fullmatch(r'[A-Za-z0-9-]+', session):
+            raise ValueError(f'Invalid session id: {session!r}')
+        # claude keys its projects dir by the agent's cwd (the node dir), with
+        # every non-alphanumeric character replaced by a dash; transcripts live
+        # under the node's CLAUDE_CONFIG_DIR (.claude), on the persisted worktree
+        slug = re.sub(r'[^A-Za-z0-9]', '-', str(self._node_dir))
+        path = self._node_dir / '.claude' / 'projects' / slug / f'{session}.jsonl'
+        if not path.is_file():
+            return {'session': session, 'exists': False, 'content': ''}
+        return {
+            'session': session,
+            'exists': True,
+            'content': path.read_text(encoding='utf-8'),
+        }
+
     def _resolve_context(
         self: Node,
         *,
@@ -3781,6 +4300,36 @@ def _derive_project_name(dir_name: str) -> str:
             ' and underscores (dashes are converted); rename the directory.'
         )
     return name
+
+
+def _git_bytes(
+    cmd: list[str],
+    *,
+    cwd: Optional[pathlib.Path] = None,
+) -> Optional[bytes]:
+    """Run a git command and return raw stdout bytes (``None`` on non-zero exit).
+
+    The binary-safe, unstripped counterpart to :func:`_git` -- for reading a
+    file blob (``git show <ref>:<path>``), where text decoding and whitespace
+    stripping would corrupt content.
+
+    Args:
+        cmd: Git subcommand and arguments (without ``git`` prefix).
+        cwd: Working directory for the command.
+
+    Returns:
+        Raw stdout bytes, or ``None`` on non-zero exit (e.g. the path does not
+        exist at that revision).
+
+    """
+    full_cmd = ['git']
+    if cwd:
+        full_cmd.extend(['-C', f'{cwd}'])
+    full_cmd.extend(cmd)
+    result = subprocess.run(full_cmd, capture_output=True)
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def _prune_branch(repo_dir: pathlib.Path, branch: str) -> None:
