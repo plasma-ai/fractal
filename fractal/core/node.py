@@ -3065,6 +3065,29 @@ class Node:
             'exists': True,
         }
 
+    def files_resolve(self: Node, path: str) -> pathlib.Path:
+        """Resolve a project file to its on-disk path (allowlist-validated).
+
+        Shared validation for the binary read paths: only files
+        :meth:`files_list` exposes are reachable, so a caller cannot read
+        outside the tracked set. Returning the path (rather than bytes) lets
+        callers stream the file from disk -- e.g. the ``/raw`` route serves it
+        with ``FileResponse`` for Range-request (partial-content) support.
+
+        Args:
+            path: Worktree-relative file path.
+
+        Returns:
+            The absolute on-disk path of the file.
+
+        Raises:
+            ValueError: If ``path`` is not a readable project file.
+
+        """
+        if path not in {entry['path'] for entry in self.files_list()}:
+            raise ValueError(f'Not a readable project file: {path!r}')
+        return self._root / path
+
     def files_read_bytes(self: Node, path: str) -> bytes:
         """Read a project file's raw bytes for download (allowlist-validated).
 
@@ -3082,9 +3105,7 @@ class Node:
             ValueError: If ``path`` is not a readable project file.
 
         """
-        if path not in {entry['path'] for entry in self.files_list()}:
-            raise ValueError(f'Not a readable project file: {path!r}')
-        return (self._root / path).read_bytes()
+        return self.files_resolve(path).read_bytes()
 
     def _check_worktree_path(self: Node, path: str) -> str:
         """Validate a worktree-relative path for writing or committing.
