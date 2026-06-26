@@ -510,6 +510,24 @@ for AGENT_DIR in claude codex agents; do
         ln -s "$GLOBAL_CODEX_AUTH" "$NODE_DIR/.$AGENT_DIR/auth.json"
         echo "Created $NODE_DIR/.$AGENT_DIR/auth.json -> $GLOBAL_CODEX_AUTH"
     fi
+    # claude auth must stay global too: CLAUDE_CONFIG_DIR points at this node dir,
+    # so claude reads .credentials.json there (Linux) with no fallback to the home
+    # dir -- share the global credential via a symlink so token refresh writes
+    # through to the global file and the secret is never copied in (.claude is
+    # gitignored). Only link when the global file exists: auth via ANTHROPIC_API_KEY
+    # or the macOS Keychain has no credential file, and a dangling link would break
+    # the read claude expects
+    if [[ "$AGENT_DIR" == "claude" && ! -L "$NODE_DIR/.$AGENT_DIR/.credentials.json" ]]; then
+        GLOBAL_CLAUDE_AUTH="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+        # CLAUDE_CONFIG_DIR may be inherited from a parent node whose credential is
+        # itself a symlink to the real ~/.claude/.credentials.json; canonicalize it
+        # so this link never dangles when an intermediate node is reset or deleted
+        if [[ -e "$GLOBAL_CLAUDE_AUTH" ]]; then
+            GLOBAL_CLAUDE_AUTH="$(readlink -f "$GLOBAL_CLAUDE_AUTH")"
+            ln -s "$GLOBAL_CLAUDE_AUTH" "$NODE_DIR/.$AGENT_DIR/.credentials.json"
+            echo "Created $NODE_DIR/.$AGENT_DIR/.credentials.json -> $GLOBAL_CLAUDE_AUTH"
+        fi
+    fi
 done
 
 # ------ config and database

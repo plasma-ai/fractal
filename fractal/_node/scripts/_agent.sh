@@ -116,6 +116,19 @@ if [[ "$AGENT_BASE_COMMAND" == "claude" ]]; then
         fi
     fi
     ERR_FILE="$NODE_DIR/claude.err"
+    # ensure the per-node credential link exists before launch -- init.sh seeds it
+    # for new nodes, but this retrofits nodes initialized before CLAUDE_CONFIG_DIR
+    # relocation (whose .claude has no credential), so they don't lose auth on the
+    # next run. Best-effort: only when a global credential exists and no link is
+    # present; auth via ANTHROPIC_API_KEY needs no file and is left untouched
+    if [[ ! -L "$NODE_DIR/.claude/.credentials.json" ]]; then
+        GLOBAL_CLAUDE_AUTH="$HOME/.claude/.credentials.json"
+        if [[ -e "$GLOBAL_CLAUDE_AUTH" ]]; then
+            mkdir -p "$NODE_DIR/.claude"
+            ln -s "$(readlink -f "$GLOBAL_CLAUDE_AUTH")" \
+                "$NODE_DIR/.claude/.credentials.json"
+        fi
+    fi
     # capture stderr straight to a log so auth/startup failures are not hidden --
     # a direct redirect (not an un-awaited `tee` process substitution) can't be
     # truncated when a fast-failing launch exits before the tee flushes; the script
@@ -123,7 +136,11 @@ if [[ "$AGENT_BASE_COMMAND" == "claude" ]]; then
     # pipe stage's status from PIPESTATUS instead of aborting on failure
     cd "$NODE_DIR"
     set +e
-    "${LAUNCH[@]}" 2>"$ERR_FILE" \
+    # CLAUDE_CONFIG_DIR relocates claude's config (settings/auth) and session
+    # transcripts under the node dir -- on the persisted worktree, not the
+    # ephemeral home, so they survive container recreation (mirrors CODEX_HOME);
+    # the cwd stays the node dir, so claude's projects slug is unchanged
+    CLAUDE_CONFIG_DIR="$NODE_DIR/.claude" "${LAUNCH[@]}" 2>"$ERR_FILE" \
         | fractal _stream ${STREAM_STEP[@]+"${STREAM_STEP[@]}"} \
             --path="$WORKTREE_DIR" "${STREAM_ARGS[@]}"
     # copy PIPESTATUS in one shot -- a simple assignment resets it, so reading
