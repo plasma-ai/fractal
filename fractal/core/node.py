@@ -2855,25 +2855,33 @@ class Node:
             )
             return (parent or '').strip() or None
         # the first commit of the relevant scope: the node's first ever (base),
-        # else the first of the most recent iteration/run
+        # else the first of the most recent iteration/run. Every query is scoped
+        # to this node -- the DB is tree-central, so an unfiltered read would
+        # anchor on another node's commit and the diff would collapse to the
+        # branch point (every file a pure add, whatever the scope).
         if since == 'base':
             query = (
-                "SELECT metadata FROM events WHERE event = 'commit'"
+                "SELECT metadata FROM events WHERE event = 'commit' AND node = ?"
                 ' ORDER BY event_id ASC LIMIT 1'
             )
+            params = (self._branch,)
         elif since == 'iteration':
             query = (
-                "SELECT metadata FROM events WHERE event = 'commit' AND iter_id ="
-                " (SELECT MAX(iter_id) FROM events WHERE event = 'commit')"
+                "SELECT metadata FROM events WHERE event = 'commit' AND node = ?"
+                ' AND iter_id = (SELECT MAX(iter_id) FROM events'
+                " WHERE event = 'commit' AND node = ?)"
                 ' ORDER BY event_id ASC LIMIT 1'
             )
+            params = (self._branch, self._branch)
         else:  # run
             query = (
-                "SELECT metadata FROM events WHERE event = 'commit' AND run_id ="
-                " (SELECT MAX(run_id) FROM events WHERE event = 'commit')"
+                "SELECT metadata FROM events WHERE event = 'commit' AND node = ?"
+                ' AND run_id = (SELECT MAX(run_id) FROM events'
+                " WHERE event = 'commit' AND node = ?)"
                 ' ORDER BY event_id ASC LIMIT 1'
             )
-        rows = self.db.read(query=query)
+            params = (self._branch, self._branch)
+        rows = self.db.read(query=query, params=params)
         first = rows[0]['metadata'] if rows and rows[0]['metadata'] else None
         if first:
             # diff against the commit just before the scope's first commit -- a
