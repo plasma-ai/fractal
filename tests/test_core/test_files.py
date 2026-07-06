@@ -10,6 +10,8 @@ repo) so the git plumbing is exercised, not mocked.
 from __future__ import annotations
 
 import io
+import json
+import subprocess
 import zipfile
 
 import pytest
@@ -24,6 +26,7 @@ __all__ = [
     'test_files_list_changed_is_the_diff_from_base',
     'test_files_list_changed_without_a_base_is_empty',
     'test_files_list_changed_since_narrows_by_commit_iteration_run',
+    'test_files_list_changed_since_ignores_other_nodes_history',
     'test_files_read_version_serves_both_sides_of_the_diff',
     'test_files_list_changed_survives_a_merge_into_the_base',
     'test_files_write_lands_in_worktree_and_rejects_escapes',
@@ -191,6 +194,81 @@ def test_files_list_changed_since_narrows_by_commit_iteration_run(
     # an unknown scope is rejected
     with pytest.raises(ValueError):
         node.files_list(changed=True, since='bogus')
+
+
+def test_files_list_changed_since_ignores_other_nodes_history(
+    node_with_db: Node,
+) -> None:
+    """``since`` anchors on this node's own commits, not the tree's newest.
+
+    The DB is tree-central: every node's ``commit`` events share one table
+    with global run/iter ids, so a sibling that runs later holds the tree's
+    MAX run/iter. An unscoped anchor query picked that sibling's sha -- a
+    commit on the sibling's branch -- and this node's iteration/run diffs
+    collapsed to the branch point (the whole contribution as pure adds).
+    """
+    node = node_with_db
+    root = node._root
+    node.config_set(base=_git(root, 'rev-parse', 'HEAD').stdout.strip())
+
+    # commit a file as one iteration of ``target``, logging the commit event
+    def commit_iter(target: Node, run_id: int, iter_id: int, name: str) -> None:
+        (target._root / name).write_text(name, encoding='utf-8')
+        _git(target._root, 'add', '-A')
+        _git(target._root, 'commit', '-m', name)
+        sha = _git(target._root, 'rev-parse', 'HEAD').stdout.strip()
+        target.event_start('commit', metadata=sha, run_id=run_id, iter_id=iter_id)
+
+    # this node's history: one run, two committed iterations
+    r1 = node.run_start()
+    commit_iter(node, r1, node.iter_start(run_id=r1, iter=1), 'a.txt')
+    commit_iter(node, r1, node.iter_start(run_id=r1, iter=2), 'b.txt')
+
+    # a sibling over the same central DB (the radio_pair recipe: real worktree,
+    # hand-built node dir) that runs and commits AFTER this node -- its run/iter
+    # take the tree-wide MAX ids, and its sha lives on its own branch
+    branch = node._branch
+    peer_branch = f'{branch}.peer'
+    worktree = root / '.worktrees' / peer_branch
+    subprocess.run(
+        ['git', 'worktree', 'add', '-b', peer_branch, f'{worktree}', branch],
+        cwd=root,
+        capture_output=True,
+        check=True,
+    )
+    node_dir = worktree / '.fractal' / peer_branch
+    node_dir.mkdir(parents=True)
+    config = {
+        'project': '.',
+        'root': branch,
+        'scope': '',
+        'agent': 'claude',
+        'local': False,
+        'detached': False,
+    }
+    (node_dir / 'config.json').write_text(
+        json.dumps(config, indent=2),
+        encoding='utf-8',
+    )
+    (node_dir / '.status').write_text('idle\n', encoding='utf-8')
+    peer = Node(worktree)
+    peer_base = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
+    r2 = peer.run_start()
+    commit_iter(peer, r2, peer.iter_start(run_id=r2, iter=1), 'peer.txt')
+
+    def names(**kwargs: str) -> set[str]:
+        return {entry['path'] for entry in node.files_list(changed=True, **kwargs)}
+
+    # every scope reads this node's own history: the sibling's newer run/iter
+    # (the tree-wide MAX) must not move the anchors
+    assert names() == {'a.txt', 'b.txt'}
+    assert names(since='run') == {'a.txt', 'b.txt'}
+    assert names(since='iteration') == {'b.txt'}
+    # and the sibling's view is its own work only
+    peer.config_set(base=peer_base)
+    assert {
+        entry['path'] for entry in peer.files_list(changed=True, since='iteration')
+    } == {'peer.txt'}
 
 
 def test_files_read_version_serves_both_sides_of_the_diff(node_with_db: Node) -> None:
