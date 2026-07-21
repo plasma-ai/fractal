@@ -14,7 +14,7 @@ import dataclasses
 import json
 import os
 import pathlib
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -58,6 +58,7 @@ __all__ = [
     'test_spawn_decodes_stdout_leniently',
     'test_record_cost_settles_thread_scope_cumulative_totals',
     'test_record_cost_clamps_a_negative_call_scope_figure',
+    'test_settle_cost_closes_the_drained_stream_against_an_override',
     'test_transcript_validates_and_gates_the_fallback',
     'test_preflight_checks_the_binary',
     'test_seed_agents_tolerates_an_absent_package_seed',
@@ -590,6 +591,53 @@ def test_record_cost_clamps_a_negative_call_scope_figure(
     row = node.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == 0.0
     assert [event.cost for event in backend.calls] == [0.0]
+
+
+def test_settle_cost_closes_the_drained_stream_against_an_override(
+    node_with_db: Node,
+) -> None:
+    """A ``_settle_cost`` override books its figure once, off the flush path.
+
+    The settled figure corrects the ledger over the stream's flushes, and a
+    stream with no cost frames still settles -- the two cases a billing
+    source must cover.
+    """
+    node = node_with_db
+
+    class BillingAgent(SampleAgent):
+        """Sample backend closing each stream against a canned figure."""
+
+        def _settle_cost(
+            self,
+            session: Optional[str],
+            streamed: Optional[float],
+        ) -> Optional[float]:
+            self.settles.append((session, streamed))
+            return self.billed
+
+    backend = BillingAgent(node, 'sample')
+    backend.settles = []
+    backend.billed = 0.55
+    # a priced stream: the settled figure overrides the flushed ones
+    step_id = _step(node)
+    frames = [
+        {'kind': 'session', 'session': 'sess-1'},
+        {'kind': 'cost', 'cost': 0.25},
+        {'kind': 'result', 'cost': 0.42, 'final': True},
+    ]
+    backend.stream(_lines(frames), step_id=step_id)
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(0.55)
+    # the hook fired once, with the drained session and streamed total
+    assert backend.settles == [('sess-1', pytest.approx(0.42))]
+    # a cost-frame-less stream: the flush path never fires, the settle does
+    backend.settles = []
+    silent_step = _step(node)
+    frames = [{'kind': 'session', 'session': 'sess-2'}]
+    backend.stream(_lines(frames), step_id=silent_step)
+    row = node.db.read('steps', where={'step_id': silent_step})[0]
+    assert row['cost'] == pytest.approx(0.55)
+    assert backend.settles == [('sess-2', None)]
 
 
 def test_transcript_validates_and_gates_the_fallback(node_with_db: Node) -> None:

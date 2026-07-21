@@ -608,7 +608,8 @@ class Agent:
         render callback, and -- when ``step_id`` is given -- the record
         verbs (session stamped as the stream opens; each cost figure
         flushed immediately, so a signal-killed reader still recorded
-        the last one). Text deltas fire no hook (render only).
+        the last one; the drained figure settled once through
+        ``_settle_cost``). Text deltas fire no hook (render only).
 
         Args:
             lines: The agent's stdout, line by line.
@@ -671,6 +672,16 @@ class Agent:
                     # presentation callback
                     if render is not None:
                         render(event)
+            # authoritative close: settle the drained figure once per
+            # recorded step, before the error check (a stream that carried
+            # error frames still spent money). The figure lands only when it
+            # corrects what the flushes recorded, so the stream-trusting
+            # default re-records nothing and a billing override books its
+            # own source here, once, off the per-frame path
+            if step_id is not None:
+                cost = self._settle_cost(parser.session, parser.cost)
+                if cost is not None and cost != parser.cost:
+                    self.record_cost(step_id, cost, final=True)
             # stream-borne errors fail the turn even after a fully drained
             # stdout (else the step records completed/exit 0); the parser
             # collects error detail raw, so sanitize the joined message --
@@ -824,6 +835,26 @@ class Agent:
                 super()._record_cost(step_id, cost, final=final)
         """
         return self.node.record.step_cost(step_id=step_id, cost=cost)
+
+    def _settle_cost(
+        self: Agent,
+        session: Optional[str],
+        streamed: Optional[float],
+    ) -> Optional[float]:
+        """Hook for the authoritative cost of a drained stream.
+
+        Called once per recorded step after the drain, with the drained
+        session and the parser's accumulated figure (``None`` when the
+        stream carried no cost frames). The returned figure lands on the
+        ledger only when it corrects the streamed one, so the
+        stream-trusting default records nothing new. Override in a host
+        app to close each step against a billing source -- ``None``
+        means unknowable, record nothing::
+
+            def _settle_cost(self, session, streamed):
+                return billing.session_cost(session) or streamed
+        """
+        return streamed
 
     def tracks_cost(self: Agent, model: Optional[str] = None) -> bool:
         """Return whether spend will be recorded.
