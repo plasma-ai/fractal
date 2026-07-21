@@ -44,6 +44,7 @@ __all__ = [
     'test_files_list_base_covers_uploads_before_the_first_loop_commit',
     'test_diff_anchors_pin_to_the_current_incarnation',
     'test_files_read_before_serves_both_sides_of_the_diff',
+    'test_files_read_at_serves_own_history_commits',
     'test_files_list_changed_survives_a_merge_into_the_base',
     'test_files_history_traces_own_commits_per_file',
     'test_files_write_lands_in_worktree_and_rejects_escapes',
@@ -583,6 +584,36 @@ def test_files_read_before_serves_both_sides_of_the_diff(node_with_db: Node) -> 
     # a before read requires an explicit anchor
     with pytest.raises(ValueError):
         node.files.read('mod.md', before=True)
+
+
+def test_files_read_at_serves_own_history_commits(node_with_db: Node) -> None:
+    """``at`` reads a file as a history commit left it; refs stay gated.
+
+    The version-view behind :meth:`Files.history`: each returned sha reads
+    that point's content, a commit predating the file answers
+    ``exists=False``, and only full shas reachable from HEAD resolve --
+    never a rev expression or a sibling's unmerged commit.
+    """
+    node = node_with_db
+    root = node.worktree
+    base = _commit_file(root, 'other.md', 'noise\n', 'base')
+    first = _commit_file(root, 'report.md', 'one\n', 'draft')
+    second = _commit_file(root, 'report.md', 'one\ntwo\n', 'extend')
+    # each history sha serves its version; at overrides since/before
+    assert node.files.read('report.md', at=first)['content'] == 'one\n'
+    assert node.files.read('report.md', at=second)['content'] == 'one\ntwo\n'
+    at_read = node.files.read('report.md', at=first, since='base', before=True)
+    assert at_read['content'] == 'one\n'
+    # a commit predating the file has no side to serve
+    assert node.files.read('report.md', at=base)['exists'] is False
+    # rev expressions and unknown shas never resolve
+    with pytest.raises(ValueError):
+        node.files.read('report.md', at='HEAD~1')
+    with pytest.raises(ValueError):
+        node.files.read('report.md', at='a' * 40)
+    # the structural boundary holds for at reads too
+    with pytest.raises(ValueError):
+        node.files.read('../escape', at=first)
 
 
 def test_files_list_changed_survives_a_merge_into_the_base(

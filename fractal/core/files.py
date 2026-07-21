@@ -191,6 +191,7 @@ class Files:
         max_lines: Optional[int] = None,
         since: Optional[str] = None,
         before: bool = False,
+        at: Optional[str] = None,
     ) -> dict[str, Any]:
         """Read a project file's content (validated, capped).
 
@@ -199,9 +200,11 @@ class Files:
         or, given ``since``, part of that anchor's changed set -- so a deleted
         file's old content stays readable without exposing anything else.
         ``before`` reads the file as it was at the ``since`` anchor (via
-        ``git show``), for the old side of a before/after view; a side that
-        does not exist (an added file has no before; a deleted file has no
-        after) returns ``exists=False`` with empty content.
+        ``git show``), for the old side of a before/after view; ``at`` reads
+        it as one of the node's own commits left it (a sha from
+        :meth:`history`), overriding ``since``/``before``. A side that does
+        not exist (an added file has no before; a deleted file has no after)
+        returns ``exists=False`` with empty content.
 
         Args:
             path: Worktree-relative file path.
@@ -212,6 +215,8 @@ class Files:
                 ``run`` (see :meth:`list`).
             before: Read the file at the ``since`` anchor instead of the
                 worktree.
+            at: Full commit sha to read the file at (:meth:`history` refs);
+                ``since``/``before`` are ignored when given.
 
         Returns:
             ``{path, content, truncated, total_lines, size, binary, exists}``.
@@ -219,11 +224,14 @@ class Files:
             (callers download it via :meth:`path` instead).
 
         Raises:
-            ValueError: If ``before`` is set without ``since``, or ``path`` is
-                not a file the tracked set or the anchor's changed set exposes.
+            ValueError: If ``before`` is set without ``since``, ``at`` is not
+                a full sha reachable from the node's HEAD, or ``path`` is not
+                a file the tracked set or the anchor's changed set exposes.
 
         """
         norm = self._validate_relpath(path)
+        if at is not None:
+            return self._render(norm, self._at_bytes(norm, at), max_lines)
         if before and since is None:
             raise ValueError('Please specify since when reading the before side.')
         # literal pathspec magic: a glob char in a tracked name (e.g. a
@@ -267,6 +275,15 @@ class Files:
                     raw = abs_path.read_bytes()
             except OSError:
                 raw = None
+        return self._render(norm, raw, max_lines)
+
+    def _render(
+        self: Files,
+        norm: str,
+        raw: Optional[bytes],
+        max_lines: Optional[int],
+    ) -> dict[str, Any]:
+        """Shape one side's raw bytes into :meth:`read`'s response dict."""
         if raw is None:
             # the file does not exist on this side (a pure add or delete)
             return {
@@ -308,6 +325,32 @@ class Files:
             'binary': False,
             'exists': True,
         }
+
+    def _at_bytes(self: Files, norm: str, at: str) -> Optional[bytes]:
+        """Fetch a file's raw bytes at one commit of the node's history.
+
+        ``at`` must be a full commit sha -- never a rev expression, which
+        could name arbitrary refs -- reachable from the node's HEAD (the
+        shas :meth:`history` returns), so a sibling's unmerged commits
+        never answer. Returns ``None`` when the file is absent at that
+        commit.
+
+        Raises:
+            ValueError: If ``at`` is not a full sha reachable from HEAD.
+
+        """
+        sha = at.lower()
+        if len(sha) != 40 or not set(sha) <= set('0123456789abcdef'):
+            raise ValueError(f'Invalid at: {at!r} (expected a full commit sha).')
+        cmd = ['merge-base', '--is-ancestor', sha, 'HEAD']
+        reachable = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
+        if reachable is None:
+            raise ValueError(f'Unknown commit: {at!r} (not reachable from HEAD).')
+        # a rev:path lookup is literal already -- no :(literal) here
+        return fractal.util.git.run_bytes(
+            ['show', f'{sha}:{norm}'],
+            cwd=self.worktree,
+        )
 
     def path(self: Files, path: str) -> pathlib.Path:
         """Resolve a project file to its on-disk path (validated).
