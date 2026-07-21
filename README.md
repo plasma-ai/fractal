@@ -18,6 +18,8 @@ bounded, and an operator can steer or stop it at any point. Run metadata
 (including cost) lands in one local `SQLite` database, which can be interacted
 with live in a terminal UI.
 
+![fractal TUI dashboard](https://raw.githubusercontent.com/plasma-ai/fractal/main/docs/_static/tui.png)
+
 ______________________________________________________________________
 
 **Source**:
