@@ -4,7 +4,7 @@ Cost accounting for a node (the ``Cost`` ledger).
 
 Behavior pins for the cost readers over persisted rows: per-run budgets
 and rollups, the unpriced/untracked disclosure taxonomy, per-run subtree
-lineage (breakdown), and the display-complete spend table
+lineage (breakdown/lifetime), and the display-complete spend table
 (``Cost.rows`` sums to ``Cost.spent``).
 
 Uses the in-process ``node_with_db`` fixture (or the spawned parent/child
@@ -38,6 +38,7 @@ __all__ = [
     'test_parent_run_id_scopes_subtree_cost',
     'test_cost_spent_includes_deleted_child',
     'test_subtree_spent_walks_deleted_descendants',
+    'test_cost_lifetime_sums_all_runs_across_subtree',
     'test_cost_rows_sum_to_spent_with_a_deleted_descendant',
 ]
 
@@ -542,6 +543,32 @@ def test_subtree_spent_walks_deleted_descendants(
         assert cost.subtree_spent(connection, p_run) == pytest.approx(1.5)
     finally:
         connection.close()
+
+
+def test_cost_lifetime_sums_all_runs_across_subtree(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifetime cost spans every run per node, over the whole subtree at once.
+
+    ``Cost.breakdown`` scopes to one run's spawn lineage; the lifetime view
+    keys each registered branch (the node itself included) to its all-runs
+    total, so one call covers a tree view's per-row spend.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    _record_step_cost(parent, run_id=_active_run(parent), cost=0.25)
+    _record_step_cost(child, run_id=_active_run(child), cost=1.0)
+    # a second child run: lifetime totals accumulate across runs
+    second_run = child.record.run_start()
+    _record_step_cost(child, run_id=second_run, cost=0.5)
+    assert parent.cost.lifetime() == pytest.approx(
+        {'main.parent': 0.25, 'main.parent.kid': 1.5}
+    )
+    # the user view narrows by depth and zero-fills spendless branches
+    user = Node(git_repo)
+    assert user.cost.lifetime(max_depth=1) == pytest.approx(
+        {'main': 0.0, 'main.parent': 0.25}
+    )
 
 
 def test_cost_rows_sum_to_spent_with_a_deleted_descendant(

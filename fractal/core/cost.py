@@ -308,6 +308,39 @@ class Cost:
         rows = self.db.read(query=query, params=params)
         return {row['node']: row['total'] for row in rows}
 
+    def lifetime(
+        self: Cost,
+        *,
+        max_depth: Optional[int] = None,
+    ) -> dict[str, float]:
+        """Map this node and each in-subtree descendant to its lifetime spend.
+
+        Unlike :meth:`breakdown`, which scopes to a single run's
+        ``parent_run_id`` lineage, this sums every step's cost across all of a
+        node's runs -- idle-spawned runs no parent run links to included --
+        and always covers the node itself, so one call replaces a per-node
+        fan-out over a whole subtree. Totals are per branch name and span
+        re-inits of the same name (history rows persist by design); a deleted
+        descendant holds no registry row and so does not key.
+
+        Args:
+            max_depth: Maximum descendant depth to include (``1`` = direct
+                children only); all descendants if omitted.
+
+        Returns:
+            ``{branch: lifetime own cost in USD}`` for this node and each
+            in-subtree descendant.
+
+        """
+        # one grouped read over the tree-central steps table; the registry
+        # projection scopes it to this subtree
+        branches = {self._node.branch}
+        for row in self._node.child_list(max_depth=max_depth) or []:
+            branches.add(row['node'])
+        query = 'SELECT node, COALESCE(SUM(cost), 0) AS total FROM steps GROUP BY node'
+        totals = {row['node']: row['total'] for row in self.db.read(query=query)}
+        return {branch: totals.get(branch, 0.0) for branch in branches}
+
     def rows(
         self: Cost,
         *,
