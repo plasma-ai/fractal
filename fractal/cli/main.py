@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import typer
@@ -9,6 +10,11 @@ import typer
 from . import cmd
 
 __all__ = ['cli']
+
+# the failure line's bold-red styling, applied only on a tty -- piped
+# consumers get the bare text (the marker is the word, not the color)
+_FAIL = '\033[1;31m'
+_RESET = '\033[0m'
 
 
 def cli(**kwargs: Any) -> None:
@@ -151,8 +157,21 @@ def cli(**kwargs: Any) -> None:
     cmd.event_end(event_app)
     cmd.event_list(event_app)
     app.add_typer(event_app, hidden=True)
-    # run app
-    app()
+    # run app -- and make every failure unmistakable: errors already ride
+    # stderr with a non-zero exit, but a decorative parse-error frame read
+    # through `tail -1` is indistinguishable from a success frame (the
+    # phantom-send class: a night of failed sends that looked delivered), so
+    # the LAST line of every failed command names the failure and exit code
+    try:
+        app()
+    except SystemExit as exit_:
+        code = exit_.code
+        if isinstance(code, int) and code != 0:
+            line = f'FAILED (exit {code})'
+            if sys.stderr.isatty():
+                line = f'{_FAIL}{line}{_RESET}'
+            typer.echo(line, err=True)
+        raise
 
 
 if __name__ == '__main__':

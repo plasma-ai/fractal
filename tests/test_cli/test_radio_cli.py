@@ -30,6 +30,7 @@ from .conftest import _run
 __all__ = [
     'test_send_and_post_route_across_nodes_by_channel',
     'test_send_and_post_reject_write_only_and_out_of_range_priority',
+    'test_failed_commands_end_with_an_unmistakable_failed_line',
     'test_node_and_parent_are_mutually_exclusive',
     'test_bare_post_lands_in_outbox',
     'test_named_target_channel_defaults',
@@ -216,6 +217,58 @@ def test_send_and_post_reject_write_only_and_out_of_range_priority(
     assert too_high.stderr.startswith('Error:')
     assert 'ValueError' not in too_high.stderr
     assert 'priority' in too_high.stderr.lower()
+
+
+def test_failed_commands_end_with_an_unmistakable_failed_line(repo: dict) -> None:
+    """A failed command's LAST line is ``FAILED (exit N)``; success has none.
+
+    The phantom-send class: an unknown-option error frame read through
+    ``tail -1`` looked identical to a success frame, so a night of failed
+    sends passed as delivered. Every failure now closes with a line naming
+    the failure and the exit code -- parse errors (exit 2, with the correct
+    usage named) and domain errors (exit 1) alike -- and a successful send
+    never carries it.
+    """
+    alpha = repo['alpha']
+    # unknown option: rejected at parse time, naming the correct usage
+    unknown = _radio(alpha, 'send', 'hi', '--body', 'x')
+    assert unknown.returncode == 2
+    assert 'No such option' in unknown.stderr
+    assert 'Usage:' in unknown.stderr
+    assert unknown.stderr.rstrip().splitlines()[-1] == 'FAILED (exit 2)'
+    assert unknown.stdout.strip() == ''
+    # domain error: exit 1 through the command wrapper, same closing line
+    missing = _radio(
+        alpha,
+        'send',
+        'hi',
+        '--node',
+        'main.ghost',
+        '--subject',
+        's',
+        '--priority',
+        '5',
+    )
+    assert missing.returncode == 1
+    assert missing.stderr.startswith('Error:')
+    assert missing.stderr.rstrip().splitlines()[-1] == 'FAILED (exit 1)'
+    # a successful send never carries the failure line
+    sent = _radio(
+        alpha,
+        'send',
+        'hi',
+        '--node',
+        'main.beta',
+        '--subject',
+        's',
+        '--priority',
+        '5',
+    )
+    assert sent.returncode == 0
+    assert 'FAILED' not in sent.stderr
+    # round-trip: withdraw the probe message so the shared mailbox stays clean
+    result = _radio(alpha, 'unsend', sent.stdout.strip())
+    assert result.returncode == 0
 
 
 def test_node_and_parent_are_mutually_exclusive(repo: dict) -> None:

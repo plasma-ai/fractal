@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Unmistakable failure frames: every failed `fractal` command closes with a
+  `FAILED (exit N)` line as the LAST line of output (bold red on a tty, bare
+  text in pipes), so an error frame read through `tail -1` can never pass as
+  success; unknown options keep the usage line naming the correct invocation.
+
 ### Changed
 
 - `node stop`'s wait-for-the-seat contract is pinned by test and documented: a
