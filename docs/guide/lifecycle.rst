@@ -222,9 +222,15 @@ stop
 
 ``fractal node stop [node] [--reason <text>]`` is the same shape as
 ``finish`` but ends the loop **after its current step**, landing the node
-``stopped``. Same children-first fan-out, same tree-wide broadcast on the
-user node, same ``active``-with-a-run requirement. There is no
-``--cancel`` for stop.
+``stopped``. Same children-first fan-out over the entire subtree, same
+tree-wide broadcast on the user node, same ``active``-with-a-run
+requirement. There is no ``--cancel`` for stop.
+
+The signal is a queued row, not a process signal: a stop that lands while a
+step's agent is in flight waits for that seat to complete -- the step books
+its real outcome and only the steps after it are forgone. A stop never
+TERMs the running agent; when an immediate end is genuinely needed, that is
+``kill``.
 
 pause
 ~~~~~

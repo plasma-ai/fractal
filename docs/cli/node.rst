@@ -287,10 +287,18 @@ signal. Refused signals are recorded as failed events in the activity log.
    $ fractal node stop [NODE] [--reason <text>]
 
 ``finish`` ends the node gracefully after the current **iteration**; ``stop``
-ends it after the current **step**. Both fan out to active descendants
-children-first, so the subtree drains before the target settles. Invoked on
-the user node, ``finish``/``stop`` broadcast tree-wide (the user node itself
-carries no signal).
+ends it after the current **step**. Both are queued signals the loop polls at
+its boundaries: a stop that lands mid-step **waits for the in-flight agent to
+complete** -- however long that takes -- and never signals or tears it (the
+immediate path is ``kill``).
+
+.. warning::
+
+   Both verbs cascade to the node's **entire subtree** of active descendants
+   (children first, so the subtree drains before the target settles). There
+   is no single-node form: stopping a manager stops every lane under it, each
+   after its own current step. Invoked on the user node, ``finish``/``stop``
+   broadcast tree-wide (the user node itself carries no signal).
 
 ``--cancel`` (``finish`` only) withdraws this node's pending finish signal
 instead of sending one — it never fans out, and refuses when no finish signal

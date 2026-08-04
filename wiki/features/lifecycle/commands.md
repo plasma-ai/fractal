@@ -46,7 +46,10 @@ children-first — descendants are swept before the node itself, so a parent nev
 completes over live children — and both let work land cleanly. They differ only
 in granularity: after `finish` the loop stops at the end of the current
 *iteration* (booking `completed`); after `stop` it stops at the end of the
-current *step* (booking `stopped`). `finish_cancel` withdraws a pending finish
+current *step* (booking `stopped`). Both are queued rows the loop polls at its
+boundaries — a stop landing mid-step waits for the in-flight seat to complete
+and never tears it (`kill` is the immediate path), and both sweep the *entire*
+subtree, not just the named node. `finish_cancel` withdraws a pending finish
 before the loop honors it. Signaled from the user (root) node, finish is a
 tree-wide broadcast with no self-signal, since the root runs no loop of its own.
 

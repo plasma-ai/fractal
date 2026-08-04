@@ -312,8 +312,9 @@ seed; once done, merge it and launch the target.
   path-relative state pass in-place and fail everywhere else. (Textual claims
   need only `git show <branch>:<path>`.)
 - **Stop:** `fractal node finish <branch>` (after iteration),
-  `fractal node stop <branch>` (after step), `fractal node kill <branch>`
-  (immediately).
+  `fractal node stop <branch>` (after step; waits for the in-flight step to
+  complete), `fractal node kill <branch>` (immediately). All three cascade over
+  the target's entire subtree, children first.
 - **Pause:** `fractal node pause <branch>` freezes the child's subtree in place
   (aborts in-flight agent turns; loops park with their runs open),
   `fractal node resume <branch>` relaunches it exactly there -- same budgets,

@@ -82,6 +82,7 @@ __all__ = [
     'test_run_end_drain_outlives_the_closed_iterations_deadline',
     'test_before_last_step_drain_uses_the_run_wall_not_the_iter_deadline',
     'test_finalize_terminal_cascade_matrix',
+    'test_stop_mid_step_lets_the_seat_complete',
     'test_stop_during_finish_drain_books_stopped',
     'test_pre_iteration_finish_drain_uses_the_run_wall_not_the_iter_deadline',
     'test_finalize_classifies_over_cap_finishes_by_reason',
@@ -2276,6 +2277,49 @@ def test_finalize_terminal_cascade_matrix(
     expected = '' if reason is None else reason.format(run=loop._run_id)
     assert row['metadata'] == expected
     assert row['ended_at'] is not None
+
+
+def test_stop_mid_step_lets_the_seat_complete(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop landing mid-step never tears the in-flight seat.
+
+    ``node stop`` is "stop after the current step": the signal is a DB row
+    the loop polls between steps, so a stop that lands while an agent is in
+    flight lets that launch run to completion -- its step row books
+    ``completed``, never a signal death -- and only the steps after it are
+    forgone. ``kill`` is the immediate path; stop must not be one.
+    """
+    monkeypatch.setenv('_NODE', '')
+
+    class _StopMidStep(MockLoop):
+        """Signal stop while the first step's launch is in flight."""
+
+        def _launch(
+            self: _StopMidStep,
+            step: Step,
+            prompt: str,
+            *,
+            agent: Any,
+            budget: Optional[float],
+        ) -> StepResult:
+            if not self.launched:
+                self.node.record.signal_set('stop', 'manual')
+            return super()._launch(step, prompt, agent=agent, budget=budget)
+
+    _configure(loop_node, max_iters=3)
+    loop = _StopMidStep(loop_node)
+    assert loop.run() == 0
+    # the in-flight seat completed; only the following step was forgone
+    assert len(loop.launched) == 1
+    [step] = loop_node.db.read('steps', where={'node': loop_node.branch})
+    assert (step['status'], step['exit_code']) == ('completed', 0)
+    iteration = loop_node.db.read('iters', where={'node': loop_node.branch})[0]
+    assert (iteration['status'], iteration['exit_code']) == ('stopped', 0)
+    run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
+    assert (run['status'], run['exit_code']) == ('stopped', 0)
+    assert loop_node.status() == 'stopped'
 
 
 def test_stop_during_finish_drain_books_stopped(

@@ -8,6 +8,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `node stop`'s wait-for-the-seat contract is pinned by test and documented: a
+  stop landing mid-step waits for the in-flight agent to complete — it never
+  signals or tears the running seat (`node kill` remains the immediate path) —
+  and the docs now state prominently that stop cascades over the target's entire
+  subtree, children first.
 - `node kill` lands on `idle` nodes: a booting spawn is reaped and a
   never-started spawn is stamped `killed` so it can never activate — an unwanted
   spawn no longer gets a head start while an operator poll-watches for its

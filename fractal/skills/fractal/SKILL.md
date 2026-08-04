@@ -408,6 +408,7 @@ Once the node is running, briefly explain how to interact with it:
   `config.json` together, and a running loop picks the change up at its next
   iteration boundary (a direct config edit is honored at the same boundary but
   leaves the registry stale until the loop heals it).
+
 - **Monitoring:** From the node's worktree (`cd <worktree>`), commands act on it
   directly — `fractal node status`, `fractal node cost spent`, and
   `fractal node attach` (watch live output — use this, not raw `tmux -t`, whose
@@ -421,14 +422,22 @@ Once the node is running, briefly explain how to interact with it:
   scopes differ by design: `cost spent` reads the run's full subtree (children
   included), while `activity`'s `cost` column sums only the node's own steps —
   and both are per-run, with no lifetime rollup.
+
 - **TUI:** For a live view of the whole tree — nodes, runs, costs, and output —
   suggest the user open the dashboard with `fractal open` (from anywhere in the
   repo; add a node branch to open focused on it, or a tree's root branch to open
   at the root).
+
 - **Stopping:** From the worktree, three escalation levels:
+
   - `fractal node finish` — stop after current iteration
-  - `fractal node stop` — stop after current step
+  - `fractal node stop` — stop after current step (waits for the in-flight step
+    to complete; never tears it)
   - `fractal node kill` — kill immediately
+
+  All three cascade over the node's entire subtree of active descendants,
+  children first — stopping a manager stops every lane under it.
+
 - **Pausing:** `fractal node pause` freezes the subtree in place — it aborts
   each in-flight agent turn and parks every loop with its run open — and
   `fractal node resume` relaunches it exactly there (same budgets, same
@@ -447,6 +456,7 @@ Once the node is running, briefly explain how to interact with it:
   `start --continue` opens a *fresh* run (worktree restored — uncommitted
   project files need `--clean`, and a budget-ended run refuses without an
   explicit `--max-cost`) on a stopped/exited node.
+
 - **Worktree:** The node runs in a git worktree at
   `<repo>/.worktrees/<branch>/`. The user's repo is untouched. When done, from
   the repo root, merge with `fractal node merge <branch>`. A conflicted merge
@@ -470,12 +480,14 @@ Once the node is running, briefly explain how to interact with it:
   node's branch while hiding it, retire it instead. Delete prompts for
   confirmation `[y/N]`, chained or standalone; pass `--force`/`-f` to skip the
   prompt.
+
 - **Reset:** `fractal reset` (from anywhere in the repo) tears down every node
   worktree, branch, and registration in the tree in one sweep; the project,
   wiki, and all history in the central database survive, so fresh nodes spawn
   immediately after. It refuses while any node is running; a paused node is
   killed as part of the teardown, which the confirmation `[y/N]` authorizes
   (`--force`/`-f` skips it).
+
 - **Tree scope:** one repository can carry several trees — one per branch you
   ran `fractal init` on, each with its own user node, database, and history. The
   tree-scoped verbs (`pause`, `resume`, `reset`, `track`, `untrack`, `open`)
@@ -487,6 +499,7 @@ Once the node is running, briefly explain how to interact with it:
   tree. `destroy` takes the same name but never infers it: a bare
   `fractal destroy` is ambiguous between this tree and everything, so name a
   tree or pass `--all`, the one repo-wide verb.
+
 - **Radio:** nodes communicate via `fractal radio` commands. `radio send` writes
   any channel permissions allow, given at least one routing dimension
   (`--node`/`--parent` or `--channel`) — a fully bare send refuses; `radio post`
