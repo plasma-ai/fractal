@@ -107,6 +107,7 @@ class Radio:
         data: str,
         priority: int,
         post: bool = False,
+        relay_of: Optional[str] = None,
     ) -> tuple[str, str, str]:
         """Write a message to a node's channel.
 
@@ -131,6 +132,9 @@ class Radio:
                 readable channel (``read_only = 0``, the ``post`` verb);
                 ``False`` (the ``send`` verb and internal callers)
                 skips the check.
+            relay_of: UUID of the message this send relays onward; the copy
+                carries ``relay:<uuid>`` metadata, making relay obligations
+                verifiable from the store (:meth:`relays`).
 
         Returns:
             Tuple of the message's 8-char UUID and the resolved
@@ -140,8 +144,9 @@ class Radio:
         Raises:
             ValueError: If ``parent`` and ``node`` are both set, the
                 parent or target node is not found, ``priority`` is out
-                of range, the channel is not found, or ``post`` is set
-                and the channel is privately readable.
+                of range, the channel is not found, ``post`` is set
+                and the channel is privately readable, or ``relay_of``
+                references no known message.
             PermissionError: If the target channel is write-only and the
                 sender is not the owner.
 
@@ -184,6 +189,16 @@ class Radio:
             )
         if target != self.node.branch and rows[0]['write_only']:
             raise PermissionError(f'Channel {channel!r} is write-only (owner only).')
+        # a relay must reference a real message -- a typo'd mark is worse
+        # than none (the obligation check would read the relay as never
+        # executed); the archive answers for an original its host unsent
+        if relay_of is not None:
+            known = self.db.exists(
+                'messages',
+                where={'message_uuid': relay_of},
+            ) or self.db.exists('archive', where={'message_uuid': relay_of})
+            if not known:
+                raise ValueError(f'Relay reference not found: {relay_of!r}')
         # write message
         message_uuid = self._unique_uuid()
         session = self._sender_session()
@@ -197,8 +212,100 @@ class Radio:
             'subject': subject,
             'data': data,
         }
+        if relay_of is not None:
+            row['metadata'] = f'relay:{relay_of}'
         self.db.write(row, 'messages')
         return message_uuid, target, channel
+
+    def send_many(
+        self: Radio,
+        nodes: list[str],
+        channel: str = 'inbox',
+        *,
+        subject: str,
+        data: str,
+        priority: int,
+        relay_of: Optional[str] = None,
+    ) -> list[tuple[str, str, str]]:
+        """Send one copy of a message to each recipient, with receipts.
+
+        The fan-out primitive for fleet orders: every target is resolved
+        and its channel checked before any row lands, so a bad recipient
+        refuses the whole fan-out instead of stranding a partial delivery
+        (the same reads :meth:`send` runs are taken as a dry pass; the
+        usual best-effort caveat about concurrent channel edits applies).
+        Each copy is its own message with its own UUID -- the returned
+        receipts are the per-recipient delivery record.
+
+        Args:
+            nodes: Target node branches, one copy each.
+            channel: Channel name on every target. Defaults to ``'inbox'``.
+            subject: Message subject.
+            data: Message data.
+            priority: Priority (0-10).
+            relay_of: UUID of the message the copies relay onward.
+
+        Returns:
+            List of ``(uuid, node, channel)`` receipts, in recipient order.
+
+        Raises:
+            ValueError: If any recipient fails :meth:`send`'s validation
+                (unknown node, missing channel, bad priority or relay
+                reference) -- raised before any copy is written.
+            PermissionError: If any target channel is write-only for this
+                sender.
+
+        """
+        # dry pass: every recipient validates before the first row lands
+        self._validate_priority(priority)
+        for node in nodes:
+            target = self._resolve_target(node)
+            rows = self.db.read(
+                'channels',
+                where={'node': target, 'channel': channel},
+                limit=1,
+            )
+            if not rows:
+                raise ValueError(f'Node {target} has no channel {channel!r}.')
+            if target != self.node.branch and rows[0]['write_only']:
+                raise PermissionError(
+                    f'Channel {channel!r} is write-only (owner only).'
+                )
+        # deliver -- send re-validates each route (cheap, and it owns the row)
+        receipts = []
+        for node in nodes:
+            receipts.append(
+                self.send(
+                    node,
+                    channel,
+                    subject=subject,
+                    data=data,
+                    priority=priority,
+                    relay_of=relay_of,
+                )
+            )
+        return receipts
+
+    def relays(self: Radio, message_uuid: str) -> list[Row]:
+        """List the relayed copies of a message (its recorded relay lineage).
+
+        The descendant-relay obligation check: an order that must be passed
+        onward is verifiable from the store -- every copy sent with
+        ``relay_of`` carries ``relay:<uuid>`` metadata, so an empty listing
+        means no relay of the message was ever recorded.
+
+        Args:
+            message_uuid: UUID of the original (relayed) message.
+
+        Returns:
+            List of relayed-copy message dicts with counts, in the shared
+            listing order (priority first).
+
+        """
+        return self._query_messages(
+            metadata=f'relay:{message_uuid}',
+            roots_only=False,
+        )
 
     def unsend(
         self: Radio,
@@ -1029,6 +1136,7 @@ class Radio:
         node: Optional[str] = None,
         sender: Optional[str] = None,
         channel: Optional[str] = None,
+        metadata: Optional[str] = None,
         limit: Optional[int] = None,
         since: Optional[str] = None,
         read: Optional[bool] = None,
@@ -1042,6 +1150,7 @@ class Radio:
             node: Filter by host node (whose channel-space).
             sender: Filter by sending node.
             channel: Filter by channel.
+            metadata: Filter by exact metadata (the relay-lineage mark).
             limit: Maximum rows.
             since: Only after this timestamp.
             read: Read filter, following this node's receipts.
@@ -1077,6 +1186,9 @@ class Radio:
         if channel is not None:
             conditions.append('m.channel = ?')
             params.append(channel)
+        if metadata is not None:
+            conditions.append('m.metadata = ?')
+            params.append(metadata)
         if since is not None:
             conditions.append('m.created_at > ?')
             params.append(since)

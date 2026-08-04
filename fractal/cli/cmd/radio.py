@@ -29,6 +29,7 @@ __all__ = [
     'radio_unsave',
     'radio_messages',
     'radio_sent',
+    'radio_relays',
     'radio_feed',
     'radio_read',
     'radio_thread',
@@ -98,6 +99,17 @@ _SAVED_COLUMNS = [
     'created_at',
 ]
 
+_RELAY_COLUMNS = [
+    'message_uuid',
+    'sender',
+    'node',
+    'channel',
+    'priority',
+    'subject',
+    'metadata',
+    'created_at',
+]
+
 _THREAD_COLUMNS = [
     'message_id',
     'node',
@@ -129,8 +141,11 @@ def radio_send(app: typer.Typer) -> typer.Typer:
     # data argument
     data_help = 'Message data.'
     data = typer.Argument(..., help=data_help)
-    # node option
-    node_help = 'Target node branch (default: self when --channel is given).'
+    # node option (repeatable: a fan-out sends one copy per recipient)
+    node_help = (
+        'Target node branch; repeat for a fan-out, one copy per recipient'
+        ' (default: self when --channel is given).'
+    )
     node = typer.Option(None, '--node', help=node_help)
     # parent flag
     parent_help = 'Send to parent node (mutex with --node).'
@@ -144,6 +159,12 @@ def radio_send(app: typer.Typer) -> typer.Typer:
     # priority option
     priority_help = f'Message priority ({PRIORITY_MIN}-{PRIORITY_MAX}; required).'
     priority = typer.Option(None, '--priority', help=priority_help)
+    # relay-of option
+    relay_of_help = (
+        'UUID of the message this send relays onward; the copy is marked'
+        " 'relay:<uuid>' so 'radio relays' can verify the obligation."
+    )
+    relay_of = typer.Option(None, '--relay-of', help=relay_of_help)
     # path option
     path_help = 'Worktree directory (default: the calling node, else the cwd).'
     path = typer.Option(None, '--path', help=path_help)
@@ -151,11 +172,12 @@ def radio_send(app: typer.Typer) -> typer.Typer:
     @command(app, 'send')
     def _send(
         data: str = data,
-        node: Optional[str] = node,
+        node: Optional[list[str]] = node,
         parent: bool = parent,
         channel: Optional[str] = channel,
         subject: Optional[str] = subject,
         priority: Optional[int] = priority,
+        relay_of: Optional[str] = relay_of,
         path: Optional[str] = path,
     ) -> None:
         """Send a message to a node's channel (a target or channel is required)."""
@@ -187,13 +209,36 @@ def radio_send(app: typer.Typer) -> typer.Typer:
         if channel is None:
             channel = 'inbox'
         target_defaulted = not node and not parent
+        # a repeated --node fans out: every recipient validates before any
+        # copy lands, and stdout carries one '<uuid> <node>' receipt per
+        # recipient -- the per-recipient delivery record a relayed fleet
+        # order is verified against
+        if node and len(node) > 1:
+            if parent:
+                raise typer.BadParameter('--parent and --node are mutually exclusive.')
+            receipts = radio.send_many(
+                node,
+                channel,
+                subject=subject,
+                data=data,
+                priority=priority,
+                relay_of=relay_of,
+            )
+            for message_uuid, target, receipt_channel in receipts:
+                typer.echo(f'{message_uuid} {target}')
+                typer.echo(
+                    f"sent to {target}'s {receipt_channel!r} channel",
+                    err=True,
+                )
+            return
         message_uuid, target, channel = radio.send(
-            node=node,
+            node=node[0] if node else None,
             channel=channel,
             parent=parent,
             subject=subject,
             data=data,
             priority=priority,
+            relay_of=relay_of,
         )
         typer.echo(message_uuid)
         # name a defaulted routing dimension on stderr so the caller sees the
@@ -548,6 +593,52 @@ def radio_sent(app: typer.Typer) -> typer.Typer:
             print_json(rows, columns=_MESSAGE_COLUMNS)
         else:
             print_rows(rows, csv=csv, columns=_MESSAGE_COLUMNS)
+        _stamp_listing(radio)
+
+    return app
+
+
+def radio_relays(app: typer.Typer) -> typer.Typer:
+    """Register the ``relays`` command."""
+    # message uuid argument
+    message_uuid_help = '8-char UUID of the relayed (original) message.'
+    message_uuid = typer.Argument(..., help=message_uuid_help)
+    # csv flag
+    csv_help = 'Force CSV output (already the default when piped / non-TTY).'
+    csv = typer.Option(False, '--csv', help=csv_help)
+    # json flag
+    json_help = 'Output a JSON array of row objects (mutex with --csv).'
+    json = typer.Option(False, '--json', help=json_help)
+    # path option
+    path_help = 'Worktree directory (default: the calling node, else the cwd).'
+    path = typer.Option(None, '--path', help=path_help)
+
+    @command(app, 'relays')
+    def _relays(
+        message_uuid: str = message_uuid,
+        csv: bool = csv,
+        json: bool = json,
+        path: Optional[str] = path,
+    ) -> None:
+        """List the recorded relayed copies of a message (relay lineage).
+
+        The descendant-relay obligation check: every copy sent with
+        ``--relay-of <uuid>`` lists here, sender and recipient named, so an
+        empty listing means no relay of the order was ever recorded.
+        """
+        if json and csv:
+            raise typer.BadParameter('--json is mutually exclusive with --csv.')
+        radio = Radio(resolve_sender(path))
+        rows = radio.relays(message_uuid)
+        # an empty lineage is the check's loudest answer -- name it (stdout
+        # keeps the empty-header contract for parsers)
+        if not rows:
+            typer.echo(f'0 relays recorded for {message_uuid}', err=True)
+        rows = [{key: row[key] for key in _RELAY_COLUMNS} for row in rows]
+        if json:
+            print_json(rows, columns=_RELAY_COLUMNS)
+        else:
+            print_rows(rows, csv=csv, columns=_RELAY_COLUMNS)
         _stamp_listing(radio)
 
     return app

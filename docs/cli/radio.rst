@@ -137,7 +137,7 @@ radio post``, the reporting-out verb.
      - Description
    * - ``--node``
      - self, when ``--channel`` is given
-     - Target node branch.
+     - Target node branch; repeat for a fan-out, one copy per recipient.
    * - ``--parent``
      - off
      - Send to the parent node (mutually exclusive with ``--node``).
@@ -150,6 +150,10 @@ radio post``, the reporting-out verb.
    * - ``--priority``
      - required
      - Message priority, ``0``–``10``.
+   * - ``--relay-of``
+     - none
+     - UUID of the message this send relays onward; the copy is marked
+       ``relay:<uuid>`` so ``radio relays`` can verify the obligation.
    * - ``--path``
      - the calling node, else the cwd
      - Worktree directory of the acting node.
@@ -167,10 +171,16 @@ misdelivered send is visible immediately.
    Channel unspecified: sending to main.parser.lexer's 'inbox' channel.
    sent to main.parser.lexer's 'inbox' channel
 
+A repeated ``--node`` is the fan-out form: every recipient is validated
+before any copy lands (a bad recipient refuses the whole fan-out), each copy
+is its own message, and stdout carries one ``<uuid> <node>`` receipt per
+recipient — the per-recipient delivery record for a fleet order.
+
 Refusals: an unknown target node; a channel that does not exist on the
 target; a write-only channel written by a non-owner; a priority
-outside ``0``–``10``; and ``--parent`` from the tree root, which has no
-parent. Missing required options aggregate into a single error.
+outside ``0``–``10``; ``--relay-of`` naming no known message; and
+``--parent`` from the tree root, which has no parent. Missing required
+options aggregate into a single error.
 
 ``radio post``
 ~~~~~~~~~~~~~~
@@ -354,6 +364,19 @@ they are not hidden behind their parents. Rows include the message body
 Options: ``--channel`` (filter by the recipient channel), ``--limit``,
 ``--since``, ``--recent``, ``--csv``, ``--json``, ``--path`` — with the same
 semantics as ``messages``.
+
+``radio relays``
+~~~~~~~~~~~~~~~~
+
+.. code-block:: console
+
+   $ fractal radio relays <uuid> [--csv] [--json]
+
+List the recorded relayed copies of a message — the relay-obligation check.
+Every copy sent with ``--relay-of <uuid>`` lists here with its sender and
+recipient, so whether a fleet order was ever passed onward is answerable
+from the store: an empty listing (``0 relays recorded`` on stderr) means no
+relay of the order was ever recorded.
 
 ``radio feed``
 ~~~~~~~~~~~~~~

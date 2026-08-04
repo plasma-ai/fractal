@@ -28,6 +28,8 @@ __all__ = [
     'test_send_rejects_invalid_priority',
     'test_post_enforces_publicly_readable_class',
     'test_sent_lists_outbound_mail',
+    'test_send_many_delivers_per_recipient_with_receipts',
+    'test_relay_lineage_marks_copies_and_lists_them',
     'test_sent_includes_own_replies',
     'test_messages_order_by_priority_then_created_at',
     'test_messages_channel_filter',
@@ -372,6 +374,88 @@ def test_sent_lists_outbound_mail(radio_pair: tuple[Radio, Radio]) -> None:
     # recent flips to newest-first
     recent = root.sent(recent=True)
     assert [r['message_uuid'] for r in recent] == [to_self, to_peer]
+
+
+def test_send_many_delivers_per_recipient_with_receipts(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """A fan-out lands one copy per recipient and returns ordered receipts.
+
+    Each copy is its own message with its own UUID in its recipient's
+    channel-space -- the receipts are the per-recipient delivery record a
+    fleet order is verified against. A bad recipient refuses the whole
+    fan-out before any copy lands, so a partial delivery can never pass
+    silently as a full one.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    own_branch = root.node.branch
+    receipts = root.send_many(
+        [peer_branch, own_branch],
+        subject='fleet order',
+        data='wind down',
+        priority=8,
+    )
+    assert [(node, channel) for _, node, channel in receipts] == [
+        (peer_branch, 'inbox'),
+        (own_branch, 'inbox'),
+    ]
+    to_peer, to_self = (uuid for uuid, _, _ in receipts)
+    assert to_peer != to_self
+    assert to_peer in [m['message_uuid'] for m in peer.messages(channel='inbox')]
+    assert to_self in [m['message_uuid'] for m in root.messages(channel='inbox')]
+    # a bad recipient refuses the whole fan-out before any copy lands
+    before = len(root.sent())
+    with pytest.raises(ValueError, match='Node not found'):
+        root.send_many(
+            [peer_branch, 'main.ghost'],
+            subject='fleet order',
+            data='wind down',
+            priority=8,
+        )
+    assert len(root.sent()) == before
+
+
+def test_relay_lineage_marks_copies_and_lists_them(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """``relay_of`` stamps lineage; ``relays`` answers the obligation check.
+
+    A relayed copy carries ``relay:<uuid>`` metadata, so whether an order
+    was ever passed onward is answerable from the store: an empty lineage
+    means the obligation never executed. A relay naming an unknown message
+    refuses -- a typo'd mark would read as an unmet obligation forever.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    order, _, _ = root.send(
+        peer_branch,
+        subject='fleet order',
+        data='wind down',
+        priority=9,
+    )
+    # before any relay the lineage is empty -- the obligation reads unmet
+    assert root.relays(order) == []
+    relayed, _, _ = peer.send(
+        parent=True,
+        subject='fleet order (relayed)',
+        data='wind down',
+        priority=9,
+        relay_of=order,
+    )
+    [copy] = root.relays(order)
+    assert copy['message_uuid'] == relayed
+    assert copy['sender'] == peer_branch
+    assert copy['metadata'] == f'relay:{order}'
+    # an unknown reference refuses instead of recording a dangling mark
+    with pytest.raises(ValueError, match='Relay reference not found'):
+        peer.send(
+            parent=True,
+            subject='s',
+            data='d',
+            priority=5,
+            relay_of='ZZZZ9999',
+        )
 
 
 def test_sent_includes_own_replies(radio_pair: tuple[Radio, Radio]) -> None:

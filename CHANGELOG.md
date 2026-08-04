@@ -8,6 +8,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Radio fan-out with per-recipient receipts and relay lineage: `radio send`
+  takes a repeated `--node` (every recipient validated before any copy lands;
+  stdout prints one `<uuid> <node>` receipt per recipient), `--relay-of <uuid>`
+  marks a copy as the relay of an order, and the new `radio relays <uuid>` lists
+  every recorded relay — the check that a descendant-relay obligation actually
+  executed.
 - `node list --json`: a JSON array of typed row objects (mutually exclusive with
   `--csv`), completing the machine-readable trio with `node activity --json` and
   the radio listings' `--json` — operator instruments no longer need comma-split

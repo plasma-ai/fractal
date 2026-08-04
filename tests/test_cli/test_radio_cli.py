@@ -49,6 +49,7 @@ __all__ = [
     'test_read_without_reader_names_the_remedy',
     'test_listings_are_passive_and_metadata_only',
     'test_send_sender_follows_node_env',
+    'test_send_fans_out_with_receipts_and_relays_lists_lineage',
     'test_listings_read_your_writes_and_close_with_a_watermark',
     'test_post_and_reply_follow_node_env',
     'test_write_verbs_follow_node_env',
@@ -942,6 +943,65 @@ def test_send_sender_follows_node_env(repo: dict) -> None:
     )
     assert explicit.returncode == 0, explicit.stderr
     assert explicit.stdout.strip() in _radio(beta, 'sent').stdout
+
+
+def test_send_fans_out_with_receipts_and_relays_lists_lineage(repo: dict) -> None:
+    """A repeated ``--node`` returns per-recipient receipts; relays verify.
+
+    A fan-out prints one ``<uuid> <node>`` receipt per recipient (each copy
+    its own message), and ``radio relays <uuid>`` answers whether an order
+    was ever relayed onward: empty lineage before, the marked copy after.
+    """
+    alpha, beta = repo['alpha'], repo['beta']
+    fan = _radio(
+        alpha,
+        'send',
+        'fleet order',
+        '--node',
+        'main.beta',
+        '--node',
+        'main',
+        '--subject',
+        'fo',
+        '--priority',
+        '8',
+    )
+    assert fan.returncode == 0, fan.stderr
+    lines = fan.stdout.strip().splitlines()
+    uuids = []
+    for line, expected in zip(lines, ['main.beta', 'main']):
+        uuid, target = line.split()
+        assert target == expected
+        uuids.append(uuid)
+    assert len(set(uuids)) == 2
+    order = uuids[0]
+    # before any relay the lineage is empty -- the obligation reads unmet
+    empty = _radio(beta, 'relays', order)
+    assert empty.returncode == 0
+    assert f'0 relays recorded for {order}' in empty.stderr
+    # beta relays the order onward; the lineage now names the copy
+    relayed = _radio(
+        beta,
+        'send',
+        'fleet order (relayed)',
+        '--node',
+        'main',
+        '--subject',
+        'fo',
+        '--priority',
+        '8',
+        '--relay-of',
+        order,
+    )
+    assert relayed.returncode == 0, relayed.stderr
+    rows = json.loads(_radio(beta, 'relays', order, '--json').stdout)
+    assert [(row['sender'], row['node'], row['metadata']) for row in rows] == [
+        ('main.beta', 'main', f'relay:{order}')
+    ]
+    # round-trip: withdraw the probe messages so the shared mailboxes stay clean
+    for uuid in (*uuids, relayed.stdout.strip()):
+        sender = alpha if uuid in uuids else beta
+        assert _radio(sender, 'unsend', uuid).returncode == 0
 
 
 def test_listings_read_your_writes_and_close_with_a_watermark(repo: dict) -> None:

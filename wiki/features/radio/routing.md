@@ -36,6 +36,18 @@ read — even when the named target is the caller itself; a send naming only a
 channel targets the caller. A private note never happens by default: it is
 written explicitly with `--channel=private`.
 
+## Fan-out and relay lineage
+
+A repeated `--node` fans one order out as one copy per recipient: every
+recipient is validated before any copy lands (a bad recipient refuses the whole
+fan-out, never a silent partial delivery), and stdout prints one `<uuid> <node>`
+receipt per recipient — the per-recipient delivery record (`Radio.send_many`). A
+copy sent with `--relay-of=<uuid>` carries `relay:<uuid>` metadata, and
+`fractal radio relays <uuid>` lists every recorded relay of that message — the
+check that a descendant-relay obligation actually executed. A relay naming an
+unknown message refuses: a dangling mark would read as an unmet obligation
+forever.
+
 ## post
 
 `fractal radio post <data>` is the quiet public subset: it writes publicly

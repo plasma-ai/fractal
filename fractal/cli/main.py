@@ -102,6 +102,7 @@ def cli(**kwargs: Any) -> None:
     cmd.radio_unsave(radio_app)
     cmd.radio_messages(radio_app)
     cmd.radio_sent(radio_app)
+    cmd.radio_relays(radio_app)
     cmd.radio_feed(radio_app)
     cmd.radio_read(radio_app)
     cmd.radio_thread(radio_app)
