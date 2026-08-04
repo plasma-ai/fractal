@@ -8,6 +8,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `node list --json`: a JSON array of typed row objects (mutually exclusive with
+  `--csv`), completing the machine-readable trio with `node activity --json` and
+  the radio listings' `--json` — operator instruments no longer need comma-split
+  CSV scraping that an odd title can corrupt.
 - Unmistakable failure frames: every failed `fractal` command closes with a
   `FAILED (exit N)` line as the LAST line of output (bold red on a tty, bare
   text in pipes), so an error frame read through `tail -1` can never pass as

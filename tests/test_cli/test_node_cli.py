@@ -59,6 +59,7 @@ __all__ = [
     'test_init_blind_seeds_no_subs_and_start_sweeps',
     'test_merge_delete_reaps_the_merged_child',
     'test_list_filters_by_retired_and_depth',
+    'test_list_json_mirrors_csv_shape',
     'test_list_status_count_and_live',
     'test_list_rejects_invalid_filters',
     'test_list_rejects_unknown_status',
@@ -974,6 +975,34 @@ def test_list_filters_by_retired_and_depth(repo: dict) -> None:
     assert 'main.task' not in shallow
     # restore the fixture
     assert _run(docs, 'node', 'unretire').returncode == 0
+
+
+def test_list_json_mirrors_csv_shape(repo: dict) -> None:
+    """``list --json`` emits typed row objects with the CSV's column set.
+
+    One object per node, keys in the CSV header's order, so a scripted
+    consumer never rebuilds accounting from comma-split text (a comma in
+    one node's title corrupted a whole census once). ``--json`` and
+    ``--csv`` are mutually exclusive.
+    """
+    root = repo['root']
+    header = _run(root, 'node', 'list', '--csv').stdout.splitlines()[0]
+    result = _run(root, 'node', 'list', '--json')
+    assert result.returncode == 0
+    rows = json.loads(result.stdout)
+    assert rows, 'fixture lists at least the two worker nodes'
+    assert list(rows[0].keys()) == header.split(',')
+    branches = {row['node'] for row in rows}
+    assert {'main.task', 'main.docs'} <= branches
+    # fields are typed, never re-stringified: numeric caps stay numbers (or
+    # null), so a comma or quote in a text field can never shift a column
+    for row in rows:
+        assert isinstance(row['node'], str)
+        for cap in ('max_cost', 'max_depth', 'max_children', 'max_descendants'):
+            assert row[cap] is None or isinstance(row[cap], (int, float))
+    # the two machine formats cannot be combined
+    clash = _run(root, 'node', 'list', '--json', '--csv')
+    assert clash.returncode != 0
 
 
 def test_list_status_count_and_live(repo: dict) -> None:

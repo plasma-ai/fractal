@@ -850,6 +850,9 @@ def node_list(app: typer.Typer) -> typer.Typer:
     # csv flag
     csv_help = 'Force CSV output (already the default when piped / non-TTY).'
     csv = typer.Option(False, '--csv', help=csv_help)
+    # json flag
+    json_help = 'Output a JSON array of row objects (mutex with --csv).'
+    json = typer.Option(False, '--json', help=json_help)
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
@@ -864,6 +867,7 @@ def node_list(app: typer.Typer) -> typer.Typer:
         live: bool = live,
         count: bool = count,
         csv: bool = csv,
+        json: bool = json,
         path: str = path,
     ) -> None:
         """List a node's descendants with status (blank limit columns mean unlimited).
@@ -881,6 +885,8 @@ def node_list(app: typer.Typer) -> typer.Typer:
         """
         # validate arguments
         require_non_negative(max_depth=max_depth)
+        if json and csv:
+            raise typer.BadParameter('--json is mutually exclusive with --csv.')
         if status == '':
             raise typer.BadParameter('--status cannot be empty.')
         # statuses are a closed set -- an unknown chunk would filter to an
@@ -918,6 +924,8 @@ def node_list(app: typer.Typer) -> typer.Typer:
                 if not targets:
                     if count:
                         typer.echo(0)
+                    elif json:
+                        print_json([], columns=_LIST_COLUMNS)
                     else:
                         print_rows([], csv=csv, columns=_LIST_COLUMNS)
                     return
@@ -943,6 +951,9 @@ def node_list(app: typer.Typer) -> typer.Typer:
             typer.echo(len(rows))
             return
         rows = [{column: row.get(column) for column in _LIST_COLUMNS} for row in rows]
+        if json:
+            print_json(rows, columns=_LIST_COLUMNS)
+            return
         # bracket the status for terminal display only
         # (machine output stays unbracketed for clean parsing)
         if rows and not csv and sys.stdout.isatty():

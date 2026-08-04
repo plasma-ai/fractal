@@ -464,7 +464,7 @@ tmux session) is healed to ``exited`` first.
 
 .. code-block:: console
 
-   $ fractal node list [NODE] [--all] [--retired] [--max-depth <n>]
+   $ fractal node list [NODE] [--all] [--retired] [--max-depth <n>] [--json]
          [--status <s[,s...]>] [--live] [--count] [--csv]
 
 List a node's **descendants** — the listing never includes the target's own
@@ -504,10 +504,15 @@ activity, with a ``!`` suffix flagging an active node quiet past
 ``--csv``
    Force CSV output (already the default when piped).
 
+``--json``
+   Emit a JSON array of row objects with typed fields (mutually exclusive
+   with ``--csv``); scripted consumers should prefer it over CSV scraping.
+
 .. code-block:: console
 
    $ fractal node list --status active,paused
    $ fractal node list parser --max-depth 1 --count
+   $ fractal node list --json
 
 ``activity``
 ~~~~~~~~~~~~
