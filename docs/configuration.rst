@@ -245,6 +245,13 @@ Booleans
      - ``false``
      - The node subscribes to no radio channels (its parent still reads its
        outbox). See :doc:`/guide/radio`.
+   * - ``sealed``
+     - ``false``
+     - Seal the node's mailbox: its own seat (identified by the
+       loop-exported ``_NODE``) sees empty hosted listings and a refused
+       ``radio read`` until unsealed (``config set sealed=false``) — the
+       hold mechanism for verifier isolation. Takes effect at the next
+       radio read; an operator shell is never held.
 
 Integer caps
 ~~~~~~~~~~~~

@@ -209,6 +209,12 @@ def node_init(app: typer.Typer) -> typer.Typer:
     # blind flag
     blind_help = 'Subscribe to no channels (the parent still reads this node).'
     blind = typer.Option(False, '--blind', help=blind_help)
+    # sealed flag
+    sealed_help = (
+        "Seal the node's mailbox: its own seat cannot read hosted messages"
+        ' until unsealed (config sealed=false).'
+    )
+    sealed = typer.Option(False, '--sealed', help=sealed_help)
     # reset flag
     reset_help = 'Delete node files and reinitialize.'
     reset = typer.Option(False, '--reset', help=reset_help)
@@ -247,6 +253,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
         detached: Optional[bool] = detached,
         local: Optional[bool] = local,
         blind: bool = blind,
+        sealed: bool = sealed,
         reset: bool = reset,
     ) -> None:
         """Create an agent node.
@@ -314,6 +321,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
             detached=detached,
             local=local,
             blind=blind,
+            sealed=sealed,
             reset=reset,
         )
         if output:

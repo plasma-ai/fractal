@@ -582,6 +582,7 @@ class Node:
         detached: Optional[bool] = None,
         local: Optional[bool] = None,
         blind: bool = False,
+        sealed: bool = False,
         reset: bool = False,
         user: bool = False,
     ) -> str:
@@ -641,6 +642,9 @@ class Node:
             detached: Separate agent invocation per step.
             local: Skip pushing to remote after each commit.
             blind: Subscribe to no channels (the parent still reads it).
+            sealed: Seal the node's mailbox -- its own seat cannot read
+                hosted messages until unsealed (``config sealed=false``);
+                the hold mechanism for verifier isolation.
             reset: Delete all node files and reinitialize.
             user: Initialize as a user node (DB + radio only).
 
@@ -987,6 +991,8 @@ class Node:
             args.append('--local')
         if blind:
             args.append('--blind')
+        if sealed:
+            args.append('--sealed')
         if reset:
             args.append('--reset')
         # ensure git excludes

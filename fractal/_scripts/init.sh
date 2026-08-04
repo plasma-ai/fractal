@@ -41,6 +41,7 @@ SYNC=""
 DETACHED=""
 LOCAL=false
 BLIND=false
+SEALED=false
 RESET=false
 
 usage() {
@@ -95,6 +96,7 @@ Options:
     --no-detached                      Run steps in one continuous session (default)
     --local                            Skip pushing to remote after each commit
     --blind                            Subscribe to no channels
+    --sealed                           Seal the node's mailbox (verifier isolation)
                                        (the parent still reads this node)
     --reset                            Delete node files and reinitialize
     --help|-h                          Show this help message
@@ -240,6 +242,7 @@ for arg in "$@"; do
         --no-detached) DETACHED=false ;;
         --local) LOCAL=true ;;
         --blind) BLIND=true ;;
+        --sealed) SEALED=true ;;
         --reset) RESET=true ;;
         *)
             if [[ -z "$NAME" ]]; then
@@ -683,6 +686,7 @@ if [[ "$RESET" == true ]] || [[ ! -f "$NODE_DIR/config.json" ]]; then
         detached="${DETACHED:-null}" \
         local="$LOCAL" \
         blind="$BLIND" \
+        sealed="$SEALED" \
         --path="$WORKTREE_DIR"
     echo idle >"$NODE_DIR/.status"
 fi

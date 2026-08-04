@@ -368,6 +368,21 @@ class Radio:
             db.delete('reads', where={'message_id': mid})
             db.delete('messages', where={'message_id': mid})
 
+    def seal_binds(self: Radio) -> bool:
+        """Return whether this node's inbox seal binds the current caller.
+
+        The seal (``sealed`` config) guards the sealed seat's own context:
+        it binds when the acting caller IS the sealed node -- the loop
+        exports ``_NODE`` for every step subprocess, so the seat's own
+        reads hold hosted mail out of its context entirely, while an
+        operator shell (no ``_NODE``) adjudicates freely. Only messages
+        the node hosts are held; its own writes stay visible.
+        """
+        if not self.node.config.get('sealed'):
+            return False
+        caller = self.node.resolve_caller()
+        return caller is not None and caller.branch == self.node.branch
+
     def messages(
         self: Radio,
         *,
@@ -394,9 +409,13 @@ class Radio:
 
         Returns:
             List of message dicts with ``replies``, ``pos_reacts``,
-            and ``neg_reacts`` counts.
+            and ``neg_reacts`` counts -- empty while the seal binds
+            (:meth:`seal_binds`): every hosted message is held out of the
+            sealed seat's view.
 
         """
+        if self.seal_binds():
+            return []
         return self._query_messages(
             node=self.node.branch,
             channel=channel,
@@ -525,9 +544,17 @@ class Radio:
         Raises:
             ValueError: If a message or the mailbox node is not found.
             PermissionError: If a channel is read-only and the reader
-                is not the owner.
+                is not the owner, or this reader's own seal binds.
 
         """
+        # a bound seal refuses the body surface outright -- reading is the
+        # act the seal exists to prevent (a routine triage read is exactly
+        # how sealed adjudication traffic contaminates a verifier's context)
+        if self.seal_binds():
+            raise PermissionError(
+                'inbox sealed: messages are held until unsealing'
+                ' (fractal config set sealed=false)'
+            )
         messages = []
         # resolve explicit uuids globally, in argument order
         for message_uuid in message_uuids:
@@ -642,6 +669,10 @@ class Radio:
                 if include:
                     kept.append(row)
             result = kept
+        # a bound seal holds this node's hosted rows out of the tree -- a
+        # reply rerouted into the sealed inbox must not surface here either
+        if self.seal_binds():
+            result = [row for row in result if row['node'] != branch]
         return result
 
     def reply(

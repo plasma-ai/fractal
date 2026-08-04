@@ -8,6 +8,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Sealed mailboxes (`sealed` config key; `node init --sealed`): while sealed,
+  every message a node hosts is held out of its own seat's context — empty
+  listings with an `inbox sealed` notice, a refused `radio read`, hosted rows
+  dropped from threads — keyed on the loop-exported `_NODE`, so operator shells
+  adjudicate freely and the node's own writes (verdicts) still file;
+  `config set sealed=false` unseals. The enforcement half of verifier isolation:
+  sealed traffic can no longer leak into a verifier's context through routine
+  triage.
 - Radio fan-out with per-recipient receipts and relay lineage: `radio send`
   takes a repeated `--node` (every recipient validated before any copy lands;
   stdout prints one `<uuid> <node>` receipt per recipient), `--relay-of <uuid>`

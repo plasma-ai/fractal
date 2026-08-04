@@ -28,6 +28,7 @@ __all__ = [
     'test_send_rejects_invalid_priority',
     'test_post_enforces_publicly_readable_class',
     'test_sent_lists_outbound_mail',
+    'test_sealed_inbox_holds_hosted_mail_from_its_own_seat',
     'test_send_many_delivers_per_recipient_with_receipts',
     'test_relay_lineage_marks_copies_and_lists_them',
     'test_sent_includes_own_replies',
@@ -374,6 +375,47 @@ def test_sent_lists_outbound_mail(radio_pair: tuple[Radio, Radio]) -> None:
     # recent flips to newest-first
     recent = root.sent(recent=True)
     assert [r['message_uuid'] for r in recent] == [to_self, to_peer]
+
+
+def test_sealed_inbox_holds_hosted_mail_from_its_own_seat(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bound seal holds hosted mail out of the sealed seat's context.
+
+    The verifier-isolation hold: with ``sealed`` set, the node's OWN reads
+    (the loop-exported ``_NODE`` names the caller) see an empty mailbox and
+    ``read`` refuses outright -- adjudication traffic can no longer leak
+    into a sealed context through routine triage. The seal binds the seat
+    alone: the node's own writes stay visible, an operator shell (no
+    ``_NODE``) reads everything, and unsealing restores the view.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    uuid, _, _ = root.send(
+        peer_branch,
+        subject='adjudication',
+        data='sealed reply',
+        priority=9,
+    )
+    peer.node.config.set('sealed', True)
+    # the sealed seat's own reads: mailbox held, body surface refused
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    assert peer.messages(channel='inbox') == []
+    with pytest.raises(PermissionError, match='inbox sealed'):
+        peer.read(uuid)
+    # the refusal consumed nothing: no receipt landed for the held message
+    assert peer.db.read('reads', where={'node': peer_branch}) == []
+    # sending -- the verdict path -- is not sealed, and own writes list
+    out, _, _ = peer.send(parent=True, subject='verdict', data='v', priority=5)
+    assert out in [m['message_uuid'] for m in peer.sent()]
+    # an operator shell (no _NODE) adjudicates freely
+    monkeypatch.delenv('_NODE')
+    assert uuid in [m['message_uuid'] for m in peer.messages(channel='inbox')]
+    # lawful unsealing restores the seat's own view
+    peer.node.config.set('sealed', False)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    assert uuid in [m['message_uuid'] for m in peer.messages(channel='inbox')]
 
 
 def test_send_many_delivers_per_recipient_with_receipts(

@@ -51,6 +51,7 @@ KEYS = (
     'detached',
     'local',
     'blind',
+    'sealed',
 )
 
 # keys whose value is a JSON list of repo-relative subdirectories (the CLI
@@ -69,6 +70,7 @@ BOOL_KEYS = (
     'detached',
     'local',
     'blind',
+    'sealed',
 )
 
 # keys whose value must be a non-negative integer cap

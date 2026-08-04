@@ -148,6 +148,10 @@ explicit reserve must stay below 99% of `--max-cost`.
   cannot be changed, and its children cannot push either.
 - `--blind` -- subscribe the node to no radio channels. The parent still reads
   this node's outbox.
+- `--sealed` -- seal the node's mailbox: its own seat cannot read hosted
+  messages until unsealed (`config set sealed=false`). The harness half of
+  verifier isolation -- sealed adjudication traffic is held out of the seat's
+  context entirely, while an operator shell reads freely.
 
 ## Maintenance
 

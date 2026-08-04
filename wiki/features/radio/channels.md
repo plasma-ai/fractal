@@ -63,3 +63,14 @@ including replies authored by other nodes. The cascade is scoped to the owner's
 channel-space; another node's same-named channel is untouched. Cascades are
 best-effort, not atomic: a message arriving mid-delete can survive the channel
 row's removal.
+
+## Sealed mailboxes
+
+The `sealed` config key is the harness half of verifier isolation: while set,
+every message the node hosts is held out of its *own* seat's context —
+`Radio.messages` returns empty, `Radio.read` refuses with `PermissionError`, and
+`Radio.thread` drops hosted rows — keyed on the caller (`Radio.seal_binds`: the
+loop-exported `_NODE` names the sealed node itself). Operator shells and other
+nodes are never held, the sealed node's own writes stay visible (verdicts still
+file), and `config set sealed=false` is the unsealing act; the lawful unsealing
+path is deployment canon, not harness law.

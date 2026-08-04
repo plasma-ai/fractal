@@ -74,6 +74,8 @@ Boolean keys (must be JSON `true`/`false`/`null`):
 - `local` -- skip pushing after commits. Latched at the init surface: a re-init
   cannot clear it, and children of a local parent spawn local.
 - `blind` -- subscribe to no radio channels. Default: false.
+- `sealed` -- hold the node's hosted mail out of its own seat's reads (empty
+  listings, refused `radio read`) until unsealed. Default: false.
 
 Integer cap keys (non-negative; `max_iters` strictly positive):
 

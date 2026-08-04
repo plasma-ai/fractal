@@ -49,6 +49,7 @@ __all__ = [
     'test_read_without_reader_names_the_remedy',
     'test_listings_are_passive_and_metadata_only',
     'test_send_sender_follows_node_env',
+    'test_sealed_inbox_holds_the_seat_but_not_the_operator',
     'test_send_fans_out_with_receipts_and_relays_lists_lineage',
     'test_listings_read_your_writes_and_close_with_a_watermark',
     'test_post_and_reply_follow_node_env',
@@ -943,6 +944,36 @@ def test_send_sender_follows_node_env(repo: dict) -> None:
     )
     assert explicit.returncode == 0, explicit.stderr
     assert explicit.stdout.strip() in _radio(beta, 'sent').stdout
+
+
+def test_sealed_inbox_holds_the_seat_but_not_the_operator(repo: dict) -> None:
+    """With ``sealed`` set, the seat's own reads hold; the operator's do not.
+
+    The seat (identified by the loop-exported ``_NODE``) gets an empty,
+    loudly-annotated listing and a refused ``read``; an operator shell (no
+    ``_NODE``) still reads everything, so adjudication stays possible.
+    Unsealing (``config set sealed=false``) restores the seat's view.
+    """
+    alpha, beta, root = repo['alpha'], repo['beta'], repo['root']
+    uuid = _send(beta, 'sealed adjudication', node='main.alpha', priority=9)
+    assert _run(alpha, 'node', 'config', 'set', 'sealed=true').returncode == 0
+    # the sealed seat: empty annotated listing, refused body surface
+    held = _run(root, 'radio', 'messages', '--all', _NODE=f'{alpha}')
+    assert held.returncode == 0
+    assert uuid not in held.stdout
+    assert 'inbox sealed' in held.stderr
+    refused = _run(root, 'radio', 'read', uuid, _NODE=f'{alpha}')
+    assert refused.returncode == 1
+    assert 'inbox sealed' in refused.stderr
+    # the operator (no _NODE) adjudicates freely
+    visible = _radio(alpha, 'messages', '--all')
+    assert uuid in visible.stdout
+    # lawful unsealing restores the seat's view
+    assert _run(alpha, 'node', 'config', 'set', 'sealed=false').returncode == 0
+    unsealed = _run(root, 'radio', 'messages', '--all', _NODE=f'{alpha}')
+    assert uuid in unsealed.stdout
+    # round-trip: withdraw the probe message so the shared mailbox stays clean
+    assert _radio(beta, 'unsend', uuid).returncode == 0
 
 
 def test_send_fans_out_with_receipts_and_relays_lists_lineage(repo: dict) -> None:

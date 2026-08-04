@@ -494,6 +494,16 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
                 print_rows(rows, csv=csv, columns=_SAVED_COLUMNS)
             _stamp_listing(radio)
             return
+        # a bound seal empties the listing by design -- name it once, with
+        # the lawful remedy, and skip the misleading unread-total notice
+        # below (whose fresh reads are held to zero too)
+        sealed = radio.seal_binds()
+        if sealed:
+            typer.echo(
+                'inbox sealed: hosted messages are held out of view until'
+                ' unsealing (fractal config set sealed=false)',
+                err=True,
+            )
         read_filter = _read_filter(all_messages, read)
         # a bare `messages` (no --channel) shows only the inbox -- not all your
         # own channels -- so own outbox/private notes don't read as incoming mail;
@@ -518,7 +528,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
         # read? -- so name the uncapped total on stderr, TTY or not (the
         # victims are agents, not TTY users); stdout keeps the empty-header
         # contract; --limit 0 empties any view, so it earns no notice
-        if not rows and read_filter is False and limit != 0:
+        if not rows and read_filter is False and limit != 0 and not sealed:
             all_rows = radio.messages(
                 channel=channel,
                 limit=None,

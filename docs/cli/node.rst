@@ -196,6 +196,10 @@ node at ``--path``.
      - disabled
      - Subscribe to no radio channels (the parent still reads this node). See
        :doc:`/guide/radio`.
+   * - ``--sealed``
+     - disabled
+     - Seal the node's mailbox: its own seat cannot read hosted messages
+       until unsealed (``config set sealed=false``) — verifier isolation.
    * - ``--reset``
      - —
      - Delete node files and reinitialize.
