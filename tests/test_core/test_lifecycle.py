@@ -48,6 +48,7 @@ __all__ = [
     'test_finish_accepts_reason',
     'test_kill_vets_recorded_group_before_script',
     'test_kill_sets_killed_status',
+    'test_kill_reaps_idle_node_before_start',
     'test_kill_marks_all_active',
     'test_kill_keeps_loop_terminal_status_when_raced',
     'test_retire_sets_status',
@@ -510,6 +511,29 @@ def test_kill_sets_killed_status(
     node.kill()
     # verify status
     assert node.status() == 'killed'
+
+
+def test_kill_reaps_idle_node_before_start(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill lands on an idle, never-started node, and start then refuses.
+
+    An unwanted spawn is reapable the moment it registers -- without this,
+    a kill only lands once the node activates, so a breach spawn gets a
+    head start equal to whoever is watching. The kill needs no live
+    session and no run row: it stamps ``killed``, and a later plain
+    ``node start`` refuses, so the node can never activate.
+    """
+    node = node_with_db
+    # a never-started node: idle, no run rows, no tmux session
+    monkeypatch.setattr(Node, '_tmux_session_exists', lambda self: False)
+    _stub_run_script(monkeypatch, node)
+    node.kill()
+    assert node.status() == 'killed'
+    # the killed stamp closes the start path -- the node never activates
+    with pytest.raises(RuntimeError, match='Cannot start from status'):
+        node.start()
 
 
 def test_kill_marks_all_active(

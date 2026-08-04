@@ -1960,12 +1960,12 @@ class Node:
     def _killable(self: Node, current: str) -> bool:
         """Return whether ``current`` admits a kill of this node.
 
-        ``active`` and ``paused`` always do. ``idle`` does only while the
-        node's tmux session is live -- a boot in flight (``start.sh``
-        created the session, the loop's preflight has not stamped
-        ``active`` yet), which a status read alone cannot tell from a
-        never-started node. An inconclusive probe reads as no session:
-        the reap keys off proof a loop lives, never off ignorance.
+        ``active`` and ``paused`` always do, and so does ``idle`` -- it
+        covers both a boot in flight (``start.sh`` created the session,
+        the loop's preflight has not stamped ``active`` yet) and a
+        never-started spawn. Killing at idle stamps ``killed`` so the
+        node never activates: an unwanted spawn is reapable the moment
+        it registers, not only once it starts burning.
 
         Args:
             current: The node status the caller read.
@@ -1974,19 +1974,18 @@ class Node:
             Whether a kill may proceed.
 
         """
-        if current in ('active', 'paused'):
-            return True
-        return current == 'idle' and bool(self._tmux_session_exists())
+        return current in ('active', 'paused', 'idle')
 
     def kill(self: Node, reason: Optional[str] = None) -> str:
-        """Kill the node and its active or paused descendants (children first).
+        """Kill the node and its unsettled descendants (children first).
 
         Reaps each tmux session and marks its active rows ``killed``. Paused
         nodes are killable -- the escape hatch for a parked subtree; with no
         loop alive the kill is pure bookkeeping (``kill.sh`` no-ops and the
-        open rows close ``killed``). A booting node -- session up, ``active``
-        not yet stamped -- is killable too (:meth:`_killable`), so a spawn
-        in flight when the kill lands is reaped, not skipped.
+        open rows close ``killed``). Idle nodes are killable too
+        (:meth:`_killable`) -- a spawn in flight when the kill lands is
+        reaped, not skipped, and a never-started spawn is stamped
+        ``killed`` so it can never activate.
 
         Args:
             reason: Optional reason for killing.
@@ -2003,7 +2002,7 @@ class Node:
             self._signal_refuse(
                 verb='kill',
                 event='kill',
-                reason=f'node is not active or paused (status: {current})',
+                reason=f'node is not active, paused, or idle (status: {current})',
             )
         propagated = self._fan_out_reason('kill', reason)
         # reap descendants first (best-effort), then self
@@ -2067,7 +2066,7 @@ class Node:
                 self._signal_refuse(
                     verb='kill',
                     event='kill',
-                    reason=f'node is not active or paused (status: {current})',
+                    reason=f'node is not active, paused, or idle (status: {current})',
                     fan_out=fan_out,
                 )
                 return ''
@@ -2102,7 +2101,7 @@ class Node:
         # already fenced, so the status stamp must not overwrite either
         if self.exists():
             self._mark_active_killed(skip=event_id, metadata=label)
-            if self.status() in ('active', 'paused'):
+            if self.status() in ('active', 'paused', 'idle'):
                 self.status_set('killed')
         if event_id is not None:
             self.record.event_end(event_id=event_id, status='completed')

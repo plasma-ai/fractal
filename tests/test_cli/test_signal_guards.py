@@ -74,12 +74,13 @@ __all__ = [
 
 
 # (finish, stop, pause, kill, finish --cancel) all require active (kill also
-# accepts paused, covered separately); the kill message names the status
+# accepts paused and idle, covered separately); the kill message names the
+# status
 _REJECT_MESSAGES = {
     'finish': 'Cannot finish: node is not active.',
     'stop': 'Cannot stop: node is not active.',
     'pause': 'Cannot pause: node is not active.',
-    'kill': 'Cannot kill: node is not active or paused (status: {status}).',
+    'kill': 'Cannot kill: node is not active, paused, or idle (status: {status}).',
     'finish --cancel': 'Cannot cancel finish: node is not active.',
 }
 

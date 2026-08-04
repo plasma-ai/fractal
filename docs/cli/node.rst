@@ -339,8 +339,9 @@ or when an ancestor is still paused.
 Kill the node immediately: descendant sessions and recorded process groups
 are reaped first (re-enumerated to a fixpoint, so mid-sweep spawns are
 caught), then the node's own, and open rows are marked ``killed``. Killable
-states are ``active``, ``paused``, and a booting ``idle`` node with a live
-session. The attribution ``killed by <actor>[: reason]`` lands on the event,
+states are ``active``, ``paused``, and ``idle`` -- a booting node is reaped
+and a never-started spawn is stamped ``killed`` so it can never activate.
+The attribution ``killed by <actor>[: reason]`` lands on the event,
 the signal, and the run row, and is surfaced as a notice on a later
 ``start --continue``.
 

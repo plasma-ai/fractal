@@ -59,8 +59,8 @@ reason before the operation raises.
   refuses; a paused node holds its spawn slot and blocks ancestor finish-drains
   until resumed or killed.
 - **`idle`** is the parked, startable state: `start` runs it, `retire` hides it,
-  `delete` removes it. An `idle` node whose tmux session is live (a spawn still
-  booting) is additionally killable.
+  `delete` removes it, and `kill` stamps it `killed` — a booting spawn is
+  reaped, a never-started one can never activate.
 - **Settled** nodes (`completed`/`stopped`/`exited`/`killed`) accept
   `start --continue` to re-arm, `retire`, and `delete`.
 - **`retired`** accepts only `unretire` and `delete`; a retired node is hidden

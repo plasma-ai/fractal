@@ -52,12 +52,13 @@ tree-wide broadcast with no self-signal, since the root runs no loop of its own.
 
 ## kill
 
-`kill` is the escape hatch: it targets `active` *or* `paused` nodes (and an
-`idle` node whose tmux session is live — a spawn still booting), reaps the tmux
-session, and closes open run and iteration rows as `killed`. It is pure
-bookkeeping plus process reaping — no graceful wind-down. The descendant sweep
-re-enumerates the subtree to a fixpoint so children registered mid-sweep are
-still caught, and proceeds best-effort per node.
+`kill` is the escape hatch: it targets `active`, `paused`, and `idle` nodes — a
+booting spawn is reaped and a never-started one is stamped `killed` so it can
+never activate — reaps the tmux session (when one lives), and closes open run
+and iteration rows as `killed`. It is pure bookkeeping plus process reaping — no
+graceful wind-down. The descendant sweep re-enumerates the subtree to a fixpoint
+so children registered mid-sweep are still caught, and proceeds best-effort per
+node.
 
 ## pause and resume
 

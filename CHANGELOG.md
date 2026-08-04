@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `node kill` lands on `idle` nodes: a booting spawn is reaped and a
+  never-started spawn is stamped `killed` so it can never activate — an unwanted
+  spawn no longer gets a head start while an operator poll-watches for its
+  activation.
+
 ## [1.1.0] - 2026-07-28
 
 ### Added

@@ -266,10 +266,12 @@ states:
 - ``active`` — the normal case;
 - ``paused`` — the escape hatch for a parked subtree; with no loop alive the
   kill is pure bookkeeping (the open rows close ``killed``);
-- ``idle`` with a live tmux session — a boot in flight that has not stamped
-  ``active`` yet.
+- ``idle`` — a boot in flight that has not stamped ``active`` yet, or a
+  never-started spawn: the kill stamps ``killed`` so the node can never
+  activate (an unwanted spawn is reapable before it starts burning).
 
-Anything else refuses (``Cannot kill: node is not active or paused``). The
+Anything else refuses (``Cannot kill: node is not active, paused, or
+idle``). The
 sweep reaps descendants first and re-enumerates to a fixpoint, so a spawn
 already in flight when the kill lands is caught rather than escaping. The
 attribution — ``killed by <actor>``, with the reason appended — lands
