@@ -18,6 +18,7 @@ import csv
 import io
 import json
 import pathlib
+import re
 import subprocess
 from typing import Optional
 
@@ -48,6 +49,7 @@ __all__ = [
     'test_read_without_reader_names_the_remedy',
     'test_listings_are_passive_and_metadata_only',
     'test_send_sender_follows_node_env',
+    'test_listings_read_your_writes_and_close_with_a_watermark',
     'test_post_and_reply_follow_node_env',
     'test_write_verbs_follow_node_env',
     'test_stale_node_env_refused_cleanly',
@@ -940,6 +942,51 @@ def test_send_sender_follows_node_env(repo: dict) -> None:
     )
     assert explicit.returncode == 0, explicit.stderr
     assert explicit.stdout.strip() in _radio(beta, 'sent').stdout
+
+
+def test_listings_read_your_writes_and_close_with_a_watermark(repo: dict) -> None:
+    """Listings act as the exported node and stamp their cut on stderr.
+
+    The false-record class: a send attributed to the exported ``_NODE``
+    was graded against a listing that read the cwd's node, so a delivered
+    send read as missing from its own sender's outbox. Listings resolve
+    the acting node exactly like the writing verbs -- a send is visible in
+    the sender's next ``sent`` listing and a delivered directive in the
+    recipient's next inbox read, from any cwd -- and each listing closes
+    with an ``as of <instant> (acting as <branch>)`` stderr watermark
+    naming the cut it took.
+    """
+    alpha, beta, root = repo['alpha'], repo['beta'], repo['root']
+    # send as alpha from the ROOT worktree (a detached step's cwd)
+    sent = _run(
+        root,
+        'radio',
+        'send',
+        'ryw body',
+        '--node',
+        'main.beta',
+        '--channel',
+        'inbox',
+        '--subject',
+        'ryw',
+        '--priority',
+        '5',
+        _NODE=f'{alpha}',
+    )
+    assert sent.returncode == 0, sent.stderr
+    uuid = sent.stdout.strip()
+    # the very next listing from the same foreign cwd shows the send ...
+    listing = _run(root, 'radio', 'sent', _NODE=f'{alpha}')
+    assert uuid in listing.stdout
+    # ... and the recipient's next inbox listing shows the directive
+    inbox = _run(root, 'radio', 'messages', '--all', _NODE=f'{beta}')
+    assert uuid in inbox.stdout
+    # each listing closes with the freshness watermark naming its actor
+    watermark = r'as of \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \(acting as main\.alpha\)'
+    assert re.search(watermark, listing.stderr)
+    assert 'acting as main.beta' in inbox.stderr
+    # round-trip: withdraw the probe message so the shared mailbox stays clean
+    assert _run(root, 'radio', 'unsend', uuid, _NODE=f'{alpha}').returncode == 0
 
 
 def test_post_and_reply_follow_node_env(repo: dict) -> None:

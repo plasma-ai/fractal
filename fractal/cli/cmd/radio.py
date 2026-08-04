@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from typing import Optional
 
 import typer
@@ -405,8 +406,8 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
     body_help = 'Include the data column (requires --json).'
     body = typer.Option(False, '--body', help=body_help)
     # path option
-    path_help = 'Worktree directory.'
-    path = typer.Option('.', '--path', help=path_help)
+    path_help = 'Worktree directory (default: the calling node, else the cwd).'
+    path = typer.Option(None, '--path', help=path_help)
 
     @command(app, 'messages')
     def _messages(
@@ -420,7 +421,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
         csv: bool = csv,
         json: bool = json,
         body: bool = body,
-        path: str = path,
+        path: Optional[str] = path,
     ) -> None:
         """List a channel's metadata, inbox by default (bodies via 'read')."""
         require_non_negative(limit=limit)
@@ -430,8 +431,10 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
             raise typer.BadParameter('--body requires --json.')
         if saved and (read or all_messages):
             raise typer.BadParameter('--saved is mutually exclusive with --read/--all.')
-        # resolve node
-        radio = Radio(resolve_node(path))
+        # resolve the acting node env-first (read-your-writes: the node a
+        # send attributed to is the node whose mailbox this lists); an
+        # explicit --path still selects another mailbox
+        radio = Radio(resolve_sender(path))
         # --saved: show archived messages
         if saved:
             rows = radio.saved(
@@ -444,6 +447,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
                 print_json(rows, columns=_SAVED_COLUMNS)
             else:
                 print_rows(rows, csv=csv, columns=_SAVED_COLUMNS)
+            _stamp_listing(radio)
             return
         read_filter = _read_filter(all_messages, read)
         # a bare `messages` (no --channel) shows only the inbox -- not all your
@@ -490,6 +494,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
             print_json(rows, columns=columns)
         else:
             print_rows(rows, csv=csv, columns=columns)
+        _stamp_listing(radio)
 
     return app
 
@@ -515,8 +520,8 @@ def radio_sent(app: typer.Typer) -> typer.Typer:
     json_help = 'Output a JSON array of row objects (mutex with --csv).'
     json = typer.Option(False, '--json', help=json_help)
     # path option
-    path_help = 'Worktree directory.'
-    path = typer.Option('.', '--path', help=path_help)
+    path_help = 'Worktree directory (default: the calling node, else the cwd).'
+    path = typer.Option(None, '--path', help=path_help)
 
     @command(app, 'sent')
     def _sent(
@@ -526,13 +531,13 @@ def radio_sent(app: typer.Typer) -> typer.Typer:
         recent: bool = recent,
         csv: bool = csv,
         json: bool = json,
-        path: str = path,
+        path: Optional[str] = path,
     ) -> None:
         """List messages this node sent (the node column is the recipient)."""
         require_non_negative(limit=limit)
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
-        radio = Radio(resolve_node(path))
+        radio = Radio(resolve_sender(path))
         rows = radio.sent(
             channel=channel,
             limit=limit,
@@ -543,6 +548,7 @@ def radio_sent(app: typer.Typer) -> typer.Typer:
             print_json(rows, columns=_MESSAGE_COLUMNS)
         else:
             print_rows(rows, csv=csv, columns=_MESSAGE_COLUMNS)
+        _stamp_listing(radio)
 
     return app
 
@@ -583,8 +589,8 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
     body_help = 'Include the data column (requires --json).'
     body = typer.Option(False, '--body', help=body_help)
     # path option
-    path_help = 'Worktree directory.'
-    path = typer.Option('.', '--path', help=path_help)
+    path_help = 'Worktree directory (default: the calling node, else the cwd).'
+    path = typer.Option(None, '--path', help=path_help)
 
     @command(app, 'feed')
     def _feed(
@@ -599,7 +605,7 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
         csv: bool = csv,
         json: bool = json,
         body: bool = body,
-        path: str = path,
+        path: Optional[str] = path,
     ) -> None:
         """List subscribed nodes' metadata (bodies via 'read --feed')."""
         require_non_negative(limit=limit)
@@ -610,7 +616,7 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
         if saved and (read or all_messages):
             raise typer.BadParameter('--saved is mutually exclusive with --read/--all.')
         # resolve node
-        radio = Radio(resolve_node(path))
+        radio = Radio(resolve_sender(path))
         # --saved: show archived messages
         if saved:
             rows = radio.saved(
@@ -624,6 +630,7 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
                 print_json(rows, columns=_SAVED_COLUMNS)
             else:
                 print_rows(rows, csv=csv, columns=_SAVED_COLUMNS)
+            _stamp_listing(radio)
             return
         read_filter = _read_filter(all_messages, read)
         rows = radio.feed(
@@ -660,6 +667,7 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
             print_json(rows, columns=columns)
         else:
             print_rows(rows, csv=csv, columns=columns)
+        _stamp_listing(radio)
 
     return app
 
@@ -757,20 +765,20 @@ def radio_thread(app: typer.Typer) -> typer.Typer:
     json_help = 'Output a JSON array of row objects (mutex with --csv).'
     json = typer.Option(False, '--json', help=json_help)
     # path option
-    path_help = 'Worktree directory.'
-    path = typer.Option('.', '--path', help=path_help)
+    path_help = 'Worktree directory (default: the calling node, else the cwd).'
+    path = typer.Option(None, '--path', help=path_help)
 
     @command(app, 'thread')
     def _thread(
         message_uuid: str = message_uuid,
         csv: bool = csv,
         json: bool = json,
-        path: str = path,
+        path: Optional[str] = path,
     ) -> None:
         """Show a message's full reply tree (root and all replies)."""
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
-        radio = Radio(resolve_node(path))
+        radio = Radio(resolve_sender(path))
         rows = radio.thread(message_uuid)
         if json:
             print_json(rows, columns=_THREAD_COLUMNS)
@@ -928,19 +936,19 @@ def radio_subs(app: typer.Typer) -> typer.Typer:
     json_help = 'Output a JSON array of row objects (mutex with --csv).'
     json = typer.Option(False, '--json', help=json_help)
     # path option
-    path_help = 'Worktree directory.'
-    path = typer.Option('.', '--path', help=path_help)
+    path_help = 'Worktree directory (default: the calling node, else the cwd).'
+    path = typer.Option(None, '--path', help=path_help)
 
     @command(app, 'subs')
     def _subs(
         csv: bool = csv,
         json: bool = json,
-        path: str = path,
+        path: Optional[str] = path,
     ) -> None:
         """List all subscriptions."""
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
-        radio = Radio(resolve_node(path))
+        radio = Radio(resolve_sender(path))
         rows = radio.subs()
         if json:
             print_json(rows, columns=_SUB_COLUMNS)
@@ -951,6 +959,18 @@ def radio_subs(app: typer.Typer) -> typer.Typer:
 
 
 # ------ helper functions
+
+
+def _stamp_listing(radio: Radio) -> None:
+    """Print a listing's freshness watermark on stderr (the recorded cut).
+
+    A listing is a point-in-time cut of the store: instruments that grade
+    from one need the cut's instant and acting identity on the record, or a
+    stale/mis-attributed read silently becomes a false-record verdict.
+    Unconditional and on stderr -- stdout keeps the row contract.
+    """
+    instant = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    typer.echo(f'as of {instant} (acting as {radio.node.branch})', err=True)
 
 
 def _resolve_reader() -> Node:

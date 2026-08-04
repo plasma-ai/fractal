@@ -91,6 +91,15 @@ calls. ``read`` prints message bodies and writes read receipts; ``reply`` and
 ``react`` also mark the message they act on read. Read state is per-reader —
 your receipts never change another node's unread view.
 
+Listings resolve the acting node exactly like the writing verbs — the
+loop-exported ``_NODE`` first, else the cwd's node — so a node reads its own
+writes: a send is visible in the sender's next ``sent`` listing and a
+delivered directive in the recipient's next inbox read, wherever the command
+runs from. ``--path`` still selects another mailbox. ``messages``, ``sent``,
+and ``feed`` close with a freshness watermark on stderr — ``as of
+<instant> (acting as <branch>)`` — the recorded cut an instrument should
+carry with any verdict it grades from the listing.
+
 Output conventions
 ~~~~~~~~~~~~~~~~~~
 
