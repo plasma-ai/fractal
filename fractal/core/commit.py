@@ -35,6 +35,7 @@ _STAGE_EXCLUDES = (
     ':!**/.db-*',
     ':!**/registry.db',
     ':!**/registry.db-*',
+    ':!**/registry.db-*',
     # the status and pause markers
     ':!**/.status',
     ':!**/.paused',

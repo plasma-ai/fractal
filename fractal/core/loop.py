@@ -345,6 +345,7 @@ class Loop:
         self._timed_out = False
         self._paused = False
         self._last_iter_failed = False
+        self._iter_interrupted = False
         self._run_end_epoch = 0
         self._iter_end_epoch = 0
         self._run_id: Optional[int] = None
@@ -359,6 +360,9 @@ class Loop:
         self._budget_stem = ''
         self._cap_overshoot = ''
         self._untracked_warned = False
+        # per-surface latches for the live-retune rejections (warn once per
+        # distinct value, not once per iteration)
+        self._warned: dict[str, str] = {}
         self._unreadable_warned = False
         self._soft_cap_warned = False
         # last good ledger readings -- a failed read falls back to these,
@@ -804,6 +808,26 @@ class Loop:
             self._arm_drain()
         print(f'Resuming run {self._run_id} where the pause left it')
 
+    def _warn_once(self: Loop, key: str, message: str) -> None:
+        """Warn about a rejected live retune, once per distinct value.
+
+        A config pair the loop cannot honor (an ``interval`` under the
+        live ``iter_timeout``, a malformed duration) is re-read at every
+        boundary, so an unconditional warning wedges the pane into one
+        line per iteration for the rest of the run -- noise that buries
+        the next real warning. The latch keeps the first report of each
+        distinct message and stays quiet until the value changes.
+
+        Args:
+            key: The retune surface being reported (its own latch).
+            message: The rejection, without the keeping-previous tail.
+
+        """
+        if self._warned.get(key) == message:
+            return
+        self._warned[key] = message
+        print(f'Warning: {message}; keeping the previous {key}', file=sys.stderr)
+
     def _arm_drain(self: Loop) -> None:
         """Record this run's drain on the run itself (the durable flag).
 
@@ -1023,10 +1047,7 @@ class Loop:
                     self._iter_timeout = iter_timeout
                     self._iter_timeout_seconds = seconds
                 except ValueError as error:
-                    print(
-                        f'Warning: {error}; keeping the previous iter_timeout',
-                        file=sys.stderr,
-                    )
+                    self._warn_once('iter_timeout', f'{error}')
 
             # reset the per-iteration deadline (the run deadline is fixed for
             # the run); an adopted iteration anchors on the credited reading,
@@ -1288,7 +1309,11 @@ class Loop:
                     iter_reason = self._fail_reason
                 else:
                     iter_reason = 'agent error'
-            elif self._signal('stop'):
+            elif self._signal('stop') or self._iter_interrupted:
+                # a requested stop, or a sequence the budget ceiling cut
+                # short: exit 0, but never the goal-met 'completed' -- an
+                # iteration whose steps only ever booked 'stopped' must not
+                # read as a full lap in the census
                 iter_status = 'stopped'
                 iter_exit_code = 0
             else:
@@ -1380,10 +1405,7 @@ class Loop:
                     self._sleep = sleep_value
                     self._sleep_seconds = sleep_seconds
                 except ValueError as error:
-                    print(
-                        f'Warning: {error}; keeping the previous pacing',
-                        file=sys.stderr,
-                    )
+                    self._warn_once('pacing', f'{error}')
                 sleep_amount = 0
                 sleep_label_text = ''
                 if self._interval_seconds > 0:
@@ -1491,6 +1513,7 @@ class Loop:
 
         started = False
         self._reserve = False
+        self._iter_interrupted = False
         # a fresh iteration voids the cached headroom
         self._last_iter_headroom = None
 
@@ -1551,6 +1574,7 @@ class Loop:
                 # budget before the iteration-boundary check -- trip here too
                 # so a long iteration stops queuing steps sooner
                 if self._check_subtree_ceiling():
+                    self._iter_interrupted = True
                     break
 
             # --- SYNC before each step ---
@@ -1680,6 +1704,9 @@ class Loop:
                             node.record.step_cost(step_id=missed_id, cost=0.0)
                         except Exception:
                             pass
+                    # the sequence was cut short: never book this iteration
+                    # 'completed' off steps it only ever recorded as stopped
+                    self._iter_interrupted = True
                     break
 
             attempt = 0
@@ -3943,9 +3970,12 @@ class Loop:
             paths = sorted(plans_dir.glob('*.md'))
             if not paths:
                 return ''
-            with paths[-1].open(encoding='utf-8') as file:
+            # lenient decode: a plan file is agent-written bytes, and a
+            # stray encoding must degrade the commit's context line, never
+            # raise out of the backstop that exists to save the work
+            with paths[-1].open(encoding='utf-8', errors='replace') as file:
                 first = file.readline().strip()
-        except OSError:
+        except (OSError, ValueError):
             return ''
         return first.removeprefix('#').strip()
 

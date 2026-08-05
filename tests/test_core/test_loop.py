@@ -83,10 +83,13 @@ __all__ = [
     'test_run_end_drain_outlives_the_closed_iterations_deadline',
     'test_before_last_step_drain_uses_the_run_wall_not_the_iter_deadline',
     'test_finalize_terminal_cascade_matrix',
+    'test_killed_before_boot_stands_the_loop_down',
+    'test_backstop_survives_a_non_utf8_plan_file',
     'test_auto_backstop_commit_carries_step_and_plan_context',
     'test_stop_mid_step_lets_the_seat_complete',
     'test_billing_failures_back_off_exponentially_and_a_success_clears',
     'test_interrupted_billing_gate_books_the_consumed_steps',
+    'test_rejected_retunes_warn_once_not_every_iteration',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
     'test_digest_renders_mail_as_inert_data',
@@ -2328,6 +2331,74 @@ def test_finalize_terminal_cascade_matrix(
     assert row['ended_at'] is not None
 
 
+def test_killed_before_boot_stands_the_loop_down(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kill that lands in the boot window is honored, not overwritten.
+
+    An idle kill has no session to reap, so the reap no-ops and only the
+    flock'd ``killed`` stamp stands between the kill and a loop already
+    on its way up. Booting over that stamp would leave a live loop
+    burning spend under a row the census reports killed. The boot reads
+    the stamp under the same flock and stands down: no iteration runs,
+    and the run books exited rather than claiming a lap.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    node.status_set('killed')
+    loop = MockLoop(node)
+    assert loop.run() == 1
+    # nothing was bought, and the stand-down is on the record
+    assert loop.launched == []
+    assert node.status() == 'killed'
+    run = node.db.read('runs', where={'run_id': loop._run_id})[0]
+    assert run['status'] == 'exited'
+    assert run['metadata'] == 'killed before boot'
+    # a retired node still stands down by its own name
+    node.status_set('retired')
+    retired = MockLoop(node)
+    assert retired.run() == 1
+    assert retired.launched == []
+    assert (
+        node.db.read('runs', where={'run_id': retired._run_id})[0]['metadata']
+        == 'retired before boot'
+    )
+
+
+def test_backstop_survives_a_non_utf8_plan_file(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan file with stray bytes degrades the context, never the save.
+
+    The backstop exists to save work a seat death would otherwise lose,
+    so reading the newest plan's title -- a cosmetic context line -- must
+    not be able to raise out of it. Undecodable bytes degrade to a
+    replaced character and the commit still lands.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    plans = node.node_dir / 'plans'
+    plans.mkdir(parents=True, exist_ok=True)
+    (plans / '2026-01-01T00:00:00Z-1.1-broken.md').write_bytes(
+        b'# 1.1 caf\xe9 survey\n\nBody.\n'
+    )
+    (node.worktree / 'work.txt').write_text('real work\n', encoding='utf-8')
+    loop = MockLoop(node)
+    loop._run_id = node.record.run_start()
+    loop._force_commit('auto')
+    message = subprocess.run(
+        ['git', '-C', f'{node.worktree}', 'log', '-1', '--format=%B'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the save landed and still carries a plan line
+    assert '(auto)' in message
+    assert 'plan: 1.1 caf' in message
+
+
 def test_auto_backstop_commit_carries_step_and_plan_context(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -2494,13 +2565,52 @@ def test_interrupted_billing_gate_books_the_consumed_steps(
     assert sorted(
         (row['step'], row['status'], row['exit_code'], row['cost']) for row in booked
     ) == [(1, 'stopped', 0, 0.0), (2, 'stopped', 0, 0.0)]
-    # the interrupted iteration still closes completed; the run's budget
-    # landing carries the wind-down attribution
+    # the interrupted iteration closes 'stopped', never the goal-met
+    # 'completed': its steps only ever booked 'stopped', so a completed lap
+    # would be a census lie; the run's budget landing carries the wind-down
+    # attribution
     iteration = node.db.read('iters', where={'iter': 4})[0]
-    assert (iteration['status'], iteration['exit_code']) == ('completed', 0)
+    assert (iteration['status'], iteration['exit_code']) == ('stopped', 0)
     run = node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert run['status'] == 'exited'
     assert 'budget' in run['metadata']
+
+
+def test_rejected_retunes_warn_once_not_every_iteration(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A config pair the loop cannot honor warns once, then stays quiet.
+
+    An ``interval`` under the live ``iter_timeout`` is re-read at every
+    boundary, so an unconditional warning wedges the pane into one line
+    per iteration for the rest of the run -- noise that buries the next
+    real warning. The first report stands; the repeat is silent, and a
+    *different* rejection speaks again.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    node = loop_node
+    _configure(node, max_iters=4)
+
+    class _EditingLoop(MockLoop):
+        """Hand-edit the pair into a combination the loop cannot honor."""
+
+        def _launch(
+            self: _EditingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            _configure(self.node, iter_timeout='10m', interval='1m')
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = _EditingLoop(node)
+    assert loop.run() == 0
+    err = capsys.readouterr().err
+    # three later iteration tops re-read the same bad pair; one report
+    assert err.count('keeping the previous iter_timeout') == 1
+    # a fresh distinct rejection is not swallowed by the latch
+    loop._warn_once('iter_timeout', 'iter_timeout must be a duration')
+    assert 'must be a duration' in capsys.readouterr().err
 
 
 def test_pacing_retunes_take_effect_at_the_next_sleep(

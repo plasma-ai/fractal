@@ -82,6 +82,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   layer a host fences secrets in, so a parked `.env`, key, or archive is refused
   by name instead of staged, and every force-add is reported on the commit
   output.
+- An iteration whose step sequence a budget ceiling cut short books `stopped`,
+  not `completed`: a gate interrupt could book a goal-met lap whose steps all
+  read `stopped` and whose launches never happened.
+- The registry database's SQLite sidecars (`registry.db-wal`/`-shm`/ `-journal`)
+  are excluded from every stage, so a mid-write snapshot can never be committed
+  beside an excluded main file.
+- A live retune the loop cannot honor (an `interval` under the live
+  `iter_timeout`) warns once per distinct value instead of once per iteration,
+  so the rejection no longer buries every later warning.
+- The force-commit backstop survives a non-UTF-8 plan file: the plan title is a
+  cosmetic context line and now degrades instead of raising out of the save that
+  exists to rescue the work.
+- `radio relays` refuses an unknown UUID instead of answering "0 relays
+  recorded" — an empty listing means the relay never happened, so a typo'd UUID
+  would indict a node that relayed faithfully.
+- Fan-out receipts print as each copy lands, so a mid-fan-out failure no longer
+  discards the record of deliveries already made (silence there invites a
+  re-send that double-delivers).
+- `node list --json --count` refuses instead of silently printing the bare count
+  a JSON consumer never asked for.
 - The estate-record force-add stages what still exists: a held file deleted
   between the pass's `ls-files` snapshot and its `git add -f`
   (ignored-and-untracked estate files are exactly what a user's `git clean -X`

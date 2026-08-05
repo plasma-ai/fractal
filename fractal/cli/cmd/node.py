@@ -926,6 +926,11 @@ def node_list(app: typer.Typer) -> typer.Typer:
         require_non_negative(max_depth=max_depth)
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
+        # --count prints a bare number, so pairing it with a row format is a
+        # contradiction: silently honoring one would hand a JSON consumer a
+        # shape it never asked for
+        if json and count:
+            raise typer.BadParameter('--json is mutually exclusive with --count.')
         if status == '':
             raise typer.BadParameter('--status cannot be empty.')
         # statuses are a closed set -- an unknown chunk would filter to an

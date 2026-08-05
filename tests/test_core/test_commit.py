@@ -28,6 +28,7 @@ __all__ = [
     'test_commit_excludes_registry_sidecars',
     'test_commit_stages_node_records_past_external_excludes',
     'test_stage_records_tolerates_a_vanished_held_file',
+    'test_commit_excludes_registry_sidecars',
     'test_record_force_add_refuses_non_record_files',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
@@ -488,6 +489,43 @@ def test_stage_records_tolerates_a_vanished_held_file(
     # the surviving record landed; the vanished one is simply absent
     assert 'memory/state.md' in tracked
     assert 'scratchpad.md' not in tracked
+
+
+def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
+    """A registry database's SQLite sidecars never ride a commit.
+
+    ``registry.db-wal``/``-shm``/``-journal`` are mid-write runtime state:
+    committing one stages a torn snapshot of a database whose main file is
+    excluded, and the pair can never be read back consistently. The main
+    file was fenced already; the sidecars share its fate.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    folder = node.node_dir.parent
+    for name in ('registry.db', 'registry.db-wal', 'registry.db-shm'):
+        (folder / name).write_bytes(b'sqlite')
+    (project_dir / 'work.txt').write_text('real work\n', encoding='utf-8')
+    node.commit('sidecar sweep', force=True)
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert 'work.txt' in tracked
+    for name in ('registry.db', 'registry.db-wal', 'registry.db-shm'):
+        assert name not in tracked, name
 
 
 def test_record_force_add_refuses_non_record_files(

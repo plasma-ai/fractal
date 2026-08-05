@@ -216,20 +216,24 @@ def radio_send(app: typer.Typer) -> typer.Typer:
         if node and len(node) > 1:
             if parent:
                 raise typer.BadParameter('--parent and --node are mutually exclusive.')
-            receipts = radio.send_many(
+
+            # print each receipt as its copy lands, never in a closing
+            # sweep: a mid-fan-out failure would otherwise discard the
+            # record of copies already delivered, and an operator
+            # re-sending on that silence double-delivers
+            def _receipt(message_uuid: str, target: str, name: str) -> None:
+                typer.echo(f'{message_uuid} {target}')
+                typer.echo(f"sent to {target}'s {name!r} channel", err=True)
+
+            radio.send_many(
                 node,
                 channel,
                 subject=subject,
                 data=data,
                 priority=priority,
                 relay_of=relay_of,
+                receipt=_receipt,
             )
-            for message_uuid, target, receipt_channel in receipts:
-                typer.echo(f'{message_uuid} {target}')
-                typer.echo(
-                    f"sent to {target}'s {receipt_channel!r} channel",
-                    err=True,
-                )
             return
         message_uuid, target, channel = radio.send(
             node=node[0] if node else None,

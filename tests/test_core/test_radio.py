@@ -32,6 +32,8 @@ __all__ = [
     'test_sealed_inbox_holds_the_archive_surface',
     'test_seal_survives_an_env_scrub_in_the_seats_own_worktree',
     'test_send_many_delivers_per_recipient_with_receipts',
+    'test_relays_refuses_an_unknown_uuid',
+    'test_send_many_reports_each_landing_before_a_later_failure',
     'test_relay_lineage_marks_copies_and_lists_them',
     'test_sent_includes_own_replies',
     'test_messages_order_by_priority_then_created_at',
@@ -547,6 +549,71 @@ def test_send_many_delivers_per_recipient_with_receipts(
             priority=8,
         )
     assert len(root.sent()) == before
+
+
+def test_relays_refuses_an_unknown_uuid(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """An unknown uuid is an error, not an empty relay listing.
+
+    The obligation check reads an empty listing as "the relay never
+    happened", so answering a typo'd or stale uuid with 0 relays would
+    indict a node that relayed faithfully -- the false-record class the
+    receipts exist to prevent. A known message with no relays still
+    answers empty; case is normalized like every other uuid verb.
+    """
+    root, peer = radio_pair
+    uuid, _, _ = root.send(
+        peer.node.branch,
+        subject='order',
+        data='d',
+        priority=5,
+    )
+    # a real message with no relays yet answers empty, either case
+    assert root.relays(uuid) == []
+    assert root.relays(uuid.lower()) == []
+    # an unknown uuid refuses instead of reading as "never relayed"
+    with pytest.raises(ValueError, match='not found'):
+        root.relays('ZZZZ9999')
+
+
+def test_send_many_reports_each_landing_before_a_later_failure(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """A copy already delivered is receipted even when a later one fails.
+
+    The dry pass cannot rule out a mid-fan-out failure (a channel deleted
+    between the passes), and a receipt discarded with the exception is
+    exactly the phantom delivery the receipts exist to prevent: the
+    operator sees silence, re-sends, and double-delivers.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    seen: list[tuple[str, str, str]] = []
+    # both recipients pass the dry pass; the second send fails underneath it
+    original = root.send
+    calls = {'n': 0}
+
+    def _flaky(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        calls['n'] += 1
+        if calls['n'] == 2:
+            raise ValueError('channel vanished mid-fan-out')
+        return original(*args, **kwargs)
+
+    root.send = _flaky
+    with pytest.raises(ValueError, match='vanished'):
+        root.send_many(
+            [peer_branch, root.node.branch],
+            subject='fleet order',
+            data='wind down',
+            priority=7,
+            receipt=lambda *row: seen.append(row),
+        )
+    root.send = original
+    # the first copy really landed, and its receipt was reported
+    assert [target for _, target, _ in seen] == [peer_branch]
+    delivered = [row['message_uuid'] for row in peer.messages(channel='inbox')]
+    assert seen[0][0] in delivered
 
 
 def test_relay_lineage_marks_copies_and_lists_them(

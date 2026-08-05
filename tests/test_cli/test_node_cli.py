@@ -1000,9 +1000,14 @@ def test_list_json_mirrors_csv_shape(repo: dict) -> None:
         assert isinstance(row['node'], str)
         for cap in ('max_cost', 'max_depth', 'max_children', 'max_descendants'):
             assert row[cap] is None or isinstance(row[cap], (int, float))
-    # the two machine formats cannot be combined
+    # the two machine formats cannot be combined ...
     clash = _run(root, 'node', 'list', '--json', '--csv')
     assert clash.returncode != 0
+    # ... and neither can a row format and the bare count: honoring one
+    # silently would hand a JSON consumer a shape it never asked for
+    counted = _run(root, 'node', 'list', '--json', '--count')
+    assert counted.returncode != 0
+    assert 'mutually exclusive' in counted.stderr
 
 
 def test_list_status_count_and_live(repo: dict) -> None:

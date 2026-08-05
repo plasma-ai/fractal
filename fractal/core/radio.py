@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 import typing
+from collections.abc import Callable
 from typing import Optional
 
 from fractal.constants import PRIORITY_MAX, PRIORITY_MIN
@@ -227,6 +228,7 @@ class Radio:
         data: str,
         priority: int,
         relay_of: Optional[str] = None,
+        receipt: Optional[Callable[[str, str, str], None]] = None,
     ) -> list[tuple[str, str, str]]:
         """Send one copy of a message to each recipient, with receipts.
 
@@ -245,6 +247,9 @@ class Radio:
             data: Message data.
             priority: Priority (0-10).
             relay_of: UUID of the message the copies relay onward.
+            receipt: Called with each ``(uuid, node, channel)`` the moment
+                that copy lands, so a delivery already made is reported
+                even when a later recipient raises.
 
         Returns:
             List of ``(uuid, node, channel)`` receipts, in recipient order.
@@ -272,19 +277,24 @@ class Radio:
                 raise PermissionError(
                     f'Channel {channel!r} is write-only (owner only).'
                 )
-        # deliver -- send re-validates each route (cheap, and it owns the row)
+        # deliver -- send re-validates each route (cheap, and it owns the row).
+        # Each landing is reported as it happens: the dry pass cannot rule out
+        # a mid-loop failure (a channel deleted between the passes), and a
+        # delivered copy whose receipt died with the exception is exactly the
+        # phantom the receipts exist to prevent
         receipts = []
         for node in nodes:
-            receipts.append(
-                self.send(
-                    node,
-                    channel,
-                    subject=subject,
-                    data=data,
-                    priority=priority,
-                    relay_of=relay_of,
-                )
+            landed = self.send(
+                node,
+                channel,
+                subject=subject,
+                data=data,
+                priority=priority,
+                relay_of=relay_of,
             )
+            receipts.append(landed)
+            if receipt is not None:
+                receipt(*landed)
         return receipts
 
     def relays(self: Radio, message_uuid: str) -> list[Row]:
@@ -303,9 +313,22 @@ class Radio:
             listing order (priority first) -- minus rows this node hosts
             while its own seal binds.
 
+        Raises:
+            ValueError: If ``message_uuid`` names no known message.
+
         """
+        message_uuid = message_uuid.upper()
+        # an unknown uuid must not answer 'no relays': the obligation check
+        # reads an empty listing as "the relay never happened", so a typo
+        # would indict a node that relayed faithfully
+        known = self.db.exists(
+            'messages',
+            where={'message_uuid': message_uuid},
+        ) or self.db.exists('archive', where={'message_uuid': message_uuid})
+        if not known:
+            raise self._message_not_found(message_uuid)
         rows = self._query_messages(
-            metadata=f'relay:{message_uuid.upper()}',
+            metadata=f'relay:{message_uuid}',
             roots_only=False,
         )
         # a bound seal holds hosted rows out of this listing too
