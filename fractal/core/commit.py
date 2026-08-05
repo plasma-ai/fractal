@@ -744,8 +744,14 @@ def _stage_records(node: Node, fractal_prefix: str) -> None:
     ]
     raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
     normal = set(filter(None, os.fsdecode(raw).split('\0')))
+    # a snapshot path can vanish before the add (ignored-and-untracked files
+    # are exactly what `git clean -X` deletes, and estates churn under the
+    # node's own housekeeping) -- stage what still exists rather than letting
+    # one dead pathspec fail the add and abort the whole commit
     forced = [
-        f':(literal){node.worktree / path}' for path in held if path not in normal
+        f':(literal){node.worktree / path}'
+        for path in held
+        if path not in normal and os.path.lexists(node.worktree / path)
     ]
     if forced:
         cmd = ['add', '-f', *forced]

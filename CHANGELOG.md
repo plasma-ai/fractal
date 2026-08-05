@@ -63,6 +63,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The estate-record force-add stages what still exists: a held file deleted
+  between the pass's `ls-files` snapshot and its `git add -f`
+  (ignored-and-untracked estate files are exactly what a user's `git clean -X`
+  removes, and estates churn under the node's own housekeeping) no longer fails
+  the add and aborts the whole commit after the scope sweep already staged the
+  iteration's real work.
 - An interrupted billing-gate wait books the gated step and the never-run tail
   as `stopped` rows (`billing gate interrupted`, knowable-zero spend), so the
   one path to a zero-row completed iteration — the gate guards step 1 too — now

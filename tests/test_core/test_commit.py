@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import fractal.util
 from fractal.core import commit
 from fractal.core.node import Node
 
@@ -26,6 +27,7 @@ __all__ = [
     'test_commit_excludes_write_atomic_temp_files',
     'test_commit_excludes_registry_sidecars',
     'test_commit_stages_node_records_past_external_excludes',
+    'test_stage_records_tolerates_a_vanished_held_file',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
     'test_commit_refreshes_wiki_indexes',
@@ -423,6 +425,68 @@ def test_commit_stages_node_records_past_external_excludes(
     # ... and an estate-internal ignore file keeps its own hold (the memory
     # wiki's cache manages itself)
     assert '.wiki/cache' not in tracked
+
+
+def test_stage_records_tolerates_a_vanished_held_file(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held estate file deleted mid-stage never aborts the commit.
+
+    The record pass force-adds externally-ignored estate files from an
+    ``ls-files`` snapshot -- and ignored-and-untracked files are exactly
+    what a user's ``git clean -X`` deletes, while estate contents churn
+    under the node's own housekeeping. A path that vanishes between the
+    snapshot and the ``git add -f`` must not fail the add and abort the
+    whole commit after the scope sweep already staged the iteration's
+    real work: the pass stages what still exists.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+
+    # the incident's exclude: everything under .fractal externally ignored,
+    # so the record pass owns both files below
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+    memory = node.node_dir / 'memory' / 'state.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    doomed = node.node_dir / 'memory' / 'scratchpad.md'
+    doomed.write_text('provisional\n', encoding='utf-8')
+
+    # the race, held deterministic: the file vanishes (a git clean -X, the
+    # estate's own housekeeping) right after the pass snapshots its listing
+    real_run_bytes = fractal.util.git.run_bytes
+
+    def racing_run_bytes(*args: Any, **kwargs: Any) -> Any:
+        raw = real_run_bytes(*args, **kwargs)
+        doomed.unlink(missing_ok=True)
+        return raw
+
+    monkeypatch.setattr('fractal.util.git.run_bytes', racing_run_bytes)
+    node.commit('record custody', force=True)
+
+    result = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = result.stdout
+    # the surviving record landed; the vanished one is simply absent
+    assert 'memory/state.md' in tracked
+    assert 'scratchpad.md' not in tracked
 
 
 def test_commit_stamps_iteration_from_args_or_open_row(
