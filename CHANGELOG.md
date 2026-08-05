@@ -66,6 +66,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A draining seat can no longer spawn its way out by moving. The drain's
+  spawn/re-arm refusals resolved the acting node from `_NODE`, else the working
+  directory — both the seat's to rewrite — so
+  `env -u _DRAIN -u _NODE -C <sibling worktree> fractal node init …` resolved to
+  a real but *wrong* node the drain never binds, and the same command from
+  outside every worktree resolved to no node at all and failed open. Two nodes
+  were spawned from a live drain that way. The guard now also asks the operating
+  system: the loop makes each agent invocation its own process group leader and
+  records the id, so the tree can ask which of its open draining runs owns the
+  calling process — attribution no `env -u` or `cd` rewrites. An operator's own
+  shell is in another group and acts normally, as before.
 - A child in its boot window no longer escapes a `stop`/`finish` cascade
   permanently. Both verbs made a single pass over the descendants live at that
   instant, so a child still `idle` for the moment between `node start` returning

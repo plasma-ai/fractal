@@ -436,7 +436,7 @@ class Loop:
         # (an already-running node is a re-arm, never that relaunch)
         actor = node.resolve_actor()
         own_relaunch = actor is not None and actor.branch == node.branch
-        if _draining() and not (own_relaunch and node.status() != 'active'):
+        if _draining(node) and not (own_relaunch and node.status() != 'active'):
             raise RuntimeError(
                 'Cannot run a node loop from a draining run (--drain forbids re-arms).'
             )

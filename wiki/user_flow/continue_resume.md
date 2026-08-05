@@ -123,3 +123,17 @@ tells the seat to close out instead of expanding. The refusal reaches
 `start.sh` actually execs -- so the front doors are not locked over an open back
 one. The drain run's own relaunch after a park is exempt: it names the parked
 seat itself, which no other re-arm does.
+
+Three sources answer "is this a draining seat", because the first two ask the
+seat who it is and a seat can move. `_DRAIN` is the seat's own environment;
+`Node.drain_bound` reads the run's durable `drain` signal against the resolved
+actor, which survives an env scrub but still falls back to the node owning the
+working directory -- so a seat that steps into a sibling worktree resolves to a
+real but *wrong* node, and one that steps outside every worktree resolves to
+none and fails open. `Node.drain_lineage` closes both: the loop makes each agent
+invocation its own process group leader and records the id (`.step_pgid`), so
+every command that seat runs inherits it, and the tree asks which of its open
+draining runs owns this process. No `env -u` or `cd` rewrites a process group.
+The handle is identity-checked like the orphan reap's, so a stale record naming
+a recycled id never refuses an unrelated caller, and a caller in any other group
+-- an operator's shell -- acts normally while the drain runs.

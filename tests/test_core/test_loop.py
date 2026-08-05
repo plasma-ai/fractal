@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
+import signal
 import sqlite3
 import subprocess
 import time
@@ -20,7 +22,7 @@ from typing import Any, Optional
 
 import pytest
 
-from fractal.constants import SOCKET_FILE
+from fractal.constants import SOCKET_FILE, STEP_PGID_FILE
 from fractal.core import pricing
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
@@ -99,6 +101,7 @@ __all__ = [
     'test_digest_renders_mail_as_inert_data',
     'test_drain_survives_a_pause_and_resume',
     'test_drain_guards_survive_an_env_scrub',
+    'test_drain_guards_survive_a_worktree_scrub',
     'test_drain_run_blocks_spawns_and_re_arms',
     'test_census_distinguishes_run_exhausted_from_done_conditions',
     'test_timeout_void_force_commit_is_loud',
@@ -3000,6 +3003,55 @@ def test_drain_guards_survive_an_env_scrub(
     # a node that is not draining is unaffected by the neighbour's drain
     monkeypatch.chdir(parent.worktree)
     assert not parent.drain_bound()
+
+
+def test_drain_guards_survive_a_worktree_scrub(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seat that also walks out of its worktree still cannot spawn.
+
+    The env scrub is only half the escape. With ``_NODE`` gone the actor
+    falls back to the node owning the working directory, so a seat that
+    steps into a SIBLING worktree resolves to a real but WRONG node the
+    drain never binds, and one that steps outside every worktree resolves
+    to no node at all -- which failed open. Neither is a lie the seat can
+    tell about its process group: the loop makes each agent invocation
+    its own group leader and records the id, so the tree can ask which of
+    its draining runs owns this process. A caller in some other group --
+    an operator's own shell -- is unaffected.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    child.record.signal_set('drain', 'continue --drain')
+    # this process stands in for the draining seat's agent invocation: the
+    # group the loop records is the one the seat runs its commands from
+    step_pgid = child.node_dir / STEP_PGID_FILE
+    step_pgid.write_text(f'{os.getpgid(0)}\n', encoding='utf-8')
+    monkeypatch.delenv('_DRAIN', raising=False)
+    monkeypatch.delenv('_NODE', raising=False)
+    # the seat works from a sibling worktree: a real but wrong actor
+    monkeypatch.chdir(parent.worktree)
+    with pytest.raises(RuntimeError, match='forbids spawns'):
+        Node(git_repo).init(name='escapee', agent='claude')
+    # the seat works outside every worktree: no actor at all
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RuntimeError, match='forbids spawns'):
+        Node(git_repo).init(name='escapee2', agent='claude')
+    # neither escapee was built -- the refusal is the spawn's, not a later
+    # guard's, so the pin cannot pass on somebody else's error
+    for name in ('main.parent.escapee', 'main.escapee2'):
+        assert not (git_repo / '.worktrees' / name).exists(), name
+    # an operator acting while the same drain runs is in another group, so
+    # the tree's spawn doors stay open to them
+    operator = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    try:
+        step_pgid.write_text(f'{operator.pid}\n', encoding='utf-8')
+        Node(git_repo).init(name='sanctioned', agent='claude')
+        assert (git_repo / '.worktrees' / 'main.sanctioned').is_dir()
+    finally:
+        os.killpg(operator.pid, signal.SIGKILL)
+        operator.wait()
 
 
 def test_drain_run_blocks_spawns_and_re_arms(

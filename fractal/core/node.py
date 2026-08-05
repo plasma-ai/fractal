@@ -481,10 +481,16 @@ class Node:
         current directory -- a step runs in its own worktree, so the
         fallback names the same node the export would have.
 
-        Residual (filed, not closed here): a seat that both unsets
-        ``_NODE`` and works from outside its worktree resolves to no
-        actor. Closing that needs process-lineage attribution, not an
-        environment read.
+        Both answers are the seat's to rewrite, so this resolution is
+        never the last word for a guard. A seat that unsets ``_NODE`` and
+        steps into a *sibling* worktree resolves to a real but wrong
+        node; one that steps outside every worktree resolves to no actor
+        and would fail open. Each guard closes that from its own side
+        rather than here: the drain adds process-lineage attribution
+        (:meth:`drain_lineage` -- the recorded agent process group, which
+        moving cannot rewrite), and the mailbox seal sits on the
+        owner-only channel rule, which asks what a caller may read rather
+        than who it claims to be.
 
         Returns:
             The acting node, or ``None`` outside any node context.
@@ -525,6 +531,63 @@ class Node:
             return self.record.signal_get('drain', run_id=runs[0]['run_id']) is not None
         except Exception:
             return False
+
+    def drain_lineage(self: Node) -> bool:
+        """Return whether this process runs inside a draining seat of this tree.
+
+        :meth:`drain_bound` asks who the caller *says* it is, and both
+        answers -- the exported ``_NODE`` and the working directory -- are
+        the seat's to rewrite (:meth:`resolve_actor`). A seat that scrubs
+        the environment and steps into a sibling worktree resolves to a
+        real but WRONG node the drain never binds; one that steps outside
+        every worktree resolves to no node and fails open. Neither is a
+        lie the seat can tell about its *process group*: the loop spawns
+        each agent invocation as its own group leader and records the id
+        (``.step_pgid``), so every command that seat runs inherits it.
+        Ask the tree which of its open runs drain, then whether this
+        process sits in one of their seats -- attribution by lineage,
+        which no ``env -u`` or ``cd`` rewrites.
+
+        Identity-checked like the reap's (:func:`_recorded_group`), so a
+        stale handle naming a recycled id never refuses an unrelated
+        caller. Best-effort: an unreadable record or database answers no,
+        leaving the other two drain sources to speak.
+
+        Returns:
+            Whether this process is a seat of a draining run in this tree.
+
+        """
+        try:
+            pgid = os.getpgid(0)
+        except OSError:
+            return False
+        # the tree's open runs carrying a drain signal (the central DB is
+        # per-tree, so this is exactly the trees this caller could act on)
+        query = (
+            'SELECT DISTINCT r.node FROM runs r'
+            ' JOIN signals s ON s.run_id = r.run_id'
+            " WHERE s.signal = 'drain' AND r.ended_at IS NULL"
+        )
+        try:
+            rows = self.db.read(query=query)
+        except Exception:
+            return False
+        for row in rows:
+            worktree_dir = fractal.util.git.find_worktree(
+                repo_dir=self.repo_dir,
+                branch=row['node'],
+            )
+            if worktree_dir is None:
+                continue
+            pgid_file = self.__class__(worktree_dir).node_dir / STEP_PGID_FILE
+            try:
+                recorded_at = pgid_file.stat().st_mtime
+                recorded = int(pgid_file.read_text(encoding='utf-8').strip())
+            except (OSError, ValueError):
+                continue
+            if recorded == pgid and _recorded_group(pgid, recorded_at):
+                return True
+        return False
 
     @classmethod
     def user_nodes(cls: type[Node], path: PathLike) -> list[Node]:
@@ -858,7 +921,7 @@ class Node:
         # whole damage class once); checked ahead of every branch below,
         # user init included -- a whole new tree, with its own database,
         # radio, and a root to spawn from, is the largest creation verb here
-        if _draining():
+        if _draining(self):
             raise RuntimeError(
                 'Cannot init a node from a draining run (--drain forbids spawns).'
             )
@@ -1651,7 +1714,7 @@ class Node:
             raise RuntimeError('Cannot start a user node.')
         # a draining seat re-arms nothing (the export plus the run's own
         # durable drain signal, so an env scrub does not lift it)
-        if _draining():
+        if _draining(self):
             raise RuntimeError(
                 'Cannot start a node from a draining run (--drain forbids re-arms).'
             )
@@ -2557,7 +2620,7 @@ class Node:
         # a draining seat re-arms nothing (export plus the run's durable
         # drain signal) -- relaunching a parked subtree from inside a
         # wind-down is the one expanding verb the other guards miss
-        if _draining():
+        if _draining(self):
             raise RuntimeError(
                 'Cannot resume a node from a draining run (--drain forbids re-arms).'
             )
@@ -4201,7 +4264,7 @@ class Node:
         """
         # a draining seat re-arms nothing: cap raises from a --drain run
         # refuse harness-side, mirroring the init and start guards
-        if _draining():
+        if _draining(self):
             raise RuntimeError(
                 'Cannot update a node from a draining run (--drain forbids re-arms).'
             )
@@ -5141,19 +5204,34 @@ def _base_status(status: Optional[str]) -> str:
     return result
 
 
-def _draining() -> bool:
+def _draining(node: Node) -> bool:
     """Return whether the acting seat runs under a drain.
 
-    Two sources, either sufficient: the loop-exported ``_DRAIN`` (present
-    in every seat subprocess of a ``--continue --drain`` run) and the
-    acting node's own run carrying the durable ``drain`` signal -- the
-    latter standing after an environment scrub and across a pause/resume,
-    which the export alone does not survive.
+    Three sources, any sufficient. The loop-exported ``_DRAIN`` rides
+    every seat subprocess of a ``--continue --drain`` run. The acting
+    node's own run carrying the durable ``drain`` signal
+    (:meth:`Node.drain_bound`) stands after an environment scrub and
+    across a pause/resume, which the export alone does not survive. Both
+    of those still ask the seat who it is, and a seat that moves can
+    answer wrongly -- so the last source asks the operating system
+    instead: whether this process sits in a draining seat's recorded
+    process group (:meth:`Node.drain_lineage`).
+
+    Args:
+        node: Any node of the tree the verb acts on -- the drain that
+            binds is one of that tree's own runs, and the lineage check
+            reads its central database.
+
+    Returns:
+        Whether the guarded verb must refuse.
+
     """
     if os.environ.get('_DRAIN'):
         return True
     actor = Node.resolve_actor()
-    return actor is not None and actor.drain_bound()
+    if actor is not None and actor.drain_bound():
+        return True
+    return node.drain_lineage()
 
 
 def _recorded_group(pgid: int, recorded_at: float) -> bool:
