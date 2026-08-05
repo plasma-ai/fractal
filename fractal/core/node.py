@@ -3581,6 +3581,62 @@ class Node:
             detail = f'{detail}; PAUSED: billing' if detail else 'PAUSED: billing'
         return detail
 
+    def end_reason(self: Node) -> Optional[str]:
+        """Return the typed token naming why a settled node's run ended.
+
+        The machine counterpart of :meth:`status_detail`'s prose: a
+        closed vocabulary read off the latest run row's typed facts and
+        the exact reason strings the loop itself records, never composed
+        prose split back apart. ``completed`` rows read ``goal_met`` (a
+        drained finish -- a cap-overshoot note is still
+        done-conditions-met), ``run_exhausted`` (the iteration cap), or
+        ``final_iteration_failed`` (a drained finish whose last
+        iteration died). ``exited`` rows read ``cost_budget`` --
+        exited/0 is the DB-level budget-landing discriminator, every
+        other exited path keeps 1 -- ``timeout``, ``setup_abort``, or
+        ``final_iteration_failed`` (the iteration cap landing on a dead
+        final iteration); any other recorded reason (an unexpected exit,
+        a kill/retire that beat the boot, a failed resume preflight)
+        maps ``other``, so ``None`` keeps meaning nothing recorded (a
+        reconcile-healed crash closes its rows reason-less). Every other
+        status reads ``None``. Reads the stored status without
+        reconciling: a crashed-but-active node's open run carries no
+        reason before the heal and none after it.
+
+        Returns:
+            The token, or ``None`` when no run reason is recorded.
+
+        """
+        status = self.status()
+        if status not in ('completed', 'exited'):
+            return None
+        rows = self.record.runs(limit=1)
+        if not rows or rows[0]['status'] != status:
+            return None
+        reason = rows[0]['metadata'] or ''
+        if status == 'exited':
+            # the budget landing is typed by its exit code alone -- the
+            # recorded reason quotes free-form figures
+            if rows[0]['exit_code'] == 0:
+                return 'cost_budget'
+            if reason.startswith('Timed out at iteration '):
+                return 'timeout'
+            if reason.startswith('setup failed x'):
+                return 'setup_abort'
+            if reason.startswith('Reached max iterations') and reason.endswith(
+                'final iteration failed'
+            ):
+                return 'final_iteration_failed'
+            return 'other' if reason else None
+        # completed: the run-out and the dead final iteration are named so
+        # neither reads as a clean done-conditions-met end (mirrors
+        # status_detail's discrimination)
+        if reason.startswith('Reached max iterations'):
+            return 'run_exhausted'
+        if reason.endswith('final iteration failed'):
+            return 'final_iteration_failed'
+        return 'goal_met'
+
     def _billing_backoff(self: Node) -> bool:
         """Return whether the newest launches carry the billing signature.
 
@@ -3758,7 +3814,8 @@ class Node:
         a node with no recorded runs. ``status`` is always bare, with any
         qualifier (a pending signal, an ``exited`` run's end reason, an
         ``orphaned`` flag, a ``model drop`` marker, an ``iteration gap``)
-        in ``detail``. The
+        in ``detail``; ``end_reason`` carries a settled row's typed end
+        token (:meth:`end_reason`), ``None`` when nothing is recorded. The
         ``last`` column renders each
         row's newest activity instant as a compact age, flagged (``12m!``)
         when an active node has sat quiet past ``max(step_timeout, 5m)``.
@@ -3777,7 +3834,8 @@ class Node:
                 view). Read-only -- it does not persist the relabel.
             decorated: Record each descendant's status qualifier (a
                 pending signal, an exited run's end reason, a model-drop
-                marker) in its ``detail``; display-only, gated off for hot
+                marker) in its ``detail`` and its typed end token in its
+                ``end_reason``; display-only, gated off for hot
                 paths such as ``--count``.
 
         Returns:
@@ -3901,13 +3959,21 @@ class Node:
                 if run_id is not None:
                     spend = round(node.cost.spent(run_id=run_id), _SPEND_PRECISION)
             # 'detail' leads the merge so an orphan flag set above wins it,
-            # and every row carries the key either way
-            row = {'detail': None, **row, **drifted, 'spend': spend, 'last': last}
+            # and every row carries both qualifier keys either way
+            row = {
+                'detail': None,
+                'end_reason': None,
+                **row,
+                **drifted,
+                'spend': spend,
+                'last': last,
+            }
             capped.append(row)
         rows = capped
         # record each active descendant's pending stop/finish signal (and each
-        # exited one's end reason) in 'detail'; 'status' stays bare, so the
-        # filters below select on the column itself
+        # exited one's end reason) in 'detail', and each settled one's typed
+        # end token in 'end_reason'; 'status' stays bare, so the filters
+        # below select on the column itself
         if decorated:
             worktrees = fractal.util.git.worktree_map(self.repo_dir)
             rows = [self._detail_status(row, worktrees) for row in rows]
@@ -3927,13 +3993,14 @@ class Node:
         row: dict,
         worktrees: dict[str, pathlib.Path],
     ) -> dict:
-        """Fill a descendant's ``detail`` with its status qualifier.
+        """Fill a descendant's ``detail`` and ``end_reason`` qualifiers.
 
         Display helper for ``list``: for a descendant whose own stored
         status still matches the row's, records its :meth:`status_detail`
         (``pausing`` / ``stopping`` / ``finishing`` / the run's end reason
         / the ``model drop`` marker -- which any status can carry, so no
-        stored-status gate scopes the consult) in the row's ``detail``.
+        stored-status gate scopes the consult) in the row's ``detail``,
+        and its :meth:`end_reason` token in the row's ``end_reason``.
         The row's ``status`` stays bare. A diverged row (a stale registry
         value, or ``--live``'s display-only relabel of a crashed ``active``
         node) is left alone without consulting ``status_detail``, whose
@@ -3951,8 +4018,11 @@ class Node:
             node = self.__class__(worktree_dir)
             if node.exists() and node.status() == stored:
                 detail = node.status_detail()
-                if detail and node.status() == stored:
-                    return {**row, 'detail': detail}
+                if node.status() == stored:
+                    decorated = {**row, 'end_reason': node.end_reason()}
+                    if detail:
+                        decorated['detail'] = detail
+                    return decorated
         return row
 
     def _heal_crashed(

@@ -1014,6 +1014,17 @@ def test_list_json_mirrors_csv_shape(repo: dict) -> None:
         assert isinstance(row['node'], str)
         for cap in ('max_cost', 'max_depth', 'max_children', 'max_descendants'):
             assert row[cap] is None or isinstance(row[cap], (int, float))
+        # end_reason is a closed vocabulary or null, never composed prose
+        assert row['end_reason'] in {
+            None,
+            'goal_met',
+            'run_exhausted',
+            'final_iteration_failed',
+            'cost_budget',
+            'timeout',
+            'setup_abort',
+            'other',
+        }
     # the two machine formats cannot be combined ...
     clash = _run(root, 'node', 'list', '--json', '--csv')
     assert clash.returncode != 0

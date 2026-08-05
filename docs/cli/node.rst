@@ -499,7 +499,7 @@ tmux session) is healed to ``exited`` first.
 List a node's **descendants** — the listing never includes the target's own
 row (use ``status`` for that). Columns, in order: ``status``, ``detail``,
 ``node``, ``title``, ``max_cost``, ``spend``, ``max_depth``, ``max_children``,
-``max_descendants``, ``last``.
+``max_descendants``, ``last``, ``end_reason``.
 
 ``status`` is always the bare lifecycle word; every qualifier rides
 ``detail``, which composes (``;``-joined) any of: a pending signal
@@ -510,7 +510,13 @@ iteration died (a clean drained finish stays bare), ``orphaned`` for a
 registered node whose worktree is gone, ``model drop`` for an unresolved
 served-model divergence, ``iteration gap <span>`` for numbers that advanced with
 no recorded row, and ``PAUSED: billing`` while the newest launches carry the
-dead-credits signature. ``spend`` is the current run's subtree cost at the
+dead-credits signature. ``end_reason`` is ``detail``'s typed counterpart, a
+closed vocabulary naming a settled row's landing: ``goal_met``,
+``run_exhausted``, or ``final_iteration_failed`` on a ``completed`` row;
+``cost_budget``, ``timeout``, ``setup_abort``, ``final_iteration_failed``, or
+``other`` (recorded but unmapped) on an ``exited`` row; null when no reason is
+recorded (e.g. a reconcile-healed crash) and on every other status. ``spend``
+is the current run's subtree cost at the
 scope ``max_cost`` is enforced at, blank for a node that has never run. Blank
 limit columns mean unlimited. ``last`` is the age of each node's newest
 activity, with a ``!`` suffix flagging an active node quiet past

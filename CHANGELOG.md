@@ -63,6 +63,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `FAILED (exit N)` line as the LAST line of output (bold red on a tty, bare
   text in pipes), so an error frame read through `tail -1` can never pass as
   success; unknown options keep the usage line naming the correct invocation.
+- `node list` gains a typed `end_reason` column (riding `--json` and CSV alike):
+  a closed vocabulary naming a settled row's landing — `goal_met`,
+  `run_exhausted`, or `final_iteration_failed` on a completed row;
+  `cost_budget`, `timeout`, `setup_abort`, `final_iteration_failed`, or `other`
+  (recorded but unmapped) on an exited one — derived from the run row's typed
+  facts and the loop's own recorded reason strings, null when nothing is
+  recorded (a reconcile-healed crash) and on every other status, so machine
+  consumers stop literal-matching the `detail` prose to tell landings apart.
 
 ### Fixed
 
