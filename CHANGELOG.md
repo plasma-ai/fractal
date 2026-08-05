@@ -44,6 +44,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The repo-hygiene version-agreement test pins the `.cruft.json` project version
+  too (mutation-checked), so a bump that misses the cruft context fails on the
+  PR instead of at the tag-time build gate.
 - The finish ceremony is idempotent across a swallowed commit: a deliberate
   `node finish` whose run died before the terminal cascade consumed it (a torn
   seat, a stop interrupting the drain, the force-commit backstop racing the

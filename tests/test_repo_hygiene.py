@@ -195,10 +195,12 @@ def test_version_strings_agree() -> None:
 
     ``fractal.__version__`` and the pyproject version are the CI-parsed
     pair, each plugin manifest repeats the literal for its marketplace
-    listing, and the shim dist carries it three more times -- its own
-    version plus the exact ``plasma-fractal`` pins. The build workflow
-    re-checks all of them at tag time; catching a drift here surfaces it
-    on the PR instead of a failed release.
+    listing, the cruft context carries it into template renders, and the
+    shim dist carries it three more times -- its own version plus the
+    exact ``plasma-fractal`` pins. The build workflow re-checks all of
+    them at tag time; a literal this test leaves unguarded fails only
+    once the tag is already pushed, so the pinned set here must match
+    the workflow's.
     """
     # the build metadata must carry the package literal
     pyproject = tomllib.loads(
@@ -217,6 +219,13 @@ def test_version_strings_agree() -> None:
             f'{folder}/plugin.json version must match fractal.__version__ '
             '(plugin releases ship the same literal as the package)'
         )
+    # the cruft context carries the literal into template renders
+    cruft = json.loads((_REPO_ROOT / '.cruft.json').read_text(encoding='utf-8'))
+    recorded = cruft['context']['cookiecutter']['project']['version']
+    assert recorded == fractal.__version__, (
+        '.cruft.json project version must match fractal.__version__ '
+        '(the tag-time build gate checks it, so drift fails after the push)'
+    )
     # the shim bumps in lockstep: its own version and its exact pins
     manifest = tomllib.loads(
         (_REPO_ROOT / 'shim' / 'pyproject.toml').read_text(encoding='utf-8')
