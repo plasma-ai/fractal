@@ -63,6 +63,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An interrupted billing-gate wait books the gated step and the never-run tail
+  as `stopped` rows (`billing gate interrupted`, knowable-zero spend), so the
+  one path to a zero-row completed iteration — the gate guards step 1 too — now
+  leaves `node activity` a trace of which steps the outage plus interrupt
+  consumed; the iteration and run labels are unchanged.
 - The retry/breaker backoff polls `finish` alongside pause, stop, and the
   subtree ceiling, so a cascaded budget finish — the very signal a billing
   outage produces — lands within seconds instead of sleeping out a breaker wait

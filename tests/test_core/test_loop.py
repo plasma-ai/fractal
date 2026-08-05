@@ -86,6 +86,7 @@ __all__ = [
     'test_auto_backstop_commit_carries_step_and_plan_context',
     'test_stop_mid_step_lets_the_seat_complete',
     'test_billing_failures_back_off_exponentially_and_a_success_clears',
+    'test_interrupted_billing_gate_books_the_consumed_steps',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
     'test_drain_run_blocks_spawns_and_re_arms',
@@ -2452,6 +2453,51 @@ def test_billing_failures_back_off_exponentially_and_a_success_clears(
     out = capsys.readouterr().out
     assert 'PAUSED: billing' not in out
     assert 'billing breaker' not in out
+
+
+def test_interrupted_billing_gate_books_the_consumed_steps(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ceiling interrupt at the billing gate books the steps it consumed.
+
+    The gate guards step 1 too, so its interrupt is the one path to an
+    iteration closing with no step rows at all -- `node activity` would
+    show a completed pass with no trace of which steps the outage plus
+    ceiling ate. The gated step and the never-run tail book as real rows
+    (start + immediate stopped close), while the iteration and run labels
+    stay what they were: the run's budget landing owns the honesty there.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    # retries off: three iterations of one billing-shaped failure each arm
+    # the breaker, so iteration 4 opens at the pre-step gate's wait
+    _configure(node, max_iters=4, max_cost=5.0, step_retries=0)
+    spent: list[float] = []
+
+    def _spend_mid_wait(seconds: float) -> None:
+        # the subtree blows its ceiling during the gate's wait -- the poll
+        # trips and interrupts the backoff
+        if not spent:
+            spent.append(6.0)
+            _record_step_cost(node, run_id=loop._run_id, cost=6.0, iter=9)
+
+    monkeypatch.setattr('fractal.core.loop.time.sleep', _spend_mid_wait)
+    results = [StepResult(status='failed', exit_code=1)] * 3
+    loop = MockLoop(node, results=results)
+    assert loop.run() == 0
+    # the gated step and the tail landed as rows, knowable-zero spend
+    booked = node.db.read('steps', where={'metadata': 'billing gate interrupted'})
+    assert sorted(
+        (row['step'], row['status'], row['exit_code'], row['cost']) for row in booked
+    ) == [(1, 'stopped', 0, 0.0), (2, 'stopped', 0, 0.0)]
+    # the interrupted iteration still closes completed; the run's budget
+    # landing carries the wind-down attribution
+    iteration = node.db.read('iters', where={'iter': 4})[0]
+    assert (iteration['status'], iteration['exit_code']) == ('completed', 0)
+    run = node.db.read('runs', where={'run_id': loop._run_id})[0]
+    assert run['status'] == 'exited'
+    assert 'budget' in run['metadata']
 
 
 def test_pacing_retunes_take_effect_at_the_next_sleep(

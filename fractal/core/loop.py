@@ -1632,6 +1632,30 @@ class Loop:
                 if not self._retry_backoff(seconds=wait):
                     if self._paused:
                         return True
+                    # book the gated step and the never-run tail as real
+                    # rows (start + immediate stopped close, mirroring the
+                    # failure path's tail booking) so `node activity`
+                    # answers which steps the interrupt consumed -- the
+                    # gated step has no row of its own yet, so the slice
+                    # starts at it, one back from the failure path's
+                    for missed in steps[step_num - 1 :]:
+                        try:
+                            missed_id = node.record.step_start(
+                                iter_id=self._iter_id,
+                                run_id=self._run_id,
+                                step=missed.number,
+                                step_name=missed.name,
+                            )
+                            node.record.step_end(
+                                step_id=missed_id,
+                                status='stopped',
+                                exit_code=0,
+                                metadata='billing gate interrupted',
+                            )
+                            # never launched, so the spend is a knowable zero
+                            node.record.step_cost(step_id=missed_id, cost=0.0)
+                        except Exception:
+                            pass
                     break
 
             attempt = 0
