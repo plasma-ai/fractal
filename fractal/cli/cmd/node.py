@@ -225,7 +225,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
     # sealed flag
     sealed_help = (
         "Seal the node's mailbox: its own seat cannot read hosted messages"
-        ' until unsealed (config sealed=false).'
+        ' until an operator or the parent unseals it (config sealed=false).'
     )
     sealed = typer.Option(False, '--sealed', help=sealed_help)
     # reset flag

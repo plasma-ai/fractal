@@ -201,6 +201,7 @@ class Config:
             ValueError: When ``key`` is fixed at init
                 (:data:`IMMUTABLE_KEYS`) and ``value`` would change its
                 stored value.
+            PermissionError: When the sealed seat clears its own seal.
 
         """
         # immutable keys admit their initial write but never a change (see
@@ -209,6 +210,14 @@ class Config:
             current = self.get(key)
             if current is not None and value != current:
                 raise ValueError(f'{key} is fixed at init and cannot be changed.')
+        # the seal is not the sealed seat's to lift: an unseal from inside the
+        # node it binds hands that seat every held message in one sanctioned
+        # call, which would leave every other seal guard decorative -- the
+        # lawful unseal is an operator's or the parent's
+        if key == 'sealed' and not value and self._node.radio.seal_binds():
+            raise PermissionError(
+                'inbox sealed: a sealed seat cannot lift its own seal'
+            )
         # serialize the read-merge-write across processes with a kernel flock
         # on a config sidecar (auto-released if the holder dies) -- concurrent
         # setters (a parent retune racing the child's own title write)

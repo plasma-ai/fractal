@@ -75,7 +75,9 @@ Boolean keys (must be JSON `true`/`false`/`null`):
   cannot clear it, and children of a local parent spawn local.
 - `blind` -- subscribe to no radio channels. Default: false.
 - `sealed` -- hold the node's hosted mail out of its own seat's reads (empty
-  listings, refused `radio read`) until unsealed. Default: false.
+  listings, refused `radio read`/`save`/`unsave`/`react`/`reply`) until an
+  operator or the parent unseals it; the sealed seat cannot clear the key
+  itself. Default: false.
 
 Integer cap keys (non-negative; `max_iters` strictly positive):
 

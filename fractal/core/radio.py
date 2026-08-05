@@ -408,10 +408,15 @@ class Radio:
         worktree (:meth:`Node.resolve_actor` records the residual). An
         operator shell outside the node adjudicates freely. Hosted
         messages are held from every listing and from the archive, the
-        body surface (:meth:`read`) refuses outright, and archiving a
-        hosted message (:meth:`save`) refuses -- the archive is a body
-        surface too; the node's own writes stay visible in listings
-        (verdicts still file).
+        body surface (:meth:`read`) refuses outright, and every verb that
+        would curate or adjudicate a hosted row refuses too --
+        :meth:`save` and :meth:`unsave` (the archive is a body surface,
+        and its integrity is the adjudicator's), :meth:`react` and
+        :meth:`reply` (a seat that may not read a message may not answer
+        it, and the reply's routing names its sender). The seal is also
+        not the seat's to lift: clearing ``sealed`` from inside refuses.
+        The node's own writes stay visible in listings (verdicts still
+        file).
         """
         if not self.node.config.get('sealed'):
             return False
@@ -755,12 +760,21 @@ class Radio:
             ValueError: If the parent message is not found, or
                 ``priority`` is out of range.
             PermissionError: If the parent's channel is read-only and the
-                replier is neither the host owner nor the original sender.
+                replier is neither the host owner nor the original sender,
+                or the seal binds and the parent is one this node hosts.
 
         """
         # find parent
         db = self.db
         parent = self._find_message(message_uuid)
+        # a held message is not a conversation the sealed seat is in: the
+        # routing this would resolve names the held message's sender, and the
+        # reply itself moves counts on a row the seat may not read
+        if parent['node'] == self.node.branch and self.seal_binds():
+            raise PermissionError(
+                'inbox sealed: hosted messages cannot be replied to until'
+                ' lawfully unsealed'
+            )
         # a bystander cannot reply into a read-only channel: the reply would
         # write there and mark the parent read, and it would make the caller a
         # thread participant, defeating thread()'s bystander gate; participants
@@ -836,7 +850,8 @@ class Radio:
             ValueError: If ``value`` is not ``1`` or ``-1``, or the
                 message is not found.
             PermissionError: If the channel is read-only and the reactor
-                is not the owner.
+                is not the owner, or the seal binds and the message is
+                one this node hosts.
 
         """
         # validate value
@@ -846,6 +861,13 @@ class Radio:
         message = self._find_message(message_uuid)
         # reject a non-owner reaching a read-only channel
         self._reject_read_only(message['channel'], message['node'])
+        # a seat that may not read a hosted message may not adjudicate it
+        # either: the react moves counts its adjudicator will later read
+        if message['node'] == self.node.branch and self.seal_binds():
+            raise PermissionError(
+                'inbox sealed: hosted messages cannot be reacted to until'
+                ' lawfully unsealed'
+            )
         # write react -- keyed on (message_id, node), so a re-react updates the
         # value in place instead of minting a new react_id
         data = {
@@ -920,6 +942,8 @@ class Radio:
 
         Raises:
             ValueError: If this node has no archived copy of the message.
+            PermissionError: If the seal binds and the archived copy is of
+                a message this node hosts.
 
         """
         # process message uuid
@@ -927,8 +951,17 @@ class Radio:
         # the archive keys on (node, uuid); scope the lookup to this saver
         where = {'node': self.node.branch, 'message_uuid': message_uuid}
         # find the archived message
-        if not self.db.exists('archive', where=where):
+        rows = self.db.read('archive', where=where, limit=1)
+        if not rows:
             raise self._message_not_found(message_uuid)
+        # the seal holds the archive's integrity, not just its confidentiality:
+        # a seat that cannot read a hosted row must not delete the copy its
+        # adjudicator (or its own pre-seal self) deliberately kept
+        if rows[0]['owner'] == self.node.branch and self.seal_binds():
+            raise PermissionError(
+                'inbox sealed: hosted messages cannot be unarchived until'
+                ' lawfully unsealed'
+            )
         # delete from archive
         self.db.delete('archive', where=where)
 

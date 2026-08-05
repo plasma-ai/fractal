@@ -212,8 +212,9 @@ node at ``--path``.
        :doc:`/guide/radio`.
    * - ``--sealed``
      - disabled
-     - Seal the node's mailbox: its own seat cannot read hosted messages
-       until unsealed (``config set sealed=false``) — verifier isolation.
+     - Seal the node's mailbox: its own seat cannot read hosted messages until
+       an operator or the parent unseals it (``config set sealed=false``, which
+       the sealed seat itself may not run) — verifier isolation.
    * - ``--reset``
      - —
      - Delete node files and reinitialize.

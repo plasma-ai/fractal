@@ -958,7 +958,10 @@ def test_sealed_inbox_holds_the_seat_but_not_the_operator(repo: dict) -> None:
     ``_NODE`` or by owning the working directory -- gets an empty,
     loudly-annotated listing and a refused ``read``; an operator working
     from outside the node still reads everything, so adjudication stays
-    possible. Unsealing (``config set sealed=false``) restores the view.
+    possible. The seat cannot lift the seal itself -- that one call would
+    hand it every held message -- so unsealing
+    (``config set sealed=false``) is the operator's, and it restores the
+    view.
     """
     alpha, beta, root = repo['alpha'], repo['beta'], repo['root']
     uuid = _send(beta, 'sealed adjudication', node='main.alpha', priority=9)
@@ -976,8 +979,12 @@ def test_sealed_inbox_holds_the_seat_but_not_the_operator(repo: dict) -> None:
     # included, so an env scrub inside the seat cannot lift it)
     visible = _run(root, 'radio', 'messages', '--all', '--path', f'{alpha}')
     assert uuid in visible.stdout
-    # lawful unsealing restores the seat's view
-    assert _run(alpha, 'node', 'config', 'set', 'sealed=false').returncode == 0
+    # the seat's own unseal refuses; the operator's, from outside, lands
+    self_unseal = _run(alpha, 'node', 'config', 'set', 'sealed=false')
+    assert self_unseal.returncode == 1
+    assert 'cannot lift its own seal' in self_unseal.stderr
+    lawful = _run(root, 'node', 'config', 'set', 'sealed=false', '--path', f'{alpha}')
+    assert lawful.returncode == 0, lawful.stderr
     unsealed = _run(root, 'radio', 'messages', '--all', _NODE=f'{alpha}')
     assert uuid in unsealed.stdout
     # round-trip: withdraw the probe message so the shared mailbox stays clean

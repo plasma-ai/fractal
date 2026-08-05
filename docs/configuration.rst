@@ -286,10 +286,12 @@ Booleans
    * - ``sealed``
      - ``false``
      - Seal the node's mailbox: its own seat (identified by the
-       loop-exported ``_NODE``) sees empty hosted listings and a refused
-       ``radio read`` until unsealed (``config set sealed=false``) — the
-       hold mechanism for verifier isolation. Takes effect at the next
-       radio read; an operator shell is never held.
+       loop-exported ``_NODE``) sees empty hosted listings and refused
+       ``radio read``/``save``/``unsave``/``react``/``reply`` until an
+       operator or the parent unseals it (``config set sealed=false``,
+       which the sealed seat itself may not run) — the hold mechanism for
+       verifier isolation. Takes effect at the next radio read; an
+       operator shell is never held.
 
 Integer caps
 ~~~~~~~~~~~~

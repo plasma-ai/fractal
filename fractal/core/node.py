@@ -782,8 +782,9 @@ class Node:
             local: Skip pushing to remote after each commit.
             blind: Subscribe to no channels (the parent still reads it).
             sealed: Seal the node's mailbox -- its own seat cannot read
-                hosted messages until unsealed (``config sealed=false``);
-                the hold mechanism for verifier isolation.
+                hosted messages until an operator or the parent unseals it
+                (``config sealed=false``, which the sealed seat itself may
+                not run); the hold mechanism for verifier isolation.
             reset: Delete all node files and reinitialize.
             user: Initialize as a user node (DB + radio only).
 

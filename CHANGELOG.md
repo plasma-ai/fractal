@@ -164,6 +164,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run-scoped kill signal to hang off, so the write is skipped instead of warning
   `no runs found; signal not set` on every successful reap (the kill event still
   carries the attribution).
+- A sealed seat can no longer unseal itself: `config set sealed=false` refuses
+  from inside the node the seal binds, so the one call that would hand the seat
+  every held message — and render every other seal guard decorative — is now the
+  operator's or the parent's alone.
+- The seal covers the verbs that curate or adjudicate a held row, not only the
+  ones that read it: `radio unsave` no longer lets a sealed seat destroy an
+  archive it cannot read (the seal protects the archive's integrity, not just
+  its confidentiality), and `radio react`/`radio reply` refuse over a hosted
+  message instead of moving counts the adjudicator will later read and, in
+  reply's case, disclosing the held message's sender in the confirmation.
 
 ### Changed
 

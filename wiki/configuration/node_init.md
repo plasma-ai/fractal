@@ -156,9 +156,10 @@ explicit reserve must stay below 99% of `--max-cost`.
   at the pin) -- stale or truncated commission seeds die at init.
 - `--pin=<sha>` -- the commission pin the profile charter must agree with.
 - `--sealed` -- seal the node's mailbox: its own seat cannot read hosted
-  messages until unsealed (`config set sealed=false`). The harness half of
-  verifier isolation -- sealed adjudication traffic is held out of the seat's
-  context entirely, while an operator shell reads freely.
+  messages until an operator or the parent unseals it
+  (`config set sealed=false`, which the sealed seat itself may not run). The
+  harness half of verifier isolation -- sealed adjudication traffic is held out
+  of the seat's context entirely, while an operator shell reads freely.
 
 ## Maintenance
 

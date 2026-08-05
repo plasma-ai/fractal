@@ -30,6 +30,7 @@ __all__ = [
     'test_sent_lists_outbound_mail',
     'test_sealed_inbox_holds_hosted_mail_from_its_own_seat',
     'test_sealed_inbox_holds_the_archive_surface',
+    'test_sealed_seat_can_neither_adjudicate_a_held_row_nor_lift_the_seal',
     'test_seal_survives_an_env_scrub_in_the_seats_own_worktree',
     'test_send_many_delivers_per_recipient_with_receipts',
     'test_send_many_is_all_or_nothing_for_the_write_only_class',
@@ -445,13 +446,15 @@ def test_sealed_inbox_holds_the_archive_surface(
     radio_pair: tuple[Radio, Radio],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The seal covers save/--saved: the archive is a body surface too.
+    """The seal covers save/unsave/--saved: the archive is a body surface too.
 
     Archiving copies a message's full body into a table the seat reads
     back, so an unsealed ``save`` would tunnel exactly what the seal
-    holds out of the sealed context -- honor-stop #3's class on another
-    surface. A hosted save refuses while the seal binds, and an archive
-    taken *before* the seal landed is held out of ``saved`` too.
+    holds out of the sealed context. A hosted save refuses while the seal
+    binds, and an archive taken *before* the seal landed is held out of
+    ``saved`` too. Deletion is held by the same seal: the archive is the
+    record the adjudicator keeps, so the seat can neither read it nor
+    destroy it -- confidentiality and integrity, not one of the two.
     """
     root, peer = radio_pair
     peer_branch = peer.node.branch
@@ -478,9 +481,58 @@ def test_sealed_inbox_holds_the_archive_surface(
     )
     with pytest.raises(PermissionError, match='cannot be archived'):
         peer.save(fresh)
-    # the operator still adjudicates through the archive
+    # ... and the pre-seal archive cannot be destroyed from inside either
+    with pytest.raises(PermissionError, match='cannot be unarchived'):
+        peer.unsave(uuid)
+    # the operator still adjudicates through the archive, deletion included
     monkeypatch.delenv('_NODE')
     assert [row['message_uuid'] for row in peer.saved()] == [uuid]
+    peer.unsave(uuid)
+    assert peer.saved() == []
+
+
+def test_sealed_seat_can_neither_adjudicate_a_held_row_nor_lift_the_seal(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seal holds the write surfaces too, and it is not the seat's to lift.
+
+    A seat that may not read a hosted message may not answer it either:
+    ``react`` moves counts its adjudicator will later read, and
+    ``reply``'s routing resolves -- and reports -- the held message's
+    sender. And the seal itself is the load-bearing guard: clearing
+    ``sealed`` from inside the sealed seat would hand it every held
+    message in one sanctioned call, leaving every other guard
+    decorative. The operator, acting from outside, does all three.
+    """
+    root, peer = radio_pair
+    uuid, _, _ = root.send(
+        peer.node.branch,
+        subject='adjudication',
+        data='held body',
+        priority=9,
+    )
+    peer.node.config.set('sealed', True)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    with pytest.raises(PermissionError, match='cannot be reacted to'):
+        peer.react(uuid, 1)
+    with pytest.raises(PermissionError, match='cannot be replied to'):
+        peer.reply(uuid, 'leaked?')
+    # the refusals consumed nothing: no react, no reply, no read receipt
+    assert peer.db.read('reacts', where={'node': peer.node.branch}) == []
+    assert peer.db.read('reads', where={'node': peer.node.branch}) == []
+    assert peer.sent() == []
+    # the seat cannot talk its own way out of the seal either
+    with pytest.raises(PermissionError, match='cannot lift its own seal'):
+        peer.node.config.set('sealed', False)
+    assert peer.node.config.get('sealed') is True
+    # an operator outside the seat unseals, and the held row opens up
+    monkeypatch.delenv('_NODE')
+    monkeypatch.chdir(root.node.worktree)
+    peer.node.config.set('sealed', False)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    peer.react(uuid, 1)
+    assert peer.read(uuid)[0]['message_uuid'] == uuid
 
 
 def test_seal_survives_an_env_scrub_in_the_seats_own_worktree(

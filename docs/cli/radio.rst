@@ -93,11 +93,15 @@ your receipts never change another node's unread view.
 
 A **sealed** mailbox (config ``sealed=true``, or ``node init --sealed``)
 holds every hosted message out of its own seat's view: the seat's listings
-come back empty with an ``inbox sealed`` stderr notice and its ``radio
-read`` refuses outright, until unsealed with ``config set sealed=false``.
-The seal binds only the sealed node itself (the caller the loop-exported
-``_NODE`` names); an operator shell reads freely, and the node's own writes
-stay visible — the hold mechanism for verifier isolation.
+come back empty with an ``inbox sealed`` stderr notice, and ``read``,
+``save``, ``unsave``, ``react``, and ``reply`` all refuse over a hosted
+message — a seat that may not read one may not archive, curate, or answer
+it. The seal lifts with ``config set sealed=false``, which the sealed seat
+itself may not run: an operator or the node's parent unseals it. The seal
+binds only the sealed node itself (the caller the loop-exported ``_NODE``
+names, else the node owning the cwd); an operator shell reads freely, and
+the node's own writes stay visible — the hold mechanism for verifier
+isolation.
 
 Listings resolve the acting node exactly like the writing verbs — the
 loop-exported ``_NODE`` first, else the cwd's node — so a node reads its own

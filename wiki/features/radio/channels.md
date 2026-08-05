@@ -70,7 +70,17 @@ The `sealed` config key is the harness half of verifier isolation: while set,
 every message the node hosts is held out of its *own* seat's context —
 `Radio.messages` returns empty, `Radio.read` refuses with `PermissionError`, and
 `Radio.thread` drops hosted rows — keyed on the caller (`Radio.seal_binds`: the
-loop-exported `_NODE` names the sealed node itself). Operator shells and other
-nodes are never held, the sealed node's own writes stay visible (verdicts still
-file), and `config set sealed=false` is the unsealing act; the lawful unsealing
-path is deployment canon, not harness law.
+loop-exported `_NODE` names the sealed node itself, and an env scrub falls back
+to the node owning the cwd). The hold covers every verb that would curate or
+adjudicate a hosted row, not just the read surfaces: `Radio.save` and
+`Radio.unsave` (the archive is a body surface, and its integrity belongs to the
+adjudicator keeping it), `Radio.react` and `Radio.reply` (a seat that may not
+read a message may not answer it, and the reply's routing resolves and reports
+the held message's sender). Operator shells and other nodes are never held and
+the sealed node's own writes stay visible (verdicts still file).
+
+`config set sealed=false` is the unsealing act, and it is not the sealed seat's
+to perform — `Config.set` refuses a self-unseal, since one sanctioned call from
+inside would hand the seat every held message and leave every other guard
+decorative. The lawful unsealing path — which operator, on what finding — is
+deployment canon, not harness law.
