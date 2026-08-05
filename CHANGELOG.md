@@ -63,6 +63,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The retry/breaker backoff polls `finish` alongside pause, stop, and the
+  subtree ceiling, so a cascaded budget finish — the very signal a billing
+  outage produces — lands within seconds instead of sleeping out a breaker wait
+  of up to an hour and buying one more dead probe launch (a pending finish
+  silences the ceiling poll, so nothing else could fire).
 - The census `PAUSED: billing` mirror excludes cannot-exec launches (recorded
   `agent launch failed`) exactly like the loop's breaker, so a broken agent
   install — whose loop is hot-retrying with no breaker armed — renders as the

@@ -1627,7 +1627,8 @@ class Loop:
                     f' zero-cost failure(s); probing again in {wait}s ==='
                 )
                 # an interrupted wait never buys a hot launch: a pause
-                # parks, and a stop or spent ceiling ends the step loop
+                # parks, and a stop, finish, or spent ceiling ends the
+                # step loop
                 if not self._retry_backoff(seconds=wait):
                     if self._paused:
                         return True
@@ -1917,8 +1918,8 @@ class Loop:
                 )
                 retry_wait = self._billing_wait() if billing else None
                 if not self._retry_backoff(seconds=retry_wait):
-                    # a pause landing during the backoff parks; stop and the
-                    # spent subtree ceiling abandon the retry to the
+                    # a pause landing during the backoff parks; stop, finish,
+                    # and the spent subtree ceiling abandon the retry to the
                     # failure path below
                     if self._paused:
                         return True
@@ -2961,9 +2962,12 @@ class Loop:
         """Sleep out a retry backoff, polling the abort signals.
 
         One-second increments so a pause (parks -- the flag is set for
-        the caller), a stop, or a spent subtree ceiling lands within
-        seconds -- a failed step must never buy another attempt once
-        the cap is spent.
+        the caller), a stop, a finish, or a spent subtree ceiling lands
+        within seconds -- a failed step must never buy another attempt
+        once the cap is spent, and the billing breaker's waits reach an
+        hour: a cascaded budget finish (the very signal an outage
+        produces) must never sleep one out, especially since a pending
+        finish silences the ceiling poll.
 
         Args:
             seconds: Wait to sleep out; ``None`` takes the step-retry
@@ -2983,6 +2987,8 @@ class Loop:
                 self._paused = True
                 return False
             if self._check_stop():
+                return False
+            if self._check_finish():
                 return False
             if self._check_subtree_ceiling():
                 return False

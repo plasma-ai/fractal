@@ -73,6 +73,7 @@ __all__ = [
     'test_step_retries_zero_disables_the_retry',
     'test_pause_during_retry_backoff_parks',
     'test_ceiling_trip_during_retry_backoff_abandons_the_retry',
+    'test_finish_during_retry_backoff_interrupts_the_wait',
     'test_models_match_admits_pin_forms_and_flags_variants',
     'test_slow_approval_sync_never_falsifies_a_clean_pin',
     'test_slow_approval_sync_never_hides_a_real_drop',
@@ -1672,6 +1673,43 @@ def test_ceiling_trip_during_retry_backoff_abandons_the_retry(
     assert loop.launched == ['step 1 of 1 (PLAN)']
     failed_rows = loop_node.db.read('steps', where={'status': 'failed'})
     assert len(failed_rows) == 1
+
+
+def test_finish_during_retry_backoff_interrupts_the_wait(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finish landing during a retry backoff interrupts the wait.
+
+    The billing breaker threads waits of up to an hour through the
+    backoff, and a billing outage is exactly when an ancestor's budget
+    abort cascades ``finish`` to every active descendant -- a backoff
+    that slept the signal out would buy one more dead launch before the
+    iteration boundary saw it (the ceiling poll goes silent on a pending
+    finish, so nothing else fires either).
+    """
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retry_backoff='30s')
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        'fractal.core.loop.time.sleep', lambda seconds: sleeps.append(seconds)
+    )
+
+    class _FinishingFailure(MockLoop):
+        """Mock loop whose failing launch lands beside a cascaded finish."""
+
+        def _launch(self: _FinishingFailure, *args: Any, **kwargs: Any) -> StepResult:
+            self.node.record.signal_set('finish', 'ancestor budget abort')
+            return super()._launch(*args, **kwargs)
+
+    failure = StepResult(status='failed', exit_code=2, reason='agent error (exit 2)')
+    loop = _FinishingFailure(loop_node, results=[failure, failure])
+    assert loop.run() == 0
+    # the backoff detected the finish on its first poll: a single attempt,
+    # no retry bought against the pending wind-down
+    assert loop.launched == ['step 1 of 1 (PLAN)']
+    assert sleeps == [1]
 
 
 # ------ model-drop policy
