@@ -85,6 +85,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The wiki contract tests pin plasma-wiki's new merge and lint contracts (the
+  union merge driver — both sides' link rows survive an `_index.md` merge,
+  deduplicated, with `wiki update` re-sorting and pruning stale rows — and typed
+  lint issues with exit 0 clean / 1 issues / 2 command error). The suite now
+  requires a plasma-wiki carrying those contracts (newer than 1.2.0); no fractal
+  runtime code needed changes — it consumes lint by boolean exit code only,
+  which is unchanged.
 - The census distinguishes the two `completed` landings: a run that ended on its
   iteration cap surfaces as `run exhausted: Reached max iterations (N)` in the
   `node list`/`node status` detail column, while a drained finish stays bare — a
