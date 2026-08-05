@@ -799,6 +799,17 @@ class Node:
         # caches expect the string form
         if path is not None:
             path = str(path)
+        # a draining seat spawns nothing: the export reaches the seat's
+        # subprocesses and the run's own drain signal backs it after an env
+        # scrub or a pause/resume, so a spawn from a draining run refuses
+        # harness-side (a resumed plan replaying a stale spawn wave was a
+        # whole damage class once); checked ahead of every branch below,
+        # user init included -- a whole new tree, with its own database,
+        # radio, and a root to spawn from, is the largest creation verb here
+        if _draining():
+            raise RuntimeError(
+                'Cannot init a node from a draining run (--drain forbids spawns).'
+            )
         # handle user node init (name derived from current branch)
         if user:
             if name:
@@ -808,15 +819,6 @@ class Node:
         if not name:
             raise ValueError('Node name is required.')
         worktree.validate_name(name)
-        # a draining seat spawns nothing: the export reaches the seat's
-        # subprocesses and the run's own drain signal backs it after an env
-        # scrub or a pause/resume, so a spawn from a draining run refuses
-        # harness-side (a resumed plan replaying a stale spawn wave was a
-        # whole damage class once)
-        if _draining():
-            raise RuntimeError(
-                'Cannot init a node from a draining run (--drain forbids spawns).'
-            )
         # flatten scope entries -- the CLI form is comma-separated, with
         # repeated flags tolerated, and whitespace is the stored form's
         # separator (config _set splits on it), so split on both here;

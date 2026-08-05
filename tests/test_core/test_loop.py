@@ -2901,7 +2901,9 @@ def test_drain_survives_a_pause_and_resume(
     ``--drain`` reaches the loop as a launch flag only; a paused drain
     resumed with a bare ``--resume`` would silently become an ordinary
     run and re-open the spawn/re-arm doors mid-wind-down. The flag is
-    recorded on the run and re-read when the run is adopted.
+    recorded on the run and re-read when the run is adopted. The relaunch
+    itself is the one loop entry a wind-down still needs, so the drain's
+    own re-arm refusal must not stand it down.
     """
     monkeypatch.setenv('_NODE', '')
     node = loop_node
@@ -2927,6 +2929,11 @@ def test_drain_survives_a_pause_and_resume(
     resumed._adopt()
     assert resumed._drain
     assert resumed._agent_env('step 1 of 1 (PLAN)')['_DRAIN'] == '1'
+    # the relaunch start.sh makes -- naming the parked seat, which is the
+    # actor the drain binds -- still runs the wind-down out
+    monkeypatch.setenv('_NODE', f'{node.node_dir}')
+    assert MockLoop(node, resume=True).run() == 0
+    assert node.status() == 'completed'
 
 
 def test_drain_guards_survive_an_env_scrub(
@@ -2938,7 +2945,9 @@ def test_drain_guards_survive_an_env_scrub(
     The export is the seat's own environment, so the guard it backs was
     advisory against the party it binds. The run's durable drain signal
     is the authority: with the export gone, a spawn from the draining
-    node's own worktree still refuses.
+    node's own worktree still refuses -- and so does a re-arm of another
+    node through the loop entry, the primitive the front-door verbs
+    protect.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
     run_id = child.record.runs(limit=1)[0]['run_id']
@@ -2949,6 +2958,11 @@ def test_drain_guards_survive_an_env_scrub(
     assert child.record.signal_get('drain', run_id=run_id) is not None
     with pytest.raises(RuntimeError, match='forbids spawns'):
         child.init(name='breach', agent='claude')
+    # bounded so a regression that lets the re-arm through fails the
+    # assertion instead of running the sibling's loop out
+    _configure(parent, max_iters=1, sync=False, local=True)
+    with pytest.raises(RuntimeError, match='forbids re-arms'):
+        MockLoop(parent, continue_=True).run()
     # a node that is not draining is unaffected by the neighbour's drain
     monkeypatch.chdir(parent.worktree)
     assert not parent.drain_bound()
@@ -2958,13 +2972,16 @@ def test_drain_run_blocks_spawns_and_re_arms(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A drain run's seats cannot init, start, update, or resume nodes.
+    """A drain run's seats cannot init, start, update, resume, or loop.
 
     ``start --continue --drain`` exports ``_DRAIN`` into every seat's
     environment, and the spawn/re-arm verbs refuse under it harness-side
     -- a replayed plan cannot buy a breach spawn no matter what the seat
-    decides. The drain also rides the prompt as the DRAIN mode doc, and a
-    plain run exports the mask so an ancestor's drain never leaks in.
+    decides. That covers the loop entry the four verbs front (re-arming
+    through it would leave the front doors locked and the back one open)
+    and user init, which builds a whole new tree to spawn from. The drain
+    also rides the prompt as the DRAIN mode doc, and a plain run exports
+    the mask so an ancestor's drain never leaks in.
     """
     monkeypatch.setenv('_NODE', '')
     node = loop_node
@@ -2981,10 +2998,19 @@ def test_drain_run_blocks_spawns_and_re_arms(
     monkeypatch.setenv('_DRAIN', '1')
     with pytest.raises(RuntimeError, match='forbids spawns'):
         node.init(name='breach', agent='claude')
+    with pytest.raises(RuntimeError, match='forbids spawns'):
+        node.init(agent='claude', user=True)
     with pytest.raises(RuntimeError, match='forbids re-arms'):
         node.start()
     with pytest.raises(RuntimeError, match='forbids re-arms'):
         node.child_update('breach', max_cost=100.0)
+    # the loop entry the four verbs front is a re-arm as well: a seat
+    # re-entering its own live loop through it refuses like the rest
+    monkeypatch.setenv('_NODE', f'{node.node_dir}')
+    node.status_set('active')
+    with pytest.raises(RuntimeError, match='forbids re-arms'):
+        MockLoop(node, continue_=True).run()
+    monkeypatch.setenv('_NODE', '')
     # resume is an expanding verb too: a paused subtree must not be woken
     # from inside a wind-down
     node.status_set('paused')

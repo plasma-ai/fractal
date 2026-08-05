@@ -262,9 +262,12 @@ launch time.
 
 ``--drain``
    With ``--continue``: run a drain — the harness forbids spawns and
-   re-arms from this run (``node init``/``start``/``update``/``resume``
-   refuse from its seats, enforced via the exported ``_DRAIN``) and injects
-   the DRAIN mode doc so every seat closes out instead of expanding.
+   re-arms from this run (``node init`` — a spawn or a whole new tree —
+   plus ``start``/``update``/``resume`` and the ``_loop`` entry they front
+   all refuse from its seats, enforced via the exported ``_DRAIN`` and the
+   run's own recorded drain) and injects the DRAIN mode doc so every seat
+   closes out instead of expanding. The drain's own relaunch after a park
+   is exempt.
 
 ``--max-cost <usd>``
    With ``--continue``: retune the cost cap before relaunch, echoed

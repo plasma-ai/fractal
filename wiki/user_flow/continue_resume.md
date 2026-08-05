@@ -115,7 +115,11 @@ unread inbox and appends the digest (metadata, priority first) to every seat's
 prompt -- directives that arrived after the plan froze are in context before any
 replayed decision executes, and a sealed mailbox stays sealed. For wind-downs,
 `node start --continue --drain` runs a drain: `_DRAIN` rides every seat's
-environment, `node init`/`node start`/`node update`/`node resume` refuse under
-it (spawns, re-arms, and subtree wake-ups are harness-blocked, not just
-discouraged), and the DRAIN mode doc tells the seat to close out instead of
-expanding.
+environment, `node init` (spawns and whole new trees alike), `node start`,
+`node update`, and `node resume` refuse under it (spawns, re-arms, and subtree
+wake-ups are harness-blocked, not just discouraged), and the DRAIN mode doc
+tells the seat to close out instead of expanding. The refusal reaches
+`node _loop` too -- the re-arm primitive those four verbs front, and what
+`start.sh` actually execs -- so the front doors are not locked over an open back
+one. The drain run's own relaunch after a park is exempt: it names the parked
+seat itself, which no other re-arm does.

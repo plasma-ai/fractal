@@ -174,6 +174,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its confidentiality), and `radio react`/`radio reply` refuse over a hosted
   message instead of moving counts the adjudicator will later read and, in
   reply's case, disclosing the held message's sender in the confirmation.
+- The drain's re-arm refusal reaches the loop entry the guarded verbs front:
+  `node _loop` is what `start.sh` execs, so a draining seat could re-arm any
+  node in the tree by calling it directly — the front doors locked over an open
+  back one, and the re-armed run was invisible to the one-loop-per-node
+  invariant. The drain run's own relaunch after a park stays exempt.
+- `fractal init` refuses under a drain like every other creation verb: the
+  user-node branch returned before the guard, so a draining seat could stand up
+  a whole new tree — its own database, radio, and a root to spawn from.
 
 ### Changed
 

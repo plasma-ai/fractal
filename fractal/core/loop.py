@@ -417,8 +417,29 @@ class Loop:
         mirror); no signal handlers are installed -- SIGTERM kill
         classification belongs to kill.sh's Python and out-of-band
         deaths to ``Node._reconcile_status``.
+
+        Raises:
+            RuntimeError: When a draining seat re-arms a node through this
+                entry (the re-arm primitive ``Node.start``/``Node.resume``
+                front).
+
         """
+        from .node import _draining
+
         node = self.node
+        # the loop entry is the re-arm primitive the guarded verbs front, so a
+        # draining seat calling it directly refuses too -- read here, ahead of
+        # the _NODE export below, which would otherwise name this loop's own
+        # node as the actor and lift the refusal off every seat. The drain
+        # run's own launch is exempt: start.sh's re-entry always names the
+        # node it launches, and a wind-down still has to relaunch after a park
+        # (an already-running node is a re-arm, never that relaunch)
+        actor = node.resolve_actor()
+        own_relaunch = actor is not None and actor.branch == node.branch
+        if _draining() and not (own_relaunch and node.status() != 'active'):
+            raise RuntimeError(
+                'Cannot run a node loop from a draining run (--drain forbids re-arms).'
+            )
         # the pane transcript must stream live (operators and the e2e harness
         # tail it mid-run): line-buffer stdout even when it is a pipe/file
         if hasattr(sys.stdout, 'reconfigure'):
