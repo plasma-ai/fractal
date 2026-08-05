@@ -39,6 +39,7 @@ __all__ = [
     'test_commit_excludes_registry_sidecars',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_record_force_add_refuses_non_record_files',
+    'test_estate_add_refuses_non_record_files_with_no_ignore_layer',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
     'test_commit_refreshes_wiki_indexes',
@@ -691,6 +692,87 @@ def test_record_force_add_refuses_non_record_files(
     )
     assert '.fractal/main.task/memory/state.md' in forced_line
     assert f'{project_dir}' not in forced_line
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        'OPEN: the record allowlist bounds only the ignore override, so a'
+        ' credential parked in an estate rides a commit whenever no host rule'
+        ' fences it. Extending _is_record to the plain estate add leaves the'
+        " estate's own tool state (memory/.wiki/, plans/.gitkeep -- neither a"
+        ' record nor fenced by any layer) permanently untracked, which trips'
+        " the pipeline's own _check_clean gate on every node. Closing this"
+        " needs the estate's non-record content given a home -- ignored, or"
+        ' admitted to the allowlist -- before the allowlist can bound the add.'
+    ),
+)
+def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The allowlist should bound the estate add, not just the ignore override.
+
+    Containment is inverted against risk: the same dotenv the force pass
+    refuses by name rides a commit silently the moment no host rule
+    happens to fence it -- the default state of a fresh clone. One law
+    should govern both paths, so a parked credential stays out of history
+    and is named either way, while the estate's records still commit.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # no hostile exclude this time: nothing fences the estate at all
+    memory = node.node_dir / 'memory' / 'state.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    (node.node_dir / '.env').write_text(
+        'AWS_SECRET_ACCESS_KEY=hunter2\n', encoding='utf-8'
+    )
+    (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
+    (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
+    (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
+    result = node.commit('plain add path')
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the record landed; nothing secret-shaped or binary did
+    assert 'memory/state.md' in tracked
+    for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
+        assert parked not in tracked, parked
+    # the refusal is named, not inferred from an absent file
+    assert 'are not node records' in result
+    for parked in ('id_rsa', 'creds.pem', 'dump.tar'):
+        assert parked in result, parked
+    # a record edited after it is tracked still commits -- the allowlist
+    # gates what the estate adds new, never the upkeep of its own history
+    memory.write_text('finding of record, revised\n', encoding='utf-8')
+    node.commit('record upkeep')
+    committed = subprocess.run(
+        [
+            'git',
+            '-C',
+            f'{project_dir}',
+            'show',
+            'HEAD:.fractal/main.task/memory/state.md',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert committed == 'finding of record, revised\n'
 
 
 def test_commit_stamps_iteration_from_args_or_open_row(
