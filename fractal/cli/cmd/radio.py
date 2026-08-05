@@ -497,6 +497,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
         instant = time.time()
         # --saved: show archived messages
         if saved:
+            _reject_foreign_bodies(radio, None)
             rows = radio.saved(
                 channel=channel,
                 limit=limit,
@@ -532,6 +533,8 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
                     '(use --channel=<channel> for your other channels)',
                     err=True,
                 )
+        if body:
+            _reject_foreign_bodies(radio, channel)
         rows = radio.messages(
             channel=channel,
             limit=limit,
@@ -743,6 +746,7 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
         instant = time.time()
         # --saved: show archived messages
         if saved:
+            _reject_foreign_bodies(radio, None)
             rows = radio.saved(
                 node=node,
                 channel=channel,
@@ -889,7 +893,7 @@ def radio_thread(app: typer.Typer) -> typer.Typer:
     json_help = 'Output a JSON array of row objects (mutex with --csv).'
     json = typer.Option(False, '--json', help=json_help)
     # path option
-    path_help = 'Worktree directory (default: the calling node, else the cwd).'
+    path_help = 'Worktree directory of the tree to view (defaults to your own).'
     path = typer.Option(None, '--path', help=path_help)
 
     @command(app, 'thread')
@@ -902,7 +906,17 @@ def radio_thread(app: typer.Typer) -> typer.Typer:
         """Show a message's full reply tree (root and all replies)."""
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
-        radio = Radio(resolve_sender(path))
+        # a thread prints bodies, so the reader is who runs the command --
+        # never --path, which only picks the tree searched (UUIDs resolve
+        # globally within one). Acting as the mailbox here would hand a
+        # bystander every read-only row the per-row filter exists to drop
+        radio = Radio(_resolve_reader())
+        if path is not None and resolve_node(path).db.path != radio.node.db.path:
+            raise typer.BadParameter(
+                '--path names a mailbox in a different fractal tree;'
+                ' read it as a node of that tree (run from one of its'
+                ' worktrees or export _NODE).'
+            )
         # the watermark's cut is read before the query, never at render
         instant = time.time()
         rows = radio.thread(message_uuid)
@@ -1151,6 +1165,28 @@ def _resolve_reader() -> Node:
             'No reader node: run from a node worktree or export _NODE'
             ' (--path only selects the mailbox viewed, never the reader).'
         ) from None
+
+
+def _reject_foreign_bodies(radio: Radio, channel: Optional[str]) -> None:
+    """Gate a listing widened into a body surface on the actual reader.
+
+    ``--path`` selects which mailbox a listing views, never who is acting,
+    so the listings that carry the ``data`` column -- ``--json --body``,
+    and ``--saved``, whose rows always do -- resolve the reader the way
+    ``read`` does and answer to its owner-only rule
+    (:meth:`Radio.reject_foreign_bodies`). The plain metadata listing is
+    untouched: it names rows, not their contents, and acting as another
+    node through ``--path`` is the operator surface it exists for.
+
+    Args:
+        radio: The listing's radio, bound to the mailbox viewed.
+        channel: The channel viewed, or ``None`` for the archive.
+
+    Raises:
+        typer.BadParameter: If no reader resolves.
+
+    """
+    Radio(_resolve_reader()).reject_foreign_bodies(radio.node.branch, channel)
 
 
 def _read_filter(all_messages: bool, read_messages: bool) -> Optional[bool]:

@@ -79,6 +79,18 @@ read a message may not answer it, and the reply's routing resolves and reports
 the held message's sender). Operator shells and other nodes are never held and
 the sealed node's own writes stay visible (verdicts still file).
 
+Because the seal is keyed on the caller, it alone cannot answer a seat that
+*moves*: unset `_NODE`, step into a sibling worktree, and the caller resolves to
+a real but wrong node the seal never binds. What closes that is the layer under
+it — the owner-only channel rule, applied to every surface that emits a body.
+`Radio.read` has always enforced it; `Radio.reject_foreign_bodies` extends the
+same rule to the listings that carry the `data` column
+(`messages --json --body`, `messages --saved`, `feed --saved`) and
+`radio thread` resolves its reader the way `read` does. So the mailbox selector
+(`--path`) picks *which* mailbox is viewed and never *who* is viewing it:
+whoever the mover resolves to, only the mailbox's owner may take its held bodies
+out — and for the owner the seal itself holds them.
+
 `config set sealed=false` is the unsealing act, and it is not the sealed seat's
 to perform — `Config.set` refuses a self-unseal, since one sanctioned call from
 inside would hand the seat every held message and leave every other guard

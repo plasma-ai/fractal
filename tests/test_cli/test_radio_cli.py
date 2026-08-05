@@ -51,6 +51,8 @@ __all__ = [
     'test_read_reader_follows_node_env',
     'test_read_refuses_cross_tree_mailbox',
     'test_read_without_reader_names_the_remedy',
+    'test_body_listings_answer_to_the_reader_never_to_path',
+    'test_sealed_bodies_hold_against_an_actor_spoof',
     'test_listings_are_passive_and_metadata_only',
     'test_send_sender_follows_node_env',
     'test_sealed_inbox_holds_the_seat_but_not_the_operator',
@@ -867,6 +869,144 @@ def test_read_without_reader_names_the_remedy(
     assert 'fractal init' not in lost.stderr
 
 
+def test_body_listings_answer_to_the_reader_never_to_path(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """``--path`` picks the mailbox listed; its bodies still answer to the reader.
+
+    The metadata listing is an operator surface -- ``--path`` acts as the
+    node named -- but ``--json --body`` and the archive carry ``data``, so
+    they are body surfaces and obey the same owner-only rule ``read``
+    does, resolved against the caller that actually runs the command.
+    Without the split, a refusal on one surface is a permission on
+    another: the bodies ``read --path`` denies ride out through the
+    listing, receipt-free.
+    """
+    alpha, beta = repo['alpha'], repo['beta']
+    uuid = _send(beta, 'listed body', node='main.alpha', subject='lb')
+    # the control: read already refuses beta the owner-only inbox
+    denied = _run(alpha.parent.parent, 'radio', 'read', uuid, _NODE=f'{beta}')
+    assert denied.returncode == 1
+    assert 'read-only' in denied.stderr
+    # the widened listing refuses identically, whoever --path names
+    peeked = _run(
+        beta,
+        'radio',
+        'messages',
+        '--all',
+        '--json',
+        '--body',
+        '--path',
+        f'{alpha}',
+    )
+    assert peeked.returncode == 1
+    assert 'read-only' in peeked.stderr
+    assert 'listed body' not in peeked.stdout
+    # the metadata listing is untouched -- the row is visible, the body is not
+    listed = _run(beta, 'radio', 'messages', '--all', '--path', f'{alpha}')
+    assert listed.returncode == 0, listed.stderr
+    assert uuid in listed.stdout
+    assert 'listed body' not in listed.stdout
+    # the owner's own widened listing still carries the body
+    own = _radio(alpha, 'messages', '--all', '--json', '--body')
+    assert own.returncode == 0, own.stderr
+    assert 'listed body' in own.stdout
+    # the archive is a body surface too: its rows always carry data
+    assert _radio(alpha, 'save', uuid).returncode == 0
+    archived = _run(
+        beta, 'radio', 'messages', '--saved', '--json', '--path', f'{alpha}'
+    )
+    assert archived.returncode == 1
+    assert 'read-only' in archived.stderr
+    assert 'listed body' not in archived.stdout
+    assert uuid in _radio(alpha, 'messages', '--saved').stdout
+    # a caller with no reader identity at all fails closed, naming the remedy
+    lost = _run(
+        tmp_path,
+        'radio',
+        'messages',
+        '--all',
+        '--json',
+        '--body',
+        '--path',
+        f'{alpha}',
+    )
+    assert lost.returncode != 0
+    assert 'No reader node' in lost.stderr
+    assert 'listed body' not in lost.stdout
+    # round-trip the shared mailbox
+    assert _radio(alpha, 'unsave', uuid).returncode == 0
+    assert _radio(beta, 'unsend', uuid).returncode == 0
+
+
+def test_sealed_bodies_hold_against_an_actor_spoof(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """No seat talks its way into a sealed mailbox's bodies by moving.
+
+    The seal binds the caller acting AS the sealed node, so a seat that
+    unsets ``_NODE`` and works from a sibling worktree resolves to a real
+    but WRONG actor and lifts it. The body surfaces close that: whoever
+    the caller resolves to, only the mailbox's owner may take its
+    owner-only bodies out -- and for the owner the seal itself holds them.
+    Unsealing from outside stays the lawful remedy.
+    """
+    alpha, beta, root = repo['alpha'], repo['beta'], repo['root']
+    uuid = _send(beta, 'sealed spoof body', node='main.alpha', subject='ss')
+    assert _radio(alpha, 'save', uuid).returncode == 0
+    assert _run(alpha, 'node', 'config', 'set', 'sealed=true').returncode == 0
+    # every spoof of the acting seat -- a sibling worktree, no node at all,
+    # a forged _NODE at a sibling's data dir -- is refused
+    spoofs = [
+        _run(
+            beta, 'radio', 'messages', '--all', '--json', '--body', '--path', f'{alpha}'
+        ),
+        _run(
+            tmp_path,
+            'radio',
+            'messages',
+            '--all',
+            '--json',
+            '--body',
+            '--path',
+            f'{alpha}',
+        ),
+        _run(
+            tmp_path,
+            'radio',
+            'messages',
+            '--all',
+            '--json',
+            '--body',
+            '--path',
+            f'{alpha}',
+            _NODE=f'{beta / ".fractal" / "main.beta"}',
+        ),
+        _run(beta, 'radio', 'messages', '--saved', '--json', '--path', f'{alpha}'),
+        _run(root, 'radio', 'thread', uuid, '--json', '--path', f'{alpha}'),
+    ]
+    for spoof in spoofs:
+        assert spoof.returncode != 0, spoof.stdout
+        assert 'sealed spoof body' not in spoof.stdout
+    # the honest seat still gets the annotated empty listing, not a refusal
+    honest = _run(
+        root, 'radio', 'messages', '--all', '--path', f'{alpha}', _NODE=f'{alpha}'
+    )
+    assert honest.returncode == 0, honest.stderr
+    assert 'inbox sealed' in honest.stderr
+    assert uuid not in honest.stdout
+    # unsealing from outside is the lawful remedy, and it restores the bodies
+    lawful = _run(root, 'node', 'config', 'set', 'sealed=false', '--path', f'{alpha}')
+    assert lawful.returncode == 0, lawful.stderr
+    restored = _radio(alpha, 'messages', '--all', '--json', '--body')
+    assert 'sealed spoof body' in restored.stdout
+    # round-trip the shared mailbox
+    assert _radio(alpha, 'unsave', uuid).returncode == 0
+    assert _radio(beta, 'unsend', uuid).returncode == 0
+
+
 def test_listings_are_passive_and_metadata_only(repo: dict) -> None:
     """``messages`` never writes receipts and never prints bodies.
 
@@ -1136,7 +1276,9 @@ def test_watermark_stamps_the_pre_query_cut(
     a subprocess) with a stepped clock the query advances two minutes,
     modeling a slow render or pipe consumer: the stamp must still say the
     instant from before the query. ``thread`` and ``subs`` -- the surfaces
-    a reply obligation grades from -- close with the watermark too.
+    a reply obligation grades from -- close with the watermark too;
+    ``thread`` prints bodies, so its acting node is the exported reader
+    rather than ``--path``.
     """
 
     class _SteppedClock:
@@ -1155,7 +1297,7 @@ def test_watermark_stamps_the_pre_query_cut(
 
     clock = _SteppedClock()
     monkeypatch.setattr(radio_cmd, 'time', clock)
-    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setenv('_NODE', f'{repo["alpha"]}')
 
     def slow_query(self: Radio, *args: Any, **kwargs: Any) -> list:
         clock.now += 120

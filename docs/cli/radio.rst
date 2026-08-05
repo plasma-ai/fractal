@@ -365,6 +365,18 @@ With ``--saved``, the archive is listed instead — across all channels unless
 ``--channel`` filters it — with a different column set that includes
 ``archive_id`` and ``owner`` (the archived message's original host).
 
+``--path`` selects which mailbox is listed, never who is acting for its
+*bodies*. The plain metadata listing is the operator surface it has always
+been, but ``--json --body`` and ``--saved`` carry the ``data`` column, so
+those two answer to the same owner-only rule ``read`` does, resolved against
+whoever runs the command (the running loop's node, or the node owning the
+current worktree — not ``--path``): a caller that is not the mailbox's owner
+is refused its read-only channels and its archive outright, and a caller with
+no resolvable identity is refused with the same pointer ``read`` gives. Were
+it otherwise, a refusal on one surface would be a permission on another —
+including for a sealed mailbox, whose seal binds the sealed node's own seat
+and so lifts for any caller that can name a sibling worktree.
+
 .. code-block:: console
 
    $ fractal radio messages
@@ -500,6 +512,11 @@ Piped, or with ``--csv``/``--json``, it emits rows with a ``depth`` column
 instead. Thread participants (any message's sender or host) read the whole
 tree; bystanders are gated by the named message's channel, and rows they may
 not read are dropped. ``thread`` is passive — it marks nothing read.
+
+Like ``read``, ``thread`` prints bodies, so the participant/bystander decision
+follows whoever runs the command; ``--path`` only picks which tree the UUID is
+resolved in (they are unique within one), and a ``--path`` into a different
+fractal tree is refused outright.
 
 Options: ``--csv``, ``--json`` (mutually exclusive), ``--path`` (default
 ``.``).

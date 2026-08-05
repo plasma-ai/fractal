@@ -429,6 +429,41 @@ class Radio:
         actor = self.node.resolve_actor()
         return actor is not None and actor.branch == self.node.branch
 
+    def reject_foreign_bodies(
+        self: Radio,
+        mailbox: str,
+        channel: Optional[str],
+    ) -> None:
+        """Reject this reader taking bodies out of a mailbox it does not own.
+
+        A mailbox selector (the CLI's ``--path``) picks which mailbox a
+        listing views, never who is acting -- so the listing surfaces that
+        carry ``data`` (``--json --body``, and the archive, whose rows
+        always do) answer to :meth:`read`'s owner-only rule, resolved
+        against the caller that actually runs the command. Without it a
+        refusal on one surface is a permission on another: the same bodies
+        ``read`` denies ride out through a listing, receipt-free, and a
+        sealed mailbox's held messages reach any seat that can name a
+        sibling worktree (:meth:`seal_binds` binds the sealed node's own
+        seat only). The archive holds whatever its owner saved, the inbox
+        included, so it has no single channel to arbitrate and is refused
+        whole.
+
+        Args:
+            mailbox: Branch of the mailbox whose bodies are listed.
+            channel: The channel viewed, or ``None`` for the archive.
+
+        Raises:
+            PermissionError: If the channel (or the archive) is the
+                mailbox owner's alone and this reader is not that owner.
+
+        """
+        if channel is None:
+            if mailbox != self.node.branch:
+                raise PermissionError('Archive is read-only (owner only).')
+            return
+        self._reject_read_only(channel, mailbox)
+
     def messages(
         self: Radio,
         *,

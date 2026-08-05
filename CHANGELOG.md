@@ -66,6 +66,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A mailbox selector no longer selects who is reading.
+  `radio messages --json --body`, `radio messages --saved`,
+  `radio feed --saved`, and `radio thread` all emit message bodies, but resolved
+  their acting node from `--path` — so the owner-only rule `radio read` enforces
+  was decorative for anyone who could pass the flag, and the same bodies rode
+  out through a listing with no read receipt. Worse, it broke the mailbox seal
+  outright: a sealed seat that unset `_NODE` and stepped into a sibling worktree
+  resolved to a real but wrong actor the seal never binds, and got every held
+  message and the pre-seal archive. Those four surfaces now resolve the reader
+  the way `read` does (never from `--path`) and refuse a foreign mailbox's
+  read-only channels and its archive; a caller with no resolvable identity is
+  refused too, instead of failing open. Plain metadata listings are unchanged —
+  they name rows, not contents, and acting as another node through `--path` is
+  the operator surface they exist for.
 - The estate-record force-add survives a record it cannot stage: git stages
   nothing when any one path in a batched `git add -f` is dead or unindexable
   (exit 128), so a single vanished or permission-dead estate file aborted the
