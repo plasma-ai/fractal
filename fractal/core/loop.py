@@ -808,6 +808,34 @@ class Loop:
             self._arm_drain()
         print(f'Resuming run {self._run_id} where the pause left it')
 
+    def _warn_iteration_gap(self: Loop) -> bool:
+        """Alarm when the just-opened iteration follows a missing number.
+
+        A number that advanced with no recorded row is an iteration that
+        never executed (a fleet transient once consumed four in eleven
+        minutes with zero trace, detected only by a hand-written census),
+        so the loop flags it the moment it is knowable. An unreadable
+        store alarms nothing -- the census keeps its own detector over the
+        recorded rows.
+
+        Returns:
+            Whether a gap was found (and reported).
+
+        """
+        try:
+            rows = self.node.record.iters(run_id=self._run_id, limit=2)
+        except Exception:
+            return False
+        if len(rows) != 2 or rows[1]['iter'] == self._iter - 1:
+            return False
+        print(
+            f'WARNING: iteration gap — {self._iter_ref} follows'
+            f' {self._run_id}.{rows[1]["iter"]} with no recorded'
+            ' iteration between them',
+            file=sys.stderr,
+        )
+        return True
+
     def _warn_once(self: Loop, key: str, message: str) -> None:
         """Warn about a rejected live retune, once per distinct value.
 
@@ -1215,21 +1243,7 @@ class Loop:
                         file=sys.stderr,
                     )
                     break
-                # alarm on an iteration-number gap: a number that advanced
-                # with no recorded row is an iteration that never executed
-                # (a fleet transient once consumed four in eleven minutes
-                # with zero trace) -- flag it the moment it is knowable
-                try:
-                    rows = node.record.iters(run_id=self._run_id, limit=2)
-                except Exception:
-                    rows = []
-                if len(rows) == 2 and rows[1]['iter'] != self._iter - 1:
-                    print(
-                        f'WARNING: iteration gap — {self._iter_ref} follows'
-                        f' {self._run_id}.{rows[1]["iter"]} with no recorded'
-                        ' iteration between them',
-                        file=sys.stderr,
-                    )
+                self._warn_iteration_gap()
             iteration_event = self.on_iteration(
                 iteration=self._iter,
                 run_id=self._run_id,

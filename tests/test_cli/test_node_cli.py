@@ -59,6 +59,7 @@ __all__ = [
     'test_init_blind_seeds_no_subs_and_start_sweeps',
     'test_merge_delete_reaps_the_merged_child',
     'test_list_filters_by_retired_and_depth',
+    'test_start_drain_requires_continue',
     'test_list_json_mirrors_csv_shape',
     'test_list_status_count_and_live',
     'test_list_rejects_invalid_filters',
@@ -975,6 +976,19 @@ def test_list_filters_by_retired_and_depth(repo: dict) -> None:
     assert 'main.task' not in shallow
     # restore the fixture
     assert _run(docs, 'node', 'unretire').returncode == 0
+
+
+def test_start_drain_requires_continue(repo: dict) -> None:
+    """The CLI refuses ``--drain`` without ``--continue`` rather than no-op.
+
+    ``--drain`` only means anything on a continued run; accepting it on a
+    fresh start would let an operator believe a wind-down was armed while
+    the node spawns freely.
+    """
+    task = repo['task']
+    refused = _run(task, 'node', 'start', '--drain')
+    assert refused.returncode != 0
+    assert '--drain requires --continue' in refused.stderr
 
 
 def test_list_json_mirrors_csv_shape(repo: dict) -> None:

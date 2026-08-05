@@ -82,6 +82,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   layer a host fences secrets in, so a parked `.env`, key, or archive is refused
   by name instead of staged, and every force-add is reported on the commit
   output.
+- Every alarm this wave added is now proved in both directions — the billing
+  breaker's non-arming guards (exit 127, slow, and paid failures), the loop-side
+  iteration-gap alarm, the census billing detector against the step sequences a
+  real run books (never-run tails and open rows are bookkeeping, a paid failure
+  breaks the streak), the seal's hold on the resumed-iteration digest and on
+  threads, served-model recording when divergence beats the seeded pin, the
+  `--drain` launch wiring, the killed-before-boot stand-down, the live
+  `iter_timeout` re-read, `send_many`'s all-or-nothing dry pass, the baseline
+  force-add under a hostile external ignore, and `--pin` without a profile.
 - An iteration whose step sequence a budget ceiling cut short books `stopped`,
   not `completed`: a gate interrupt could book a goal-met lap whose steps all
   read `stopped` and whose launches never happened.
@@ -150,6 +159,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `node list`'s documented schema matches what it prints: the `detail` and
+  `spend` columns are listed, and the `detail` vocabulary is enumerated (pending
+  signals, exit reasons, `run exhausted:`, `orphaned`, `model drop`,
+  `iteration gap`, `PAUSED: billing`).
 - The wiki contract tests pin plasma-wiki's new merge and lint contracts (the
   union merge driver — both sides' link rows survive an `_index.md` merge,
   deduplicated, with `wiki update` re-sorting and pruning stale rows — and typed

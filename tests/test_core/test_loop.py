@@ -83,6 +83,10 @@ __all__ = [
     'test_run_end_drain_outlives_the_closed_iterations_deadline',
     'test_before_last_step_drain_uses_the_run_wall_not_the_iter_deadline',
     'test_finalize_terminal_cascade_matrix',
+    'test_iteration_gap_alarm_fires_and_stays_quiet',
+    'test_billing_breaker_does_not_arm_on_non_billing_failures',
+    'test_sealed_seat_gets_no_inbox_digest',
+    'test_iter_timeout_live_re_read_bounds_the_next_iteration',
     'test_killed_before_boot_stands_the_loop_down',
     'test_backstop_survives_a_non_utf8_plan_file',
     'test_auto_backstop_commit_carries_step_and_plan_context',
@@ -2329,6 +2333,148 @@ def test_finalize_terminal_cascade_matrix(
     expected = '' if reason is None else reason.format(run=loop._run_id)
     assert row['metadata'] == expected
     assert row['ended_at'] is not None
+
+
+def test_iteration_gap_alarm_fires_and_stays_quiet(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The loop-side gap alarm fires on a real gap and only on a real gap.
+
+    A detector that cannot fire is worse than none: it reports "no gaps"
+    forever. Contiguous rows must stay silent, a missing number must
+    alarm and name the span, and an unreadable store must not manufacture
+    one.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    loop = MockLoop(node)
+    loop._run_id = node.record.run_start()
+
+    def _close(number: int) -> None:
+        iter_id = node.record.iter_start(run_id=loop._run_id, iter=number)
+        node.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
+
+    # known-good: contiguous numbers alarm nothing
+    _close(1)
+    _close(2)
+    loop._iter = 2
+    loop._iter_ref = f'{loop._run_id}.2'
+    assert loop._warn_iteration_gap() is False
+    assert 'iteration gap' not in capsys.readouterr().err
+    # known-bad: 3 and 4 never executed, so 5 follows 2
+    _close(5)
+    loop._iter = 5
+    loop._iter_ref = f'{loop._run_id}.5'
+    assert loop._warn_iteration_gap() is True
+    err = capsys.readouterr().err
+    assert f'iteration gap — {loop._run_id}.5 follows {loop._run_id}.2' in err
+    # an unreadable store alarms nothing rather than guessing
+    monkeypatch.setattr(
+        type(node.record),
+        'iters',
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('locked')),
+    )
+    assert loop._warn_iteration_gap() is False
+
+
+def test_billing_breaker_does_not_arm_on_non_billing_failures(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The breaker's non-arming guards hold: only the outage shape arms it.
+
+    A breaker that arms on every failure would park a healthy node for an
+    hour on a bad flag; one that never arms is the run-1 burn. The guards
+    are load-bearing in both directions -- a cannot-exec launch (127) and
+    a failure that took real time are refused, while the instant
+    zero-cost shape arms.
+    """
+    monkeypatch.setenv('_NODE', '')
+    loop = MockLoop(loop_node)
+    loop._run_id = loop_node.record.run_start()
+    instant = StepResult(status='failed', exit_code=1)
+    # known-bad (the outage shape): instant, zero-cost, ordinary failure
+    assert loop._billing_failure(instant, 0) is True
+    # known-good: a cannot-exec launch is a broken binary, not dead credits
+    assert loop._billing_failure(StepResult(status='failed', exit_code=127), 0) is False
+    # known-good: a failure that ran did reach paid inference
+    assert loop._billing_failure(instant, 30) is False
+    # known-good: an instant failure that recorded spend is not the outage
+    iter_id = loop_node.record.iter_start(run_id=loop._run_id, iter=1)
+    step_id = loop_node.record.step_start(
+        iter_id=iter_id,
+        run_id=loop._run_id,
+        step=1,
+        step_name='PLAN',
+    )
+    loop_node.record.step_cost(step_id=step_id, cost=0.42)
+    loop._step_id = step_id
+    assert loop._billing_failure(instant, 0) is False
+
+
+def test_sealed_seat_gets_no_inbox_digest(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seal holds the resumed-iteration digest too.
+
+    The digest is a body-adjacent surface built from the seat's own
+    mailbox, so a sealed verifier resuming mid-verdict must not receive
+    its held mail as prompt context through the back door. Unsealed, the
+    same resume gets the digest.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    node.radio.init()
+    node.radio.send(node.branch, subject='held order', data='body', priority=9)
+    loop = MockLoop(node)
+    loop._resume_mode = True
+    # unsealed: the digest is built
+    assert 'held order' in loop._inbox_digest()
+    # sealed, acting as the node itself: nothing reaches the prompt
+    node.config.set('sealed', True)
+    monkeypatch.setenv('_NODE', f'{node.node_dir}')
+    assert loop._inbox_digest() == ''
+    steps = loop._discover_steps()
+    assert steps
+    assert 'inbox re-read' not in loop._build_step_prompt(steps[0])
+
+
+def test_iter_timeout_live_re_read_bounds_the_next_iteration(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-run ``iter_timeout`` retune bounds the very next iteration.
+
+    The deadline is armed at the iteration top, so the re-read has to
+    land ahead of it or the retune waits a whole lap -- the class the
+    live-boundary work exists to close. A raise reaches the next
+    iteration; the boot value stands until then.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, max_iters=3, iter_timeout='30s')
+    seen: list[int] = []
+
+    class _Recording(MockLoop):
+        """Record the deadline window each iteration arms."""
+
+        def _launch(
+            self: _Recording, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            seen.append(self._iter_timeout_seconds)
+            if len(seen) == 1:
+                _configure(self.node, iter_timeout='2h')
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = _Recording(node)
+    assert loop.run() == 0
+    # iteration 1's steps ran on the boot value; the retune bounds every
+    # step from iteration 2 on (the mock runs two steps per iteration)
+    assert seen[:2] == [30, 30]
+    assert set(seen[2:]) == {7200}
 
 
 def test_killed_before_boot_stands_the_loop_down(

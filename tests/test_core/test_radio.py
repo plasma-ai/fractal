@@ -32,6 +32,8 @@ __all__ = [
     'test_sealed_inbox_holds_the_archive_surface',
     'test_seal_survives_an_env_scrub_in_the_seats_own_worktree',
     'test_send_many_delivers_per_recipient_with_receipts',
+    'test_send_many_is_all_or_nothing_for_the_write_only_class',
+    'test_sealed_hold_covers_the_thread_surface',
     'test_relays_refuses_an_unknown_uuid',
     'test_send_many_reports_each_landing_before_a_later_failure',
     'test_relay_lineage_marks_copies_and_lists_them',
@@ -549,6 +551,76 @@ def test_send_many_delivers_per_recipient_with_receipts(
             priority=8,
         )
     assert len(root.sent()) == before
+
+
+def test_send_many_is_all_or_nothing_for_the_write_only_class(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """A write-only recipient refuses the whole fan-out before any copy lands.
+
+    The dry pass exists so a fleet order is never half-delivered: an
+    operator reading a permission error must know nothing went out.
+    A single unwritable recipient anywhere in the list is enough, and the
+    same list without it delivers to everyone.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    before = len(root.sent())
+    # peer's 'private' channel is write-only (owner only) -- a foreign
+    # write is refused, and the refusal precedes every delivery
+    with pytest.raises(PermissionError, match='write-only'):
+        root.send_many(
+            [root.node.branch, peer_branch],
+            'private',
+            subject='fleet order',
+            data='wind down',
+            priority=6,
+        )
+    assert len(root.sent()) == before
+    assert root.messages(channel='private') == []
+    # the same recipients on a writable channel all receive
+    receipts = root.send_many(
+        [root.node.branch, peer_branch],
+        subject='fleet order',
+        data='wind down',
+        priority=6,
+    )
+    assert len(receipts) == 2
+    assert len(root.sent()) == before + 2
+
+
+def test_sealed_hold_covers_the_thread_surface(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread never surfaces the sealed seat's own hosted rows.
+
+    Threads walk to a root and collect every reply, so a reply rerouted
+    into a sealed inbox would hand the seat the body the seal holds --
+    the same tunnel as the archive, through the conversation view. The
+    seat sees the thread minus its hosted rows; the operator sees it all.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    # a thread rooted at a message peer HOSTS, with peer's own reply
+    # routed back to the sender -- so the tree spans both hosts
+    seed, _, _ = root.send(
+        peer_branch,
+        subject='thread root',
+        data='sealed body',
+        priority=5,
+    )
+    peer.reply(seed, 'acknowledged')
+    assert len(peer.thread(seed)) == 2
+    peer.node.config.set('sealed', True)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    # the sealed seat sees the thread without the row it hosts
+    hosted = [row for row in peer.thread(seed) if row['node'] == peer_branch]
+    assert hosted == []
+    # the operator's view of the same thread still carries it
+    monkeypatch.delenv('_NODE')
+    hosted = [row for row in peer.thread(seed) if row['node'] == peer_branch]
+    assert len(hosted) == 1
 
 
 def test_relays_refuses_an_unknown_uuid(

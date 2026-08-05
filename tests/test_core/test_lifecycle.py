@@ -37,6 +37,7 @@ __all__ = [
     'test_start_rejects_non_positive_max_cost',
     'test_start_only_from_idle',
     'test_start_continue_from_terminal',
+    'test_start_drain_reaches_the_launch_and_requires_continue',
     'test_start_continue_re_arms_after_drained_run',
     'test_start_continue_refuses_after_budget_end',
     'test_start_continue_rolls_back_retune_on_refusal_or_failed_launch',
@@ -208,6 +209,34 @@ def test_start_continue_from_terminal(
     run_scripts = _stub_run_script(monkeypatch, node)
     node.start(continue_run=True)
     assert run_scripts
+
+
+def test_start_drain_reaches_the_launch_and_requires_continue(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--drain`` rides the launch argv, and only alongside ``--continue``.
+
+    The flag is the whole wind-down contract: if it never reaches
+    ``start.sh`` (and through it the loop), a run the operator ordered to
+    drain quietly keeps its spawn and re-arm doors open. A plain start
+    carries no drain, and the CLI refuses the flag without ``--continue``
+    rather than accepting a no-op.
+    """
+    node = node_with_db
+    node.config.set('max_cost', 1.0)
+    node.status_set('stopped')
+    run_scripts = _stub_run_script(monkeypatch, node)
+    node.start(continue_run=True, drain=True)
+    launch = next(call for call in run_scripts if call[0] == 'start.sh')
+    assert '--continue' in launch
+    assert '--drain' in launch
+    # a plain continue carries no drain
+    run_scripts.clear()
+    node.status_set('stopped')
+    node.start(continue_run=True)
+    launch = next(call for call in run_scripts if call[0] == 'start.sh')
+    assert '--drain' not in launch
 
 
 def test_start_continue_re_arms_after_drained_run(

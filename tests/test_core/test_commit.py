@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -20,15 +21,21 @@ from .conftest import (
     _spawn_parent_child,
 )
 
+#: the console script beside the running interpreter -- a bare name would
+#: resolve through a shim to whatever install the ambient PATH front-runs
+_FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
+
 __all__ = [
     'test_user_node_commit_init_commits_baseline',
     'test_commit_pushes_unless_local',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
     'test_commit_excludes_registry_sidecars',
+    'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_commit_stages_node_records_past_external_excludes',
     'test_stage_records_tolerates_a_vanished_held_file',
     'test_commit_excludes_registry_sidecars',
+    'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_record_force_add_refuses_non_record_files',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
@@ -1444,3 +1451,54 @@ def test_lint_runs_standalone_without_node_dir(
         env=env,
     )
     assert 'unbound variable' not in result.stderr
+
+
+def test_user_init_baseline_survives_a_hostile_external_ignore(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The baseline commits its seed and wiki past a broad external ignore.
+
+    ``fractal init`` writes the user node's seed and the project wiki and
+    must land them as the tree's baseline; a machine-local ``/.fractal/``
+    line (or a host ``.gitignore``) would otherwise silently empty the
+    pathspec and leave a tree whose baseline never happened -- the
+    fleet-wide breakage this staging work exists to end.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=repo,
+            capture_output=True,
+            check=True,
+        )
+    # the hostile layer, in place BEFORE init writes anything
+    exclude = repo / '.git' / 'info' / 'exclude'
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\nwiki/\n')
+    Node(repo).init(agent='claude', user=True)
+    # opt the tree in, so the seed is committable at all (the self-ignore
+    # is fractal's own choice; the hostile layer above is the operator's)
+    subprocess.run(
+        [f'{_FRACTAL_BIN}', 'track'],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    node = Node(repo)
+    node.commit('configure', init=True)
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{repo}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the seed and the wiki are on the branch despite both ignore rules
+    assert '.fractal/main/config.json' in tracked
+    assert 'wiki/_index.md' in tracked
+    # runtime state still never rides the baseline
+    assert '.status' not in tracked
+    assert '.db' not in tracked

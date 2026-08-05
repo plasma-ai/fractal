@@ -55,6 +55,7 @@ __all__ = [
     'test_init_stores_unset_booleans_as_null',
     'test_child_inherits_steps_and_scripts_from_parent',
     'test_init_seeds_steps_from_directory',
+    'test_pin_without_a_profile_still_validates',
     'test_init_profile_seeds_and_validates_the_fill_sheet',
     'test_child_inherits_skills_only_on_request',
     'test_child_inherits_config_preferences_not_caps',
@@ -1396,6 +1397,33 @@ def test_resolve_init_target_refuses_linked_worktree(
     )
     with pytest.raises(typer.BadParameter, match='main checkout'):
         resolve_init_target(f'{tmp_path / "feature"}')
+
+
+def test_pin_without_a_profile_still_validates(
+    git_repo: pathlib.Path,
+) -> None:
+    """``--pin`` alone runs the validation gate, not just alongside a profile.
+
+    A commission can pin a revision without carrying a profile bundle, and
+    a gate that only ran under ``--profile`` would wave those through --
+    a stale pin then dies at the node's first seat instead of at init. A
+    resolvable pin initializes normally.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    head = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    # a pin that resolves to no commit refuses before any worktree exists
+    with pytest.raises(ValueError, match='--pin does not resolve'):
+        Node(git_repo).init(name='v1', pin='0' * 40)
+    assert not (git_repo / '.worktrees' / 'main.v1').exists()
+    # a real pin passes the gate and the node initializes
+    Node(git_repo).init(name='v1', pin=head)
+    assert (git_repo / '.worktrees' / 'main.v1' / '.fractal' / 'main.v1').is_dir()
 
 
 def test_init_profile_seeds_and_validates_the_fill_sheet(

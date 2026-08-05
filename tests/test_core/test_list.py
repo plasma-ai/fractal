@@ -35,6 +35,7 @@ __all__ = [
     'test_list_renders_last_activity_age',
     'test_list_flags_stale_active_rows',
     'test_list_flags_iteration_gaps',
+    'test_billing_detector_reads_realistic_step_sequences',
     'test_list_flags_billing_backoff',
 ]
 
@@ -385,6 +386,68 @@ def test_list_flags_iteration_gaps(
     child.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
     rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
     assert f'iteration gap {run_id}.3-{run_id}.4' in rows[child.branch]
+
+
+def test_billing_detector_reads_realistic_step_sequences(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The census billing detector holds against the shapes a real run books.
+
+    A detector that fires on any trailing failure would flag every
+    ordinary bad patch as an outage; one that the loop's own bookkeeping
+    rows break can never fire at all. The never-run tail the failure path
+    books (``stopped``/``failed on <step>``) and open rows are skipped as
+    bookkeeping, a completed step earlier in the run does not lift a live
+    streak, and a paid or slow failure breaks it.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    run_id = child.record.runs(limit=1)[0]['run_id']
+    iter_id = child.record.iter_start(run_id=run_id, iter=1)
+    number = iter(range(1, 99))
+
+    def _step(status: str, *, cost: Optional[float], metadata: str = '') -> None:
+        step_id = child.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=next(number),
+            step_name='EXECUTE',
+        )
+        child.record.step_end(
+            step_id=step_id,
+            status=status,
+            exit_code=1 if status == 'failed' else 0,
+            metadata=metadata,
+        )
+        if cost is not None:
+            child.record.step_cost(step_id=step_id, cost=cost)
+
+    def _detail() -> str:
+        rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+        return rows[child.branch] or ''
+
+    # a healthy lap, then two instant $0 failures: not yet an outage
+    _step('completed', cost=0.30)
+    _step('failed', cost=0.0)
+    _step('failed', cost=0.0)
+    assert 'PAUSED: billing' not in _detail()
+    # the third arms it -- and the never-run tail the failure path books
+    # must not break the streak it sits on top of
+    _step('failed', cost=0.0)
+    _step('stopped', cost=0.0, metadata='failed on EXECUTE')
+    assert 'PAUSED: billing' in _detail()
+    # an open row (a step in flight) is bookkeeping, not a launch
+    child.record.step_start(
+        iter_id=iter_id,
+        run_id=run_id,
+        step=next(number),
+        step_name='EXECUTE',
+    )
+    assert 'PAUSED: billing' in _detail()
+    # a paid failure on top breaks the streak -- an expensive genuine
+    # failure is not an outage
+    _step('failed', cost=0.90)
+    assert 'PAUSED: billing' not in _detail()
 
 
 def test_list_flags_billing_backoff(
