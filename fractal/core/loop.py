@@ -700,7 +700,26 @@ class Loop:
         """Adopt a paused run (resume) or open a fresh run row."""
         node = self.node
         if not self._resume:
+            # a pending finish survives the tear: a run can die between
+            # `node finish` landing and the terminal cascade consuming it
+            # (a torn seat, a stop interrupting the drain, a force-commit
+            # backstop racing the wind-down), and finish signals are
+            # run-scoped -- without the carry the docket-met intent is
+            # orphaned and the continued node keeps iterating and burning
+            # budget as an active node. Deliberate reasons only: a
+            # budget-stemmed finish died with its run's accounting (the
+            # re-arm raised the caps on purpose).
+            carried = self._pending_finish()
             self._run_id = node.record.run_start()
+            if carried is not None:
+                print(
+                    '=== Pending finish carried from the previous run'
+                    f' ({carried or "no reason"}) ==='
+                )
+                try:
+                    node.record.signal_set('finish', carried)
+                except Exception:
+                    pass
             return
         # adopt the paused run on a resume relaunch: pause parks with the run
         # and iteration rows open, and a fresh run start would close them as
@@ -757,6 +776,31 @@ class Loop:
         except Exception:
             pass
         print(f'Resuming run {self._run_id} where the pause left it')
+
+    def _pending_finish(self: Loop) -> Optional[str]:
+        """Return the previous run's undischarged deliberate finish reason.
+
+        A finish whose run ended without booking ``completed`` never
+        discharged -- the signal is run-scoped, so a fresh run would leave
+        it orphaned forever. Budget-stemmed reasons never carry, and a
+        cancelled finish left no row to find. ``None`` when there is
+        nothing to carry.
+        """
+        try:
+            runs = self.node.record.runs(limit=1)
+            if not runs or runs[0]['status'] == 'completed':
+                return None
+            rows = self.node.record.signals(
+                run_id=runs[0]['run_id'],
+                signal='finish',
+            )
+        except Exception:
+            return None
+        for row in rows:
+            reason = row['metadata'] or ''
+            if not _is_budget_reason(reason):
+                return reason
+        return None
 
     def _clean_worktree(self: Loop) -> None:
         """Restore the worktree for a continue launch.
@@ -3607,6 +3651,16 @@ class Loop:
             )
             if output:
                 print(output)
+                # a timed-out step whose backstop found nothing to stage is
+                # the silent-void hazard: the pass books its rows and ships
+                # no bytes (a detached verify killed by its deadline), so
+                # name it loudly instead of letting the no-op read as a save
+                if self._timed_out and 'Nothing staged to commit' in output:
+                    print(
+                        f'Warning: {message}: timed out with no committed'
+                        ' output (the pass produced nothing durable)',
+                        file=sys.stderr,
+                    )
         except Exception as error:
             print(f'Error: {error}', file=sys.stderr)
 

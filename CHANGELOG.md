@@ -31,6 +31,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   text in pipes), so an error frame read through `tail -1` can never pass as
   success; unknown options keep the usage line naming the correct invocation.
 
+### Fixed
+
+- The finish ceremony is idempotent across a swallowed commit: a deliberate
+  `node finish` whose run died before the terminal cascade consumed it (a torn
+  seat, a stop interrupting the drain, the force-commit backstop racing the
+  wind-down) carries onto the next `--continue` run and books immediately — a
+  docket-met node can no longer keep iterating and burning budget;
+  budget-stemmed finishes stay with their run. A timed-out step whose backstop
+  finds nothing to stage is named loudly (`timed out with no committed output`)
+  instead of silently voiding the pass.
+
 ### Changed
 
 - Seat-death backstop commits carry their context: the auto force-commit's

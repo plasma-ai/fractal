@@ -84,6 +84,8 @@ __all__ = [
     'test_finalize_terminal_cascade_matrix',
     'test_auto_backstop_commit_carries_step_and_plan_context',
     'test_stop_mid_step_lets_the_seat_complete',
+    'test_timeout_void_force_commit_is_loud',
+    'test_pending_finish_carries_to_the_continued_run',
     'test_stop_during_finish_drain_books_stopped',
     'test_pre_iteration_finish_drain_uses_the_run_wall_not_the_iter_deadline',
     'test_finalize_classifies_over_cap_finishes_by_reason',
@@ -2357,6 +2359,100 @@ def test_stop_mid_step_lets_the_seat_complete(
     run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert (run['status'], run['exit_code']) == ('stopped', 0)
     assert loop_node.status() == 'stopped'
+
+
+def test_timeout_void_force_commit_is_loud(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A timed-out step whose backstop stages nothing is named loudly.
+
+    A detached pass killed by its deadline books its rows and can ship no
+    bytes; the backstop's quiet 'Nothing staged to commit' would let that
+    void pass as a save, silently voiding the work (a verify pass most of
+    all). The timeout case warns on stderr; a clean non-timeout sweep
+    stays quiet.
+    """
+    monkeypatch.setenv('_NODE', '')
+    loop = MockLoop(loop_node)
+    loop._run_id = loop_node.record.run_start()
+    # settle the fixture's estate into a commit so the probe sweeps clean
+    loop._force_commit('prime')
+    capsys.readouterr()
+    loop._timed_out = True
+    loop._force_commit('failed on VERIFY')
+    captured = capsys.readouterr()
+    assert 'Nothing staged to commit' in captured.out
+    assert 'timed out with no committed output' in captured.err
+    # the same empty sweep without a timeout stays quiet
+    loop._timed_out = False
+    loop._force_commit('final')
+    assert 'no committed output' not in capsys.readouterr().err
+
+
+def test_pending_finish_carries_to_the_continued_run(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undischarged finish books on the next run instead of orphaning.
+
+    Finish signals are run-scoped, and a run can die between `node finish`
+    landing and the cascade consuming it (a torn seat, a stop interrupting
+    the drain) -- without the carry, the docket-met node keeps iterating
+    and burning budget as an active node forever. The continued run adopts
+    the deliberate finish and completes without buying a single step; a
+    budget-stemmed finish stays with its run (the re-arm raised the caps
+    on purpose).
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, max_iters=3)
+
+    class _TornDrain(MockLoop):
+        """Land finish then stop mid-drain, stranding the finish."""
+
+        def _launch(
+            self: _TornDrain,
+            step: Step,
+            prompt: str,
+            *,
+            agent: Any,
+            budget: Optional[float],
+        ) -> StepResult:
+            result = super()._launch(step, prompt, agent=agent, budget=budget)
+            if len(self.launched) == 1:
+                self.node.record.signal_set('finish', 'requirements met')
+                self.node.record.signal_set('stop', 'manual')
+            return result
+
+        def _descendants_active(self: _TornDrain) -> bool:
+            return True
+
+    torn = _TornDrain(node)
+    torn._wait_seconds = 1
+    assert torn.run() == 0
+    run = node.record.runs(limit=1)[0]
+    assert run['status'] == 'stopped'
+    # the continued run carries the finish: it drains and completes
+    # without launching a step
+    carried = MockLoop(node, continue_=True)
+    assert carried.run() == 0
+    assert carried.launched == []
+    run = node.record.runs(limit=1)[0]
+    assert (run['status'], run['exit_code']) == ('completed', 0)
+    assert node.status() == 'completed'
+    # a budget-stemmed finish never carries: the next continue runs normally
+    run_id = node.record.run_start()
+    node.record.signal_set(
+        'finish',
+        'cost budget reserve reached (spent $9.0000 >= $10.0 max - $1.0 reserve)',
+    )
+    node.record.run_end(run_id=run_id, status='exited', exit_code=0)
+    node.status_set('exited')
+    plain = MockLoop(node, continue_=True)
+    assert plain.run() == 0
+    assert len(plain.launched) > 0
 
 
 def test_stop_during_finish_drain_books_stopped(
