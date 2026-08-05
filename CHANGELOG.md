@@ -66,6 +66,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A read-only census no longer SIGKILLs a healthy loop that has no tmux session.
+  `fractal node _loop` is a supported bare entry point (`start.sh` execs it, and
+  a tmux-less host has no other), but crash reconciliation read the tmux probe's
+  "no such session" as proof the loop had died — so any command reaching
+  `Node.status_detail`, `fractal node list` included, stamped the node `exited`
+  and TERM/KILLed the running loop's whole process group, in-flight agent and
+  all, leaving one `orphan` event as the only trace. A bare launch records no
+  socket, so that answer is about a server the loop never joined; its own
+  recorded process group now overrules the probe.
 - A mailbox selector no longer selects who is reading.
   `radio messages --json --body`, `radio messages --saved`,
   `radio feed --saved`, and `radio thread` all emit message bodies, but resolved

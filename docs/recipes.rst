@@ -231,7 +231,11 @@ process groups:
 
 ``fractal node list --live`` gives the same authoritative view read-only,
 relabeling without persisting. A ``paused`` node is never healed: no tmux
-session is its normal parked state.
+session is its normal parked state. Neither is a loop launched bare
+(``fractal node _loop``, what ``start.sh`` execs — the harness and a
+tmux-less host launch it directly): it never joined a tmux server, so the
+probe's "no such session" says nothing about it, and its own recorded process
+group keeps the heal — and the reap that comes with it — off a running loop.
 
 ``--continue`` restores the worktree before relaunching: uncommitted project
 files refuse without ``--clean`` (which acknowledges discarding them), and a

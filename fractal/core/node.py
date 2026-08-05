@@ -306,6 +306,37 @@ class Node:
             return None
         return self.tmux_session in sessions
 
+    def _bare_loop_alive(self: Node) -> bool:
+        """Return whether a live loop is running with no tmux session of its own.
+
+        ``fractal node _loop`` is a supported entry point -- ``start.sh``
+        execs it inside the pane, but the harness and a tmux-less host
+        launch it bare -- and a bare launch records no socket
+        (:meth:`_tmux_session_exists` drops any stale one at boot), so
+        "no such session" is an answer about a server this loop never
+        joined rather than proof it died. What a bare loop does leave is
+        its own process group (``.pgid``, written at run start and removed
+        on any in-band exit): alive, and the recorded group rather than a
+        recycled id (:func:`_recorded_group`), it proves the loop is
+        running. A tmux-backed loop is excluded by its socket record --
+        for that one a group outliving the pane is the headless orphan the
+        reap exists for, not a loop to spare.
+
+        Returns:
+            Whether a bare-launched loop is provably still running.
+
+        """
+        if (self.node_dir / SOCKET_FILE).exists():
+            return False
+        pgid_file = self.node_dir / PGID_FILE
+        try:
+            recorded_at = pgid_file.stat().st_mtime
+            pgid = int(pgid_file.read_text(encoding='utf-8').strip())
+            os.killpg(pgid, 0)
+        except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+            return False
+        return _recorded_group(pgid, recorded_at)
+
     def _reconcile_status(self: Node) -> None:
         """Stamp a crashed-but-active node ``exited``.
 
@@ -331,6 +362,11 @@ class Node:
         tmux visibility (a cron/CI host) must not kill a healthy loop's
         process groups, and a shell on a *different* socket gets its proof
         from the loop's recorded one (see :meth:`_tmux_session_exists`).
+        A definitive "no such session" is proof only for a loop that had
+        one: a bare ``node _loop`` launch never joined a server, so its own
+        live process group overrules the probe (:meth:`_bare_loop_alive`)
+        -- without that, any read-only census SIGKILLed a healthy
+        tmux-less loop and its in-flight agent.
 
         Never reconciles the node from inside its own running loop: the loop
         self-finishes (``send_budget_finish`` calls ``node finish``), and a
@@ -342,7 +378,7 @@ class Node:
             return
         if self.status() != 'active':
             return
-        if self._tmux_session_exists() is False:
+        if self._tmux_session_exists() is False and not self._bare_loop_alive():
             self._reap_orphan()
             self.record.close_open('exited')
             self.status_set('exited')

@@ -14,13 +14,14 @@ import os
 import pathlib
 import signal
 import subprocess
+import time
 
 import pytest
 
 from fractal.core.node import Node
 from tests._helpers import _git
 
-from .conftest import _run
+from .conftest import _cli_env, _fractal_bin, _reap_group, _run
 
 __all__ = [
     'test_retire_recovers_a_crashed_active_node',
@@ -29,7 +30,16 @@ __all__ = [
     'test_list_read_reconciles_crashed_node',
     'test_status_read_reaps_an_orphaned_agent',
     'test_kill_reaps_recorded_pgid_after_pane_death',
+    'test_census_read_spares_a_live_tmux_less_loop',
 ]
+
+# hanging claude stand-in: emit the init frame the stream driver expects,
+# then block, so the launch parks mid-step for the census read to find
+_HANG_STUB = """#!/usr/bin/env bash
+SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
+exec sleep 600
+"""
 
 
 @pytest.fixture(scope='module')
@@ -145,12 +155,20 @@ def _orphaned_worker(
     Fabricates the out-of-band pane death: a crashed-active worker plus a real
     process in its own group (``start_new_session`` -- pgid equals its pid,
     like the pane's loop process), recorded in the node's ``.pgid`` the
-    way the loop records it at run start.
+    way the loop records it at run start. The dead pane's socket record goes
+    in too -- a loop that had a session always leaves one, and only that
+    record tells a surviving group apart from a bare (tmux-less) loop's own,
+    which no reap may touch.
     """
     worktree = _crashed_worker(root, name)
     orphan = subprocess.Popen(['sleep', '300'], start_new_session=True)
     node_dir = worktree / '.fractal' / f'main.{name}'
     (node_dir / '.pgid').write_text(f'{orphan.pid}\n', encoding='utf-8')
+    # a short, never-created socket path: tmux answers "no such file", the
+    # definitive empty a dead pane's socket gives -- a path under the node
+    # dir would overrun the sockaddr limit and read as an unknown instead
+    socket = f'/tmp/fx-dead-{orphan.pid}'  # noqa: S108
+    (node_dir / '.socket').write_text(f'{socket}\n', encoding='utf-8')
     return worktree, orphan
 
 
@@ -210,3 +228,79 @@ def test_kill_reaps_recorded_pgid_after_pane_death(root: pathlib.Path) -> None:
         except (ProcessLookupError, PermissionError):
             pass
         orphan.wait()
+
+
+def test_census_read_spares_a_live_tmux_less_loop(
+    root: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A read-only census never reaps a healthy loop that has no tmux session.
+
+    ``fractal node _loop`` is a supported entry point (``start.sh`` execs
+    it, and the harness launches it bare), so a live loop can legitimately
+    have no session for the tmux probe to find. The probe's "no such
+    session" is then an answer about a server this loop never joined --
+    ignorance, not proof -- and a reconcile that treated it as proof
+    SIGKILLed the running loop's whole process group from any listing.
+    The census must leave it alone: still running, still ``active``, no
+    ``orphan`` row.
+    """
+    init = _run(
+        root,
+        'node',
+        'init',
+        'census',
+        '--agent',
+        'claude',
+        '--max-iters',
+        '1',
+        '--no-sync',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = root / '.worktrees' / 'main.census'
+    node_dir = worktree / '.fractal' / 'main.census'
+    # one hanging step, so the launch parks mid-step for the census read
+    steps_dir = node_dir / 'steps'
+    for step in steps_dir.glob('*.md'):
+        step.unlink()
+    (steps_dir / '01-hang.md').write_text('# Hang\n\nHanging step.\n', encoding='utf-8')
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    agent = bindir / 'claude'
+    agent.write_text(_HANG_STUB, encoding='utf-8')
+    agent.chmod(0o755)
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    log = tmp_path / 'loop.log'
+    with open(log, 'w', encoding='utf-8') as handle:
+        proc = subprocess.Popen(
+            [_fractal_bin(), 'node', '_loop', f'--path={worktree}'],
+            cwd=f'{worktree}',
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+    try:
+        # the loop is up once it has stamped active and recorded its group
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            status = (node_dir / '.status').read_text(encoding='utf-8').strip()
+            if status == 'active' and (node_dir / '.pgid').exists():
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail(f'loop never came up:\n{log.read_text()}')
+        listed = _run(root, 'node', 'list', '--json')
+        assert listed.returncode == 0, listed.stderr
+        # the census neither killed the loop nor rewrote its status
+        assert proc.poll() is None, log.read_text()
+        assert (node_dir / '.status').read_text(encoding='utf-8').strip() == 'active'
+        assert '"status": "active"' in listed.stdout
+        # ...and it logged no reap: an orphan row would name the pgid it took
+        activity = _run(worktree, 'node', 'activity', '--csv').stdout
+        assert 'orphan' not in activity, activity
+    finally:
+        _reap_group(proc)
