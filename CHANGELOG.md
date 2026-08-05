@@ -155,9 +155,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `feed`, `thread`, and `subs` resolve the acting node exactly like the writing
   verbs (loop-exported `_NODE` first, else the cwd; `--path` still selects
   another mailbox), so a delivered send is visible in its sender's own next
-  outbox listing; `messages`/`sent`/`feed` close with an
+  outbox listing; every listing closes with an
   `as of <instant> (acting as <branch>)` freshness watermark on stderr — the
-  recorded cut to quote when grading from a listing.
+  recorded cut to quote when grading from a listing, read before the query so a
+  row a concurrent sender lands mid-render is never endorsed as absent.
 - `node stop`'s wait-for-the-seat contract is pinned by test and documented: a
   stop landing mid-step waits for the in-flight agent to complete — it never
   signals or tears the running seat (`node kill` remains the immediate path) —

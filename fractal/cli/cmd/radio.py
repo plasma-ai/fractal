@@ -480,6 +480,8 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
         # send attributed to is the node whose mailbox this lists); an
         # explicit --path still selects another mailbox
         radio = Radio(resolve_sender(path))
+        # the watermark's cut is read before the query, never at render
+        instant = time.time()
         # --saved: show archived messages
         if saved:
             rows = radio.saved(
@@ -492,7 +494,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
                 print_json(rows, columns=_SAVED_COLUMNS)
             else:
                 print_rows(rows, csv=csv, columns=_SAVED_COLUMNS)
-            _stamp_listing(radio)
+            _stamp_listing(radio, instant)
             return
         # a bound seal empties the listing by design -- name it once, with
         # the lawful remedy, and skip the misleading unread-total notice
@@ -549,7 +551,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
             print_json(rows, columns=columns)
         else:
             print_rows(rows, csv=csv, columns=columns)
-        _stamp_listing(radio)
+        _stamp_listing(radio, instant)
 
     return app
 
@@ -593,6 +595,8 @@ def radio_sent(app: typer.Typer) -> typer.Typer:
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
         radio = Radio(resolve_sender(path))
+        # the watermark's cut is read before the query, never at render
+        instant = time.time()
         rows = radio.sent(
             channel=channel,
             limit=limit,
@@ -603,7 +607,7 @@ def radio_sent(app: typer.Typer) -> typer.Typer:
             print_json(rows, columns=_MESSAGE_COLUMNS)
         else:
             print_rows(rows, csv=csv, columns=_MESSAGE_COLUMNS)
-        _stamp_listing(radio)
+        _stamp_listing(radio, instant)
 
     return app
 
@@ -639,6 +643,8 @@ def radio_relays(app: typer.Typer) -> typer.Typer:
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
         radio = Radio(resolve_sender(path))
+        # the watermark's cut is read before the query, never at render
+        instant = time.time()
         rows = radio.relays(message_uuid)
         # an empty lineage is the check's loudest answer -- name it (stdout
         # keeps the empty-header contract for parsers)
@@ -649,7 +655,7 @@ def radio_relays(app: typer.Typer) -> typer.Typer:
             print_json(rows, columns=_RELAY_COLUMNS)
         else:
             print_rows(rows, csv=csv, columns=_RELAY_COLUMNS)
-        _stamp_listing(radio)
+        _stamp_listing(radio, instant)
 
     return app
 
@@ -718,6 +724,8 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
             raise typer.BadParameter('--saved is mutually exclusive with --read/--all.')
         # resolve node
         radio = Radio(resolve_sender(path))
+        # the watermark's cut is read before the query, never at render
+        instant = time.time()
         # --saved: show archived messages
         if saved:
             rows = radio.saved(
@@ -731,7 +739,7 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
                 print_json(rows, columns=_SAVED_COLUMNS)
             else:
                 print_rows(rows, csv=csv, columns=_SAVED_COLUMNS)
-            _stamp_listing(radio)
+            _stamp_listing(radio, instant)
             return
         read_filter = _read_filter(all_messages, read)
         rows = radio.feed(
@@ -768,7 +776,7 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
             print_json(rows, columns=columns)
         else:
             print_rows(rows, csv=csv, columns=columns)
-        _stamp_listing(radio)
+        _stamp_listing(radio, instant)
 
     return app
 
@@ -880,6 +888,8 @@ def radio_thread(app: typer.Typer) -> typer.Typer:
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
         radio = Radio(resolve_sender(path))
+        # the watermark's cut is read before the query, never at render
+        instant = time.time()
         rows = radio.thread(message_uuid)
         if json:
             print_json(rows, columns=_THREAD_COLUMNS)
@@ -897,6 +907,7 @@ def radio_thread(app: typer.Typer) -> typer.Typer:
                     f'{indent}[{uuid}] {sender}'
                     f' ({timestamp}, priority {priority}): {subject}'
                 )
+        _stamp_listing(radio, instant)
 
     return app
 
@@ -1050,11 +1061,14 @@ def radio_subs(app: typer.Typer) -> typer.Typer:
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
         radio = Radio(resolve_sender(path))
+        # the watermark's cut is read before the query, never at render
+        instant = time.time()
         rows = radio.subs()
         if json:
             print_json(rows, columns=_SUB_COLUMNS)
         else:
             print_rows(rows, csv=csv, columns=_SUB_COLUMNS)
+        _stamp_listing(radio, instant)
 
     return app
 
@@ -1062,16 +1076,21 @@ def radio_subs(app: typer.Typer) -> typer.Typer:
 # ------ helper functions
 
 
-def _stamp_listing(radio: Radio) -> None:
+def _stamp_listing(radio: Radio, instant: float) -> None:
     """Print a listing's freshness watermark on stderr (the recorded cut).
 
     A listing is a point-in-time cut of the store: instruments that grade
     from one need the cut's instant and acting identity on the record, or a
     stale/mis-attributed read silently becomes a false-record verdict.
-    Unconditional and on stderr -- stdout keeps the row contract.
+    ``instant`` is the caller's clock read from before its query: a stamp
+    taken at render time would claim a cut the query never saw, endorsing
+    a row a concurrent sender landed mid-render as never sent -- the exact
+    verdict the watermark exists to prevent -- while the pre-query cut only
+    ever under-claims. Unconditional and on stderr -- stdout keeps the row
+    contract.
     """
-    instant = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-    typer.echo(f'as of {instant} (acting as {radio.node.branch})', err=True)
+    stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(instant))
+    typer.echo(f'as of {stamp} (acting as {radio.node.branch})', err=True)
 
 
 def _resolve_reader() -> Node:

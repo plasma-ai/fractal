@@ -20,10 +20,14 @@ import json
 import pathlib
 import re
 import subprocess
-from typing import Optional
+import time
+from typing import Any, Optional
 
 import pytest
+import typer
 
+from fractal.cli.cmd import radio as radio_cmd
+from fractal.core.radio import Radio
 from tests._helpers import _git
 
 from .conftest import _run
@@ -52,6 +56,7 @@ __all__ = [
     'test_sealed_inbox_holds_the_seat_but_not_the_operator',
     'test_send_fans_out_with_receipts_and_relays_lists_lineage',
     'test_listings_read_your_writes_and_close_with_a_watermark',
+    'test_watermark_stamps_the_pre_query_cut',
     'test_post_and_reply_follow_node_env',
     'test_write_verbs_follow_node_env',
     'test_stale_node_env_refused_cleanly',
@@ -1078,6 +1083,67 @@ def test_listings_read_your_writes_and_close_with_a_watermark(repo: dict) -> Non
     assert 'acting as main.beta' in inbox.stderr
     # round-trip: withdraw the probe message so the shared mailbox stays clean
     assert _run(root, 'radio', 'unsend', uuid, _NODE=f'{alpha}').returncode == 0
+
+
+def test_watermark_stamps_the_pre_query_cut(
+    repo: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The watermark instant is the clock read before the query, not render.
+
+    A row a concurrent sender lands between the query and the stamp has
+    ``created_at`` before the watermark yet is absent from the listing, so
+    a render-time stamp endorses a false 'never sent' verdict -- the exact
+    error the watermark exists to prevent; the pre-query cut only ever
+    under-claims. Driven in-process (the interleaving is unreachable from
+    a subprocess) with a stepped clock the query advances two minutes,
+    modeling a slow render or pipe consumer: the stamp must still say the
+    instant from before the query. ``thread`` and ``subs`` -- the surfaces
+    a reply obligation grades from -- close with the watermark too.
+    """
+
+    class _SteppedClock:
+        """Module-shaped time double whose queries advance the clock."""
+
+        strftime = staticmethod(time.strftime)
+
+        def __init__(self) -> None:
+            self.now = 1_000_000_000.0
+
+        def time(self) -> float:
+            return self.now
+
+        def gmtime(self, secs: Optional[float] = None) -> time.struct_time:
+            return time.gmtime(self.now if secs is None else secs)
+
+    clock = _SteppedClock()
+    monkeypatch.setattr(radio_cmd, 'time', clock)
+    monkeypatch.setenv('_NODE', '')
+
+    def slow_query(self: Radio, *args: Any, **kwargs: Any) -> list:
+        clock.now += 120
+        return []
+
+    def invoke(register: Any, query: str, **kwargs: Any) -> str:
+        clock.now = 1_000_000_000.0
+        monkeypatch.setattr(Radio, query, slow_query)
+        app = typer.Typer()
+        register(app)
+        [entry] = app.registered_commands
+        entry.callback(csv=True, json=False, path=f'{repo["alpha"]}', **kwargs)
+        return capsys.readouterr().err
+
+    pre_query = 'as of 2001-09-09T01:46:40Z (acting as main.alpha)'
+    listing = invoke(
+        radio_cmd.radio_sent, 'sent', channel=None, limit=None, since=None, recent=False
+    )
+    assert pre_query in listing
+    assert 'as of 2001-09-09T01:48:40Z' not in listing
+    assert pre_query in invoke(
+        radio_cmd.radio_thread, 'thread', message_uuid='a1b2c3d4'
+    )
+    assert pre_query in invoke(radio_cmd.radio_subs, 'subs')
 
 
 def test_post_and_reply_follow_node_env(repo: dict) -> None:
