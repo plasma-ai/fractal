@@ -97,6 +97,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and start, instead of instructing the operator to author the charter the
   profile already authored (following that instruction invited overwriting a
   pinned commission).
+- `node list --csv --count` refuses like `--json --count` already did: `--count`
+  silently won and handed a CSV consumer a bare number — a shape it never asked
+  for, with no error.
 - Seal enforcement closes its archive and environment bypasses: a sealed seat
   can no longer `radio save` a hosted message and read the body back through
   `messages --saved` (the archive is a body surface; pre-seal archives are held

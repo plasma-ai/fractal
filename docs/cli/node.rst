@@ -541,7 +541,9 @@ activity, with a ``!`` suffix flagging an active node quiet past
    ``<status> (orphaned)`` when settled).
 
 ``--count``
-   Print only the number of matching nodes.
+   Print only the number of matching nodes (mutually exclusive with the
+   row formats: a bare number is a shape neither a CSV nor a JSON consumer
+   asked for).
 
 ``--csv``
    Force CSV output (already the default when piped).

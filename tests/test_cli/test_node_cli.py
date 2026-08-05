@@ -1018,10 +1018,12 @@ def test_list_json_mirrors_csv_shape(repo: dict) -> None:
     clash = _run(root, 'node', 'list', '--json', '--csv')
     assert clash.returncode != 0
     # ... and neither can a row format and the bare count: honoring one
-    # silently would hand a JSON consumer a shape it never asked for
-    counted = _run(root, 'node', 'list', '--json', '--count')
-    assert counted.returncode != 0
-    assert 'mutually exclusive' in counted.stderr
+    # silently would hand a machine consumer a shape it never asked for --
+    # the rule covers both row formats, not just JSON
+    for row_format in ('--json', '--csv'):
+        counted = _run(root, 'node', 'list', row_format, '--count')
+        assert counted.returncode != 0, row_format
+        assert 'mutually exclusive' in counted.stderr
 
 
 def test_list_status_count_and_live(repo: dict) -> None:
