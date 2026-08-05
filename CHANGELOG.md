@@ -66,6 +66,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A child in its boot window no longer escapes a `stop`/`finish` cascade
+  permanently. Both verbs made a single pass over the descendants live at that
+  instant, so a child still `idle` for the moment between `node start` returning
+  and its loop's `active` stamp got no signal row at all — while the operator's
+  command reported success. It then ran on unattended after its manager settled,
+  and under `finish` blocked the manager's drain-wait until its own `max_iters`
+  ran out. The sweeps now re-enumerate to a fixpoint (as `kill` and `pause`
+  already did), and a loop that boots while an ancestor still carries a pending
+  stop or finish adopts that signal onto its own run and honors it at the first
+  boundary — the graceful-signal twin of the pause latch a booting loop parks
+  itself against.
 - A read-only census no longer SIGKILLs a healthy loop that has no tmux session.
   `fractal node _loop` is a supported bare entry point (`start.sh` execs it, and
   a tmux-less host has no other), but crash reconciliation read the tmux probe's

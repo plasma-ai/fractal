@@ -53,6 +53,17 @@ subtree, not just the named node. `finish_cancel` withdraws a pending finish
 before the loop honors it. Signaled from the user (root) node, finish is a
 tree-wide broadcast with no self-signal, since the root runs no loop of its own.
 
+Both sweeps re-enumerate to a fixpoint, the way `kill` and `pause` do: a single
+pass covers only the descendants live when it began, so a child that stamped
+`active` while the sweep signaled its sibling escaped with no signal row at all.
+The remaining sliver — a child that boots after the last pass — closes at the
+child's own end, mirroring how a booting loop parks itself under a pause latch:
+`Node.cascade_latched` walks the ancestors for one still `active` with a pending
+`stop` or `finish` (nearest first, `stop` outranking `finish`), and
+`Loop._adopt_cascade` records it on the fresh run so the ordinary boundary check
+honors it. The user node is skipped in that walk — its tree-wide broadcast
+records no signal there is anything to adopt.
+
 ## kill
 
 `kill` is the escape hatch: it targets `active`, `paused`, and `idle` nodes — a

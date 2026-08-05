@@ -530,6 +530,7 @@ class Loop:
         try:
             if self._park_if_latched():
                 return 0
+            self._adopt_cascade()
             # compute the whole-run deadline once -- the per-iteration
             # deadline resets each pass, but the run wall clock is fixed for
             # this invocation; an adopted run anchors on the credited
@@ -739,6 +740,49 @@ class Loop:
         except Exception:
             pass
         return True
+
+    def _adopt_cascade(self: Loop) -> None:
+        """Adopt a wind-down an ancestor ordered while this loop was booting.
+
+        ``stop``/``finish`` fan out over the descendants live when they
+        sweep, so a node still ``idle`` for the moment between ``node
+        start`` returning and the stamp below gets no signal row -- and the
+        operator's command reports success. The pause latch closes the same
+        window from the booting loop's own end (:meth:`_park_if_latched`);
+        this is its graceful-signal twin: an ancestor still ``active`` with
+        a pending stop or finish is a wind-down this node was meant to be
+        part of, so record it on this fresh run and let the ordinary
+        boundary checks honor it -- after the current step for a stop,
+        after the current iteration for a finish. Best-effort throughout: a
+        read or write that fails must not abort a boot the operator has no
+        other way to complete.
+        """
+        node = self.node
+        try:
+            latched = node.cascade_latched()
+        except Exception:
+            return
+        if latched is None:
+            return
+        branch, signal = latched
+        # mirror Node._fan_out_reason's attribution, so the adopted row reads
+        # as the ancestor's order rather than this node's own boundary mis-fire
+        reason = f'via {signal} of {branch}'
+        print(f'=== Adopted the pending {signal} of {branch} at boot ===')
+        try:
+            node.record.signal_set(signal, reason)
+        except Exception:
+            pass
+        try:
+            event_id = node.record.event_start(
+                signal,
+                metadata=reason,
+                run_id=self._run_id,
+            )
+            if event_id is not None:
+                node.record.event_end(event_id=event_id, status='completed')
+        except Exception:
+            pass
 
     def _adopt(self: Loop) -> None:
         """Adopt a paused run (resume) or open a fresh run row."""

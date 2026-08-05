@@ -67,6 +67,7 @@ __all__ = [
     'test_signals_reach_deep_through_inactive_intermediate',
     'test_kill_propagates_deep_status_and_keeps_worktrees',
     'test_kill_reaps_booting_descendant',
+    'test_graceful_sweep_reaches_a_descendant_that_appears_mid_sweep',
     'test_merge_lifecycle',
     'test_merge_no_op_when_nothing_to_merge',
     'test_merge_surfaces_script_notices',
@@ -975,6 +976,58 @@ def test_kill_reaps_booting_descendant(
     assert ('kill.sh', f'{child.worktree}') in run_scripts
     run = child.record.runs(limit=1)[0]
     assert run['status'] == 'killed'
+
+
+@pytest.mark.parametrize('verb', ['stop', 'finish'])
+def test_graceful_sweep_reaches_a_descendant_that_appears_mid_sweep(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    """Stop and finish re-enumerate, so a start landing mid-sweep is signaled.
+
+    A single pass covers only the descendants live when it began, so a
+    child that stamped ``active`` while the sweep was signaling its
+    sibling escaped with no signal row at all -- running on unattended
+    under a stop, and blocking the parent's drain-wait under a finish.
+    The sweep re-reads until no fresh live descendant appears, the way
+    ``kill`` and ``pause`` already do.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    # a second child in its boot window: registered with a run open, its
+    # loop yet to stamp active
+    node_dir = parent.worktree / '.fractal' / 'main.parent'
+    monkeypatch.setenv('_NODE', f'{node_dir}')
+    Node(git_repo).init(name='late')
+    monkeypatch.delenv('_NODE')
+    late = Node(git_repo / '.worktrees' / 'main.parent.late')
+    late.record.run_start()
+    # present all three loops alive, so no enumeration reconciles one away
+    sessions = frozenset({parent.tmux_session, child.tmux_session, late.tmux_session})
+    monkeypatch.setattr('fractal.util.tmux.probe', lambda: sessions)
+    # the late child wins its boot race while the sweep signals its sibling
+    # -- the interleaving a single pass exited over
+    signal_one = getattr(Node, f'_{verb}')
+
+    def _signal_one(
+        self: Node,
+        reason: Optional[str] = None,
+        *,
+        fan_out: bool = False,
+    ) -> None:
+        if self.branch == child.branch:
+            late.status_set('active')
+        signal_one(self, reason, fan_out=fan_out)
+
+    monkeypatch.setattr(Node, f'_{verb}', _signal_one)
+    _stub_run_script(monkeypatch, Node)
+    getattr(parent, verb)()
+    # every descendant carries the signal, the late arrival included, and
+    # each names the parent that ordered it
+    for node in (child, late):
+        row = node.record.signal_get(verb)
+        assert row is not None, node.branch
+    assert parent.record.signal_get(verb) is not None
 
 
 # ------ merge

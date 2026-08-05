@@ -64,6 +64,7 @@ __all__ = [
     'test_kill_marks_node_and_active_rows_killed',
     'test_kill_mid_step_lands_killed_on_every_surface',
     'test_step_timeout_kills_a_term_trapping_survivor',
+    'test_boot_adopts_a_wind_down_that_swept_past_it',
     'test_stop_after_finish_records_both_and_keeps_active',
     'test_kill_is_terminal_for_further_signals',
     'test_step_approval_tristate_drives_approved_and_pending',
@@ -114,6 +115,15 @@ SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
 bash -c 'trap "" TERM; while true; do sleep 1; done' &
 exit 0
+"""
+
+# a claude stand-in that completes instantly: the boot-window cascade pin needs
+# a launch that reaches its first boundary check, not one that parks mid-step
+_QUICK_STUB = """#!/usr/bin/env bash
+SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
+printf '{"type":"result","session_id":"%s","total_cost_usd":0,"num_turns":1,"duration_ms":1}\\n' \\
+    "$SID"
 """
 
 
@@ -625,6 +635,94 @@ def test_step_timeout_kills_a_term_trapping_survivor(
 
 
 # ------ double-signal sequencing
+
+
+@pytest.mark.parametrize('signal', ['stop', 'finish'])
+def test_boot_adopts_a_wind_down_that_swept_past_it(
+    repo: dict,
+    tmp_path: pathlib.Path,
+    live_loop: Callable[[pathlib.Path], None],
+    signal: str,
+) -> None:
+    """A child whose start was in flight when the sweep ran still winds down.
+
+    ``stop``/``finish`` fan out over the descendants live at the moment
+    they sweep, so a child still ``idle`` between ``node start`` returning
+    and its loop's ``active`` stamp gets no signal row -- while the
+    operator's command reports success. It then runs on unattended after
+    its manager settles, and under ``finish`` it blocks the manager's
+    drain-wait until its own caps run out. The child closes the window
+    from its own end, the way a booting loop already parks itself under a
+    pause latch: an ancestor still carrying a pending wind-down is one
+    this node was meant to be part of, so the boot adopts the signal and
+    the ordinary boundary checks honor it.
+    """
+    root = repo['root']
+    name = f'boot{signal}'
+    mgr, _ = _arm(root, name)
+    live_loop(mgr)
+    # a child registered under the manager but not yet started: the state a
+    # start in flight leaves behind, which the sweep's active filter skips
+    init = _run(
+        mgr,
+        'node',
+        'init',
+        'kid',
+        '--agent',
+        'claude',
+        '--max-iters',
+        '3',
+        '--no-sync',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    kid = root / '.worktrees' / f'main.{name}.kid'
+    node_dir = kid / '.fractal' / f'main.{name}.kid'
+    # one trivial step, so an iteration is one quick agent call
+    steps_dir = node_dir / 'steps'
+    for step in steps_dir.glob('*.md'):
+        step.unlink()
+    (steps_dir / '01-work.md').write_text('# Work\n\nOne step.\n', encoding='utf-8')
+    # the sweep runs while the child is idle: it is skipped, and says so by
+    # leaving no signal row behind
+    swept = _run(mgr, 'node', signal)
+    assert swept.returncode == 0, swept.stderr
+    rows = f"SELECT COUNT(*) FROM signals WHERE node='{kid.name}' AND signal='{signal}'"
+    assert _cell(kid, rows) == '0'
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    agent = bindir / 'claude'
+    agent.write_text(_QUICK_STUB, encoding='utf-8')
+    agent.chmod(0o755)
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    log = tmp_path / 'loop.log'
+    with open(log, 'w', encoding='utf-8') as handle:
+        proc = subprocess.Popen(
+            [_fractal_bin(), 'node', '_loop', f'--path={kid}'],
+            cwd=f'{kid}',
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+    try:
+        proc.wait(timeout=120)
+    finally:
+        _reap_group(proc)
+    transcript = log.read_text()
+    # the boot adopted the manager's order, attributed to it rather than
+    # reading as the child's own boundary mis-fire
+    metadata = (
+        f"SELECT metadata FROM signals WHERE node='{kid.name}' AND signal='{signal}'"
+    )
+    assert _cell(kid, metadata) == f'via {signal} of main.{name}', transcript
+    # ...and the first boundary check honored it, so the run settled without
+    # booking a single iteration of the three it was capped at
+    iters = f"SELECT COUNT(*) FROM iters WHERE node='{kid.name}'"
+    assert _cell(kid, iters) == '0', transcript
+    assert _run(kid, 'node', 'status').stdout.strip() != 'active', transcript
 
 
 def test_stop_after_finish_records_both_and_keeps_active(

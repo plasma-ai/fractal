@@ -2031,6 +2031,81 @@ class Node:
             return f'{reason} (via {verb} of {self.branch})'
         return f'via {verb} of {self.branch}'
 
+    def _fan_out(self: Node, verb: str, reason: str) -> int:
+        """Signal every active descendant, re-enumerating to a fixpoint.
+
+        A single pass covers only the descendants live when it started, so
+        a child whose ``start`` was in flight -- ``idle`` for the moment
+        between ``node start`` returning and its loop's flock'd ``active``
+        stamp -- got no signal row at all and never learned: under ``stop``
+        it runs on unattended after its manager settles, and under
+        ``finish`` the parent's drain-wait then blocks on a child that was
+        never told to finish. Re-read until no fresh live descendant
+        appears, the way :meth:`kill` and :meth:`pause` already do; each
+        branch is attempted exactly once, so the sweep converges even when
+        a child never settles, and each helper guards its own node under
+        the flock (a descendant that settled mid-sweep is skipped, refusal
+        recorded). The rest of the window closes at the child's own end: a
+        loop booting under a pending ancestor signal adopts it
+        (:meth:`cascade_latched`).
+
+        Args:
+            verb: ``'stop'`` or ``'finish'``.
+            reason: The attributed reason for the descendants' signal rows.
+
+        Returns:
+            How many descendants the sweep signaled.
+
+        """
+        signaled = 0
+        attempted: set[str] = set()
+        while True:
+            fresh = [
+                (row['node'], descendant)
+                for row, descendant in self._live_descendants(status='active')
+                if row['node'] not in attempted
+            ]
+            if not fresh:
+                break
+            for branch, descendant in fresh:
+                attempted.add(branch)
+                if verb == 'stop':
+                    descendant._stop(reason, fan_out=True)
+                else:
+                    descendant._finish(reason, fan_out=True)
+                signaled += 1
+        return signaled
+
+    def cascade_latched(self: Node) -> Optional[tuple[str, str]]:
+        """Return the nearest ancestor winding this node's subtree down.
+
+        The graceful-signal twin of :meth:`pause_latched`: ``stop`` and
+        ``finish`` fan out over the descendants live when they sweep, so a
+        node whose own start was in flight is reachable only from its own
+        end -- at boot it asks whether an ancestor is still ``active``
+        carrying a pending ``stop`` or ``finish``, and adopts it
+        (:meth:`Loop._adopt_cascade`). Walks by name so a pruned
+        intermediate never hides a winding-down ancestor, nearest first,
+        and ``stop`` outranks ``finish`` on one node (it ends the run
+        sooner). The node itself is skipped -- a run this loop just opened
+        carries no signal of its own -- and so is the user node, which runs
+        no loop and records no signal for its tree-wide broadcast.
+
+        Returns:
+            The latching ancestor's branch and its pending signal, or
+            ``None`` when the path is clear.
+
+        """
+        for node in self._self_and_ancestors():
+            if node is self or node.is_user:
+                continue
+            if node.status() != 'active':
+                continue
+            for signal in ('stop', 'finish'):
+                if node.record.signal_get(signal) is not None:
+                    return node.branch, signal
+        return None
+
     def finish(self: Node, reason: Optional[str] = None) -> str:
         """Finish the node and its active descendants (children first).
 
@@ -2049,10 +2124,7 @@ class Node:
         # land here): no self guard or signal, just the descendant sweep
         if self.is_user:
             propagated = self._fan_out_reason('finish', reason)
-            finished_count = 0
-            for _, descendant in self._live_descendants(status='active'):
-                descendant._finish(propagated, fan_out=True)
-                finished_count += 1
+            finished_count = self._fan_out('finish', propagated)
             if finished_count == 0:
                 return 'No active nodes to finish.'
             suffix = 's' if finished_count != 1 else ''
@@ -2068,11 +2140,9 @@ class Node:
         # the flock for the race window
         self._signal_guard('finish', 'finish')
         propagated = self._fan_out_reason('finish', reason)
-        # finish descendants first, then self -- each helper guards its own
-        # node under the flock, so a descendant that settled mid-sweep is
-        # skipped (refusal recorded) while the self-act refusal raises
-        for _, descendant in self._live_descendants(status='active'):
-            descendant._finish(propagated, fan_out=True)
+        # finish descendants first, then self -- the sweep re-enumerates to a
+        # fixpoint so a descendant whose start was in flight is reached too
+        self._fan_out('finish', propagated)
         self._finish(reason)
         # build confirmation
         result = 'Finish signal sent (will stop after current iteration)'
@@ -2151,10 +2221,7 @@ class Node:
         # signal, just the descendant sweep
         if self.is_user:
             propagated = self._fan_out_reason('stop', reason)
-            stopped_count = 0
-            for _, descendant in self._live_descendants(status='active'):
-                descendant._stop(propagated, fan_out=True)
-                stopped_count += 1
+            stopped_count = self._fan_out('stop', propagated)
             if stopped_count == 0:
                 return 'No active nodes to stop.'
             suffix = 's' if stopped_count != 1 else ''
@@ -2170,11 +2237,9 @@ class Node:
         # the flock for the race window
         self._signal_guard('stop', 'stop')
         propagated = self._fan_out_reason('stop', reason)
-        # stop descendants first, then self -- each helper guards its own
-        # node under the flock, so a descendant that settled mid-sweep is
-        # skipped (refusal recorded) while the self-act refusal raises
-        for _, descendant in self._live_descendants(status='active'):
-            descendant._stop(propagated, fan_out=True)
+        # stop descendants first, then self -- the sweep re-enumerates to a
+        # fixpoint so a descendant whose start was in flight is reached too
+        self._fan_out('stop', propagated)
         self._stop(reason)
         # build confirmation
         result = 'Stop signal sent (will stop after current step)'

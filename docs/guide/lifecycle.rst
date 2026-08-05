@@ -217,6 +217,15 @@ event, and the propagated fan-out attribution.
 The target must be ``active`` and have a run; a settled target refuses
 before any descendant is signaled.
 
+The sweep re-enumerates until no fresh live descendant appears, so a child
+whose ``start`` was still in flight when it began is signaled too rather
+than escaping the pass. What the re-read cannot catch, the child does from
+its own end: a loop that boots while an ancestor still carries a pending
+``finish`` or ``stop`` adopts that signal onto its own fresh run and honors
+it at its first boundary, announcing it on the pane. (A tree-wide broadcast
+from the user node records no signal of its own, so a child booting after
+that sweep has no ancestor row to adopt — re-enumeration alone covers it.)
+
 stop
 ~~~~
 
