@@ -3341,8 +3341,12 @@ class Node:
         Three or more consecutive newest closed launches, each failed,
         instant, and zero-cost -- the loop is backing off dead credits
         (its own breaker uses the same signature), so the census must say
-        so loudly rather than render an idle-looking active row. Active
-        nodes only: a settled node's trailing failures are history.
+        so loudly rather than render an idle-looking active row. A
+        cannot-exec launch (recorded ``agent launch failed``) is the class
+        the loop's breaker refuses to arm on, so it disqualifies the
+        streak here too -- a broken agent install must never steer the
+        operator at a credit refill. Active nodes only: a settled node's
+        trailing failures are history.
         """
         if self.status() != 'active':
             return False
@@ -3357,6 +3361,11 @@ class Node:
                 row['status'] == 'stopped' and row['metadata'].startswith('failed on')
             ):
                 continue
+            # a cannot-exec launch books failed/instant with no cost, but is
+            # not billing-shaped -- the recorded reason (retry-marker safe:
+            # the marker is a suffix) breaks the streak like a paid failure
+            if row['metadata'].startswith('agent launch failed'):
+                return False
             if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
                 return False
             elapsed = fractal.util.time.elapsed(row['started_at'])

@@ -396,21 +396,26 @@ def test_list_flags_billing_backoff(
     The credit-crash signature: consecutive newest launches failed
     instantly at $0, so the loop is backing off dead credits and the
     listing must say so loudly. A launch that spent real money breaks the
-    streak -- an expensive genuine failure never reads as an outage.
+    streak -- an expensive genuine failure never reads as an outage --
+    and so does a cannot-exec launch, the class the loop's breaker
+    excludes (a broken agent install is hot-retrying, not backing off).
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
     run_id = child.record.runs(limit=1)[0]['run_id']
     iter_id = child.record.iter_start(run_id=run_id, iter=1)
 
-    def _failed_step(number: int, cost: float) -> None:
+    def _failed_step(number: int, cost: Optional[float], metadata: str = '') -> None:
         step_id = child.record.step_start(
             iter_id=iter_id,
             run_id=run_id,
             step=number,
             step_name='EXECUTE',
         )
-        child.record.step_end(step_id=step_id, status='failed', exit_code=1)
-        child.record.step_cost(step_id=step_id, cost=cost)
+        child.record.step_end(
+            step_id=step_id, status='failed', exit_code=1, metadata=metadata
+        )
+        if cost is not None:
+            child.record.step_cost(step_id=step_id, cost=cost)
 
     for number in (1, 2, 3):
         _failed_step(number, 0.0)
@@ -418,5 +423,13 @@ def test_list_flags_billing_backoff(
     assert 'PAUSED: billing' in rows[child.branch]
     # a paid failure on top breaks the streak -- not an outage
     _failed_step(4, 0.75)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'PAUSED: billing' not in (rows[child.branch] or '')
+    # cannot-exec launches book failed/instant with no cost, but the loop's
+    # breaker excludes their class -- the census must too, retry marker and
+    # all, or a broken agent install reads as a credit outage
+    reason = 'agent launch failed: [Errno 2] No such file or directory'
+    for number, metadata in ((5, reason), (6, reason), (7, f'{reason}; retry')):
+        _failed_step(number, None, metadata=metadata)
     rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
     assert 'PAUSED: billing' not in (rows[child.branch] or '')

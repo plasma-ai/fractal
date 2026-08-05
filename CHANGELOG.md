@@ -63,6 +63,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The census `PAUSED: billing` mirror excludes cannot-exec launches (recorded
+  `agent launch failed`) exactly like the loop's breaker, so a broken agent
+  install — whose loop is hot-retrying with no breaker armed — renders as the
+  fault it is instead of steering the operator at a credit refill.
 - An idle-target kill stamps `killed` under the `.worktrees` flock before the
   reap, so a kill racing a mid-validation `start` is fully serialized against
   the loop's flock'd boot check: kill-first stands the boot down, loop-first
