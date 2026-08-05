@@ -8,6 +8,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Iteration-gap alarms: iteration numbers that advance with no recorded row
+  (iterations consumed but never executed — a fleet-wide transient once ate four
+  in eleven minutes with zero trace) flag the `node list`/`node status` detail
+  column with the missing span (`iteration gap 2.19-2.22`), and the loop warns
+  on stderr the moment a fresh row lands past a gap.
 - Sealed mailboxes (`sealed` config key; `node init --sealed`): while sealed,
   every message a node hosts is held out of its own seat's context — empty
   listings with an `inbox sealed` notice, a refused `radio read`, hosted rows

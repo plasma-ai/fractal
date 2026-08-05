@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import itertools
 import json
 import logging
 import os
@@ -3168,7 +3169,35 @@ class Node:
         # append shape), so neither fact hides the other
         if self._model_dropped():
             detail = f'{detail}; model drop' if detail else 'model drop'
+        # an iteration-number gap composes the same way: numbers that
+        # advanced with no recorded row are iterations that never executed
+        if gap := self._iteration_gap():
+            detail = f'{detail}; {gap}' if detail else gap
         return detail
+
+    def _iteration_gap(self: Node) -> str:
+        """Return the latest run's iteration-gap label, or ``''``.
+
+        Recorded iteration rows are the execution trace: numbers that jump
+        (2.18 recorded, then 2.23) mean scheduled iterations were consumed
+        with zero execution -- cadence-keyed law and budget arithmetic skew
+        silently unless the gap is flagged. Reads the latest run alone and
+        names its newest gap.
+        """
+        runs = self.record.runs(limit=1)
+        if not runs:
+            return ''
+        run_id = runs[0]['run_id']
+        iters = self.record.iters(run_id=run_id)
+        numbers = sorted({row['iter'] for row in iters}, reverse=True)
+        for newer, older in itertools.pairwise(numbers):
+            if newer != older + 1:
+                first, last = older + 1, newer - 1
+                span = f'{run_id}.{first}'
+                if last != first:
+                    span += f'-{run_id}.{last}'
+                return f'iteration gap {span}'
+        return ''
 
     def _model_dropped(self: Node) -> bool:
         """Return whether the newest iteration carries an unresolved model drop.
@@ -3276,7 +3305,8 @@ class Node:
         enforced at -- the current run's subtree spend -- and is blank for
         a node with no recorded runs. ``status`` is always bare, with any
         qualifier (a pending signal, an ``exited`` run's end reason, an
-        ``orphaned`` flag, a ``model drop`` marker) in ``detail``. The
+        ``orphaned`` flag, a ``model drop`` marker, an ``iteration gap``)
+        in ``detail``. The
         ``last`` column renders each
         row's newest activity instant as a compact age, flagged (``12m!``)
         when an active node has sat quiet past ``max(step_timeout, 5m)``.

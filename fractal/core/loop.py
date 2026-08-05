@@ -1111,6 +1111,21 @@ class Loop:
                         file=sys.stderr,
                     )
                     break
+                # alarm on an iteration-number gap: a number that advanced
+                # with no recorded row is an iteration that never executed
+                # (a fleet transient once consumed four in eleven minutes
+                # with zero trace) -- flag it the moment it is knowable
+                try:
+                    rows = node.record.iters(run_id=self._run_id, limit=2)
+                except Exception:
+                    rows = []
+                if len(rows) == 2 and rows[1]['iter'] != self._iter - 1:
+                    print(
+                        f'WARNING: iteration gap — {self._iter_ref} follows'
+                        f' {self._run_id}.{rows[1]["iter"]} with no recorded'
+                        ' iteration between them',
+                        file=sys.stderr,
+                    )
             iteration_event = self.on_iteration(
                 iteration=self._iter,
                 run_id=self._run_id,

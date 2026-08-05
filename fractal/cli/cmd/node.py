@@ -886,7 +886,7 @@ def node_list(app: typer.Typer) -> typer.Typer:
         to none of them, a bare ``list`` spans them all. ``status`` is
         always bare and ``detail`` carries any qualifier (a pending
         signal, an exited run's end reason, ``orphaned``, an unresolved
-        ``model drop``). ``spend`` is the current run's subtree cost, the
+        ``model drop``, an ``iteration gap``). ``spend`` is the current run's subtree cost, the
         scope ``max_cost`` beside it is enforced at, and is blank for a node
         that has never run. ``last`` is the age of each node's newest activity;
         ``!`` flags an active node quiet past ``max(step_timeout, 5m)``.

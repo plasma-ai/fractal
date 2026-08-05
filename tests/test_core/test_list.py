@@ -34,6 +34,7 @@ __all__ = [
     'test_list_flags_orphan_rows',
     'test_list_renders_last_activity_age',
     'test_list_flags_stale_active_rows',
+    'test_list_flags_iteration_gaps',
 ]
 
 
@@ -357,3 +358,29 @@ def test_list_flags_stale_active_rows(
     child.status_set('completed')
     rows = {row['node']: row['last'] for row in parent.list()}
     assert rows[child.branch] == '20m'
+
+
+def test_list_flags_iteration_gaps(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Iteration numbers that jump with no recorded row flag the listing.
+
+    Recorded iteration rows are the execution trace: a run whose numbers
+    jump (2 recorded, then 5) consumed iterations that never executed --
+    the class a fleet transient once produced fleet-wide with zero trace.
+    Contiguous rows never flag; the gap names the missing span.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    run_id = child.record.runs(limit=1)[0]['run_id']
+    for number in (1, 2):
+        iter_id = child.record.iter_start(run_id=run_id, iter=number)
+        child.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
+    # contiguous iterations: no gap flag
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'iteration gap' not in (rows[child.branch] or '')
+    # a jump to 5 leaves 3-4 unexecuted -- the detail names the span
+    iter_id = child.record.iter_start(run_id=run_id, iter=5)
+    child.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert f'iteration gap {run_id}.3-{run_id}.4' in rows[child.branch]
