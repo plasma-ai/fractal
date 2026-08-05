@@ -429,6 +429,62 @@ class Node:
         return None
 
     @classmethod
+    def resolve_actor(cls: type[Node]) -> Optional[Node]:
+        """Resolve the acting node from the environment, else the cwd.
+
+        The authoritative actor for the guards a seat must not talk its
+        way out of (the mailbox seal, the drain's spawn/re-arm refusals):
+        :meth:`resolve_caller` reads the loop-exported ``_NODE``, which a
+        seat can unset, so an unset env falls back to the node owning the
+        current directory -- a step runs in its own worktree, so the
+        fallback names the same node the export would have.
+
+        Residual (filed, not closed here): a seat that both unsets
+        ``_NODE`` and works from outside its worktree resolves to no
+        actor. Closing that needs process-lineage attribution, not an
+        environment read.
+
+        Returns:
+            The acting node, or ``None`` outside any node context.
+
+        """
+        if caller := cls.resolve_caller():
+            return caller
+        # cwd fallback: resolve the directory's worktree root, then its node
+        try:
+            worktree = fractal.util.git.toplevel(pathlib.Path.cwd(), check=False)
+        except OSError:
+            return None
+        if worktree is None:
+            return None
+        node = cls(worktree)
+        return node if node.exists() else None
+
+    def drain_bound(self: Node) -> bool:
+        """Return whether a drain binds this node's own acting seat.
+
+        Drain-ness is recorded on the run (a ``drain`` signal row), not
+        just exported into the seat's environment, so the refusal stands
+        after an env scrub and survives a pause/resume of the drain run.
+        Binds only the draining node's own seat: an operator, or another
+        node, acts normally.
+
+        Returns:
+            Whether the acting node is this node and its open run drains.
+
+        """
+        actor = self.resolve_actor()
+        if actor is None or actor.branch != self.branch:
+            return False
+        try:
+            runs = self.record.runs(limit=1)
+            if not runs or runs[0]['ended_at'] is not None:
+                return False
+            return self.record.signal_get('drain', run_id=runs[0]['run_id']) is not None
+        except Exception:
+            return False
+
+    @classmethod
     def user_nodes(cls: type[Node], path: PathLike) -> list[Node]:
         """Return every tree's user (root) node in the repo, branch-sorted.
 
@@ -751,11 +807,12 @@ class Node:
         if not name:
             raise ValueError('Node name is required.')
         worktree.validate_name(name)
-        # a draining seat spawns nothing: the loop exports _DRAIN for a
-        # --continue --drain run, so a spawn from any of its subprocesses
-        # refuses harness-side (a resumed plan replaying a stale spawn wave
-        # was a whole damage class once)
-        if os.environ.get('_DRAIN'):
+        # a draining seat spawns nothing: the export reaches the seat's
+        # subprocesses and the run's own drain signal backs it after an env
+        # scrub or a pause/resume, so a spawn from a draining run refuses
+        # harness-side (a resumed plan replaying a stale spawn wave was a
+        # whole damage class once)
+        if _draining():
             raise RuntimeError(
                 'Cannot init a node from a draining run (--drain forbids spawns).'
             )
@@ -1537,10 +1594,9 @@ class Node:
         # reject user nodes
         if self.is_user:
             raise RuntimeError('Cannot start a user node.')
-        # a draining seat re-arms nothing: the loop exports _DRAIN for a
-        # --continue --drain run, so a start from any of its subprocesses
-        # refuses harness-side
-        if os.environ.get('_DRAIN'):
+        # a draining seat re-arms nothing (the export plus the run's own
+        # durable drain signal, so an env scrub does not lift it)
+        if _draining():
             raise RuntimeError(
                 'Cannot start a node from a draining run (--drain forbids re-arms).'
             )
@@ -2373,11 +2429,10 @@ class Node:
             Confirmation message.
 
         """
-        # a draining seat re-arms nothing: the loop exports _DRAIN for a
-        # --continue --drain run, so a resume from any of its subprocesses
-        # refuses harness-side -- relaunching a parked subtree from inside
-        # a wind-down is the one expanding verb the other guards miss
-        if os.environ.get('_DRAIN'):
+        # a draining seat re-arms nothing (export plus the run's durable
+        # drain signal) -- relaunching a parked subtree from inside a
+        # wind-down is the one expanding verb the other guards miss
+        if _draining():
             raise RuntimeError(
                 'Cannot resume a node from a draining run (--drain forbids re-arms).'
             )
@@ -4014,7 +4069,7 @@ class Node:
         """
         # a draining seat re-arms nothing: cap raises from a --drain run
         # refuse harness-side, mirroring the init and start guards
-        if os.environ.get('_DRAIN'):
+        if _draining():
             raise RuntimeError(
                 'Cannot update a node from a draining run (--drain forbids re-arms).'
             )
@@ -4952,6 +5007,21 @@ def _base_status(status: Optional[str]) -> str:
     """
     result, *_ = (status or '').partition(' ')
     return result
+
+
+def _draining() -> bool:
+    """Return whether the acting seat runs under a drain.
+
+    Two sources, either sufficient: the loop-exported ``_DRAIN`` (present
+    in every seat subprocess of a ``--continue --drain`` run) and the
+    acting node's own run carrying the durable ``drain`` signal -- the
+    latter standing after an environment scrub and across a pause/resume,
+    which the export alone does not survive.
+    """
+    if os.environ.get('_DRAIN'):
+        return True
+    actor = Node.resolve_actor()
+    return actor is not None and actor.drain_bound()
 
 
 def _recorded_group(pgid: int, recorded_at: float) -> bool:

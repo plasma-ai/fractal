@@ -28,6 +28,7 @@ __all__ = [
     'test_commit_excludes_registry_sidecars',
     'test_commit_stages_node_records_past_external_excludes',
     'test_stage_records_tolerates_a_vanished_held_file',
+    'test_record_force_add_refuses_non_record_files',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
     'test_commit_refreshes_wiki_indexes',
@@ -487,6 +488,61 @@ def test_stage_records_tolerates_a_vanished_held_file(
     # the surviving record landed; the vanished one is simply absent
     assert 'memory/state.md' in tracked
     assert 'scratchpad.md' not in tracked
+
+
+def test_record_force_add_refuses_non_record_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The force pass stages records only, and says what it did.
+
+    The layer this pass overrides -- a machine-local ignore -- is where a
+    host fences its secrets, so a general "stage what is ignored" verb
+    would silently commit a dotenv or a key a node parked in its estate.
+    Only the canon-required record surfaces at text suffixes qualify; a
+    non-record file is refused by name, and every force-add is reported
+    on the commit output.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # the incident's exclude: everything under .fractal ignored
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+    # a record, plus secret-shaped files a node parked beside it
+    memory = node.node_dir / 'memory' / 'state.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    (node.node_dir / '.env').write_text('TOKEN=hunter2\n', encoding='utf-8')
+    (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
+    (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
+    (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
+    result = node.commit('record custody', force=True)
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the record landed; nothing secret-shaped or binary did
+    assert 'memory/state.md' in tracked
+    for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
+        assert parked not in tracked, parked
+    # the pass reports both halves rather than leaving them to be inferred
+    assert 'Force-staged' in result
+    assert 'memory/state.md' in result
+    assert 'not node records and were NOT force-staged' in result
+    assert 'id_rsa' in result
 
 
 def test_commit_stamps_iteration_from_args_or_open_row(

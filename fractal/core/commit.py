@@ -222,8 +222,15 @@ def commit(
                 output.append(stream.strip())
 
     # stage relevant paths; closure so the post-hook retry can re-use it
+    # the record pass's notices ride the commit output -- a force-add past
+    # a host ignore rule, and any non-record file it refused, must be said
+    # out loud rather than inferred from the diff; the hook retry re-stages
+    # through this same closure, so the latest pass's notices are the ones
+    # reported
+    record_notices: list[str] = []
+
     def _stage_changes() -> None:
-        _stage(
+        record_notices[:] = _stage(
             node,
             scoped=scoped,
             commit_scopes=commit_scopes,
@@ -233,6 +240,7 @@ def commit(
         )
 
     _stage_changes()
+    output.extend(record_notices)
     # count workspace files the staging expansion dropped solely because ignore
     # rules match them -- a tracked host ignore pattern can silently eat node
     # artifacts; fractal's own runtime ignores stay silent (the info/exclude
@@ -626,6 +634,58 @@ def _attributes_is_init_edit(node: Node) -> bool:
     return attribute in text.splitlines() and attribute not in committed.splitlines()
 
 
+#: estate subdirectories whose contents are node records canon requires
+#: committed (the memory wiki, plans, and the seeded step/script/skill set)
+_RECORD_DIRS = ('memory', 'plans', 'scripts', 'skills', 'steps')
+#: estate root files that are records in their own right
+_RECORD_FILES = ('NODE.md', 'config.json')
+#: the suffixes a record carries -- text and structured text only, so the
+#: force pass can never stage a key, a certificate, an archive, or a binary
+_RECORD_SUFFIXES = (
+    '.csv',
+    '.json',
+    '.md',
+    '.sh',
+    '.toml',
+    '.tsv',
+    '.txt',
+    '.yaml',
+    '.yml',
+)
+
+
+def _is_record(relpath: str, estate: str) -> bool:
+    """Whether an estate-relative path is a force-stageable node record.
+
+    The force pass overrides the ignore layer where a host's secrets are
+    normally fenced (``core.excludesFile``, a machine-local
+    ``info/exclude``), so it must not be a general "stage what is
+    ignored" verb: anything a node parked in its estate -- a dotenv, a
+    key, a downloaded credential -- would ride a commit silently. Only
+    the canon-required record surfaces qualify, and only at the text
+    suffixes a record is written in.
+
+    Args:
+        relpath: The file's worktree-relative path.
+        estate: The estate directory's worktree-relative path.
+
+    Returns:
+        Whether the path is inside the record allowlist.
+
+    """
+    inside = pathlib.PurePosixPath(relpath).relative_to(estate)
+    parts = inside.parts
+    # a dotfile anywhere in the path is machine or tool state, never a
+    # record: the memory wiki's own .wiki/ cache rides the ignore layers
+    if any(part.startswith('.') for part in parts):
+        return False
+    if inside.suffix not in _RECORD_SUFFIXES:
+        return False
+    if len(parts) == 1:
+        return parts[0] in _RECORD_FILES
+    return parts[0] in _RECORD_DIRS
+
+
 def _stage(
     node: Node,
     *,
@@ -634,7 +694,7 @@ def _stage(
     node_prefix: str,
     wiki_prefix: str,
     fractal_prefix: str,
-) -> None:
+) -> list[str]:
     """Stage the node's committable paths.
 
     Args:
@@ -646,6 +706,9 @@ def _stage(
         wiki_prefix: The shared project wiki prefix.
         fractal_prefix: The fractal data folder prefix (node estates live
             under it; the record pass owns them).
+
+    Returns:
+        The record pass's notices (what it force-staged, what it refused).
 
     """
     worktree = node.worktree
@@ -683,10 +746,10 @@ def _stage(
     else:
         cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES]
         fractal.util.git.run(cmd, cwd=worktree)
-    _stage_records(node, fractal_prefix)
+    return _stage_records(node, fractal_prefix)
 
 
-def _stage_records(node: Node, fractal_prefix: str) -> None:
+def _stage_records(node: Node, fractal_prefix: str) -> list[str]:
     """Force-stage estate records an external ignore rule held out.
 
     fractal owns its staging: the plain adds honor every ignore layer, so
@@ -700,28 +763,36 @@ def _stage_records(node: Node, fractal_prefix: str) -> None:
     self-ignored seed dir (the user node's untracked-by-design state) is
     left alone.
 
+    The override is bounded by the record allowlist (:func:`_is_record`):
+    the layer it overrides is the one a host fences its secrets in, so a
+    non-record file a node parked in its estate is refused and named
+    rather than staged, and every force-add is reported.
+
     Args:
         node: The node whose worktree to stage.
         fractal_prefix: The fractal data folder prefix.
 
+    Returns:
+        Notices naming what was force-staged and what was refused.
+
     """
     folder = node.worktree / fractal_prefix
     if not folder.is_dir():
-        return
+        return []
     estates = [
         entry
         for entry in sorted(folder.iterdir())
         if entry.is_dir() and worktree.seed_tracked(entry)
     ]
     if not estates:
-        return
+        return []
     specs = [f':(literal){entry}' for entry in estates]
     # collect the estate files ignore rules held out of the plain adds
     cmd = ['ls-files', '--others', '-i', '--exclude-standard', '-z', '--', *specs]
     raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
     held = [path for path in os.fsdecode(raw).split('\0') if path]
     if not held:
-        return
+        return []
     # the paths fractal-normal rules hold: the shipped template (runtime
     # artifacts, evaluated directly -- rule attribution cannot answer this,
     # a broad foreign line shadows the block while barring the very same
@@ -748,14 +819,40 @@ def _stage_records(node: Node, fractal_prefix: str) -> None:
     # are exactly what `git clean -X` deletes, and estates churn under the
     # node's own housekeeping) -- stage what still exists rather than letting
     # one dead pathspec fail the add and abort the whole commit
-    forced = [
-        f':(literal){node.worktree / path}'
-        for path in held
-        if path not in normal and os.path.lexists(node.worktree / path)
-    ]
+    prefixes = {
+        f'{entry.relative_to(node.worktree).as_posix()}': entry for entry in estates
+    }
+    forced = []
+    refused = []
+    for path in held:
+        if path in normal or not os.path.lexists(node.worktree / path):
+            continue
+        estate = next(
+            (root for root in prefixes if path.startswith(f'{root}/')),
+            None,
+        )
+        if estate is None:
+            continue
+        if not _is_record(path, estate):
+            refused.append(path)
+            continue
+        forced.append(f':(literal){node.worktree / path}')
+    notices = []
     if forced:
         cmd = ['add', '-f', *forced]
         fractal.util.git.run(cmd, cwd=node.worktree)
+        listing = ', '.join(sorted(spec.removeprefix(':(literal)') for spec in forced))
+        notices.append(
+            f'Force-staged {len(forced)} node record(s) held out by an'
+            f' ignore rule: {listing}'
+        )
+    if refused:
+        listing = ', '.join(sorted(refused))
+        notices.append(
+            f'Warning: {len(refused)} ignored estate file(s) are not node'
+            f' records and were NOT force-staged: {listing}'
+        )
+    return notices
 
 
 def _hook_retry(

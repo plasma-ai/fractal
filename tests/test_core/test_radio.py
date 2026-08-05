@@ -29,6 +29,8 @@ __all__ = [
     'test_post_enforces_publicly_readable_class',
     'test_sent_lists_outbound_mail',
     'test_sealed_inbox_holds_hosted_mail_from_its_own_seat',
+    'test_sealed_inbox_holds_the_archive_surface',
+    'test_seal_survives_an_env_scrub_in_the_seats_own_worktree',
     'test_send_many_delivers_per_recipient_with_receipts',
     'test_relay_lineage_marks_copies_and_lists_them',
     'test_sent_includes_own_replies',
@@ -433,6 +435,78 @@ def test_sealed_inbox_holds_hosted_mail_from_its_own_seat(
     peer.node.config.set('sealed', False)
     monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
     assert uuid in [m['message_uuid'] for m in peer.messages(channel='inbox')]
+
+
+def test_sealed_inbox_holds_the_archive_surface(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seal covers save/--saved: the archive is a body surface too.
+
+    Archiving copies a message's full body into a table the seat reads
+    back, so an unsealed ``save`` would tunnel exactly what the seal
+    holds out of the sealed context -- honor-stop #3's class on another
+    surface. A hosted save refuses while the seal binds, and an archive
+    taken *before* the seal landed is held out of ``saved`` too.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    uuid, _, _ = root.send(
+        peer_branch,
+        subject='adjudication',
+        data='sealed body',
+        priority=9,
+    )
+    # an archive taken before the seal lands
+    peer.node.config.set('sealed', False)
+    peer.save(uuid)
+    assert [row['message_uuid'] for row in peer.saved()] == [uuid]
+    # once sealed, the seat's own archive read holds the hosted row ...
+    peer.node.config.set('sealed', True)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    assert peer.saved() == []
+    # ... and a fresh archive of a hosted message refuses outright
+    fresh, _, _ = root.send(
+        peer_branch,
+        subject='second',
+        data='also sealed',
+        priority=8,
+    )
+    with pytest.raises(PermissionError, match='cannot be archived'):
+        peer.save(fresh)
+    # the operator still adjudicates through the archive
+    monkeypatch.delenv('_NODE')
+    assert [row['message_uuid'] for row in peer.saved()] == [uuid]
+
+
+def test_seal_survives_an_env_scrub_in_the_seats_own_worktree(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsetting ``_NODE`` does not lift the seal off the seat that owns the cwd.
+
+    The seal keyed on the exported ``_NODE`` alone was advisory against
+    the one party it binds: a seat could scrub its own environment and
+    read. The actor resolves env-first and falls back to the node owning
+    the working directory, which for a step IS its own worktree.
+    """
+    root, peer = radio_pair
+    uuid, _, _ = root.send(
+        peer.node.branch,
+        subject='sealed order',
+        data='body',
+        priority=7,
+    )
+    peer.node.config.set('sealed', True)
+    monkeypatch.delenv('_NODE', raising=False)
+    monkeypatch.chdir(peer.node.worktree)
+    # the scrubbed seat is still held -- listings empty, body refused
+    assert peer.messages(channel='inbox') == []
+    with pytest.raises(PermissionError, match='inbox sealed'):
+        peer.read(uuid)
+    # an operator outside the worktree still adjudicates
+    monkeypatch.chdir(root.node.worktree)
+    assert uuid in [row['message_uuid'] for row in peer.messages(channel='inbox')]
 
 
 def test_send_many_delivers_per_recipient_with_receipts(

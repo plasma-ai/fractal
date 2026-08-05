@@ -378,18 +378,22 @@ class Radio:
         """Return whether this node's inbox seal binds the current caller.
 
         The seal (``sealed`` config) guards the sealed seat's own context:
-        it binds when the acting caller IS the sealed node -- the loop
-        exports ``_NODE`` for every step subprocess, so the seat's own
-        reads hold hosted mail out of its context entirely, while an
-        operator shell (no ``_NODE``) adjudicates freely. Hosted messages
-        are held from the listings, and the body surface (:meth:`read`)
-        refuses outright while the seal binds; the node's own writes stay
-        visible in listings (verdicts still file).
+        it binds when the acting node IS the sealed node -- resolved
+        env-first (the loop exports ``_NODE`` for every step subprocess)
+        and, when that is unset, from the directory the call runs in, so
+        an env scrub does not lift the seal off a seat working in its own
+        worktree (:meth:`Node.resolve_actor` records the residual). An
+        operator shell outside the node adjudicates freely. Hosted
+        messages are held from every listing and from the archive, the
+        body surface (:meth:`read`) refuses outright, and archiving a
+        hosted message (:meth:`save`) refuses -- the archive is a body
+        surface too; the node's own writes stay visible in listings
+        (verdicts still file).
         """
         if not self.node.config.get('sealed'):
             return False
-        caller = self.node.resolve_caller()
-        return caller is not None and caller.branch == self.node.branch
+        actor = self.node.resolve_actor()
+        return actor is not None and actor.branch == self.node.branch
 
     def messages(
         self: Radio,
@@ -855,6 +859,14 @@ class Radio:
         message = self._find_message(message_uuid)
         # reject a non-owner reaching a read-only channel
         self._reject_read_only(message['channel'], message['node'])
+        # the archive is a body surface: saving a hosted message would copy
+        # its data into a table the seat can read back, tunneling exactly
+        # what the seal holds out of its context
+        if message['node'] == self.node.branch and self.seal_binds():
+            raise PermissionError(
+                'inbox sealed: hosted messages cannot be archived until'
+                ' lawfully unsealed'
+            )
         # copy into the archive (node = saver, owner = the message's host)
         row = {
             'node': self.node.branch,
@@ -945,7 +957,12 @@ class Radio:
             query += ' LIMIT ?'
             params.append(limit)
         # execute query
-        return self.db.read(query=query, params=tuple(params))
+        rows = self.db.read(query=query, params=tuple(params))
+        # a bound seal holds hosted rows here too -- an archive taken before
+        # the seal landed must not read the body back out through --saved
+        if self.seal_binds():
+            rows = [row for row in rows if row['owner'] != self.node.branch]
+        return rows
 
     def channel(
         self: Radio,

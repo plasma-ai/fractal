@@ -63,6 +63,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Seal enforcement closes its archive and environment bypasses: a sealed seat
+  can no longer `radio save` a hosted message and read the body back through
+  `messages --saved` (the archive is a body surface; pre-seal archives are held
+  too), and the seal resolves its actor env-first *then* by the working
+  directory, so scrubbing `_NODE` inside the seat's own worktree no longer lifts
+  it.
+- Drain enforcement is durable, not advisory: `--continue --drain` records the
+  drain on the run itself, so the spawn/re-arm refusals survive an environment
+  scrub and a pause/resume of the drain run (a resumed drain silently became an
+  ordinary run before).
+- The resumed-iteration inbox digest renders sender-controlled headers as
+  quoted, single-line, length-bounded data with block-opening markup stripped,
+  under a banner naming it untrusted and non-authoritative — a crafted subject
+  can no longer read as an instruction in another node's context.
+- The estate force-add is bounded to the node-record allowlist (known record
+  dirs and files at text suffixes, no dotfiles): the pass overrides the ignore
+  layer a host fences secrets in, so a parked `.env`, key, or archive is refused
+  by name instead of staged, and every force-add is reported on the commit
+  output.
 - The estate-record force-add stages what still exists: a held file deleted
   between the pass's `ls-files` snapshot and its `git add -f`
   (ignored-and-untracked estate files are exactly what a user's `git clean -X`
