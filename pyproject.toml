@@ -1,6 +1,6 @@
 [project]
 name = "plasma-fractal"
-version = "1.1.0"
+version = "1.2.0.dev0"
 description = "Hierarchical agent loops with recursive self-organization."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"

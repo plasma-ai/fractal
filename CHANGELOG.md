@@ -245,10 +245,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The in-tree version is `1.2.0.dev0`: a development checkout no longer reports
+  the same `1.1.0` as the released package, so an installed release and an
+  editable dev install are distinguishable by version string alone — a shimmed
+  release binary once answered three separate version probes with exactly the
+  number the dev tree was expected to report, costing a full diagnostic cycle.
+  The release commit sets the final `1.2.0`.
+
 - `node list`'s documented schema matches what it prints: the `detail` and
   `spend` columns are listed, and the `detail` vocabulary is enumerated (pending
   signals, exit reasons, `run exhausted:`, `orphaned`, `model drop`,
   `iteration gap`, `PAUSED: billing`).
+
 - The wiki contract tests pin plasma-wiki's new merge and lint contracts (the
   union merge driver — both sides' link rows survive an `_index.md` merge,
   deduplicated, with `wiki update` re-sorting and pruning stale rows — and typed
@@ -256,18 +264,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requires a plasma-wiki carrying those contracts (newer than 1.2.0); no fractal
   runtime code needed changes — it consumes lint by boolean exit code only,
   which is unchanged.
+
 - The census distinguishes the two `completed` landings: a run that ended on its
   iteration cap surfaces as `run exhausted: Reached max iterations (N)` in the
   `node list`/`node status` detail column, while a drained finish stays bare — a
   run-out lane (usually a re-continue candidate) can no longer pass as
   done-conditions-met; `--continue` keeps looping per its per-run `max_iters`,
   pinned by test.
+
 - The seeded COMMIT step's sign-off is unconditional: the parent-is-root
   conditional is gone, so a finishing node posts its sign-off (and any
   operator-ordered signal with it) whatever its position in the tree — the
   mechanical cause of silently dropped ordered signals at closeout. Existing
   nodes keep their seeded step copies; re-seed (`node init --reset`/`--steps`)
   to pick the new text up.
+
 - Model pins are honored or the step fails loudly: the ambient
   `CLAUDE_CODE_SUBAGENT_MODEL` forcing var is unset at invocation compose (like
   the effort knobs) and removed from the seeded node settings — it silently
@@ -278,15 +289,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   moves on). The iteration row records the model that actually served when its
   steps agree, so divergence from the pin is visible in the row and the
   `node list` detail column.
+
 - Config edits take effect live at each key's natural boundary — pacing
   (`interval`/`sleep`) now re-reads at the next sleep call and `iter_timeout` at
   the next iteration, joining the already-live
   `max_iters`/`step_timeout`/`wait`/cost caps — and the per-key boundary table
   is documented, so a mid-run edit can never silently no-op.
+
 - Seat-death backstop commits carry their context: the auto force-commit's
   subject names the step it follows (`auto after EXECUTE`) and its body the step
   and the newest plan's title — buried real work no longer costs archaeology at
   forensics and merge screens.
+
 - fractal owns its estate staging: any estate file an ignore rule held out of a
   commit is re-evaluated against fractal-normal rules alone (the shipped exclude
   template plus committed per-directory `.gitignore` files) and force-added when
@@ -297,6 +311,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `registry.db` spelling and its SQLite sidecars (`registry.db-*`), mirroring
   the modern `.db`/`.db-*` pair — a hot WAL or journal swept into a commit is a
   torn byte capture of a database another process is mid-write on.
+
 - Radio listings are read-your-writes and watermarked: `messages`, `sent`,
   `feed`, `thread`, and `subs` resolve the acting node exactly like the writing
   verbs (loop-exported `_NODE` first, else the cwd; `--path` still selects
@@ -305,11 +320,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `as of <instant> (acting as <branch>)` freshness watermark on stderr — the
   recorded cut to quote when grading from a listing, read before the query so a
   row a concurrent sender lands mid-render is never endorsed as absent.
+
 - `node stop`'s wait-for-the-seat contract is pinned by test and documented: a
   stop landing mid-step waits for the in-flight agent to complete — it never
   signals or tears the running seat (`node kill` remains the immediate path) —
   and the docs now state prominently that stop cascades over the target's entire
   subtree, children first.
+
 - `node kill` lands on `idle` nodes: a booting spawn is reaped and a
   never-started spawn is stamped `killed` so it can never activate — an unwanted
   spawn no longer gets a head start while an operator poll-watches for its

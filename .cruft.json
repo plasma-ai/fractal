@@ -12,7 +12,7 @@
         "package": "plasma-fractal",
         "title": "Fractal",
         "description": "Hierarchical agent loops with recursive self-organization.",
-        "version": "1.1.0",
+        "version": "1.2.0.dev0",
         "authors": [
           {
             "name": "Plasma AI",
