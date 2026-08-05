@@ -8,6 +8,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Billing-class breaker: three consecutive instant zero-cost step failures (the
+  dead-credits signature) back the loop off exponentially (60s doubling to 1h)
+  instead of redispatching hot, announce themselves as `PAUSED: billing` on the
+  pane and in the `node list` detail column, and self-clear on the first
+  completed launch — the probe; a failure that spent real money never reads as
+  an outage.
 - Iteration-gap alarms: iteration numbers that advance with no recorded row
   (iterations consumed but never executed — a fleet-wide transient once ate four
   in eleven minutes with zero trace) flag the `node list`/`node status` detail

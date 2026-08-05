@@ -84,6 +84,7 @@ __all__ = [
     'test_finalize_terminal_cascade_matrix',
     'test_auto_backstop_commit_carries_step_and_plan_context',
     'test_stop_mid_step_lets_the_seat_complete',
+    'test_billing_failures_back_off_exponentially_and_a_success_clears',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_timeout_void_force_commit_is_loud',
     'test_pending_finish_carries_to_the_continued_run',
@@ -2360,6 +2361,57 @@ def test_stop_mid_step_lets_the_seat_complete(
     run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert (run['status'], run['exit_code']) == ('stopped', 0)
     assert loop_node.status() == 'stopped'
+
+
+def test_billing_failures_back_off_exponentially_and_a_success_clears(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Instant zero-cost failures arm the breaker; the probe clears it.
+
+    The credit-crash class: every launch dies instantly at $0 and a hot
+    redispatch just burns another priced frame. The breaker waits the
+    exponential clock instead (60s doubling), announces itself loudly as
+    ``PAUSED: billing``, and the first completed launch -- the probe --
+    clears it. A failure that spent real money is not billing-shaped and
+    keeps the plain retry pacing.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    node = loop_node
+    _configure(node, max_iters=3)
+    # four billing-shaped failures (the third arms the breaker -- one or two
+    # are transient weather), then the probe succeeds
+    results = [StepResult(status='failed', exit_code=1)] * 4
+    loop = MockLoop(node, results=results)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    # the third consecutive failure arms the breaker's base on the in-step
+    # retry; the fourth doubles it at the next iteration's pre-step gate
+    assert 'retrying in 60s (billing breaker)' in out
+    assert 'PAUSED: billing — 4 instant zero-cost failure(s)' in out
+    assert 'probing again in 120s' in out
+    # the probe (iteration 3's first launch) succeeded and cleared the breaker
+    assert '=== billing breaker cleared (a call succeeded) ===' in out
+
+    class _PaidFailure(MockLoop):
+        """A failure that spent real money is not billing-shaped."""
+
+        def _launch(
+            self: _PaidFailure, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            super()._launch(step, prompt, **kwargs)
+            self._step_launched = True
+            self.node.record.step_cost(step_id=self._step_id, cost=0.5)
+            return StepResult(status='failed', exit_code=1)
+
+    _configure(node, max_iters=1)
+    paid = _PaidFailure(node)
+    assert paid.run() in (0, 1)
+    out = capsys.readouterr().out
+    assert 'PAUSED: billing' not in out
+    assert 'billing breaker' not in out
 
 
 def test_pacing_retunes_take_effect_at_the_next_sleep(

@@ -74,6 +74,17 @@ _BUDGET_REASON_STEMS = (
 # still a deliberate finish
 _BUDGET_REASON_HEADS = tuple(f'{stem} (spent $' for stem in _BUDGET_REASON_STEMS)
 
+# billing-class breaker pacing: three consecutive instant zero-cost failures
+# read as an outage (one or two are transient weather), then the backoff
+# doubles from the base to the cap -- the launch after each wait is the
+# probe that clears or escalates the breaker
+_BILLING_OUTAGE_THRESHOLD = 3
+_BILLING_BACKOFF_BASE_SECONDS = 60
+_BILLING_BACKOFF_CAP_SECONDS = 3600
+# a failed launch this quick with zero recorded cost never reached paid
+# inference -- the billing/credit-outage signature
+_BILLING_INSTANT_SECONDS = 10
+
 # the dash-segment widths a dated model snapshot stamps: one YYYYMMDD run,
 # or a dashed YYYY-MM-DD (a dotted date normalizes to the same three) -- the
 # whole tail must be the stamp, so a version bump ahead of a date
@@ -351,6 +362,7 @@ class Loop:
         self._last_iter_headroom: Optional[float] = None
         self._setup_fails = 0
         self._setup_abort = False
+        self._billing_fails = 0
         self._fail_reason: Optional[str] = None
         self._time_budget = 'no limit'
         self._cost_budget = 'no limit'
@@ -1583,6 +1595,21 @@ class Loop:
             # its own step row, so cost and duration attribute honestly; a
             # model drop (a completed launch served off its pinned model)
             # re-dispatches once, outside the failure-retry allowance
+            # billing breaker: never buy a fresh launch hot while the last
+            # failures carried the dead-credits signature -- back off
+            # exponentially and let the launch after the wait be the probe
+            if self._billing_fails >= _BILLING_OUTAGE_THRESHOLD:
+                wait = self._billing_wait()
+                print(
+                    f'=== PAUSED: billing — {self._billing_fails} instant'
+                    f' zero-cost failure(s); probing again in {wait}s ==='
+                )
+                if not self._retry_backoff(seconds=wait):
+                    if self._paused:
+                        return True
+                    if self._check_stop():
+                        break
+
             attempt = 0
             drop_retried = False
             drop_completed = False
@@ -1805,6 +1832,16 @@ class Loop:
                 if self._paused:
                     return True
 
+                # billing-class accounting: an instant zero-cost agent
+                # failure carries the dead-credits signature and arms the
+                # breaker; any completed launch is the probe that clears it
+                if step_status == 'completed':
+                    if self._billing_fails >= _BILLING_OUTAGE_THRESHOLD:
+                        print('=== billing breaker cleared (a call succeeded) ===')
+                    self._billing_fails = 0
+                elif failed and self._billing_failure(result, duration):
+                    self._billing_fails += 1
+
                 # every drop lands an event; the first re-dispatches the step
                 # once (infrastructure weather can silently serve a different
                 # model than pinned), the second is recorded and the loop
@@ -1839,14 +1876,21 @@ class Loop:
                             return True
 
                 # only a failed launch buys a retry, and only
-                # while attempts remain
+                # while attempts remain; a billing-shaped failure waits the
+                # breaker's exponential clock instead of the hot default
                 if result.status != 'failed' or attempt >= self._step_retries:
                     break
+                billing = self._billing_fails >= _BILLING_OUTAGE_THRESHOLD
+                if billing:
+                    backoff_label = f'{self._billing_wait()}s (billing breaker)'
+                else:
+                    backoff_label = self._step_retry_backoff
                 print(
                     f'--- Step {step_num}/{step_count} ({step_name}):'
-                    f' retrying in {self._step_retry_backoff} ---'
+                    f' retrying in {backoff_label} ---'
                 )
-                if not self._retry_backoff():
+                retry_wait = self._billing_wait() if billing else None
+                if not self._retry_backoff(seconds=retry_wait):
                     # a pause landing during the backoff parks; stop and the
                     # spent subtree ceiling abandon the retry to the
                     # failure path below
@@ -2839,20 +2883,26 @@ class Loop:
         except Exception:
             return False
 
-    def _retry_backoff(self: Loop) -> bool:
-        """Sleep out the step-retry backoff, polling the abort signals.
+    def _retry_backoff(self: Loop, seconds: Optional[int] = None) -> bool:
+        """Sleep out a retry backoff, polling the abort signals.
 
         One-second increments so a pause (parks -- the flag is set for
         the caller), a stop, or a spent subtree ceiling lands within
         seconds -- a failed step must never buy another attempt once
         the cap is spent.
 
+        Args:
+            seconds: Wait to sleep out; ``None`` takes the step-retry
+                backoff (the billing breaker passes its own clock).
+
         Returns:
             Whether the retry may proceed (``False`` abandons it).
 
         """
+        if seconds is None:
+            seconds = self._step_retry_backoff_seconds
         waited = 0
-        while waited < self._step_retry_backoff_seconds:
+        while waited < seconds:
             time.sleep(1)
             waited += 1
             if self._check_pause():
@@ -2863,6 +2913,30 @@ class Loop:
             if self._check_subtree_ceiling():
                 return False
         return True
+
+    def _billing_wait(self: Loop) -> int:
+        """Return the billing breaker's current backoff, doubling to the cap."""
+        doublings = self._billing_fails - _BILLING_OUTAGE_THRESHOLD
+        return min(
+            _BILLING_BACKOFF_CAP_SECONDS,
+            _BILLING_BACKOFF_BASE_SECONDS * 2**doublings,
+        )
+
+    def _billing_failure(self: Loop, result: StepResult, duration: int) -> bool:
+        """Return whether a failed launch carries the billing signature.
+
+        Instant and zero-cost: the launch died before buying any paid
+        inference -- an API billing/credit refusal, not work that failed.
+        A cannot-exec launch (127) is a different class and never arms
+        the breaker; an unknowable (``None``) cost on an instant failure
+        reads as zero, since a launch that paid reports its frames.
+        """
+        if result.exit_code == 127 or duration >= _BILLING_INSTANT_SECONDS:
+            return False
+        spent = None
+        if self._step_id is not None:
+            spent = self._cost_spent(step_id=self._step_id)
+        return not spent
 
     def _run_setup(self: Loop) -> bool:
         """Run setup.sh from the worktree root, teeing to setup.log.

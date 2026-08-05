@@ -3173,7 +3173,43 @@ class Node:
         # advanced with no recorded row are iterations that never executed
         if gap := self._iteration_gap():
             detail = f'{detail}; {gap}' if detail else gap
+        # the billing breaker is the loudest fact on the row while it holds
+        if self._billing_backoff():
+            detail = f'{detail}; PAUSED: billing' if detail else 'PAUSED: billing'
         return detail
+
+    def _billing_backoff(self: Node) -> bool:
+        """Return whether the newest launches carry the billing signature.
+
+        Three or more consecutive newest closed launches, each failed,
+        instant, and zero-cost -- the loop is backing off dead credits
+        (its own breaker uses the same signature), so the census must say
+        so loudly rather than render an idle-looking active row. Active
+        nodes only: a settled node's trailing failures are history.
+        """
+        if self.status() != 'active':
+            return False
+        runs = self.record.runs(limit=1)
+        if not runs:
+            return False
+        streak = 0
+        for row in self.record.steps(run_id=runs[0]['run_id']):
+            # bookkeeping rows are not launches: the never-run tail booked
+            # after a failure, and any still-open row
+            if row['ended_at'] is None or (
+                row['status'] == 'stopped' and row['metadata'].startswith('failed on')
+            ):
+                continue
+            if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
+                return False
+            elapsed = fractal.util.time.elapsed(row['started_at'])
+            elapsed -= fractal.util.time.elapsed(row['ended_at'])
+            if elapsed >= 10:
+                return False
+            streak += 1
+            if streak >= 3:
+                return True
+        return False
 
     def _iteration_gap(self: Node) -> str:
         """Return the latest run's iteration-gap label, or ``''``.

@@ -35,6 +35,7 @@ __all__ = [
     'test_list_renders_last_activity_age',
     'test_list_flags_stale_active_rows',
     'test_list_flags_iteration_gaps',
+    'test_list_flags_billing_backoff',
 ]
 
 
@@ -384,3 +385,38 @@ def test_list_flags_iteration_gaps(
     child.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
     rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
     assert f'iteration gap {run_id}.3-{run_id}.4' in rows[child.branch]
+
+
+def test_list_flags_billing_backoff(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three instant zero-cost failures flag the census PAUSED: billing.
+
+    The credit-crash signature: consecutive newest launches failed
+    instantly at $0, so the loop is backing off dead credits and the
+    listing must say so loudly. A launch that spent real money breaks the
+    streak -- an expensive genuine failure never reads as an outage.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    run_id = child.record.runs(limit=1)[0]['run_id']
+    iter_id = child.record.iter_start(run_id=run_id, iter=1)
+
+    def _failed_step(number: int, cost: float) -> None:
+        step_id = child.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=number,
+            step_name='EXECUTE',
+        )
+        child.record.step_end(step_id=step_id, status='failed', exit_code=1)
+        child.record.step_cost(step_id=step_id, cost=cost)
+
+    for number in (1, 2, 3):
+        _failed_step(number, 0.0)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'PAUSED: billing' in rows[child.branch]
+    # a paid failure on top breaks the streak -- not an outage
+    _failed_step(4, 0.75)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'PAUSED: billing' not in (rows[child.branch] or '')
