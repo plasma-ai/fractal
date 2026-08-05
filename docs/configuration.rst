@@ -151,6 +151,44 @@ rejected ("must be a duration with a unit suffix"), and the value must come to
 at least one whole second after truncation to integral seconds — ``0s`` and
 ``0.5s`` are refused at init, ``config set``, and ``start``.
 
+When edits take effect
+----------------------
+
+Config is a live-edited steering surface: a running loop re-reads each key at
+that key's natural boundary, so an edit lands without a restart — and no key
+silently no-ops. Per key:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Keys
+     - Boundary
+   * - ``max_iters``
+     - The next iteration's stop gate.
+   * - ``iter_timeout``, ``step_timeout``, ``wait``
+     - The next iteration (the fresh deadline/poll windows it arms).
+   * - ``interval``, ``sleep``
+     - The next between-iterations sleep call.
+   * - ``max_cost``, ``max_iter_cost``, ``max_step_cost``, ``reserve_budget``
+     - The next iteration's pricing, and live at every budget boundary
+       probe.
+   * - ``scope``, ``local``
+     - The next commit (read per commit).
+   * - ``sealed``
+     - The next radio read.
+   * - ``timeout`` (run wall), ``agent``, ``provider``, ``model``, ``effort``,
+       ``detached``, ``sync``, ``meta``, ``step_retries``,
+       ``step_retry_backoff``
+     - Pinned at loop boot — the edit reaches the next ``start``/``resume``,
+       never a run already in flight (a mid-run edit cannot flip a run's
+       mode composition).
+   * - ``root``, ``user``, ``project``
+     - Immutable.
+
+A malformed mid-run edit warns on the loop's stderr and keeps the prior
+value; it never crashes the run.
+
 Key reference
 -------------
 

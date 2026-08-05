@@ -960,6 +960,31 @@ class Loop:
             self._iter_ref = f'{self._run_id}.{self._iter}'
             self._iter_label = self._iter_label_text()
 
+            # re-read iter_timeout at its natural boundary -- ahead of the
+            # deadline reset just below, so a mid-run retune bounds THIS
+            # iteration; an unset value under an interval keeps the slot
+            # default (mirroring boot), and a malformed or interval-busting
+            # edit warns and keeps the prior value
+            if self._iter > 1:
+                try:
+                    iter_timeout = node.config.get('iter_timeout') or ''
+                    seconds = _parse_duration(iter_timeout, 'iter_timeout')
+                    if seconds <= 0 and self._interval_seconds > 0:
+                        iter_timeout = self._interval
+                        seconds = self._interval_seconds
+                    if 0 < self._interval_seconds < seconds:
+                        raise ValueError(
+                            f'--iter-timeout ({iter_timeout}) exceeds'
+                            f' --interval ({self._interval})'
+                        )
+                    self._iter_timeout = iter_timeout
+                    self._iter_timeout_seconds = seconds
+                except ValueError as error:
+                    print(
+                        f'Warning: {error}; keeping the previous iter_timeout',
+                        file=sys.stderr,
+                    )
+
             # reset the per-iteration deadline (the run deadline is fixed for
             # the run); an adopted iteration anchors on the credited reading,
             # like the run
@@ -1278,8 +1303,29 @@ class Loop:
             if self._check_stop():
                 break
 
-            # sleep between iterations
+            # sleep between iterations -- the pacing knobs re-read at their
+            # natural boundary (this sleep call), so a mid-run retune of
+            # interval/sleep takes effect without a restart; a malformed or
+            # conflicting edit warns and keeps the prior pacing
             if self._max_iters <= 0 or self._iter < self._max_iters:
+                try:
+                    interval = node.config.get('interval') or ''
+                    sleep_value = node.config.get('sleep') or ''
+                    interval_seconds = _parse_duration(interval, 'interval')
+                    sleep_seconds = _parse_duration(sleep_value, 'sleep')
+                    if interval_seconds > 0 and sleep_seconds > 0:
+                        raise ValueError(
+                            '--interval and --sleep are mutually exclusive.'
+                        )
+                    self._interval = interval
+                    self._interval_seconds = interval_seconds
+                    self._sleep = sleep_value
+                    self._sleep_seconds = sleep_seconds
+                except ValueError as error:
+                    print(
+                        f'Warning: {error}; keeping the previous pacing',
+                        file=sys.stderr,
+                    )
                 sleep_amount = 0
                 sleep_label_text = ''
                 if self._interval_seconds > 0:

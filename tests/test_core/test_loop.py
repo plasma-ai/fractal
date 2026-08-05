@@ -84,6 +84,7 @@ __all__ = [
     'test_finalize_terminal_cascade_matrix',
     'test_auto_backstop_commit_carries_step_and_plan_context',
     'test_stop_mid_step_lets_the_seat_complete',
+    'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_timeout_void_force_commit_is_loud',
     'test_pending_finish_carries_to_the_continued_run',
     'test_stop_during_finish_drain_books_stopped',
@@ -2359,6 +2360,48 @@ def test_stop_mid_step_lets_the_seat_complete(
     run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert (run['status'], run['exit_code']) == ('stopped', 0)
     assert loop_node.status() == 'stopped'
+
+
+def test_pacing_retunes_take_effect_at_the_next_sleep(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-run sleep/interval edit reaches the very next sleep call.
+
+    Pacing was the one knob a running loop never re-read: a nulled sleep
+    kept sleeping its boot value for the rest of the run. The knobs now
+    re-read at their natural boundary -- the sleep call itself -- so a
+    sleep granted mid-run takes effect immediately, and clearing it again
+    stops the sleeping just as live.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, max_iters=3)
+    chunks: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        chunks.append(seconds)
+        # clearing the sleep mid-run must reach the next boundary too
+        _configure(node, sleep=None)
+
+    monkeypatch.setattr('fractal.core.loop.time.sleep', fake_sleep)
+
+    class _RetuningLoop(MockLoop):
+        """Grant a sleep mid-iteration 1 (the boot config had none)."""
+
+        def _launch(
+            self: _RetuningLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            if not chunks:
+                _configure(self.node, sleep='40s')
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = _RetuningLoop(node)
+    assert loop.run() == 0
+    # the granted sleep fired after iteration 1 (boot had none), chunked at
+    # 30s; the null-out landed before the second boundary, so no later
+    # sleep ran
+    assert chunks == [30, 10]
 
 
 def test_timeout_void_force_commit_is_loud(

@@ -49,6 +49,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Config edits take effect live at each key's natural boundary — pacing
+  (`interval`/`sleep`) now re-reads at the next sleep call and `iter_timeout` at
+  the next iteration, joining the already-live
+  `max_iters`/`step_timeout`/`wait`/cost caps — and the per-key boundary table
+  is documented, so a mid-run edit can never silently no-op.
 - Seat-death backstop commits carry their context: the auto force-commit's
   subject names the step it follows (`auto after EXECUTE`) and its body the step
   and the newest plan's title — buried real work no longer costs archaeology at
