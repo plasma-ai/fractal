@@ -150,7 +150,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `core.excludesFile` — held it, so one stray broad exclude can no longer
   silently unstage (or hard-fail) the records canon requires nodes to commit;
   the generated exclude block and the stage excludes also cover the legacy
-  `registry.db` spelling.
+  `registry.db` spelling and its SQLite sidecars (`registry.db-*`), mirroring
+  the modern `.db`/`.db-*` pair — a hot WAL or journal swept into a commit is a
+  torn byte capture of a database another process is mid-write on.
 - Radio listings are read-your-writes and watermarked: `messages`, `sent`,
   `feed`, `thread`, and `subs` resolve the acting node exactly like the writing
   verbs (loop-exported `_NODE` first, else the cwd; `--path` still selects

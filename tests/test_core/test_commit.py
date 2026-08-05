@@ -24,6 +24,7 @@ __all__ = [
     'test_commit_pushes_unless_local',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
+    'test_commit_excludes_registry_sidecars',
     'test_commit_stages_node_records_past_external_excludes',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
@@ -317,6 +318,47 @@ def test_commit_excludes_write_atomic_temp_files(tmp_path: pathlib.Path) -> None
     assert '.work.txt-a1b2c3.tmp' not in tracked
 
 
+def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
+    """A legacy ``registry.db``'s SQLite sidecars never ride a work commit.
+
+    SQLite writes ``-wal``/``-shm`` (WAL mode) or ``-journal`` (rollback)
+    beside a live DB, so a swept sidecar is a torn point-in-time byte
+    capture of a database another process is mid-write on, plus perpetual
+    churn commits as it mutates -- the exact reason the modern spelling is
+    barred as a ``.db``/``.db-*`` pair. The legacy spelling gets the same
+    pair, in the stage excludes and the exclude template alike.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+
+    # a work file plus a legacy DB and a live writer's sidecars beside it
+    (project_dir / 'work.txt').write_text('real work\n', encoding='utf-8')
+    sidecars = ('registry.db-wal', 'registry.db-shm', 'registry.db-journal')
+    for name in ('registry.db', *sidecars):
+        (project_dir / name).write_text('', encoding='utf-8')
+    node.commit('do the work', force=True)
+
+    result = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = result.stdout
+    assert 'work.txt' in tracked
+    assert 'registry.db' not in tracked
+
+
 def test_commit_stages_node_records_past_external_excludes(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -358,6 +400,10 @@ def test_commit_stages_node_records_past_external_excludes(
     scratch.write_text('scratch\n', encoding='utf-8')
     registry = node.node_dir.parent / 'registry.db'
     registry.write_text('', encoding='utf-8')
+    # a live legacy writer leaves SQLite sidecars beside the DB -- a hot WAL
+    # is a torn mid-write byte capture, barred like its parent file
+    sidecar = node.node_dir.parent / 'registry.db-wal'
+    sidecar.write_text('', encoding='utf-8')
     node.commit('record custody', force=True)
 
     result = subprocess.run(
@@ -372,6 +418,7 @@ def test_commit_stages_node_records_past_external_excludes(
     # ... and the runtime artifacts never ride, force pass or not
     assert 'tmp/probe.txt' not in tracked
     assert 'registry.db' not in tracked
+    assert 'registry.db-wal' not in tracked
     assert '.status' not in tracked
     # ... and an estate-internal ignore file keeps its own hold (the memory
     # wiki's cache manages itself)
