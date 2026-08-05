@@ -500,9 +500,10 @@ row (use ``status`` for that). Columns, in order: ``status``, ``detail``,
 ``detail``, which composes (``;``-joined) any of: a pending signal
 (``pausing``/``stopping``/``finishing``), an ``exited`` run's recorded end
 reason, ``run exhausted: <reason>`` on a ``completed`` run that ended on its
-iteration cap (a drained finish stays bare), ``orphaned`` for a registered
-node whose worktree is gone, ``model drop`` for an unresolved served-model
-divergence, ``iteration gap <span>`` for iteration numbers that advanced with
+iteration cap and ``final iteration failed`` on a drained finish whose last
+iteration died (a clean drained finish stays bare), ``orphaned`` for a
+registered node whose worktree is gone, ``model drop`` for an unresolved
+served-model divergence, ``iteration gap <span>`` for numbers that advanced with
 no recorded row, and ``PAUSED: billing`` while the newest launches carry the
 dead-credits signature. ``spend`` is the current run's subtree cost at the
 scope ``max_cost`` is enforced at, blank for a node that has never run. Blank

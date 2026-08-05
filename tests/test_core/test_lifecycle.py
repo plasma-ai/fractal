@@ -546,6 +546,7 @@ def test_kill_sets_killed_status(
 def test_kill_reaps_idle_node_before_start(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Kill lands on an idle, never-started node, and start then refuses.
 
@@ -553,7 +554,9 @@ def test_kill_reaps_idle_node_before_start(
     a kill only lands once the node activates, so a breach spawn gets a
     head start equal to whoever is watching. The kill needs no live
     session and no run row: it stamps ``killed``, and a later plain
-    ``node start`` refuses, so the node can never activate.
+    ``node start`` refuses, so the node can never activate. It is the
+    designed happy path, so it is also quiet -- the run-scoped signal it
+    has no run for is skipped, not warned about.
     """
     node = node_with_db
     # a never-started node: idle, no run rows, no tmux session
@@ -561,6 +564,10 @@ def test_kill_reaps_idle_node_before_start(
     _stub_run_script(monkeypatch, node)
     node.kill()
     assert node.status() == 'killed'
+    assert 'no runs found' not in caplog.text
+    # the attribution still lands: the kill event carries it alone
+    events = node.db.read('events', where={'node': node.branch, 'event': 'kill'})
+    assert [row['metadata'] for row in events] == ['killed by operator']
     # the killed stamp closes the start path -- the node never activates
     with pytest.raises(RuntimeError, match='Cannot start from status'):
         node.start()

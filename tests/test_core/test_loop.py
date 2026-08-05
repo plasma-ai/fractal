@@ -2231,6 +2231,19 @@ def test_before_last_step_drain_uses_the_run_wall_not_the_iter_deadline(
             0,
             None,
         ),
+        # a deliberate finish whose last iteration died keeps the goal-met
+        # completion (the node declared done) but names the dead tail, so
+        # the run row is not byte-identical to a clean finish
+        (
+            lambda loop: (
+                loop.node.record.signal_set('finish', 'done'),
+                setattr(loop, '_last_iter_failed', True),
+            ),
+            'completed',
+            'completed',
+            0,
+            'final iteration failed',
+        ),
         # a stop that interrupts the finish drain abandons the finish: the
         # run must not claim completed over a subtree it never drained
         (
@@ -2305,6 +2318,7 @@ def test_before_last_step_drain_uses_the_run_wall_not_the_iter_deadline(
         'max_iters',
         'max_iters_failed_final_iter',
         'finish',
+        'finish_failed_final_iter',
         'stop_abandons_finish_drain',
         'timeout_abandons_finish_drain',
         'inconclusive_probe_reads_active',
@@ -2985,11 +2999,13 @@ def test_census_distinguishes_run_exhausted_from_done_conditions(
 ) -> None:
     """``completed`` says why: run-exhausted is not done-conditions-met.
 
-    Both landings stamp ``completed``, but they are different facts -- an
-    exhausted iteration budget usually means the lane has more work and
-    wants a re-continue, while a drained finish is genuinely done. The
-    census detail names the first (``run exhausted: ...``) and leaves the
-    second bare, so nobody triages nine completed lanes by hand again.
+    The landings all stamp ``completed``, but they are different facts --
+    an exhausted iteration budget usually means the lane has more work and
+    wants a re-continue, a drained finish is genuinely done, and a finish
+    whose last iteration died left its closing work unfinished. The census
+    detail names the first (``run exhausted: ...``) and the third
+    (``final iteration failed``) and leaves the clean finish bare, so
+    nobody triages nine completed lanes by hand again.
     """
     monkeypatch.setenv('_NODE', '')
     node = loop_node
@@ -3011,6 +3027,22 @@ def test_census_distinguishes_run_exhausted_from_done_conditions(
     assert _Finishing(node, continue_=True).run() == 0
     assert node.status() == 'completed'
     assert node.status_detail() == ''
+
+    class _FinishingWithDeadTail(_Finishing):
+        """Meet the done conditions, then die on the closing step."""
+
+        def _launch(
+            self: _FinishingWithDeadTail, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            result = super()._launch(step, prompt, **kwargs)
+            if len(self.launched) == 1:
+                return result
+            return StepResult(status='failed', exit_code=1, reason='agent error')
+
+    _configure(node, max_iters=3, step_retries=0)
+    assert _FinishingWithDeadTail(node, continue_=True).run() == 0
+    assert node.status() == 'completed'
+    assert node.status_detail() == 'final iteration failed'
 
 
 def test_timeout_void_force_commit_is_loud(

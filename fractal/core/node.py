@@ -2249,7 +2249,8 @@ class Node:
         attribution -- ``killed by <actor>``, with the reason appended when
         one is given -- lands identically on the kill event, the ``kill``
         signal, and the killed run row, so every surface answers who ended
-        the run.
+        the run; a never-started spawn has none of the latter two, and its
+        event alone carries the attribution.
         """
         # compose the attribution: who killed, and why when a reason rides
         caller = self.resolve_caller()
@@ -2269,7 +2270,11 @@ class Node:
                 return ''
             # set signal and log event; the tmux kill runs outside the lock
             event_id = self.record.event_start('kill', metadata=label)
-            self.record.signal_set('kill', label)
+            # a never-started spawn has no run for a signal to hang off -- the
+            # kill event and the killed stamp are its whole record, so skip
+            # the write rather than warn over a reap that worked
+            if self.record.runs(limit=1):
+                self.record.signal_set('kill', label)
             # an idle target is stamped here, not after the reap -- see the
             # docstring: the boot-window race is only closed flock-to-flock
             if current == 'idle':
@@ -3367,16 +3372,19 @@ class Node:
             if rows and rows[0]['status'] == 'exited' and rows[0]['metadata']:
                 detail = rows[0]['metadata']
         if status == 'completed':
-            # the two completed landings are different facts: an exhausted
+            # the completed landings are different facts: an exhausted
             # iteration budget records its cap, while a goal-met finish
             # leaves the run reason-less (or carries a cap-overshoot note,
-            # which is still done-conditions-met) -- name only the run-out
-            # so a census never reads it as done-conditions-met
+            # which is still done-conditions-met) -- name the run-out and a
+            # dead final iteration so a census never reads either as a clean
+            # done-conditions-met end
             rows = self.record.runs(limit=1)
             if rows and rows[0]['status'] == 'completed':
                 reason = rows[0]['metadata'] or ''
                 if reason.startswith('Reached max iterations'):
                     detail = f'run exhausted: {reason}'
+                elif reason.endswith('final iteration failed'):
+                    detail = reason
         # an unresolved model drop composes onto the qualifier (the metadata
         # append shape), so neither fact hides the other
         if self._model_dropped():

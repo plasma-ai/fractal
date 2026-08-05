@@ -3782,10 +3782,17 @@ class Loop:
                 node.record.signal_set('exit', exit_reason)
             except Exception:
                 pass
-        elif self._cap_overshoot:
-            # the goal-met finish keeps its completed landing; the overshoot
-            # figures ride the run row so `node activity` explains the spend
-            exit_reason = self._cap_overshoot
+        elif self._cap_overshoot or self._last_iter_failed:
+            # the goal-met finish keeps its completed landing, but the run row
+            # names whatever qualifies it: the overshoot figures explain the
+            # spend, and a dead final iteration must never read as a clean
+            # finish on a census that only sees the run row
+            notes = []
+            if self._cap_overshoot:
+                notes.append(self._cap_overshoot)
+            if self._last_iter_failed:
+                notes.append('final iteration failed')
+            exit_reason = '; '.join(notes)
 
         if self._budget_hit:
             # budget landing: a budget stop is not a goal-met completion --

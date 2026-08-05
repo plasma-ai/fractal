@@ -65,11 +65,13 @@ intent:
   budget, timeout, max iterations with a failed final iteration, crash. A parent
   deciding whether to merge, continue, or absorb a child's work reads this one
   word first, which is why the loop is strict about never letting a failed or
-  budget-cut stop launder into completed. The two completed landings stay
+  budget-cut stop launder into completed. The completed landings stay
   distinguishable too: a full iteration count records its cap on the run row and
-  surfaces as `run exhausted: ...` in the status detail, while a drained finish
-  reads bare — an exhausted lane usually wants a re-continue, a finished one is
-  done.
+  surfaces as `run exhausted: ...` in the status detail, a drained finish whose
+  last iteration died records and surfaces `final iteration failed`, and a clean
+  drained finish reads bare — an exhausted lane usually wants a re-continue, a
+  finished one is done, and a finish with a dead tail left its closing work
+  unfinished.
 
 ## Binary exit codes, derived from outcome
 

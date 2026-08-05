@@ -156,6 +156,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   budget-stemmed finishes stay with their run. A timed-out step whose backstop
   finds nothing to stage is named loudly (`timed out with no committed output`)
   instead of silently voiding the pass.
+- A deliberate finish whose final iteration died no longer lands byte-identical
+  to a clean one: the run row records `final iteration failed` and the census
+  detail column names it, the same honesty the max-iters leg already enforced —
+  the dead tail was visible only in `node activity` before.
+- Killing an idle node is quiet: a never-started spawn has no run for the
+  run-scoped kill signal to hang off, so the write is skipped instead of warning
+  `no runs found; signal not set` on every successful reap (the kill event still
+  carries the attribution).
 
 ### Changed
 
