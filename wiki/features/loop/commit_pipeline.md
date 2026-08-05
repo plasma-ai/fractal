@@ -50,10 +50,11 @@ Staging appends a fixed exclude set to every sweep: virtualenvs, the central
 database and its sidecars, the status and pause markers, crash-stranded
 atomic-write temp files, and engine-materialized system skills
 (`skills/.system/`) never ride a work commit. Two advisory guards warn without
-blocking: workspace files silently eaten by tracked host ignore rules are
-counted and reported (fractal's own runtime ignores and self-managing ignored
-directories stay silent), and any staged file at or over 10MB is listed by name
--- an oversized file is usually an accident, but large commits are also
+blocking: workspace files silently eaten by host ignore rules are counted and
+reported (fractal's own runtime ignores -- the managed `info/exclude` block by
+its line span, so a user line sharing the file still alarms -- and self-managing
+ignored directories stay silent), and any staged file at or over 10MB is listed
+by name -- an oversized file is usually an accident, but large commits are also
 legitimate.
 
 fractal owns its estate staging (`_stage_records`): after the plain adds, any
@@ -63,7 +64,10 @@ alone -- the shipped exclude template plus the repo's committed per-directory
 `info/exclude` line, `core.excludesFile`) held it. One stray broad exclude line
 can therefore no longer silently unstage, or hard-fail, the audit trail canon
 requires nodes to commit; the user node's self-ignored seed dir stays untracked
-by design.
+by design. The force-add stages every record it can: a record the add cannot
+take -- vanished after the snapshot, unreadable on disk -- is named in a warning
+rather than aborting the commit, and both notices report worktree-relative
+paths, since a force commit folds them into its body.
 
 ## Commit, retry, and the backstop
 
@@ -82,7 +86,8 @@ event is logged from a single emit point keyed on the new sha, so the retry
 never double-logs (no event for `--init`, whose baseline has no run lineage),
 and a failed event insert warns rather than blocking the save. A `--force`
 commit -- the loop's backstop save -- passes `--no-verify` so a failing or
-mutating hook can neither block nor rewrite the save, and folds the staged-sweep
-warnings plus a capped diffstat into its body so the backstop describes what it
-saved from git history alone. `--check` commits nothing and errors if
+mutating hook can neither block nor rewrite the save, and folds the record
+pass's notices and the staged-sweep warnings plus a capped diffstat into its
+body so the backstop describes what it saved (and what it deliberately overrode
+or refused) from git history alone. `--check` commits nothing and errors if
 uncommitted changes exist.

@@ -18,6 +18,7 @@ import fractal.util
 from fractal.constants import FRACTAL_FOLDER
 
 from . import worktree
+from .worktree import exclude_block_lines
 
 if typing.TYPE_CHECKING:
     from .node import Node
@@ -83,8 +84,9 @@ def commit(
         ignore_scope: Commit out-of-scope changes but still lint.
         force: Bypass scope and lint checks and git hooks.
         body: Optional paragraph below the subject; a ``force`` commit's
-            body also folds in the staged-sweep warnings and a capped
-            diffstat, so a backstop save describes itself.
+            body also folds in the record pass's notices, the staged-sweep
+            warnings, and a capped diffstat, so a backstop save describes
+            itself.
         iteration: Commit-message iteration number (the loop passes the
             live one); resolved from the node's open iteration row, else
             ``0``, when omitted.
@@ -275,11 +277,18 @@ def commit(
             text=True,
         )
         managed: set[str] = set()
+        # fractal's own info/exclude holds are the managed block's lines
+        # only -- the file is a user surface too (its normal purpose), so a
+        # foreign line there eats paths like any tracked ignore rule
+        block_lines = exclude_block_lines(node.repo_dir)
         # -v -z emits <source> <linenum> <pattern> <pathname> quadruples,
         # the source already bare (no :line:pattern suffix to strip)
         fields = result.stdout.split('\0')
-        for source, path in zip(fields[::4], fields[3::4]):
-            if source == '.git/info/exclude' or source.endswith('/.git/info/exclude'):
+        for source, line, path in zip(fields[::4], fields[1::4], fields[3::4]):
+            in_exclude = source == '.git/info/exclude' or source.endswith(
+                '/.git/info/exclude'
+            )
+            if in_exclude and int(line) in block_lines:
                 continue
             path = path.rstrip('/')
             if source.startswith(f'{path}/'):
@@ -320,11 +329,13 @@ def commit(
     else:
         label = f'iteration {iteration}'
     subject = f'{node.branch}: {label} ({message})'
-    # compose the body: the caller's paragraph, and on force the staged
-    # warnings above plus a capped diffstat -- a backstop sweep must
-    # describe what it saved from git history alone
+    # compose the body: the caller's paragraph, and on force the record
+    # pass's notices and staged warnings above plus a capped diffstat -- a
+    # backstop sweep must describe what it saved (and what it deliberately
+    # overrode or refused) from git history alone
     paragraphs = [body] if body else []
     if force:
+        paragraphs.extend(record_notices)
         paragraphs.extend(
             warning for warning in (skip_warning, large_warning) if warning
         )
@@ -767,7 +778,9 @@ def _stage_records(node: Node, fractal_prefix: str) -> list[str]:
     The override is bounded by the record allowlist (:func:`_is_record`):
     the layer it overrides is the one a host fences its secrets in, so a
     non-record file a node parked in its estate is refused and named
-    rather than staged, and every force-add is reported.
+    rather than staged, and every force-add is reported. A record the add
+    cannot stage -- vanished after the snapshot, unreadable on disk -- is
+    likewise reported by name, never fatal.
 
     Args:
         node: The node whose worktree to stage.
@@ -837,15 +850,36 @@ def _stage_records(node: Node, fractal_prefix: str) -> list[str]:
         if not _is_record(path, estate):
             refused.append(path)
             continue
-        forced.append(f':(literal){node.worktree / path}')
+        forced.append(path)
+    failed: list[str] = []
+    if forced:
+        # batched add, retried per path on failure: git stages nothing on
+        # exit 128 (a record can vanish after the lexists probe or sit
+        # unreadable on disk), and one bad path must cost itself, never the
+        # healthy records queued beside it -- the backstop save this pass
+        # feeds exists precisely to rescue those
+        specs = [f':(literal){node.worktree / path}' for path in forced]
+        cmd = ['add', '-f', *specs]
+        if fractal.util.git.run(cmd, cwd=node.worktree, check=False) is None:
+            for path in forced:
+                cmd = ['add', '-f', f':(literal){node.worktree / path}']
+                if fractal.util.git.run(cmd, cwd=node.worktree, check=False) is None:
+                    failed.append(path)
+            forced = [path for path in forced if path not in failed]
     notices = []
     if forced:
-        cmd = ['add', '-f', *forced]
-        fractal.util.git.run(cmd, cwd=node.worktree)
-        listing = ', '.join(sorted(spec.removeprefix(':(literal)') for spec in forced))
+        # worktree-relative paths in every notice: a force commit folds
+        # them into its body, where machine-local prefixes do not belong
+        listing = ', '.join(sorted(forced))
         notices.append(
             f'Force-staged {len(forced)} node record(s) held out by an'
             f' ignore rule: {listing}'
+        )
+    if failed:
+        listing = ', '.join(sorted(failed))
+        notices.append(
+            f'Warning: {len(failed)} node record(s) could not be staged'
+            f' (vanished or unreadable): {listing}'
         )
     if refused:
         listing = ', '.join(sorted(refused))

@@ -63,6 +63,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The estate-record force-add survives a record it cannot stage: git stages
+  nothing when any one path in a batched `git add -f` is dead or unindexable
+  (exit 128), so a single vanished or permission-dead estate file aborted the
+  whole commit — the `--force` backstop save included, leaving the node unable
+  to commit at all until a human cleared the path. The pass now retries per
+  path, stages every record it can, and names the ones it could not.
+- A force commit's body folds in the record pass's notices — the force-staged
+  list and the non-record refusals — beside the staged-sweep warnings: the
+  console notice dies with the run's pane, so the one durable record that a
+  backstop save overrode a host ignore layer (and that credential-shaped files
+  sat in the estate) is now in git history.
+- The "skipped by ignore rules" alarm covers user lines in `.git/info/exclude`:
+  the suppression keys on fractal's managed block by its line span, never the
+  whole file, so a foreign pattern in the file's user territory no longer eats a
+  deliverable in silence.
+- The force-add notice names worktree-relative paths, matching the refusal
+  notice beside it — absolute machine-local paths no longer print, nor land in a
+  force commit's body.
 - Seal enforcement closes its archive and environment bypasses: a sealed seat
   can no longer `radio save` a hosted message and read the body back through
   `messages --saved` (the archive is a body surface; pre-seal archives are held

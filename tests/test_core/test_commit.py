@@ -34,6 +34,8 @@ __all__ = [
     'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_commit_stages_node_records_past_external_excludes',
     'test_stage_records_tolerates_a_vanished_held_file',
+    'test_stage_records_survives_an_unreadable_held_file',
+    'test_skip_alarm_covers_foreign_info_exclude_lines',
     'test_commit_excludes_registry_sidecars',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_record_force_add_refuses_non_record_files',
@@ -498,6 +500,100 @@ def test_stage_records_tolerates_a_vanished_held_file(
     assert 'scratchpad.md' not in tracked
 
 
+def test_stage_records_survives_an_unreadable_held_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """One unreadable held record costs itself, never the whole backstop save.
+
+    git stages nothing when any one path in a batched ``add -f`` cannot be
+    indexed (exit 128), so a single permission-dead plan file would fail
+    the force-add and abort the very ``--force`` save that exists to
+    rescue work -- and break every ordinary commit beside it until a human
+    clears the path. The pass stages every record it can and names the
+    ones it could not.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # the incident's exclude: everything under .fractal externally ignored,
+    # so the record pass owns both files below
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+    memory = node.node_dir / 'memory' / 'irreplaceable.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    doomed = node.node_dir / 'plans' / '0099-doomed.md'
+    doomed.parent.mkdir(parents=True, exist_ok=True)
+    doomed.write_text('# doomed\n', encoding='utf-8')
+    doomed.chmod(0)
+    result = node.commit('backstop save', force=True)
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the healthy record landed; the unreadable one is named, never fatal
+    assert 'memory/irreplaceable.md' in tracked
+    assert 'plans/0099-doomed.md' not in tracked
+    assert 'could not be staged' in result
+    assert 'plans/0099-doomed.md' in result
+
+
+def test_skip_alarm_covers_foreign_info_exclude_lines(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A foreign ``info/exclude`` line alarms; fractal's own block stays silent.
+
+    ``info/exclude`` is a user surface first -- fractal manages only its
+    marker-delimited block -- so a user line there eats a deliverable
+    exactly like a tracked ``.gitignore`` pattern and must count into the
+    ignore-skip warning. The suppression keys on the block's line span,
+    never the whole file.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # a path held only by fractal's own block (the tmp/ scratch pattern)
+    # is an intentional runtime ignore -- no alarm
+    (project_dir / 'tmp').mkdir()
+    (project_dir / 'tmp' / 'probe.txt').write_text('scratch\n', encoding='utf-8')
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    result = node.commit('quiet block hold')
+    assert 'skipped by ignore rules' not in result
+    # the identical pattern as a user line in the shared info/exclude eats
+    # a deliverable -- the alarm must fire
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('src/generated.txt\n')
+    src = project_dir / 'src'
+    src.mkdir()
+    (src / 'generated.txt').write_text('deliverable\n', encoding='utf-8')
+    (src / 'other.txt').write_text('more work\n', encoding='utf-8')
+    result = node.commit('foreign line hold')
+    assert 'skipped by ignore rules' in result
+
+
 def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
     """A registry database's SQLite sidecars never ride a commit.
 
@@ -588,6 +684,13 @@ def test_record_force_add_refuses_non_record_files(
     assert 'memory/state.md' in result
     assert 'not node records and were NOT force-staged' in result
     assert 'id_rsa' in result
+    # both halves name worktree-relative paths -- a force commit folds these
+    # bytes into git history, where machine-local paths do not belong
+    forced_line = next(
+        line for line in result.splitlines() if line.startswith('Force-staged')
+    )
+    assert '.fractal/main.task/memory/state.md' in forced_line
+    assert f'{project_dir}' not in forced_line
 
 
 def test_commit_stamps_iteration_from_args_or_open_row(
@@ -857,6 +960,14 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     (project_dir / 'eaten.log').write_text('eaten\n', encoding='utf-8')
     (project_dir / 'blob.bin').write_bytes(b'\0' * (11 * 1024 * 1024))
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    # a hostile external ignore holds the estate out, so the record pass
+    # force-stages a fresh record and refuses the parked non-record --
+    # both notices belong in the body beside the warnings
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+    (node.node_dir / 'memory' / 'note.md').write_text('note\n', encoding='utf-8')
+    (node.node_dir / '.env').write_text('TOKEN=hunter2\n', encoding='utf-8')
     run_id = node.record.run_start()
     commit.commit(
         node=node,
@@ -878,11 +989,16 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
 
     # the subject is the run-qualified backstop label
     assert _log('%s') == f'{branch}: iteration {run_id}.2 (failed on EXECUTE)'
-    # the body carries the caller's paragraph, both warnings, and a diffstat
-    # naming the swept files
+    # the body carries the caller's paragraph, the record pass's notices,
+    # both warnings, and a diffstat naming the swept files
     body = _log('%b')
     assert 'agent error (exit 2)' in body
     assert 'steps not run: REVIEW, COMMIT' in body
+    assert 'Force-staged' in body
+    assert 'memory/note.md' in body
+    assert 'NOT force-staged' in body
+    assert '.env' in body
+    assert f'{project_dir}' not in body
     assert 'skipped by ignore rules' in body
     assert 'blob.bin (11MB)' in body
     assert 'work.txt' in body
