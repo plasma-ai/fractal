@@ -148,6 +148,13 @@ explicit reserve must stay below 99% of `--max-cost`.
   cannot be changed, and its children cannot push either.
 - `--blind` -- subscribe the node to no radio channels. The parent still reads
   this node's outbox.
+- `--profile=<name>` -- seed from a named bundle under
+  `.fractal/profiles/<name>/`: `steps/` seeds the step list (like `--steps`) and
+  `NODE.md` a deployment-ready charter, whose fill-sheet is validated at init
+  (`## Instructions`/`## Completion Requirements` present; every `pin:` line
+  resolves to a commit and matches `--pin`; every `docket: <path>` line resolves
+  at the pin) -- stale or truncated commission seeds die at init.
+- `--pin=<sha>` -- the commission pin the profile charter must agree with.
 - `--sealed` -- seal the node's mailbox: its own seat cannot read hosted
   messages until unsealed (`config set sealed=false`). The harness half of
   verifier isolation -- sealed adjudication traffic is held out of the seat's

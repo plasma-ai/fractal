@@ -115,6 +115,20 @@ node at ``--path``.
        instead of the package seed; must hold at least one, each carrying
        the loop's ``NN-`` digit prefix at one width.
        Mutually exclusive with ``--inherit=steps``.
+   * - ``--profile <name>``
+     - none
+     - Named seed bundle under ``.fractal/profiles/<name>/``: ``steps/``
+       seeds the step list (like ``--steps``), ``NODE.md`` a
+       deployment-ready charter. The charter's fill-sheet is validated at
+       init: its two authored sections must be present, every ``pin:``
+       line must resolve to a commit (and match ``--pin``), and every
+       ``docket: <path>`` line must resolve at the pin — a stale or
+       truncated seed dies at init, not at the commission's first seat.
+       Mutually exclusive with ``--steps``/``--inherit=steps``.
+   * - ``--pin <sha>``
+     - none
+     - Commission pin: must resolve to a commit; the profile charter's
+       ``pin:`` declarations must match it.
    * - ``--agent <command>``
      - nearest ancestor's
      - Agent command, validated against the agent registry (a typo refuses).

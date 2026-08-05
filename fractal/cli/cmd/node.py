@@ -124,6 +124,19 @@ def node_init(app: typer.Typer) -> typer.Typer:
         ' instead of the package seed; mutually exclusive with --inherit=steps.'
     )
     steps = typer.Option(None, '--steps', help=steps_help)
+    # profile option
+    profile_help = (
+        'Named seed bundle under .fractal/profiles/<name>/: steps/ seeds the'
+        ' step list, NODE.md a deployment-ready charter (fill-sheet validated'
+        ' at init; mutex with --steps).'
+    )
+    profile = typer.Option(None, '--profile', help=profile_help)
+    # pin option
+    pin_help = (
+        'Commission pin (a commit sha): must resolve, and every pin:'
+        ' declaration in the profile charter must match it.'
+    )
+    pin = typer.Option(None, '--pin', help=pin_help)
     # agent option
     agent_help = 'Agent command (default: inherited from the nearest ancestor).'
     agent = typer.Option(None, '--agent', help=agent_help)
@@ -229,6 +242,8 @@ def node_init(app: typer.Typer) -> typer.Typer:
         meta: Optional[str] = meta,
         inherit: Optional[list[str]] = inherit,
         steps: Optional[str] = steps,
+        profile: Optional[str] = profile,
+        pin: Optional[str] = pin,
         agent: Optional[str] = agent,
         provider: Optional[str] = provider,
         model: Optional[str] = model,
@@ -297,6 +312,8 @@ def node_init(app: typer.Typer) -> typer.Typer:
             meta=meta,
             inherit=inherit,
             steps=steps,
+            profile=profile,
+            pin=pin,
             agent=agent,
             provider=provider,
             model=model,

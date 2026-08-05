@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import time
@@ -548,6 +549,77 @@ class Node:
         except RuntimeError:
             return False
 
+    def _validate_charter(
+        self: Node,
+        charter: Optional[pathlib.Path],
+        *,
+        pin: Optional[str],
+    ) -> None:
+        """Validate a profile charter's fill-sheet before any spend.
+
+        The stale-seed gate: four commissions once shipped with stale pins,
+        stale docket rows, or truncated charters, each costing the node's
+        opening seat plus an adjudication. Checks, all pre-worktree:
+
+        - ``--pin`` (when given) resolves to a commit;
+        - the charter carries its two authored sections (a truncated seed
+          dies here);
+        - every ``pin: <sha>`` line in the charter resolves to a commit and
+          matches ``--pin`` (prefix-wise) when one is given;
+        - every ``docket: <path>`` line resolves at the pin (the charter's
+          own when ``--pin`` is absent, else ``HEAD``).
+
+        Args:
+            charter: The profile's ``NODE.md``, or ``None`` (pin-only).
+            pin: The commission pin from ``--pin``, or ``None``.
+
+        Raises:
+            ValueError: On the first fill-sheet violation.
+
+        """
+        repo_dir = self.repo_dir
+
+        def _commit(rev: str) -> bool:
+            cmd = ['rev-parse', '--verify', '--quiet', f'{rev}^{{commit}}']
+            return bool(fractal.util.git.run(cmd, cwd=repo_dir, check=False))
+
+        if pin is not None and not _commit(pin):
+            raise ValueError(f'--pin does not resolve to a commit: {pin!r}')
+        if charter is None:
+            return
+        text = charter.read_text(encoding='utf-8')
+        # the two authored sections bound the seed: a commission truncated
+        # in transit loses the tail first
+        for heading in ('## Instructions', '## Completion Requirements'):
+            if heading not in text:
+                raise ValueError(
+                    f'Profile charter {charter} is missing {heading!r}'
+                    ' (truncated or stale seed).'
+                )
+        pins = re.findall(r'^pin:\s*([0-9a-f]{7,40})\s*$', text, flags=re.M)
+        for declared in pins:
+            if not _commit(declared):
+                raise ValueError(
+                    f'Charter pin does not resolve to a commit: {declared!r}'
+                    ' (stale seed).'
+                )
+            if pin is not None and not (
+                pin.startswith(declared) or declared.startswith(pin)
+            ):
+                raise ValueError(
+                    f'Charter pin {declared!r} does not match --pin {pin!r}'
+                    ' (stale seed).'
+                )
+        # docket rows must exist at the pin -- an enumerated surface that
+        # moved or never existed is exactly the stale-docket class
+        anchor = pin or (pins[0] if pins else 'HEAD')
+        for row in re.findall(r'^docket:\s*(\S+)\s*$', text, flags=re.M):
+            cmd = ['cat-file', '-e', f'{anchor}:{row}']
+            if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is None:
+                raise ValueError(
+                    f'Docket row does not resolve at {anchor}: {row!r} (stale seed).'
+                )
+
     def init(
         self: Node,
         name: Optional[str] = None,
@@ -559,6 +631,8 @@ class Node:
         meta: Optional[str] = None,
         inherit: Optional[list[str]] = None,
         steps: Optional[PathLike] = None,
+        profile: Optional[str] = None,
+        pin: Optional[str] = None,
         agent: Optional[str] = None,
         provider: Optional[str] = None,
         model: Optional[str] = None,
@@ -613,6 +687,14 @@ class Node:
                 loop's ``NN-`` digit prefix at one width) to seed the
                 node's ``steps/`` from instead of the package seed;
                 mutually exclusive with inheriting ``steps``.
+            profile: Named seed bundle under
+                ``.fractal/profiles/<name>/`` -- its ``steps/`` seeds the
+                step list (like ``steps``) and its ``NODE.md`` seeds a
+                deployment-ready charter, fill-sheet-validated at init;
+                mutually exclusive with ``steps`` and inheriting them.
+            pin: Commission pin (a commit sha): must resolve, and every
+                ``pin:`` declaration in the profile charter must match it
+                -- a stale seed dies at init, not at the first seat.
             agent: Agent type.
             provider: Provider route for the agent (e.g. ``openrouter``;
                 default: the vendor-native endpoint, inherited from the
@@ -718,6 +800,28 @@ class Node:
                     )
             if 'all' in inherit:
                 inherit = ['steps', 'scripts', 'skills', 'config']
+        # resolve a named profile: a repo-provided seed bundle under
+        # .fractal/profiles/<name>/ -- its steps/ seeds the step list
+        # exactly like --steps, and its NODE.md seeds a deployment-ready
+        # charter whose fill-sheet is validated below, so a stale or
+        # truncated seed dies at init instead of at the node's first seat
+        charter: Optional[pathlib.Path] = None
+        if profile is not None:
+            if steps is not None:
+                raise ValueError('--profile cannot be combined with --steps.')
+            if inherit and 'steps' in inherit:
+                raise ValueError('--profile cannot be combined with --inherit=steps.')
+            profile_dir = self.repo_dir / FRACTAL_FOLDER / 'profiles' / profile
+            if not profile_dir.is_dir():
+                raise ValueError(f'No profile found at {profile_dir}.')
+            if (profile_dir / 'steps').is_dir():
+                steps = profile_dir / 'steps'
+            if (profile_dir / 'NODE.md').is_file():
+                charter = profile_dir / 'NODE.md'
+        # the fill-sheet gate: a pinned commission must hold together before
+        # any spend (--pin alone still validates the pin itself)
+        if pin is not None or charter is not None:
+            self._validate_charter(charter, pin=pin)
         # an explicit steps dir is a rival step source to inheriting the
         # parent's -- refuse the combination rather than pick one silently --
         # and it must satisfy the loop's discovery contract, checked here so a
@@ -948,6 +1052,8 @@ class Node:
             args.append(f'--inherit={joined}')
         if steps is not None:
             args.append(f'--steps={steps}')
+        if charter is not None:
+            args.append(f'--charter={charter}')
         if agent:
             args.append(f'--agent={agent}')
         if provider:

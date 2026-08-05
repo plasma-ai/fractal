@@ -8,6 +8,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `node init --profile=<name>` + init-time fill-sheet validation: a profile is a
+  repo-provided seed bundle under `.fractal/profiles/<name>/` (`steps/` seeds
+  the step list, `NODE.md` a deployment-ready charter), and the charter's
+  fill-sheet is validated before any worktree exists — its two authored sections
+  must be present, every `pin:` line must resolve to a commit and match `--pin`,
+  and every `docket: <path>` line must resolve at the pin — so stale pins, stale
+  docket rows, and truncated seeds die at init instead of costing the
+  commission's opening seat. (Profile config presets are a follow-up; caps and
+  modes stay flags.)
 - Resumed iterations are no longer context-blind: the harness re-reads the
   node's unread inbox and appends the digest (metadata, priority first; sealed
   mailboxes stay sealed) to every seat of a resumed iteration, so directives

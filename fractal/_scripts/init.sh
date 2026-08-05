@@ -17,6 +17,7 @@ BASE=""
 META=""
 INHERIT=""
 STEPS=""
+CHARTER=""
 AGENT=""
 PROVIDER=""
 MODEL=""
@@ -65,6 +66,8 @@ Options:
                                        scripts, skills, config, all
     --steps=<dir>                      Seed steps/ from the NN- prefixed step files
                                        (*.md) in <dir> instead of the package seed
+    --charter=<file>                   Seed NODE.md from a profile charter instead of
+                                       the package seed's placeholder
     --agent=<agent>                    Agent type
                                        (currently claude, codex, grok, opencode, or omp)
     --provider=<provider>              Provider route for the agent (e.g. openrouter)
@@ -236,6 +239,7 @@ for arg in "$@"; do
         --meta=*) META="${arg#*=}" ;;
         --inherit=*) INHERIT="${INHERIT:+$INHERIT,}${arg#*=}" ;;
         --steps=*) STEPS="${arg#*=}" ;;
+        --charter=*) CHARTER="${arg#*=}" ;;
         --sync) SYNC=true ;;
         --no-sync) SYNC=false ;;
         --detached) DETACHED=true ;;
@@ -531,8 +535,14 @@ MEMORY_DIR="$NODE_DIR/memory"
 if [[ "$RESET" == true ]]; then
     rm -f "$NODE_DIR/NODE.md"
 fi
+# a profile charter seeds a deployment-ready NODE.md; the package seed's
+# placeholder charter otherwise
 if [[ ! -f "$NODE_DIR/NODE.md" ]]; then
-    cp "$NODE_SEED_DIR/NODE.md" "$NODE_DIR/NODE.md"
+    if [[ -n "$CHARTER" ]]; then
+        cp "$CHARTER" "$NODE_DIR/NODE.md"
+    else
+        cp "$NODE_SEED_DIR/NODE.md" "$NODE_DIR/NODE.md"
+    fi
     echo "Created $NODE_DIR/NODE.md"
 fi
 
