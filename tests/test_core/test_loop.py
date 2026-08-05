@@ -86,6 +86,8 @@ __all__ = [
     'test_stop_mid_step_lets_the_seat_complete',
     'test_billing_failures_back_off_exponentially_and_a_success_clears',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
+    'test_resumed_seats_get_the_inbox_re_read',
+    'test_drain_run_blocks_spawns_and_re_arms',
     'test_census_distinguishes_run_exhausted_from_done_conditions',
     'test_timeout_void_force_commit_is_loud',
     'test_pending_finish_carries_to_the_continued_run',
@@ -2454,6 +2456,73 @@ def test_pacing_retunes_take_effect_at_the_next_sleep(
     # 30s; the null-out landed before the second boundary, so no later
     # sleep ran
     assert chunks == [30, 10]
+
+
+def test_resumed_seats_get_the_inbox_re_read(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed iteration's prompts carry the harness's inbox re-read.
+
+    A resumed plan is frozen context -- the run's worst damage class was a
+    resume replaying a stale spawn wave with the operator's correction
+    sitting unread. Every seat of a resumed iteration gets the unread
+    inbox (metadata, priority first) appended by the harness itself; a
+    fresh iteration's prompts stay clean.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    node.radio.init()
+    node.radio.send(
+        node.branch,
+        subject='stand down wave two',
+        data='the pre-order spawn wave is countermanded',
+        priority=9,
+    )
+    loop = MockLoop(node)
+    steps = loop._discover_steps()
+    assert steps
+    # a fresh iteration's prompt carries no digest
+    assert 'inbox re-read' not in loop._build_step_prompt(steps[0])
+    # the adopted (resumed) iteration's prompts carry it, priority first
+    loop._resume_mode = True
+    prompt = loop._build_step_prompt(steps[0])
+    assert '## Resumed-iteration inbox re-read' in prompt
+    assert 'stand down wave two' in prompt
+    assert 'fractal radio read --channel=inbox --unread' in prompt
+
+
+def test_drain_run_blocks_spawns_and_re_arms(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drain run's seats cannot init, start, or update nodes.
+
+    ``start --continue --drain`` exports ``_DRAIN`` into every seat's
+    environment, and the spawn/re-arm verbs refuse under it harness-side
+    -- a replayed plan cannot buy a breach spawn no matter what the seat
+    decides. The drain also rides the prompt as the DRAIN mode doc, and a
+    plain run exports the mask so an ancestor's drain never leaks in.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    drain = MockLoop(node, drain=True)
+    # the drain rides every seat's env and prompt
+    assert drain._agent_env('step 1 of 1 (PLAN)')['_DRAIN'] == '1'
+    steps = drain._discover_steps()
+    assert steps
+    assert '## Drain Mode' in drain._build_step_prompt(steps[0])
+    plain = MockLoop(node)
+    assert plain._agent_env('step 1 of 1 (PLAN)')['_DRAIN'] == ''
+    assert '## Drain Mode' not in plain._build_step_prompt(steps[0])
+    # under the export, the spawn and re-arm verbs refuse
+    monkeypatch.setenv('_DRAIN', '1')
+    with pytest.raises(RuntimeError, match='forbids spawns'):
+        node.init(name='breach', agent='claude')
+    with pytest.raises(RuntimeError, match='forbids re-arms'):
+        node.start()
+    with pytest.raises(RuntimeError, match='forbids re-arms'):
+        node.child_update('breach', max_cost=100.0)
 
 
 def test_census_distinguishes_run_exhausted_from_done_conditions(

@@ -107,3 +107,14 @@ meeting, a spend freeze), and nothing about the task is changing. Reach for
 **stop/continue** (or finish, or kill) when the run should end: the direction is
 changing, the budget needs re-arming, or you want the node to re-orient from a
 clean boundary rather than thaw mid-thought.
+
+## Resume context and drains
+
+A resumed iteration replays a frozen plan, so the harness re-reads the node's
+unread inbox and appends the digest (metadata, priority first) to every seat's
+prompt -- directives that arrived after the plan froze are in context before any
+replayed decision executes, and a sealed mailbox stays sealed. For wind-downs,
+`node start --continue --drain` runs a drain: `_DRAIN` rides every seat's
+environment, `node init`/`node start`/`node update` refuse under it (spawns and
+re-arms are harness-blocked, not just discouraged), and the DRAIN mode doc tells
+the seat to close out instead of expanding.

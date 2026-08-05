@@ -380,6 +380,12 @@ def node_start(app: typer.Typer) -> typer.Typer:
     # clean flag
     clean_help = 'With --continue: discard uncommitted project files.'
     clean = typer.Option(False, '--clean', help=clean_help)
+    # drain flag
+    drain_help = (
+        'With --continue: run a drain — the harness forbids spawns and'
+        ' re-arms from this run and tells every seat it is draining.'
+    )
+    drain = typer.Option(False, '--drain', help=drain_help)
     # max cost option
     max_cost_help = (
         'With --continue: retune the cost cap before relaunch, echoed'
@@ -395,6 +401,7 @@ def node_start(app: typer.Typer) -> typer.Typer:
         node: Optional[str] = node,
         continue_: bool = continue_,
         clean: bool = clean,
+        drain: bool = drain,
         max_cost: Optional[float] = max_cost,
         path: str = path,
     ) -> None:
@@ -410,10 +417,17 @@ def node_start(app: typer.Typer) -> typer.Typer:
         require_non_negative(max_cost=max_cost)
         if clean and not continue_:
             raise typer.BadParameter('--clean requires --continue.')
+        if drain and not continue_:
+            raise typer.BadParameter('--drain requires --continue.')
         if max_cost is not None and not continue_:
             raise typer.BadParameter('--max-cost requires --continue.')
         node = resolve_target(path, node)
-        output = node.start(continue_run=continue_, clean=clean, max_cost=max_cost)
+        output = node.start(
+            continue_run=continue_,
+            clean=clean,
+            drain=drain,
+            max_cost=max_cost,
+        )
         if output:
             typer.echo(output)
 
@@ -1278,6 +1292,9 @@ def node_loop(app: typer.Typer) -> typer.Typer:
     # resume flag
     resume_help = 'Resume a paused node (adopt its open run where the pause left it).'
     resume = typer.Option(False, '--resume', help=resume_help)
+    # drain flag
+    drain_help = 'With --continue: forbid spawns and re-arms for this run.'
+    drain = typer.Option(False, '--drain', help=drain_help)
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
@@ -1287,6 +1304,7 @@ def node_loop(app: typer.Typer) -> typer.Typer:
         agent_command: Optional[str] = agent_command,
         continue_: bool = continue_,
         resume: bool = resume,
+        drain: bool = drain,
         path: str = path,
     ) -> None:
         """Run the node's iteration loop (invoked by start.sh inside tmux)."""
@@ -1296,6 +1314,7 @@ def node_loop(app: typer.Typer) -> typer.Typer:
             agent_command=agent_command,
             continue_=continue_,
             resume=resume,
+            drain=drain,
             render=StreamRenderer(),
         )
         code = loop.run()

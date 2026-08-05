@@ -25,6 +25,7 @@ _CHAT_RUNTIME = {
     'CONTINUE_MODE': 'false',
     'RESUME_MODE': 'false',
     'RESERVE_MODE': 'false',
+    'DRAIN_MODE': 'false',
 }
 
 

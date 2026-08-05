@@ -669,6 +669,14 @@ class Node:
         if not name:
             raise ValueError('Node name is required.')
         worktree.validate_name(name)
+        # a draining seat spawns nothing: the loop exports _DRAIN for a
+        # --continue --drain run, so a spawn from any of its subprocesses
+        # refuses harness-side (a resumed plan replaying a stale spawn wave
+        # was a whole damage class once)
+        if os.environ.get('_DRAIN'):
+            raise RuntimeError(
+                'Cannot init a node from a draining run (--drain forbids spawns).'
+            )
         # flatten scope entries -- the CLI form is comma-separated, with
         # repeated flags tolerated, and whitespace is the stored form's
         # separator (config _set splits on it), so split on both here;
@@ -1373,6 +1381,7 @@ class Node:
         *,
         continue_run: bool = False,
         clean: bool = False,
+        drain: bool = False,
         max_cost: Optional[float] = None,
     ) -> str:
         """Launch the node in a tmux session.
@@ -1418,6 +1427,13 @@ class Node:
         # reject user nodes
         if self.is_user:
             raise RuntimeError('Cannot start a user node.')
+        # a draining seat re-arms nothing: the loop exports _DRAIN for a
+        # --continue --drain run, so a start from any of its subprocesses
+        # refuses harness-side
+        if os.environ.get('_DRAIN'):
+            raise RuntimeError(
+                'Cannot start a node from a draining run (--drain forbids re-arms).'
+            )
         # reconcile a crashed-but-active node so --continue isn't wedged
         self._reconcile_status()
         # validate status
@@ -1612,6 +1628,8 @@ class Node:
         args = [f'{self._root}']
         if continue_run:
             args.append('--continue')
+        if drain:
+            args.append('--drain')
         # ensure git excludes
         self._git_exclude()
         if continue_run:
@@ -3854,6 +3872,12 @@ class Node:
             max_descendants: New maximum total descendant nodes.
 
         """
+        # a draining seat re-arms nothing: cap raises from a --drain run
+        # refuse harness-side, mirroring the init and start guards
+        if os.environ.get('_DRAIN'):
+            raise RuntimeError(
+                'Cannot update a node from a draining run (--drain forbids re-arms).'
+            )
         # initialize updates -- the iter/step caps, the reserve, and the
         # step timeout are config-only
         data = {}

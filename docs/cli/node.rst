@@ -245,6 +245,12 @@ launch time.
    With ``--continue``: acknowledge discarding uncommitted project files
    (node-directory files are exempt).
 
+``--drain``
+   With ``--continue``: run a drain — the harness forbids spawns and
+   re-arms from this run (``node init``/``start``/``update`` refuse from
+   its seats, enforced via the exported ``_DRAIN``) and injects the DRAIN
+   mode doc so every seat closes out instead of expanding.
+
 ``--max-cost <usd>``
    With ``--continue``: retune the cost cap before relaunch, echoed
    ``max_cost: old -> new``. **Required** when the last run ended on its cost

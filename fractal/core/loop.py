@@ -232,6 +232,7 @@ class Loop:
         agent_command: Optional[str] = None,
         continue_: bool = False,
         resume: bool = False,
+        drain: bool = False,
         render: Optional[Callable[[StreamEvent], None]] = None,
     ) -> None:
         """Initialize ``Loop``.
@@ -244,6 +245,9 @@ class Loop:
                 further iterations).
             resume: Resume a paused node (adopt its open run where the
                 pause left it).
+            drain: Run a drain (with ``continue_``): the harness forbids
+                spawns and re-arms from this run (``_DRAIN`` rides every
+                seat's env) and injects the DRAIN mode doc into prompts.
             render: Presentation callback for parsed agent stream events
                 (the pane rendering); ``None`` renders nothing.
 
@@ -258,6 +262,7 @@ class Loop:
         self._render = render
         self._continue = continue_
         self._resume = resume
+        self._drain = drain
         # the agent comes from the argument or the node config (--agent at init)
         config = node.config
         self._agent_command = agent_command or config.get('agent')
@@ -2165,8 +2170,52 @@ class Loop:
             'RESERVE_MODE': 'true' if self._reserve else 'false',
             'DETACHED_MODE': self._env_base['DETACHED_MODE'],
             'META_MODE': self._env_base['META_MODE'],
+            'DRAIN_MODE': 'true' if self._drain else 'false',
         }
-        return self.node.build_prompt(f'{step.path}', overrides=overrides)
+        prompt = self.node.build_prompt(f'{step.path}', overrides=overrides)
+        # a resumed iteration replays a frozen plan -- the harness re-reads
+        # the inbox at every attached seat, so directives that arrived after
+        # the plan froze are in context before any replayed decision executes
+        if self._resume_mode and (digest := self._inbox_digest()):
+            prompt = f'{prompt}\n{digest}'
+        return prompt
+
+    def _inbox_digest(self: Loop) -> str:
+        """Render the unread inbox for a resumed seat's prompt, or ``''``.
+
+        Metadata only (sender, priority, subject, uuid) with the read
+        command spelled out -- enough to force triage without flooding the
+        prompt; capped at the twenty highest-priority rows. A sealed
+        mailbox stays sealed: the read runs as the node itself, so the
+        seal's hold applies here too. Guarded -- a failed read yields
+        ``''``, never a crashed prompt build.
+        """
+        try:
+            rows = self.node.radio.messages(read=False)
+        except Exception:
+            return ''
+        if not rows:
+            return ''
+        lines = [
+            '',
+            '## Resumed-iteration inbox re-read',
+            '',
+            'This iteration resumed from a frozen plan; directives that',
+            'arrived since it was written supersede it. Your unread inbox,',
+            'priority first:',
+            '',
+        ]
+        for row in rows[:20]:
+            lines.append(
+                f'- [p{row["priority"]}] {row["message_uuid"]}'
+                f' from {row["sender"]}: {row["subject"]}'
+            )
+        lines += [
+            '',
+            'Read them before acting on the plan:'
+            ' `fractal radio read --channel=inbox --unread`.',
+        ]
+        return '\n'.join(lines)
 
     def _build_cost_budget(self: Loop) -> None:
         """Refresh the cost-budget label from the CURRENT remaining.
@@ -2229,6 +2278,9 @@ class Loop:
             'CONTINUE_MODE': 'true' if self._continue else 'false',
             'RESUME_MODE': 'true' if self._resume_mode else 'false',
             '_NODE': f'{self.node.node_dir}',
+            # a draining run's seats spawn and re-arm nothing -- init,
+            # start, and update refuse under this export
+            '_DRAIN': '1' if self._drain else '',
             # external env consumers key node identity off this branch,
             # not _NODE's basename (an incidental dir-layout fact)
             'NODE_BRANCH': self.node.branch,
