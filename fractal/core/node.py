@@ -2184,10 +2184,16 @@ class Node:
 
         The status re-read and the kill's event/signal writes stay atomic
         under the ``.worktrees`` flock; ``kill.sh`` and the row marking run
-        outside the lock. The attribution -- ``killed by <actor>``, with
-        the reason appended when one is given -- lands identically on the
-        kill event, the ``kill`` signal, and the killed run row, so every
-        surface answers who ended the run.
+        outside the lock. An idle target is also stamped ``killed`` under
+        that flock: it has no terminal to clobber and possibly no session
+        yet, and only a stamp that precedes the reap lets the loop's
+        flock'd boot check stand a racing start down -- stamped after,
+        the loop boots in the window, kill.sh has already no-op'd, and
+        nothing ever reaps it (the loop never polls the kill signal). The
+        attribution -- ``killed by <actor>``, with the reason appended when
+        one is given -- lands identically on the kill event, the ``kill``
+        signal, and the killed run row, so every surface answers who ended
+        the run.
         """
         # compose the attribution: who killed, and why when a reason rides
         caller = self.resolve_caller()
@@ -2208,6 +2214,10 @@ class Node:
             # set signal and log event; the tmux kill runs outside the lock
             event_id = self.record.event_start('kill', metadata=label)
             self.record.signal_set('kill', label)
+            # an idle target is stamped here, not after the reap -- see the
+            # docstring: the boot-window race is only closed flock-to-flock
+            if current == 'idle':
+                self.status_set('killed')
         # vet the recorded process groups before the script's fallback reap:
         # kill.sh gates on liveness alone, and a recycled id (the OS re-issued
         # a dead group's id to an unrelated same-user group) answers that

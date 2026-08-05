@@ -63,6 +63,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An idle-target kill stamps `killed` under the `.worktrees` flock before the
+  reap, so a kill racing a mid-validation `start` is fully serialized against
+  the loop's flock'd boot check: kill-first stands the boot down, loop-first
+  keeps the reap a live target — a post-reap stamp let the reap no-op on the
+  not-yet-booted session, the loop boot in the window, and a live loop burn
+  spend indefinitely under a `killed` census row with nothing left to reap it.
 - Adversarial-review hardening of this wave's own changes: the resumed-seat
   digest reads the inbox channel only; relay UUIDs normalize case like every
   other verb; a kill that wins the boot window stands the loop down instead of

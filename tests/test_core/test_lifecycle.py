@@ -49,6 +49,7 @@ __all__ = [
     'test_kill_vets_recorded_group_before_script',
     'test_kill_sets_killed_status',
     'test_kill_reaps_idle_node_before_start',
+    'test_kill_stamps_idle_killed_before_the_reap',
     'test_kill_marks_all_active',
     'test_kill_keeps_loop_terminal_status_when_raced',
     'test_retire_sets_status',
@@ -534,6 +535,35 @@ def test_kill_reaps_idle_node_before_start(
     # the killed stamp closes the start path -- the node never activates
     with pytest.raises(RuntimeError, match='Cannot start from status'):
         node.start()
+
+
+def test_kill_stamps_idle_killed_before_the_reap(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An idle kill stamps ``killed`` under the flock, before ``kill.sh``.
+
+    The boot window: a kill landing while a start is mid-validation finds
+    no session to reap, so a stamp that trailed the reap would let the
+    loop boot in between, flock-read ``idle``, stamp ``active``, and run
+    forever under a ``killed`` census row -- kill.sh already no-op'd and
+    the loop never polls the kill signal. The pre-reap stamp serializes
+    the outcomes: the loop's flock'd boot check sees ``killed`` and
+    stands down.
+    """
+    node = node_with_db
+    # a never-started node: idle, no run rows, no tmux session
+    monkeypatch.setattr(Node, '_tmux_session_exists', lambda self: False)
+    stamped: list[str] = []
+
+    def run_script(script: str, *args: str) -> subprocess.CompletedProcess[str]:
+        stamped.append(node.status())
+        return subprocess.CompletedProcess([script, *args], 0, '', '')
+
+    monkeypatch.setattr(node, '_run_script', run_script)
+    node.kill()
+    # kill.sh fired exactly once, with the killed stamp already down
+    assert stamped == ['killed']
 
 
 def test_kill_marks_all_active(
