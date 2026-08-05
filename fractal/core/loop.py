@@ -356,6 +356,7 @@ class Loop:
         self._cost_budget = 'no limit'
         # per-launch state (the exported step vocabulary)
         self._step_label = ''
+        self._last_step_name = ''
         self._step_id: Optional[int] = None
         self._step_model = ''
         self._step_effort = ''
@@ -1115,7 +1116,10 @@ class Loop:
 
             # ensure iteration committed
             if not self._commit_check():
-                self._force_commit('auto')
+                message = 'auto'
+                if self._last_step_name:
+                    message = f'auto after {self._last_step_name}'
+                self._force_commit(message)
 
             iter_reason = None
             if iter_failed:
@@ -1477,6 +1481,8 @@ class Loop:
             attempt = 0
             drop_retried = False
             drop_completed = False
+            # the newest step name rides every backstop commit's context
+            self._last_step_name = step_name
             while True:
                 print()
                 print(f'--- Step {step_num}/{step_count} ({step_name}) ---')
@@ -3577,6 +3583,17 @@ class Loop:
         """
         if step_id is None:
             step_id = self._step_id if self._iter_id is not None else None
+        # backstop context: the step the save follows and the newest plan's
+        # title -- a bare '(auto)' subject over real work costs archaeology
+        # at every forensics pass and merge screen
+        context = []
+        if self._last_step_name:
+            context.append(f'after step: {self._last_step_name}')
+        if title := self._plan_title():
+            context.append(f'plan: {title}')
+        if context:
+            block = '\n'.join(context)
+            body = f'{body}\n\n{block}' if body else block
         try:
             output = commit.commit(
                 node=self.node,
@@ -3592,6 +3609,24 @@ class Loop:
                 print(output)
         except Exception as error:
             print(f'Error: {error}', file=sys.stderr)
+
+    def _plan_title(self: Loop) -> str:
+        """Return the newest plan file's H1 title, or ``''``.
+
+        The last plan the seat wrote is the run's frozen intent -- it rides
+        every backstop commit so the save names what the work was for.
+        Guarded: a missing or unreadable plans dir yields ``''``.
+        """
+        try:
+            plans_dir = self.node.node_dir / 'plans'
+            paths = sorted(plans_dir.glob('*.md'))
+            if not paths:
+                return ''
+            with paths[-1].open(encoding='utf-8') as file:
+                first = file.readline().strip()
+        except OSError:
+            return ''
+        return first.removeprefix('#').strip()
 
     def _iter_label_text(self: Loop) -> str:
         """Return the iteration progress label (``N of M`` / ``N (no limit)``)."""

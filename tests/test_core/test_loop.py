@@ -82,6 +82,7 @@ __all__ = [
     'test_run_end_drain_outlives_the_closed_iterations_deadline',
     'test_before_last_step_drain_uses_the_run_wall_not_the_iter_deadline',
     'test_finalize_terminal_cascade_matrix',
+    'test_auto_backstop_commit_carries_step_and_plan_context',
     'test_stop_mid_step_lets_the_seat_complete',
     'test_stop_during_finish_drain_books_stopped',
     'test_pre_iteration_finish_drain_uses_the_run_wall_not_the_iter_deadline',
@@ -2277,6 +2278,42 @@ def test_finalize_terminal_cascade_matrix(
     expected = '' if reason is None else reason.format(run=loop._run_id)
     assert row['metadata'] == expected
     assert row['ended_at'] is not None
+
+
+def test_auto_backstop_commit_carries_step_and_plan_context(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The auto backstop names the step it follows and the newest plan.
+
+    A seat death leaves the loop to commit whatever is in the tree; a bare
+    ``(auto)`` subject over thousands of inserted lines costs archaeology
+    at every forensics pass and merge screen, so the subject carries the
+    step the save follows and the body the last plan's title.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    node.plans.init(iter_ref='1.1', name='route_survey', title='Survey the routes')
+
+    class _DirtyLoop(MockLoop):
+        """Leave the worktree dirty so the auto backstop fires."""
+
+        def _commit_check(self: _DirtyLoop) -> bool:
+            return False
+
+    (node.worktree / 'work.txt').write_text('real work\n', encoding='utf-8')
+    loop = _DirtyLoop(loop_node)
+    assert loop.run() == 0
+    message = subprocess.run(
+        ['git', '-C', f'{node.worktree}', 'log', '-1', '--format=%B'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the subject names the step; the body carries the step and plan context
+    assert '(auto after' in message
+    assert 'after step:' in message
+    assert 'plan: 1.1 Survey the routes' in message
 
 
 def test_stop_mid_step_lets_the_seat_complete(

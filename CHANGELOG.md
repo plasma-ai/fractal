@@ -33,6 +33,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Seat-death backstop commits carry their context: the auto force-commit's
+  subject names the step it follows (`auto after EXECUTE`) and its body the step
+  and the newest plan's title — buried real work no longer costs archaeology at
+  forensics and merge screens.
 - fractal owns its estate staging: any estate file an ignore rule held out of a
   commit is re-evaluated against fractal-normal rules alone (the shipped exclude
   template plus committed per-directory `.gitignore` files) and force-added when
