@@ -40,6 +40,8 @@ __all__ = [
     'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_record_force_add_refuses_non_record_files',
     'test_estate_add_refuses_non_record_files_with_no_ignore_layer',
+    'test_estate_commits_its_own_tool_state',
+    'test_refused_estate_content_leaves_the_clean_check_quiet',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
     'test_commit_refreshes_wiki_indexes',
@@ -694,19 +696,6 @@ def test_record_force_add_refuses_non_record_files(
     assert f'{project_dir}' not in forced_line
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'OPEN: the record allowlist bounds only the ignore override, so a'
-        ' credential parked in an estate rides a commit whenever no host rule'
-        ' fences it. Extending _is_record to the plain estate add leaves the'
-        " estate's own tool state (memory/.wiki/, plans/.gitkeep -- neither a"
-        ' record nor fenced by any layer) permanently untracked, which trips'
-        " the pipeline's own _check_clean gate on every node. Closing this"
-        " needs the estate's non-record content given a home -- ignored, or"
-        ' admitted to the allowlist -- before the allowlist can bound the add.'
-    ),
-)
 def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -758,6 +747,7 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
         assert parked in result, parked
     # a record edited after it is tracked still commits -- the allowlist
     # gates what the estate adds new, never the upkeep of its own history
+    # (the memory wiki's index refresh owns the frontmatter around the body)
     memory.write_text('finding of record, revised\n', encoding='utf-8')
     node.commit('record upkeep')
     committed = subprocess.run(
@@ -772,7 +762,101 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
         text=True,
         check=True,
     ).stdout
-    assert committed == 'finding of record, revised\n'
+    assert 'finding of record, revised' in committed
+
+
+def test_estate_commits_its_own_tool_state(tmp_path: pathlib.Path) -> None:
+    """An ordinary node's estate tool state is content, and commits silently.
+
+    The content law bounds what an estate adds, so it must describe
+    everything an estate legitimately holds -- not only the records, but
+    the tool state a fresh clone needs to check the estate out as the
+    node left it: git's empty-directory placeholder under a bare record
+    dir, and the memory wiki's settings, whose declared-root marker the
+    wiki CLI reads the memory back through. Withholding those would
+    leave a normal node permanently untracked against the pipeline's own
+    clean check, with nothing able to clear it, so they must commit --
+    and, being ordinary content, must draw no refusal notice.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    result = node.commit('ordinary work')
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the estate's own tool state rides the commit beside the records
+    estate = '.fractal/main.task'
+    for state in (f'{estate}/plans/.gitkeep', f'{estate}/memory/.wiki/settings.json'):
+        assert state in tracked, state
+    assert f'{estate}/NODE.md' in tracked
+    # nothing was withheld, so the pass says nothing about refusals
+    assert 'NOT staged' not in result
+    assert 'are not node records' not in result
+    # and the tree reads back clean, so the loop's net never fires
+    node.commit(check=True)
+
+
+def test_refused_estate_content_leaves_the_clean_check_quiet(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A parked credential is withheld from history without reading as dirty.
+
+    The clean check counts only work the stage could commit, which is
+    why it already rides the stage's own excludes. Estate content the
+    content law refuses is exactly that kind of dirt: no pass may ever
+    stage it, so counting it would fire the loop's force-commit net
+    every iteration over a file that can never clear. The refusal is
+    reported through the commit output instead, where it names the file.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    node.commit('ordinary work')
+    # a node parks credentials in its estate, with nothing fencing them --
+    # one beside a tracked record, one in a directory of its own, which the
+    # default status listing would collapse to a single untracked entry
+    (node.node_dir / '.env').write_text('AWS_SECRET_ACCESS_KEY=x\n', encoding='utf-8')
+    keys = node.node_dir / 'memory' / '.ssh'
+    keys.mkdir(parents=True)
+    (keys / 'id_ed25519').write_text('PRIVATE KEY\n', encoding='utf-8')
+    result = node.commit('work beside parked credentials')
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for parked in ('.env', 'id_ed25519'):
+        assert parked not in tracked, parked
+        assert parked in result, parked
+    # the refused files are dirt no pass may stage, so the net stays parked
+    node.commit(check=True)
 
 
 def test_commit_stamps_iteration_from_args_or_open_row(

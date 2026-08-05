@@ -554,8 +554,21 @@ def _check_clean(node: Node) -> None:
     # (runtime artifacts in a worktree whose info/exclude has not refreshed)
     # would otherwise read as permanently dirty and fire the net every
     # iteration for nothing
-    cmd = ['status', '--porcelain', '--', *_STAGE_EXCLUDES]
-    if fractal.util.git.run(cmd, cwd=node.worktree, check=False):
+    # the estate content law rides along for the same reason: a credential a
+    # node parked in its estate is dirt no pass may ever stage, so counting it
+    # would fire the net every iteration over a file that can never clear
+    # -uall so the law is asked the same question the stage answers, per file:
+    # the default listing collapses a wholly-untracked directory to one entry,
+    # and a parked .ssh/ would read as dirt no expansion could ever clear
+    project = node.project_path
+    prefix = FRACTAL_FOLDER if project == '.' else f'{project}/{FRACTAL_FOLDER}'
+    cmd = ['status', '--porcelain', '-uall', '-z', '--', *_STAGE_EXCLUDES]
+    raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+    for entry in filter(None, os.fsdecode(raw).split('\0')):
+        # -z drops the rename arrow, so a rename's source rides as its own
+        # bare field -- unprefixed, hence never read as an untracked path
+        if entry.startswith('?? ') and _is_refused_estate(entry[3:], prefix):
+            continue
         raise RuntimeError('Uncommitted changes remain (agent should have committed).')
 
 
@@ -664,38 +677,76 @@ _RECORD_SUFFIXES = (
     '.yaml',
     '.yml',
 )
+#: dot-named directories a record dir may carry: the wiki tool's own
+#: settings directory, whose declared-root marker a fresh clone needs to
+#: read the memory wiki back (the tool's derived state self-ignores)
+_TOOL_STATE_DIRS = ('.wiki',)
+#: dot-named files a record dir may carry: git's empty-directory
+#: placeholder, whose only purpose is to check a bare record dir out
+_TOOL_STATE_FILES = ('.gitkeep',)
 
 
-def _is_record(relpath: str, estate: str) -> bool:
-    """Whether an estate-relative path is a force-stageable node record.
+def _is_committable(relpath: str, estate: str) -> bool:
+    """Whether an estate-relative path is content a node may commit.
 
-    The force pass overrides the ignore layer where a host's secrets are
-    normally fenced (``core.excludesFile``, a machine-local
-    ``info/exclude``), so it must not be a general "stage what is
-    ignored" verb: anything a node parked in its estate -- a dotenv, a
-    key, a downloaded credential -- would ride a commit silently. Only
-    the canon-required record surfaces qualify, and only at the text
-    suffixes a record is written in.
+    One law governs both estate staging paths, because both decide what
+    a node's own directory folds into git history: anything a node
+    parked in its estate -- a dotenv, a key, a downloaded credential --
+    would otherwise ride a commit silently whenever no ignore rule
+    happens to fence it, and be refused only where a host rule already
+    protected it. So the allowlist describes everything an estate may
+    legitimately hold: the canon-required record surfaces at the text
+    suffixes a record is written in, plus the estate's own tool state,
+    which is committed content rather than machine state.
 
     Args:
         relpath: The file's worktree-relative path.
         estate: The estate directory's worktree-relative path.
 
     Returns:
-        Whether the path is inside the record allowlist.
+        Whether the path is inside the estate content allowlist.
 
     """
     inside = pathlib.PurePosixPath(relpath).relative_to(estate)
     parts = inside.parts
-    # a dotfile anywhere in the path is machine or tool state, never a
-    # record: the memory wiki's own .wiki/ cache rides the ignore layers
-    if any(part.startswith('.') for part in parts):
-        return False
-    if inside.suffix not in _RECORD_SUFFIXES:
-        return False
     if len(parts) == 1:
-        return parts[0] in _RECORD_FILES
-    return parts[0] in _RECORD_DIRS
+        return parts[0] in _RECORD_FILES and inside.suffix in _RECORD_SUFFIXES
+    if parts[0] not in _RECORD_DIRS:
+        return False
+    # a dot-named directory is machine or agent state (an agent config dir,
+    # a parked .ssh/) unless it is the estate's own tool state
+    if any(
+        part.startswith('.') and part not in _TOOL_STATE_DIRS for part in parts[1:-1]
+    ):
+        return False
+    # the leaf is either named tool state or a record at a text suffix, so
+    # no pass can stage a key, a certificate, an archive, or a binary
+    if parts[-1].startswith('.'):
+        return parts[-1] in _TOOL_STATE_FILES
+    return inside.suffix in _RECORD_SUFFIXES
+
+
+def _is_refused_estate(relpath: str, fractal_prefix: str) -> bool:
+    """Whether a worktree path is estate content no staging pass may commit.
+
+    Args:
+        relpath: The file's worktree-relative path.
+        fractal_prefix: The fractal data folder prefix.
+
+    Returns:
+        Whether the path sits inside an estate and the content law
+        refuses it.
+
+    """
+    path = pathlib.PurePosixPath(relpath)
+    if not path.is_relative_to(fractal_prefix):
+        return False
+    parts = path.relative_to(fractal_prefix).parts
+    # <prefix>/<estate>/<path>: a file directly under the folder sits in no
+    # estate, so no estate's law governs it
+    if len(parts) < 2:
+        return False
+    return not _is_committable(relpath, f'{fractal_prefix}/{parts[0]}')
 
 
 def _stage(
@@ -720,10 +771,18 @@ def _stage(
             under it; the record pass owns them).
 
     Returns:
-        The record pass's notices (what it force-staged, what it refused).
+        The estate pass's notices (what it force-staged, what it refused).
 
     """
     worktree = node.worktree
+    # settle the estate content law before any sweep, and withhold what it
+    # refuses by name: what a node's own directory folds into history must
+    # not turn on whether a host rule happens to fence it. Naming refused
+    # paths (never a whole estate) keeps the sweeps whole -- an exclude
+    # matching an ignored path fails the add outright, and an ignored path
+    # is already outside the sweep anyway.
+    denied = _estate_denied(node, fractal_prefix)
+    withheld = [f':(exclude,literal){path}' for path in denied]
     if scoped:
         # stage only paths that exist -- a scope dir that is planned
         # but not yet created would otherwise make `git add` fatal
@@ -747,21 +806,73 @@ def _stage(
             # literal pathspec magic: a glob char in an on-disk path (e.g. a
             # bracketed project dir) must not widen or empty the match
             specs = [f':(literal){path}' for path in paths]
-            cmd = ['add', *specs, *_STAGE_EXCLUDES]
+            cmd = ['add', *specs, *_STAGE_EXCLUDES, *withheld]
             fractal.util.git.run(cmd, cwd=worktree)
         # the estates ride their own plain add: it must be able to fail
         # (everything under it ignored) without unstaging the scope sweep
         folder = worktree / fractal_prefix
         if folder.is_dir():
-            cmd = ['add', f':(literal){folder}', *_STAGE_EXCLUDES]
+            cmd = ['add', f':(literal){folder}', *_STAGE_EXCLUDES, *withheld]
             fractal.util.git.run(cmd, cwd=worktree, check=False)
     else:
-        cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES]
+        cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
         fractal.util.git.run(cmd, cwd=worktree)
-    return _stage_records(node, fractal_prefix)
+    return _stage_records(node, fractal_prefix, denied)
 
 
-def _stage_records(node: Node, fractal_prefix: str) -> list[str]:
+def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
+    """The estate directories the content law governs.
+
+    A self-ignored seed dir (the user node's untracked-by-design state)
+    is not an estate the law speaks for, so it is left alone.
+
+    Args:
+        node: The node whose worktree holds the estates.
+        fractal_prefix: The fractal data folder prefix.
+
+    Returns:
+        Each estate directory, sorted.
+
+    """
+    folder = node.worktree / fractal_prefix
+    if not folder.is_dir():
+        return []
+    return [
+        entry
+        for entry in sorted(folder.iterdir())
+        if entry.is_dir() and worktree.seed_tracked(entry)
+    ]
+
+
+def _estate_denied(node: Node, fractal_prefix: str) -> list[str]:
+    """Estate content the law refuses to let a plain add stage.
+
+    The plain adds would otherwise take anything a node parked in its
+    estate -- a dotenv, a key, a downloaded credential -- the moment no
+    ignore rule happened to fence it, which is the default state of a
+    fresh clone. Only new content is judged: what an estate already
+    tracks stays committable, so the law gates what enters history and
+    never the upkeep of the history a node already owns.
+
+    Args:
+        node: The node whose worktree to judge.
+        fractal_prefix: The fractal data folder prefix.
+
+    Returns:
+        Worktree-relative paths the sweeps must withhold.
+
+    """
+    estates = _estate_roots(node, fractal_prefix)
+    if not estates:
+        return []
+    specs = [f':(literal){entry}' for entry in estates]
+    cmd = ['ls-files', '--others', '--exclude-standard', '-z', '--', *specs]
+    raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+    fresh = [path for path in os.fsdecode(raw).split('\0') if path]
+    return [path for path in fresh if _is_refused_estate(path, fractal_prefix)]
+
+
+def _stage_records(node: Node, fractal_prefix: str, denied: list[str]) -> list[str]:
     """Force-stage estate records an external ignore rule held out.
 
     fractal owns its staging: the plain adds honor every ignore layer, so
@@ -775,97 +886,84 @@ def _stage_records(node: Node, fractal_prefix: str) -> list[str]:
     self-ignored seed dir (the user node's untracked-by-design state) is
     left alone.
 
-    The override is bounded by the record allowlist (:func:`_is_record`):
-    the layer it overrides is the one a host fences its secrets in, so a
-    non-record file a node parked in its estate is refused and named
-    rather than staged, and every force-add is reported. A record the add
-    cannot stage -- vanished after the snapshot, unreadable on disk -- is
-    likewise reported by name, never fatal.
+    The override answers to the same content allowlist
+    (:func:`_is_committable`) that bounds the plain adds, so one law
+    decides what an estate folds into history on either path: a file
+    outside it is refused and named rather than staged, and every
+    force-add is reported. A record the add cannot stage -- vanished
+    after the snapshot, unreadable on disk -- is likewise reported by
+    name, never fatal.
 
     Args:
         node: The node whose worktree to stage.
         fractal_prefix: The fractal data folder prefix.
+        denied: Estate content the law already withheld from the plain
+            adds, reported here so both refusals read together.
 
     Returns:
         Notices naming what was force-staged and what was refused.
 
     """
-    folder = node.worktree / fractal_prefix
-    if not folder.is_dir():
-        return []
-    estates = [
-        entry
-        for entry in sorted(folder.iterdir())
-        if entry.is_dir() and worktree.seed_tracked(entry)
-    ]
-    if not estates:
-        return []
-    specs = [f':(literal){entry}' for entry in estates]
-    # collect the estate files ignore rules held out of the plain adds
-    cmd = ['ls-files', '--others', '-i', '--exclude-standard', '-z', '--', *specs]
-    raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
-    held = [path for path in os.fsdecode(raw).split('\0') if path]
-    if not held:
-        return []
-    # the paths fractal-normal rules hold: the shipped template (runtime
-    # artifacts, evaluated directly -- rule attribution cannot answer this,
-    # a broad foreign line shadows the block while barring the very same
-    # artifact) plus the repo's committed per-directory .gitignore files
-    # (repo content a node can see and fix; an estate cache's self-ignore
-    # rides here). The machine-local layers -- info/exclude beyond the
-    # template's rules, core.excludesFile -- are deliberately absent:
-    # their holds are exactly what the force pass overrides.
-    assets = pathlib.Path(__file__).parent.parent / '_assets'
-    template = assets / 'git' / 'exclude'
-    cmd = [
-        'ls-files',
-        '--others',
-        '-i',
-        f'--exclude-from={template}',
-        '--exclude-per-directory=.gitignore',
-        '-z',
-        '--',
-        *specs,
-    ]
-    raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
-    normal = set(filter(None, os.fsdecode(raw).split('\0')))
-    # a snapshot path can vanish before the add (ignored-and-untracked files
-    # are exactly what `git clean -X` deletes, and estates churn under the
-    # node's own housekeeping) -- stage what still exists rather than letting
-    # one dead pathspec fail the add and abort the whole commit
-    prefixes = {
-        f'{entry.relative_to(node.worktree).as_posix()}': entry for entry in estates
-    }
-    forced = []
-    refused = []
-    for path in held:
-        if path in normal or not os.path.lexists(node.worktree / path):
-            continue
-        estate = next(
-            (root for root in prefixes if path.startswith(f'{root}/')),
-            None,
-        )
-        if estate is None:
-            continue
-        if not _is_record(path, estate):
-            refused.append(path)
-            continue
-        forced.append(path)
+    estates = _estate_roots(node, fractal_prefix)
+    forced: list[str] = []
     failed: list[str] = []
-    if forced:
-        # batched add, retried per path on failure: git stages nothing on
-        # exit 128 (a record can vanish after the lexists probe or sit
-        # unreadable on disk), and one bad path must cost itself, never the
-        # healthy records queued beside it -- the backstop save this pass
-        # feeds exists precisely to rescue those
-        specs = [f':(literal){node.worktree / path}' for path in forced]
-        cmd = ['add', '-f', *specs]
-        if fractal.util.git.run(cmd, cwd=node.worktree, check=False) is None:
-            for path in forced:
-                cmd = ['add', '-f', f':(literal){node.worktree / path}']
-                if fractal.util.git.run(cmd, cwd=node.worktree, check=False) is None:
-                    failed.append(path)
-            forced = [path for path in forced if path not in failed]
+    refused: list[str] = []
+    held: list[str] = []
+    if estates:
+        specs = [f':(literal){entry}' for entry in estates]
+        # collect the estate files ignore rules held out of the plain adds
+        cmd = ['ls-files', '--others', '-i', '--exclude-standard', '-z', '--', *specs]
+        raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+        held = [path for path in os.fsdecode(raw).split('\0') if path]
+    if held:
+        # the paths fractal-normal rules hold: the shipped template (runtime
+        # artifacts, evaluated directly -- rule attribution cannot answer this,
+        # a broad foreign line shadows the block while barring the very same
+        # artifact) plus the repo's committed per-directory .gitignore files
+        # (repo content a node can see and fix; an estate cache's self-ignore
+        # rides here). The machine-local layers -- info/exclude beyond the
+        # template's rules, core.excludesFile -- are deliberately absent:
+        # their holds are exactly what the force pass overrides.
+        assets = pathlib.Path(__file__).parent.parent / '_assets'
+        template = assets / 'git' / 'exclude'
+        cmd = [
+            'ls-files',
+            '--others',
+            '-i',
+            f'--exclude-from={template}',
+            '--exclude-per-directory=.gitignore',
+            '-z',
+            '--',
+            *specs,
+        ]
+        raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+        normal = set(filter(None, os.fsdecode(raw).split('\0')))
+        # a snapshot path can vanish before the add (ignored-and-untracked
+        # files are exactly what `git clean -X` deletes, and estates churn
+        # under the node's own housekeeping) -- stage what still exists rather
+        # than letting one dead pathspec fail the add and abort the commit
+        for path in held:
+            if path in normal or not os.path.lexists(node.worktree / path):
+                continue
+            if _is_refused_estate(path, fractal_prefix):
+                refused.append(path)
+                continue
+            forced.append(path)
+        if forced:
+            # batched add, retried per path on failure: git stages nothing on
+            # exit 128 (a record can vanish after the lexists probe or sit
+            # unreadable on disk), and one bad path must cost itself, never the
+            # healthy records queued beside it -- the backstop save this pass
+            # feeds exists precisely to rescue those
+            specs = [f':(literal){node.worktree / path}' for path in forced]
+            cmd = ['add', '-f', *specs]
+            if fractal.util.git.run(cmd, cwd=node.worktree, check=False) is None:
+                for path in forced:
+                    cmd = ['add', '-f', f':(literal){node.worktree / path}']
+                    result = fractal.util.git.run(cmd, cwd=node.worktree, check=False)
+                    if result is None:
+                        failed.append(path)
+                forced = [path for path in forced if path not in failed]
     notices = []
     if forced:
         # worktree-relative paths in every notice: a force commit folds
@@ -886,6 +984,12 @@ def _stage_records(node: Node, fractal_prefix: str) -> list[str]:
         notices.append(
             f'Warning: {len(refused)} ignored estate file(s) are not node'
             f' records and were NOT force-staged: {listing}'
+        )
+    if denied:
+        listing = ', '.join(sorted(denied))
+        notices.append(
+            f'Warning: {len(denied)} estate file(s) are not node records and'
+            f' were NOT staged: {listing}'
         )
     return notices
 

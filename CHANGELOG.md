@@ -66,6 +66,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A credential parked in a node's estate no longer rides a commit silently.
+  Containment was inverted against risk: the record allowlist bounded only the
+  force-add that overrides a host's ignore rules, so the same dotenv, private
+  key, or downloaded token was loudly refused where a host rule already fenced
+  it — and swept into history by the plain add wherever nothing did, which is
+  the default state of a fresh clone. One content law now bounds both paths, so
+  what a node's own directory folds into history never turns on whether an
+  ignore rule happens to cover it, and a refusal is named in the commit output
+  either way rather than inferred from an absent file. Because the law must hold
+  for a normal node, it describes everything an estate legitimately holds — the
+  canon-required records at their text suffixes, plus the estate's own tool
+  state: git's empty-directory placeholder (`plans/.gitkeep`) and the memory
+  wiki's settings directory (`memory/.wiki/`), whose declared-root marker the
+  wiki CLI reads the memory back through. Both already committed and still do;
+  no file class is newly admitted to history, and the classes now withheld are
+  exactly those outside the law (keys, certificates, archives, binaries, and
+  anything a node parks at the estate root). The clean check learns the same law
+  for untracked estate paths, for the reason it already rides the stage's own
+  excludes: content no pass may ever stage would otherwise read as permanently
+  dirty and fire the loop's force-commit net every iteration over a file that
+  can never clear.
 - A draining seat can no longer spawn its way out by moving. The drain's
   spawn/re-arm refusals resolved the acting node from `_NODE`, else the working
   directory — both the seat's to rewrite — so

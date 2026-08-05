@@ -57,17 +57,48 @@ ignored directories stay silent), and any staged file at or over 10MB is listed
 by name -- an oversized file is usually an accident, but large commits are also
 legitimate.
 
+## The estate content law
+
+What a node's own directory may fold into git history is one allowlist's call
+(`_is_committable`), and it bounds both estate staging paths -- the plain adds
+and the ignore-rule override alike. That single law is the point: bounding only
+the override inverts containment against risk, refusing a parked dotenv loudly
+wherever a host rule already fenced it while sweeping the same file into history
+wherever nothing did, which is the default state of a fresh clone.
+
+The law describes everything an estate legitimately holds. Records are the
+canon-required surfaces -- the estate root's `NODE.md` and `config.json`, and
+the `memory/`, `plans/`, `scripts/`, `skills/`, and `steps/` directories -- and
+only at the text and structured-text suffixes a record is written in, so no pass
+can stage a key, a certificate, an archive, or a binary. Beside them sits the
+estate's own tool state, which is committed content rather than machine state:
+git's empty-directory placeholder (`.gitkeep`), which exists only so a bare
+record dir survives a clone, and the wiki tool's settings directory (`.wiki/`),
+whose declared-root marker the wiki CLI reads the memory wiki back through (the
+tool's derived cache self-ignores, and its plugin binaries install to an ignored
+`.obsidian/`). Every other dot-named path is machine or agent state and stays
+out. Only new content is judged: what an estate already tracks keeps committing,
+so the law gates what enters history and never the upkeep of history a node
+already owns.
+
+Content the law refuses is withheld from the sweeps by name and reported, never
+staged and never silently dropped. The refused paths themselves are named as
+pathspec exclusions rather than the estate as a whole, because an exclusion
+matching an ignored path fails the whole add -- and an ignored path is already
+outside the sweep.
+
 fractal owns its estate staging (`_stage_records`): after the plain adds, any
 estate file an ignore rule held out is re-evaluated against fractal-normal rules
 alone -- the shipped exclude template plus the repo's committed per-directory
 `.gitignore` files -- and force-added when only a machine-local layer (a foreign
-`info/exclude` line, `core.excludesFile`) held it. One stray broad exclude line
-can therefore no longer silently unstage, or hard-fail, the audit trail canon
-requires nodes to commit; the user node's self-ignored seed dir stays untracked
-by design. The force-add stages every record it can: a record the add cannot
-take -- vanished after the snapshot, unreadable on disk -- is named in a warning
-rather than aborting the commit, and both notices report worktree-relative
-paths, since a force commit folds them into its body.
+`info/exclude` line, `core.excludesFile`) held it, subject to the same content
+law. One stray broad exclude line can therefore no longer silently unstage, or
+hard-fail, the audit trail canon requires nodes to commit; the user node's
+self-ignored seed dir stays untracked by design. The force-add stages every
+record it can: a record the add cannot take -- vanished after the snapshot,
+unreadable on disk -- is named in a warning rather than aborting the commit, and
+both notices report worktree-relative paths, since a force commit folds them
+into its body.
 
 ## Commit, retry, and the backstop
 
@@ -90,4 +121,7 @@ mutating hook can neither block nor rewrite the save, and folds the record
 pass's notices and the staged-sweep warnings plus a capped diffstat into its
 body so the backstop describes what it saved (and what it deliberately overrode
 or refused) from git history alone. `--check` commits nothing and errors if
-uncommitted changes exist.
+uncommitted changes exist -- counting only work the stage could commit, so the
+stage's own excludes and the estate content law both ride along: dirt no pass
+may ever stage would otherwise read as permanently dirty and fire the backstop
+every iteration over a file that can never clear.
