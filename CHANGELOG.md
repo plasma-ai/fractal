@@ -63,6 +63,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Adversarial-review hardening of this wave's own changes: the resumed-seat
+  digest reads the inbox channel only; relay UUIDs normalize case like every
+  other verb; a kill that wins the boot window stands the loop down instead of
+  being overwritten `active`; the seal also covers `feed` self-subscriptions and
+  `radio relays`, and the seat-facing refusals stop naming the unseal command; a
+  non-billing failure breaks the breaker's streak and an interrupted breaker
+  wait never buys a hot launch; a goal-met finish with a cap-overshoot note no
+  longer renders as `run exhausted`.
 - The repo-hygiene version-agreement test pins the `.cruft.json` project version
   too (mutation-checked), so a bump that misses the cruft context fails on the
   PR instead of at the tag-time build gate.

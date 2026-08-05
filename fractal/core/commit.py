@@ -677,7 +677,7 @@ def _stage(
         # (everything under it ignored) without unstaging the scope sweep
         folder = worktree / fractal_prefix
         if folder.is_dir():
-            cmd = ['add', f':(literal){folder}']
+            cmd = ['add', f':(literal){folder}', *_STAGE_EXCLUDES]
             fractal.util.git.run(cmd, cwd=worktree, check=False)
     else:
         cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES]

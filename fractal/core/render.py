@@ -147,7 +147,8 @@ def prompt(
     both selects the active modes and renders the text. A mode doc
     ``<NAME>.md`` activates when ``<NAME>_MODE`` is ``true`` in that map:
     static modes (``DETACHED``/``META``) derive from config, run-scoped
-    modes (``CONTINUE``/``RESUME``/``RESERVE``) ride in as overrides.
+    modes (``CONTINUE``/``RESUME``/``RESERVE``/``DRAIN``) ride in as
+    overrides.
     ``SYNC.md`` never joins -- sync runs as its own step.
 
     Args:

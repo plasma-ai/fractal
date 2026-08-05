@@ -1498,6 +1498,10 @@ class Node:
         before launch); ``continue_run`` (with its optional ``max_cost``
         retune) is the only launch-time action.
 
+        ``drain`` runs the continued run as a wind-down: the loop exports
+        ``_DRAIN`` into every seat's environment (init/start/update refuse
+        under it) and injects the DRAIN mode doc into prompts.
+
         A continue re-enters the unsettled pool, so it re-checks the
         width/descendant gates (:meth:`_enforce_rearm_limits`) and re-arms to
         ``idle`` under the ``.worktrees`` flock; the loop stamps ``active`` at
@@ -3290,13 +3294,16 @@ class Node:
             if rows and rows[0]['status'] == 'exited' and rows[0]['metadata']:
                 detail = rows[0]['metadata']
         if status == 'completed':
-            # the two completed landings are different facts: a goal-met
-            # finish leaves the run reason-less, while an exhausted
-            # iteration budget records its cap -- name the second so a
-            # census never reads a run-out lane as done-conditions-met
+            # the two completed landings are different facts: an exhausted
+            # iteration budget records its cap, while a goal-met finish
+            # leaves the run reason-less (or carries a cap-overshoot note,
+            # which is still done-conditions-met) -- name only the run-out
+            # so a census never reads it as done-conditions-met
             rows = self.record.runs(limit=1)
-            if rows and rows[0]['status'] == 'completed' and rows[0]['metadata']:
-                detail = f'run exhausted: {rows[0]["metadata"]}'
+            if rows and rows[0]['status'] == 'completed':
+                reason = rows[0]['metadata'] or ''
+                if reason.startswith('Reached max iterations'):
+                    detail = f'run exhausted: {reason}'
         # an unresolved model drop composes onto the qualifier (the metadata
         # append shape), so neither fact hides the other
         if self._model_dropped():

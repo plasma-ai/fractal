@@ -409,6 +409,23 @@ def test_sealed_inbox_holds_hosted_mail_from_its_own_seat(
     # sending -- the verdict path -- is not sealed, and own writes list
     out, _, _ = peer.send(parent=True, subject='verdict', data='v', priority=5)
     assert out in [m['message_uuid'] for m in peer.sent()]
+    # a self-subscription to an own hosted channel cannot tunnel hosted
+    # mail into the sealed seat through the feed
+    root.send(peer_branch, channel='public', subject='board', data='b', priority=3)
+    peer.subscribe(peer_branch, channel='public')
+    assert [row for row in peer.feed() if row['node'] == peer_branch] == []
+    # nor does the relay-lineage listing surface a copy the seat hosts
+    relayed, _, _ = root.send(
+        peer_branch,
+        subject='relayed order',
+        data='r',
+        priority=5,
+        relay_of=uuid,
+    )
+    assert peer.relays(uuid) == []
+    monkeypatch.delenv('_NODE')
+    assert [row['message_uuid'] for row in peer.relays(uuid)] == [relayed]
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
     # an operator shell (no _NODE) adjudicates freely
     monkeypatch.delenv('_NODE')
     assert uuid in [m['message_uuid'] for m in peer.messages(channel='inbox')]

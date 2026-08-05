@@ -99,8 +99,8 @@ Options:
     --no-detached                      Run steps in one continuous session (default)
     --local                            Skip pushing to remote after each commit
     --blind                            Subscribe to no channels
-    --sealed                           Seal the node's mailbox (verifier isolation)
                                        (the parent still reads this node)
+    --sealed                           Seal the node's mailbox (verifier isolation)
     --reset                            Delete node files and reinitialize
     --help|-h                          Show this help message
 USAGE

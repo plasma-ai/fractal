@@ -453,28 +453,30 @@ class Loop:
         except OSError:
             pass
         # stamp the node active -- under the .worktrees flock, so a retire
-        # that won the boot window (its flock-guarded read legally saw
-        # 'idle' after start's checks but before this stamp) is honored
-        # instead of clobbered; guarded so a transient failure (a DB
+        # or kill that won the boot window (its flock-guarded read legally
+        # saw 'idle' after start's checks but before this stamp) is honored
+        # instead of clobbered: an idle kill stamps 'killed' with no session
+        # to reap, and overwriting it here would activate a node the kill
+        # already reported dead; guarded so a transient failure (a DB
         # contended under wide fan-out) never aborts the run and strands
         # .status at 'idle' (a missed stamp self-corrects as the loop runs)
-        retired = False
+        stood_down = ''
         try:
             with worktree.lock(node.repo_dir):
-                if node.status() == 'retired':
-                    retired = True
+                if node.status() in ('retired', 'killed'):
+                    stood_down = node.status()
                 else:
                     node.status_set('active')
         except Exception:
             pass
-        if retired:
-            print('=== Stood down at boot: node was retired ===')
+        if stood_down:
+            print(f'=== Stood down at boot: node was {stood_down} ===')
             try:
                 node.record.run_end(
                     run_id=self._run_id,
                     status='exited',
                     exit_code=1,
-                    metadata='retired before boot',
+                    metadata=f'{stood_down} before boot',
                 )
             except Exception:
                 pass
@@ -1624,11 +1626,12 @@ class Loop:
                     f'=== PAUSED: billing — {self._billing_fails} instant'
                     f' zero-cost failure(s); probing again in {wait}s ==='
                 )
+                # an interrupted wait never buys a hot launch: a pause
+                # parks, and a stop or spent ceiling ends the step loop
                 if not self._retry_backoff(seconds=wait):
                     if self._paused:
                         return True
-                    if self._check_stop():
-                        break
+                    break
 
             attempt = 0
             drop_retried = False
@@ -1858,8 +1861,13 @@ class Loop:
                     if self._billing_fails >= _BILLING_OUTAGE_THRESHOLD:
                         print('=== billing breaker cleared (a call succeeded) ===')
                     self._billing_fails = 0
-                elif failed and self._billing_failure(result, duration):
-                    self._billing_fails += 1
+                elif failed:
+                    if self._billing_failure(result, duration):
+                        self._billing_fails += 1
+                    else:
+                        # consecutive means consecutive: a failure that paid
+                        # or ran long is not the outage, and breaks the streak
+                        self._billing_fails = 0
 
                 # every drop lands an event; the first re-dispatches the step
                 # once (infrastructure weather can silently serve a different
@@ -2191,7 +2199,7 @@ class Loop:
         ``''``, never a crashed prompt build.
         """
         try:
-            rows = self.node.radio.messages(read=False)
+            rows = self.node.radio.messages(channel='inbox', read=False)
         except Exception:
             return ''
         if not rows:

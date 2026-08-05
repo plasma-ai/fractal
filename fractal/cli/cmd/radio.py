@@ -501,7 +501,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
         if sealed:
             typer.echo(
                 'inbox sealed: hosted messages are held out of view until'
-                ' unsealing (fractal config set sealed=false)',
+                ' lawfully unsealed',
                 err=True,
             )
         read_filter = _read_filter(all_messages, read)

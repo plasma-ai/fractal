@@ -193,6 +193,7 @@ class Radio:
         # than none (the obligation check would read the relay as never
         # executed); the archive answers for an original its host unsent
         if relay_of is not None:
+            relay_of = relay_of.upper()
             known = self.db.exists(
                 'messages',
                 where={'message_uuid': relay_of},
@@ -299,13 +300,18 @@ class Radio:
 
         Returns:
             List of relayed-copy message dicts with counts, in the shared
-            listing order (priority first).
+            listing order (priority first) -- minus rows this node hosts
+            while its own seal binds.
 
         """
-        return self._query_messages(
-            metadata=f'relay:{message_uuid}',
+        rows = self._query_messages(
+            metadata=f'relay:{message_uuid.upper()}',
             roots_only=False,
         )
+        # a bound seal holds hosted rows out of this listing too
+        if self.seal_binds():
+            rows = [row for row in rows if row['node'] != self.node.branch]
+        return rows
 
     def unsend(
         self: Radio,
@@ -375,8 +381,10 @@ class Radio:
         it binds when the acting caller IS the sealed node -- the loop
         exports ``_NODE`` for every step subprocess, so the seat's own
         reads hold hosted mail out of its context entirely, while an
-        operator shell (no ``_NODE``) adjudicates freely. Only messages
-        the node hosts are held; its own writes stay visible.
+        operator shell (no ``_NODE``) adjudicates freely. Hosted messages
+        are held from the listings, and the body surface (:meth:`read`)
+        refuses outright while the seal binds; the node's own writes stay
+        visible in listings (verdicts still file).
         """
         if not self.node.config.get('sealed'):
             return False
@@ -504,6 +512,10 @@ class Radio:
             read=read,
             recent=recent,
         )
+        # a bound seal holds hosted rows here too -- a self-subscription to
+        # an own hosted channel must not tunnel sealed mail into the seat
+        if self.seal_binds():
+            messages = [row for row in messages if row['node'] != self.node.branch]
         if limit is not None:
             messages = messages[:limit]
         # return rows
@@ -552,8 +564,7 @@ class Radio:
         # how sealed adjudication traffic contaminates a verifier's context)
         if self.seal_binds():
             raise PermissionError(
-                'inbox sealed: messages are held until unsealing'
-                ' (fractal config set sealed=false)'
+                'inbox sealed: messages are held until lawfully unsealed'
             )
         messages = []
         # resolve explicit uuids globally, in argument order
