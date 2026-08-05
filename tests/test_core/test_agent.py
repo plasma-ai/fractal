@@ -360,12 +360,16 @@ def test_invocation_scrubs_ambient_effort_vars(
     """
     monkeypatch.setenv('CLAUDE_EFFORT', 'xhigh')
     monkeypatch.setenv('CLAUDE_CODE_EFFORT_LEVEL', 'high')
+    monkeypatch.setenv('CLAUDE_CODE_SUBAGENT_MODEL', 'best')
     monkeypatch.setenv('AMBIENT', 'inherited')
     backend = SampleAgent(node_with_db, 'sample')
     composed = backend.invocation('hello', effort='low')
-    # neither scrubbed var reaches the spawn env; the pin rides argv alone
+    # no scrubbed var reaches the spawn env; the pins ride argv alone --
+    # an ambient CLAUDE_CODE_SUBAGENT_MODEL would force every fan-out
+    # sub-agent onto one model, explicit per-agent pins included
     assert 'CLAUDE_EFFORT' not in composed.env
     assert 'CLAUDE_CODE_EFFORT_LEVEL' not in composed.env
+    assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in composed.env
     assert composed.argv[-2:] == ('--effort', 'low')
     # a non-effort ambient key passes through untouched
     assert composed.env['AMBIENT'] == 'inherited'
@@ -383,6 +387,7 @@ def test_invocation_scrubs_ambient_effort_vars(
     assert bare.env is not None
     assert 'CLAUDE_EFFORT' not in bare.env
     assert 'CLAUDE_CODE_EFFORT_LEVEL' not in bare.env
+    assert 'CLAUDE_CODE_SUBAGENT_MODEL' not in bare.env
     assert bare.env['AMBIENT'] == 'inherited'
 
 

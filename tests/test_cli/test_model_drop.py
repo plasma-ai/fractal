@@ -38,7 +38,7 @@ from .conftest import _cli_env, _loop_cmd, _run, _run_reaped
 __all__ = [
     'test_pinned_model_runs_clean',
     'test_model_drop_redispatches_once',
-    'test_double_drop_proceeds_and_flags_the_listing',
+    'test_double_drop_fails_the_step_and_flags_the_listing',
 ]
 
 # the model both step files pin, and the wrong one weather serves instead
@@ -231,13 +231,14 @@ def test_model_drop_redispatches_once(
     assert _list_detail(node_env) == ''
 
 
-def test_double_drop_proceeds_and_flags_the_listing(node_env: dict) -> None:
-    """A drop the retry cannot resolve is recorded twice and surfaced, not fatal.
+def test_double_drop_fails_the_step_and_flags_the_listing(node_env: dict) -> None:
+    """A drop the re-dispatch cannot resolve fails the step, never ships.
 
     Step 2 (detached) serves off the pin on both its attempts: the loop
-    records both drops, marks each attempt's row, and proceeds to the
-    run's completion -- consumer-side gates and the operator own the
-    response. ``node list`` composes the ``model drop`` marker into
+    records both drops and marks each attempt's row, then books the step
+    -- and its iteration -- failed instead of proceeding on wrong-model
+    output (pins are honored or the step fails loudly; the node is never
+    killed). ``node list`` composes the ``model drop`` marker into
     ``detail``; a later clean iteration supersedes the marker.
     """
     calls, run_id = _run_loop(node_env, models=f'{PINNED} {DROPPED} {DROPPED}')
@@ -252,14 +253,20 @@ def test_double_drop_proceeds_and_flags_the_listing(node_env: dict) -> None:
         (2, DROPPED, f'model drop (served {DROPPED})'),
         (1, PINNED, ''),
     ]
-    # both drops evented, and the loop still completed the run
+    # both drops evented; the unresolved drop failed the iteration and the
+    # run never launders into a clean completion
     events = node.record.events(run_id=run_id, event='model_drop')
     assert len(events) == 2
-    assert node.record.runs(limit=1)[0]['status'] == 'completed'
+    iters = node.record.iters(run_id=run_id)
+    assert iters[0]['status'] == 'failed'
+    assert f'model drop (served {DROPPED}, pinned {PINNED})' in (
+        iters[0]['metadata'] or ''
+    )
+    assert node.record.runs(limit=1)[0]['status'] == 'exited'
     # the unresolved drop reaches the listing's detail column
-    assert _list_detail(node_env) == 'model drop'
+    assert 'model drop' in _list_detail(node_env)
 
-    # a later clean iteration supersedes the marker
+    # a later clean run supersedes the marker
     calls, run_id = _run_loop(node_env, models=PINNED)
     assert calls == 2
     assert (

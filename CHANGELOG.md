@@ -55,6 +55,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Model pins are honored or the step fails loudly: the ambient
+  `CLAUDE_CODE_SUBAGENT_MODEL` forcing var is unset at invocation compose (like
+  the effort knobs) and removed from the seeded node settings — it silently
+  rerouted every pinned fan-out sub-agent onto the session model once — and a
+  model drop the one re-dispatch cannot resolve now books the step and iteration
+  failed with the drop named, never a clean completion over wrong-model output
+  (the node is never killed: the loop warns at the next iteration start and
+  moves on). The iteration row records the model that actually served when its
+  steps agree, so divergence from the pin is visible in the row and the
+  `node list` detail column.
 - Config edits take effect live at each key's natural boundary — pacing
   (`interval`/`sleep`) now re-reads at the next sleep call and `iter_timeout` at
   the next iteration, joining the already-live

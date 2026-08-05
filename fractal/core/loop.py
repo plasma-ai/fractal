@@ -1085,6 +1085,21 @@ class Loop:
             print()
             print(f'=== Iteration {self._iter_label} at {self._iter_timestamp} ===')
 
+            # off-pin awareness at the boundary: the previous iteration's
+            # unresolved drop is worth one loud line before more work is
+            # bought on top of wrong-model output (warn, never kill)
+            if self._iter > 1:
+                try:
+                    off_pin = node._model_dropped()
+                except Exception:
+                    off_pin = False
+                if off_pin:
+                    print(
+                        'WARNING: the previous iteration carries an'
+                        ' unresolved model drop (served off its pin)',
+                        file=sys.stderr,
+                    )
+
             # check signals before starting (pause outranks stop/finish: it
             # parks the run with the other signals intact, to fire after
             # resume) -- except on an adopted iteration: it IS the current
@@ -1612,7 +1627,6 @@ class Loop:
 
             attempt = 0
             drop_retried = False
-            drop_completed = False
             # the newest step name rides every backstop commit's context
             self._last_step_name = step_name
             while True:
@@ -1849,7 +1863,6 @@ class Loop:
                 # response, never a crash or a kill
                 if served is not None:
                     self._record_model_drop(step_name, served=served)
-                    drop_completed = True
                     # a spent deadline abandons the re-dispatch outright: the
                     # launch's own pre-check would only convert the completed
                     # work into a timed-out failure
@@ -1899,20 +1912,21 @@ class Loop:
                     break
                 attempt += 1
 
-            # a re-dispatch (or the failure retries its failure bought) that
-            # cannot complete must not downgrade the step: the dropped
-            # attempt's work is complete -- and, when gated, was approved
-            # before the drop check ran -- so the loop proceeds on it, the
-            # drop evented and its row marked; an interrupted approval keeps
-            # the failure path (unapproved work never ships)
-            if failed and drop_completed and not approval_interrupted:
-                failed = False
-                self._timed_out = False
-                self._fail_reason = None
+            # pins are honored or the step fails loudly: an unresolved drop
+            # -- the re-dispatch also served off-pin, or could not run --
+            # books the step failed rather than proceeding on wrong-model
+            # output (consumer canon voids it anyway); the drop is evented
+            # and its row marked, and the node itself is never killed (the
+            # iteration fails and the loop moves on)
+            if served is not None and not failed and not self._paused:
+                failed = True
+                self._fail_reason = (
+                    f'model drop (served {served}, pinned {self._step_model})'
+                )
                 print(
                     f'--- Step {step_num}/{step_count} ({step_name}):'
-                    f' re-dispatch did not complete; proceeding on the'
-                    f' dropped attempt ---'
+                    f' failed on an unresolved model drop (served {served},'
+                    f' pinned {self._step_model}) ---'
                 )
 
             if failed:

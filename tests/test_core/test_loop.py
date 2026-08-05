@@ -76,7 +76,7 @@ __all__ = [
     'test_models_match_admits_pin_forms_and_flags_variants',
     'test_slow_approval_sync_never_falsifies_a_clean_pin',
     'test_slow_approval_sync_never_hides_a_real_drop',
-    'test_failed_drop_redispatch_proceeds_on_the_dropped_attempt',
+    'test_failed_drop_redispatch_keeps_the_failure',
     'test_spent_deadline_abandons_the_drop_redispatch',
     'test_err_snapshots_keep_every_attempts_diagnosis',
     'test_run_end_drain_outlives_the_closed_iterations_deadline',
@@ -1834,17 +1834,17 @@ def test_slow_approval_sync_never_hides_a_real_drop(
     assert loop_node.status_detail() == ''
 
 
-def test_failed_drop_redispatch_proceeds_on_the_dropped_attempt(
+def test_failed_drop_redispatch_keeps_the_failure(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture,
 ) -> None:
-    """A re-dispatch that cannot complete never downgrades the dropped step.
+    """A re-dispatch chain that cannot complete leaves the step failed.
 
-    The dropped attempt's work is complete; when the re-dispatch and the
-    failure retries its failure bought all fail, the loop proceeds on that
-    work -- the iteration completes, the tail steps run, and the drop
-    stays evented, marked on its own row, and surfaced in the listing.
+    Pins are honored or the step fails loudly: when the re-dispatch and
+    the failure retries its failure bought all fail, the loop never
+    proceeds on the dropped attempt's wrong-model output -- the iteration
+    fails with the re-dispatch's own failure, the tail steps book their
+    not-run rows, and the drop stays evented, marked, and listed.
     """
     monkeypatch.setenv('_NODE', '')
     _seed_steps(loop_node, ['01-PLAN.md', '02-EXECUTE.md'])
@@ -1859,45 +1859,42 @@ def test_failed_drop_redispatch_proceeds_on_the_dropped_attempt(
         StepResult(status='completed'),  # PLAN, served off the pin
         failure,  # the drop re-dispatch
         failure,  # the failure retry its failure bought
-        StepResult(status='completed'),  # EXECUTE, served the pin
     ]
-    serves = ['dropped-model', None, None, 'pinned-model']
+    serves = ['dropped-model', None, None]
     loop = ServingLoop(loop_node, results=results, serves=serves)
     assert loop.run() == 0
-    assert 'proceeding on the dropped attempt' in capsys.readouterr().out
-    # the failed re-dispatch chain spent its rows, then the tail step ran
+    # the failed re-dispatch chain spent its rows; the tail never launched
     assert loop.launched == [
         'step 1 of 2 (PLAN)',
         'step 1 of 2 (PLAN)',
         'step 1 of 2 (PLAN)',
-        'step 2 of 2 (EXECUTE)',
     ]
-    # newest-first: EXECUTE, the failed retry, the failed re-dispatch, and
-    # the dropped attempt whose mark no completed attempt superseded
+    # newest-first: the not-run tail, the failed retry, the failed
+    # re-dispatch, and the dropped attempt whose mark still stands
     rows = loop_node.db.read('steps', where={'node': loop_node.branch})
     assert [(row['step'], row['status'], row['metadata']) for row in rows] == [
-        (2, 'completed', ''),
+        (2, 'stopped', 'failed on PLAN'),
         (1, 'failed', 'agent error (exit 2); retry'),
         (1, 'failed', 'agent error (exit 2)'),
         (1, 'completed', 'model drop (served dropped-model)'),
     ]
     assert len(loop_node.db.read('events', where={'event': 'model_drop'})) == 1
-    # the iteration completed on the dropped attempt's work, and the
-    # unresolved drop reaches the listing
-    assert loop_node.status() == 'completed'
-    assert loop_node.status_detail() == 'model drop'
+    # the iteration failed -- wrong-model output never ships as a clean run
+    assert loop_node.status() == 'exited'
+    assert 'model drop' in loop_node.status_detail()
 
 
 def test_spent_deadline_abandons_the_drop_redispatch(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A drop past the iteration deadline proceeds instead of re-dispatching.
+    """A drop past the iteration deadline fails without a re-dispatch.
 
     The re-dispatch's own launch pre-check would only convert the
-    completed work into a timed-out failure, so a spent deadline abandons
-    it: one launch, the drop evented and marked, the iteration completed
-    -- never a timed-out run off work that finished.
+    completed work into a timed-out failure, so a spent deadline buys no
+    second launch -- but the pin is still law: the unresolved drop books
+    the step (and iteration) failed with the drop named, never a clean
+    completion off wrong-model output.
     """
     monkeypatch.setenv('_NODE', '')
     _seed_steps(loop_node, ['01-PLAN.md'])
@@ -1916,7 +1913,7 @@ def test_spent_deadline_abandons_the_drop_redispatch(
 
     loop = OverrunningLoop(loop_node, serves=['dropped-model'])
     assert loop.run() == 0
-    # the spent deadline bought no re-dispatch; the completed work stands
+    # the spent deadline bought no re-dispatch
     assert loop.launched == ['step 1 of 1 (PLAN)']
     row = loop_node.db.read('steps', where={'step_name': 'PLAN'})[0]
     assert (row['status'], row['metadata']) == (
@@ -1924,11 +1921,13 @@ def test_spent_deadline_abandons_the_drop_redispatch(
         'model drop (served dropped-model)',
     )
     assert len(loop_node.db.read('events', where={'event': 'model_drop'})) == 1
-    # the iteration and run close clean -- not timed out
+    # the iteration fails on the unresolved drop, naming it
     iter_row = loop_node.db.read('iters', where={'node': loop_node.branch})[0]
-    assert (iter_row['status'], iter_row['metadata']) == ('completed', '')
-    assert loop_node.record.runs(limit=1)[0]['metadata'] == 'Reached max iterations (1)'
-    assert loop_node.status_detail() == 'model drop'
+    assert iter_row['status'] == 'failed'
+    assert 'model drop (served dropped-model, pinned pinned-model)' in (
+        iter_row['metadata'] or ''
+    )
+    assert 'model drop' in loop_node.status_detail()
 
 
 # ------ launch diagnostics

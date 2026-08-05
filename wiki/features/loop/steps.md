@@ -127,18 +127,20 @@ behind a date (`claude-opus-4` against `claude-opus-4-1-20250805`). A bare-word
 alias (`opus`) names a family rather than a version, so it matches the family's
 own version run and date alike, but not a named variant riding one
 (`claude-opus-5-mini`). A truncation or variant suffix flags even though one id
-contains the other. A drop the re-dispatch also served off the pin is evented
-and marked again, and the loop proceeds — consumer-side gates and the operator
-own the response, never a crash or a kill: a spent deadline abandons the
-re-dispatch outright, and a re-dispatch that fails or times out books its own
-rows while the loop proceeds on the dropped attempt's completed work (an
-interrupted approval keeps the failure path — unapproved work never ships).
-`fractal node list` composes a `model drop` marker into the node's `detail`
-column while a step of the newest iteration has its newest *completed* attempt
-marked: a clean re-dispatch supersedes the mark, an abandoned or failed one
-leaves it standing, and the marker reads off the newest iteration alone, so a
-later iteration supersedes it. Detection reads the launch's own stream record —
-every model named, so a substitution the stream recovered from before ending
-still flags — falling back to the step row, and attached and detached launches
-are enforced identically; an agent whose stream never names the served model
-records the pin itself, so unknown never reads as a verified match.
+contains the other. A drop the re-dispatch cannot resolve fails the step: pins
+are honored or the step fails loudly — a second off-pin serve, a spent deadline
+that abandons the re-dispatch, or a re-dispatch that fails or times out all book
+the iteration failed with the drop named
+(`model drop (served <model>, pinned <pin>)`), never a clean completion over
+wrong-model output. The node itself is never killed — the loop warns, moves to
+the next iteration, and prints an off-pin warning at that iteration's start
+while the previous iteration's drop stands unresolved. `fractal node list`
+composes a `model drop` marker into the node's `detail` column while a step of
+the newest iteration has its newest *completed* attempt marked: a clean
+re-dispatch supersedes the mark, an abandoned or failed one leaves it standing,
+and the marker reads off the newest iteration alone, so a later iteration
+supersedes it. Detection reads the launch's own stream record — every model
+named, so a substitution the stream recovered from before ending still flags —
+falling back to the step row, and attached and detached launches are enforced
+identically; an agent whose stream never names the served model records the pin
+itself, so unknown never reads as a verified match.
