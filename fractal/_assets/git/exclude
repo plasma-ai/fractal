@@ -11,6 +11,7 @@
 # Local databases
 .db
 .db-*
+registry.db
 
 # Status file
 .status

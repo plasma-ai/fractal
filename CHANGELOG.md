@@ -33,6 +33,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- fractal owns its estate staging: any estate file an ignore rule held out of a
+  commit is re-evaluated against fractal-normal rules alone (the shipped exclude
+  template plus committed per-directory `.gitignore` files) and force-added when
+  only a machine-local layer — a foreign `info/exclude` line,
+  `core.excludesFile` — held it, so one stray broad exclude can no longer
+  silently unstage (or hard-fail) the records canon requires nodes to commit;
+  the generated exclude block and the stage excludes also cover the legacy
+  `registry.db` spelling.
 - Radio listings are read-your-writes and watermarked: `messages`, `sent`,
   `feed`, `thread`, and `subs` resolve the acting node exactly like the writing
   verbs (loop-exported `_NODE` first, else the cwd; `--path` still selects

@@ -24,6 +24,7 @@ __all__ = [
     'test_commit_pushes_unless_local',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
+    'test_commit_stages_node_records_past_external_excludes',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
     'test_commit_refreshes_wiki_indexes',
@@ -314,6 +315,67 @@ def test_commit_excludes_write_atomic_temp_files(tmp_path: pathlib.Path) -> None
     tracked = result.stdout
     assert 'work.txt' in tracked
     assert '.work.txt-a1b2c3.tmp' not in tracked
+
+
+def test_commit_stages_node_records_past_external_excludes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Node records commit under a broad external ignore rule; runtime never.
+
+    One ``/.fractal/`` line in the shared ``.git/info/exclude`` broke every
+    node's commit fleet-wide: the plain add honors the rule and either
+    silently unstages the audit trail or hard-fails the whole add. The
+    record pass owns the node dir with ``git add -f``, so record custody
+    never depends on git ignore state -- while the runtime artifacts the
+    force pass could now drag in (the status marker, ``tmp/`` scratch, a
+    stray ``registry.db``) stay barred by the derived pathspec excludes.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+
+    # the incident's exclude: everything under .fractal ignored, appended
+    # OUTSIDE fractal's managed block (worktrees share info/exclude)
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+
+    # a record write plus runtime residue beside it
+    memory = node.node_dir / 'memory' / 'state.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    scratch = node.node_dir / 'tmp' / 'probe.txt'
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text('scratch\n', encoding='utf-8')
+    registry = node.node_dir.parent / 'registry.db'
+    registry.write_text('', encoding='utf-8')
+    node.commit('record custody', force=True)
+
+    result = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = result.stdout
+    # the record landed despite the broad exclude ...
+    assert 'memory/state.md' in tracked
+    # ... and the runtime artifacts never ride, force pass or not
+    assert 'tmp/probe.txt' not in tracked
+    assert 'registry.db' not in tracked
+    assert '.status' not in tracked
+    # ... and an estate-internal ignore file keeps its own hold (the memory
+    # wiki's cache manages itself)
+    assert '.wiki/cache' not in tracked
 
 
 def test_commit_stamps_iteration_from_args_or_open_row(

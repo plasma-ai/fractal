@@ -56,6 +56,15 @@ directories stay silent), and any staged file at or over 10MB is listed by name
 -- an oversized file is usually an accident, but large commits are also
 legitimate.
 
+fractal owns its estate staging (`_stage_records`): after the plain adds, any
+estate file an ignore rule held out is re-evaluated against fractal-normal rules
+alone -- the shipped exclude template plus the repo's committed per-directory
+`.gitignore` files -- and force-added when only a machine-local layer (a foreign
+`info/exclude` line, `core.excludesFile`) held it. One stray broad exclude line
+can therefore no longer silently unstage, or hard-fail, the audit trail canon
+requires nodes to commit; the user node's self-ignored seed dir stays untracked
+by design.
+
 ## Commit, retry, and the backstop
 
 A sweep that stages nothing is a tolerated no-op, reported rather than failed.
