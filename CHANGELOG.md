@@ -24,9 +24,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   executes.
 - `node start --continue --drain`: the harness runs the continued run as a drain
   — `_DRAIN` rides every seat's environment,
-  `node init`/`node start`/`node update` refuse under it (spawns and re-arms are
-  blocked, not just discouraged), and the DRAIN mode doc directs every seat to
-  close out.
+  `node init`/`node start`/`node update`/`node resume` refuse under it (spawns,
+  re-arms, and subtree wake-ups are blocked, not just discouraged), and the
+  DRAIN mode doc directs every seat to close out.
 - Billing-class breaker: three consecutive instant zero-cost step failures (the
   dead-credits signature) back the loop off exponentially (60s doubling to 1h)
   instead of redispatching hot, announce themselves as `PAUSED: billing` on the

@@ -27,7 +27,7 @@ from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
 from fractal.exceptions import _Abort
 from fractal.impl.claude import ClaudeAgent
-from tests._helpers import _age_run, _past_timestamp
+from tests._helpers import _age_run, _past_timestamp, _stub_run_script
 
 from ._agents import SampleAgent
 from .conftest import _record_step_cost, _spawn_parent_child
@@ -2496,7 +2496,7 @@ def test_drain_run_blocks_spawns_and_re_arms(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A drain run's seats cannot init, start, or update nodes.
+    """A drain run's seats cannot init, start, update, or resume nodes.
 
     ``start --continue --drain`` exports ``_DRAIN`` into every seat's
     environment, and the spawn/re-arm verbs refuse under it harness-side
@@ -2523,6 +2523,12 @@ def test_drain_run_blocks_spawns_and_re_arms(
         node.start()
     with pytest.raises(RuntimeError, match='forbids re-arms'):
         node.child_update('breach', max_cost=100.0)
+    # resume is an expanding verb too: a paused subtree must not be woken
+    # from inside a wind-down
+    node.status_set('paused')
+    _stub_run_script(monkeypatch, node)
+    with pytest.raises(RuntimeError, match='forbids re-arms'):
+        node.resume()
 
 
 def test_census_distinguishes_run_exhausted_from_done_conditions(

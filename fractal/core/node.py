@@ -1499,8 +1499,8 @@ class Node:
         retune) is the only launch-time action.
 
         ``drain`` runs the continued run as a wind-down: the loop exports
-        ``_DRAIN`` into every seat's environment (init/start/update refuse
-        under it) and injects the DRAIN mode doc into prompts.
+        ``_DRAIN`` into every seat's environment (init/start/update/resume
+        refuse under it) and injects the DRAIN mode doc into prompts.
 
         A continue re-enters the unsettled pool, so it re-checks the
         width/descendant gates (:meth:`_enforce_rearm_limits`) and re-arms to
@@ -2363,6 +2363,14 @@ class Node:
             Confirmation message.
 
         """
+        # a draining seat re-arms nothing: the loop exports _DRAIN for a
+        # --continue --drain run, so a resume from any of its subprocesses
+        # refuses harness-side -- relaunching a parked subtree from inside
+        # a wind-down is the one expanding verb the other guards miss
+        if os.environ.get('_DRAIN'):
+            raise RuntimeError(
+                'Cannot resume a node from a draining run (--drain forbids re-arms).'
+            )
         # a tree-wide resume releases the latch first -- new starts and
         # spawns are legal again the moment the release begins, even when
         # nothing is left parked to relaunch
