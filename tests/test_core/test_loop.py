@@ -86,6 +86,7 @@ __all__ = [
     'test_stop_mid_step_lets_the_seat_complete',
     'test_billing_failures_back_off_exponentially_and_a_success_clears',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
+    'test_census_distinguishes_run_exhausted_from_done_conditions',
     'test_timeout_void_force_commit_is_loud',
     'test_pending_finish_carries_to_the_continued_run',
     'test_stop_during_finish_drain_books_stopped',
@@ -1797,7 +1798,7 @@ def test_slow_approval_sync_never_falsifies_a_clean_pin(
     row = loop_node.db.read('steps', where={'step_name': 'PLAN'})[0]
     assert (row['model'], row['metadata']) == ('pinned-model', '')
     assert row['approved']
-    assert loop_node.status_detail() == ''
+    assert 'model drop' not in loop_node.status_detail()
 
 
 def test_slow_approval_sync_never_hides_a_real_drop(
@@ -1831,7 +1832,7 @@ def test_slow_approval_sync_never_hides_a_real_drop(
         'model drop (served dropped-model)',
     )
     assert (redispatched['model'], redispatched['metadata']) == ('pinned-model', '')
-    assert loop_node.status_detail() == ''
+    assert 'model drop' not in loop_node.status_detail()
 
 
 def test_failed_drop_redispatch_keeps_the_failure(
@@ -2453,6 +2454,40 @@ def test_pacing_retunes_take_effect_at_the_next_sleep(
     # 30s; the null-out landed before the second boundary, so no later
     # sleep ran
     assert chunks == [30, 10]
+
+
+def test_census_distinguishes_run_exhausted_from_done_conditions(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``completed`` says why: run-exhausted is not done-conditions-met.
+
+    Both landings stamp ``completed``, but they are different facts -- an
+    exhausted iteration budget usually means the lane has more work and
+    wants a re-continue, while a drained finish is genuinely done. The
+    census detail names the first (``run exhausted: ...``) and leaves the
+    second bare, so nobody triages nine completed lanes by hand again.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    assert MockLoop(node).run() == 0
+    assert node.status() == 'completed'
+    assert node.status_detail() == 'run exhausted: Reached max iterations (1)'
+
+    class _Finishing(MockLoop):
+        """Meet the done conditions on the first step."""
+
+        def _launch(
+            self: _Finishing, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            if not self.launched:
+                self.node.record.signal_set('finish', 'requirements met')
+            return super()._launch(step, prompt, **kwargs)
+
+    _configure(node, max_iters=3)
+    assert _Finishing(node, continue_=True).run() == 0
+    assert node.status() == 'completed'
+    assert node.status_detail() == ''
 
 
 def test_timeout_void_force_commit_is_loud(

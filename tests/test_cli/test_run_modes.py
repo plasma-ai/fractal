@@ -797,9 +797,11 @@ def test_pause_mid_step_parks_and_resume_adopts_run(repo: dict) -> None:
 
     # the same run and iteration were adopted (never a second row), the
     # interrupted step re-ran on a fresh row, and the run closed normally
-    assert _run(worktree, 'node', 'status').stdout.strip() == 'completed', (
-        resumed.stdout
-    )
+    assert (
+        _run(worktree, 'node', 'status')
+        .stdout.strip()
+        .startswith('completed (run exhausted:')
+    ), resumed.stdout
     runs = (
         _run(
             worktree,
@@ -896,9 +898,11 @@ def test_checkpoint_pause_resumes_at_next_step(repo: dict) -> None:
     # resume: the adopted iteration re-enters at step 2, never re-running 1
     calls, resumed = _resume_loop(repo, node, capture_name='ckpt_pause')
     assert resumed.returncode == 0, resumed.stderr
-    assert _run(worktree, 'node', 'status').stdout.strip() == 'completed', (
-        resumed.stdout
-    )
+    assert (
+        _run(worktree, 'node', 'status')
+        .stdout.strip()
+        .startswith('completed (run exhausted:')
+    ), resumed.stdout
     steps = (
         _run(
             worktree,
@@ -967,9 +971,11 @@ def test_boundary_pause_resume_continues_iteration_count(repo: dict) -> None:
     # resume: the run continues at iteration 2 and max_iters never re-arms
     _, resumed = _resume_loop(repo, node, capture_name='boundary_pause')
     assert resumed.returncode == 0, resumed.stderr
-    assert _run(worktree, 'node', 'status').stdout.strip() == 'completed', (
-        resumed.stdout
-    )
+    assert (
+        _run(worktree, 'node', 'status')
+        .stdout.strip()
+        .startswith('completed (run exhausted:')
+    ), resumed.stdout
     iters = (
         _run(
             worktree,
@@ -1105,9 +1111,11 @@ def test_tree_latch_parks_a_booting_loop(repo: dict) -> None:
     # released: the resume relaunch adopts the empty open run and runs it
     _, resumed = _resume_loop(repo, node, capture_name='bootpark_on')
     assert resumed.returncode == 0, resumed.stderr
-    assert _run(worktree, 'node', 'status').stdout.strip() == 'completed', (
-        resumed.stdout
-    )
+    assert (
+        _run(worktree, 'node', 'status')
+        .stdout.strip()
+        .startswith('completed (run exhausted:')
+    ), resumed.stdout
     runs = (
         _run(
             worktree,
@@ -2170,7 +2178,11 @@ def test_iter_cost_reserve_continues_next_iteration(repo: dict) -> None:
     assert len(calls) == 4, (calls, result.stdout)
     # the total-cost boundary never fired, and the node ran out its iterations
     assert 'Total cost budget reserve reached' not in result.stdout, result.stdout
-    assert _run(worktree, 'node', 'status').stdout.strip() == 'completed', result.stdout
+    assert (
+        _run(worktree, 'node', 'status')
+        .stdout.strip()
+        .startswith('completed (run exhausted:')
+    ), result.stdout
     run = (
         _run(
             worktree,
@@ -3152,7 +3164,11 @@ def test_run_completes_when_max_iters_reached(repo: dict) -> None:
     worktree = node['worktree']
     _, result = _run_loop(repo, node, capture_name='max_done')
 
-    assert _run(worktree, 'node', 'status').stdout.strip() == 'completed', result.stdout
+    assert (
+        _run(worktree, 'node', 'status')
+        .stdout.strip()
+        .startswith('completed (run exhausted:')
+    ), result.stdout
     run = (
         _run(
             worktree,

@@ -78,6 +78,7 @@ _CONFIG_ORDER = (
     'local',
     'detached',
     'blind',
+    'sealed',
 )
 _SPOKEN_CONFIG = frozenset(
     {

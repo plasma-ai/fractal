@@ -242,9 +242,13 @@ def _await_settled(worktree: pathlib.Path, *, deadline_seconds: float = 120) -> 
     Idle-based via ``_await_progress``: any status transition refreshes the
     allowance. Returns whether the node settled.
     """
+    # the status may carry a parenthesized qualifier (an end reason, a
+    # run-exhausted note) -- settle on the bare word before it
     settled = ('completed', 'stopped', 'exited', 'killed')
     return _await_progress(
-        check=lambda: _run(worktree, 'node', 'status').stdout.strip() in settled,
+        check=lambda: (
+            _run(worktree, 'node', 'status').stdout.strip().split(' (')[0] in settled
+        ),
         progress=lambda: _run(worktree, 'node', 'status').stdout.strip(),
         deadline=time.monotonic() + deadline_seconds,
     )

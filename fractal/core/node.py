@@ -3165,6 +3165,14 @@ class Node:
             rows = self.record.runs(limit=1)
             if rows and rows[0]['status'] == 'exited' and rows[0]['metadata']:
                 detail = rows[0]['metadata']
+        if status == 'completed':
+            # the two completed landings are different facts: a goal-met
+            # finish leaves the run reason-less, while an exhausted
+            # iteration budget records its cap -- name the second so a
+            # census never reads a run-out lane as done-conditions-met
+            rows = self.record.runs(limit=1)
+            if rows and rows[0]['status'] == 'completed' and rows[0]['metadata']:
+                detail = f'run exhausted: {rows[0]["metadata"]}'
         # an unresolved model drop composes onto the qualifier (the metadata
         # append shape), so neither fact hides the other
         if self._model_dropped():

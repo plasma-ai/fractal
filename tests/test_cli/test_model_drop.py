@@ -179,7 +179,7 @@ def test_pinned_model_runs_clean(node_env: dict) -> None:
     assert node.record.events(run_id=run_id, event='model_drop') == []
     # the run lands its clean max-iters completion, listing unflagged
     assert node.record.runs(limit=1)[0]['status'] == 'completed'
-    assert _list_detail(node_env) == ''
+    assert 'model drop' not in _list_detail(node_env)
 
 
 @pytest.mark.parametrize(
@@ -228,7 +228,7 @@ def test_model_drop_redispatches_once(
     assert events[0]['metadata'] == f'served {DROPPED}, pinned {PINNED}'
     # resolved by the retry: the run completes and no marker lingers
     assert node.record.runs(limit=1)[0]['status'] == 'completed'
-    assert _list_detail(node_env) == ''
+    assert 'model drop' not in _list_detail(node_env)
 
 
 def test_double_drop_fails_the_step_and_flags_the_listing(node_env: dict) -> None:
@@ -276,7 +276,7 @@ def test_double_drop_fails_the_step_and_flags_the_listing(node_env: dict) -> Non
         )
         == []
     )
-    assert _list_detail(node_env) == ''
+    assert 'model drop' not in _list_detail(node_env)
 
 
 # ------ helpers

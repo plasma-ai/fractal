@@ -58,6 +58,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The census distinguishes the two `completed` landings: a run that ended on its
+  iteration cap surfaces as `run exhausted: Reached max iterations (N)` in the
+  `node list`/`node status` detail column, while a drained finish stays bare — a
+  run-out lane (usually a re-continue candidate) can no longer pass as
+  done-conditions-met; `--continue` keeps looping per its per-run `max_iters`,
+  pinned by test.
 - The seeded COMMIT step's sign-off is unconditional: the parent-is-root
   conditional is gone, so a finishing node posts its sign-off (and any
   operator-ordered signal with it) whatever its position in the tree — the
