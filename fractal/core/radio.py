@@ -303,7 +303,9 @@ class Radio:
         The descendant-relay obligation check: an order that must be passed
         onward is verifiable from the store -- every copy sent with
         ``relay_of`` carries ``relay:<uuid>`` metadata, so an empty listing
-        means no relay of the message was ever recorded.
+        means no relay of the message was ever recorded. The lineage keys
+        on those marks alone: a withdrawn original (unsend deletes the
+        original but leaves the relay copies) stays auditable.
 
         Args:
             message_uuid: UUID of the original (relayed) message.
@@ -314,23 +316,27 @@ class Radio:
             while its own seal binds.
 
         Raises:
-            ValueError: If ``message_uuid`` names no known message.
+            ValueError: If ``message_uuid`` names no known message and no
+                recorded relay carries its mark.
 
         """
         message_uuid = message_uuid.upper()
-        # an unknown uuid must not answer 'no relays': the obligation check
-        # reads an empty listing as "the relay never happened", so a typo
-        # would indict a node that relayed faithfully
-        known = self.db.exists(
-            'messages',
-            where={'message_uuid': message_uuid},
-        ) or self.db.exists('archive', where={'message_uuid': message_uuid})
-        if not known:
-            raise self._message_not_found(message_uuid)
         rows = self._query_messages(
             metadata=f'relay:{message_uuid}',
             roots_only=False,
         )
+        # an unknown uuid must not answer 'no relays': the obligation check
+        # reads an empty listing as "the relay never happened", so a typo
+        # would indict a node that relayed faithfully -- the gate applies
+        # to an empty lineage only, since recorded marks answer for a
+        # withdrawn original themselves
+        if not rows:
+            known = self.db.exists(
+                'messages',
+                where={'message_uuid': message_uuid},
+            ) or self.db.exists('archive', where={'message_uuid': message_uuid})
+            if not known:
+                raise self._message_not_found(message_uuid)
         # a bound seal holds hosted rows out of this listing too
         if self.seal_binds():
             rows = [row for row in rows if row['node'] != self.node.branch]
@@ -1267,22 +1273,30 @@ class Radio:
     def _resolve_target(self: Radio, node: Optional[str]) -> str:
         """Normalize a target to a branch name, defaulting to the own node.
 
-        ``None``, the empty string, and the own branch all resolve to self.
-        Any other target must be the tree's root or have a ``nodes`` registry
-        row -- a deleted node's persisted rows do not make it addressable.
+        ``None`` and the own branch resolve to self; the empty string
+        refuses -- it is what an unset variable expands to in a fleet
+        script's ``--node "$PEER"``, and a target left blank by accident
+        must not become a self-note under a clean exit. Any other target
+        must be the tree's root or have a ``nodes`` registry row -- a
+        deleted node's persisted rows do not make it addressable.
 
         Args:
-            node: Target node branch, or ``None``/``''`` for the own node.
+            node: Target node branch, or ``None`` for the own node.
 
         Returns:
             The resolved branch name.
 
         Raises:
-            ValueError: If ``node`` names a node that is not registered.
+            ValueError: If ``node`` is empty or names a node that is not
+                registered.
 
         """
         branch = self.node.branch
-        if not node or node == branch:
+        if node == '':
+            raise ValueError(
+                'Empty node target: name a node branch, or omit the target for self.'
+            )
+        if node is None or node == branch:
             return branch
         root = self.node.config.get('root')
         if node != root and not self.db.exists('nodes', where={'node': node}):

@@ -119,7 +119,7 @@ def test_radio_read_shows_uuid(repo: dict) -> None:
         '--priority',
         '5',
     )
-    uuid = sent.stdout.strip()
+    uuid = sent.stdout.split()[0]
     result = _run(task, 'radio', 'read', uuid)
     assert uuid in result.stdout
 
@@ -180,7 +180,7 @@ def test_radio_thread_shows_full_tree_by_default(repo: dict) -> None:
         '--priority',
         '5',
     )
-    root = sent.stdout.strip()
+    root = sent.stdout.split()[0]
     child = _run(task, 'radio', 'reply', root, 'child').stdout.strip()
     # read both the root and the child -- unread-only would hide the whole thread
     _run(task, 'radio', 'read', root)

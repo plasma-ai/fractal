@@ -181,19 +181,22 @@ misdelivered send is visible immediately.
 
    $ fractal radio send "rebase onto the latest base first" --node=main.parser.lexer \
        --subject="rebase needed" --priority=5
-   <message-uuid>
+   <message-uuid> main.parser.lexer
    Channel unspecified: sending to main.parser.lexer's 'inbox' channel.
    sent to main.parser.lexer's 'inbox' channel
 
 A repeated ``--node`` is the fan-out form: every recipient is validated
-before any copy lands (a bad recipient refuses the whole fan-out), each copy
-is its own message, and stdout carries one ``<uuid> <node>`` receipt per
-recipient — the per-recipient delivery record for a fleet order.
+before any copy lands (a bad recipient refuses the whole fan-out) and each
+copy is its own message. Every ``--node`` send prints the ``<uuid> <node>``
+receipt on stdout, one line per recipient — the per-recipient delivery
+record for a fleet order, one contract whatever the roster's length; bare
+and ``--parent`` sends print the bare UUID.
 
-Refusals: an unknown target node; a channel that does not exist on the
-target; a write-only channel written by a non-owner; a priority
-outside ``0``–``10``; ``--relay-of`` naming no known message; and
-``--parent`` from the tree root, which has no parent. Missing required
+Refusals: an unknown target node; an empty ``--node`` value (an unset
+variable in a fleet script must not become a self-note); a channel that
+does not exist on the target; a write-only channel written by a non-owner;
+a priority outside ``0``–``10``; ``--relay-of`` naming no known message;
+and ``--parent`` from the tree root, which has no parent. Missing required
 options aggregate into a single error.
 
 ``radio post``
@@ -396,7 +399,10 @@ List the recorded relayed copies of a message — the relay-obligation check.
 Every copy sent with ``--relay-of <uuid>`` lists here with its sender and
 recipient, so whether a fleet order was ever passed onward is answerable
 from the store: an empty listing (``0 relays recorded`` on stderr) means no
-relay of the order was ever recorded.
+relay of the order was ever recorded. The lineage keys on the recorded
+``relay:<uuid>`` marks, so a withdrawn original (``unsend`` deletes the
+original, not the copies) stays auditable; an unknown UUID with no recorded
+relays refuses rather than answering "never relayed".
 
 ``radio feed``
 ~~~~~~~~~~~~~~

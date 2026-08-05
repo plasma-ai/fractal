@@ -47,11 +47,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sealed traffic can no longer leak into a verifier's context through routine
   triage.
 - Radio fan-out with per-recipient receipts and relay lineage: `radio send`
-  takes a repeated `--node` (every recipient validated before any copy lands;
-  stdout prints one `<uuid> <node>` receipt per recipient), `--relay-of <uuid>`
-  marks a copy as the relay of an order, and the new `radio relays <uuid>` lists
-  every recorded relay — the check that a descendant-relay obligation actually
-  executed.
+  takes a repeated `--node` (every recipient validated before any copy lands),
+  and every `--node` send prints one `<uuid> <node>` receipt per recipient on
+  stdout — one contract whatever the roster's length, while bare and `--parent`
+  sends keep the bare UUID. `--relay-of <uuid>` marks a copy as the relay of an
+  order, and the new `radio relays <uuid>` lists every recorded relay — the
+  check that a descendant-relay obligation actually executed — keyed on the
+  recorded marks alone, so a withdrawn original (`unsend` deletes the original,
+  never the copies) stays auditable.
 - `node list --json`: a JSON array of typed row objects (mutually exclusive with
   `--csv`), completing the machine-readable trio with `node activity --json` and
   the radio listings' `--json` — operator instruments no longer need comma-split
@@ -81,6 +84,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The force-add notice names worktree-relative paths, matching the refusal
   notice beside it — absolute machine-local paths no longer print, nor land in a
   force commit's body.
+- An empty `--node` value refuses instead of resolving to self: `--node "$PEER"`
+  with an unset variable landed an urgent fleet order in the sender's own inbox
+  under a clean exit 0.
 - Seal enforcement closes its archive and environment bypasses: a sealed seat
   can no longer `radio save` a hosted message and read the body back through
   `messages --saved` (the archive is a body surface; pre-seal archives are held

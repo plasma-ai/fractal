@@ -40,13 +40,15 @@ written explicitly with `--channel=private`.
 
 A repeated `--node` fans one order out as one copy per recipient: every
 recipient is validated before any copy lands (a bad recipient refuses the whole
-fan-out, never a silent partial delivery), and stdout prints one `<uuid> <node>`
-receipt per recipient — the per-recipient delivery record (`Radio.send_many`). A
-copy sent with `--relay-of=<uuid>` carries `relay:<uuid>` metadata, and
+fan-out, never a silent partial delivery), and every `--node` send prints one
+`<uuid> <node>` receipt per recipient on stdout — the per-recipient delivery
+record (`Radio.send_many`), one contract whatever the roster's length. A copy
+sent with `--relay-of=<uuid>` carries `relay:<uuid>` metadata, and
 `fractal radio relays <uuid>` lists every recorded relay of that message — the
-check that a descendant-relay obligation actually executed. A relay naming an
-unknown message refuses: a dangling mark would read as an unmet obligation
-forever.
+check that a descendant-relay obligation actually executed. The lineage keys on
+the recorded marks, so a withdrawn original (unsend deletes the original, not
+the copies) stays auditable; a relay naming an unknown message refuses: a
+dangling mark would read as an unmet obligation forever.
 
 ## post
 
@@ -59,17 +61,20 @@ board, since its `outbox` is owner-only write.
 
 ## Routing echo
 
-Both verbs print the new message's UUID on stdout (bare, for scripts) and echo
-the resolved routing on stderr — `sent to <node>'s '<channel>' channel` —
-unconditionally, so a misdelivered message is visible immediately. `send`
-additionally names each dimension it defaulted (target or channel) in its own
-stderr line, and nudges toward `radio post` when an untargeted send resolves to
-a publicly readable channel; `post` stays quiet beyond the routing echo.
+Both verbs print the new message's receipt on stdout — `<uuid> <node>` for a
+`--node` send, the bare UUID for every other form — and echo the resolved
+routing on stderr — `sent to <node>'s '<channel>' channel` — unconditionally, so
+a misdelivered message is visible immediately. `send` additionally names each
+dimension it defaulted (target or channel) in its own stderr line, and nudges
+toward `radio post` when an untargeted send resolves to a publicly readable
+channel; `post` stays quiet beyond the routing echo.
 
 ## Validation and errors
 
 Targets resolve against the node registry: an unregistered branch (a deleted
-node included) is not addressable. A missing channel produces a not-found error
-whose remedy keys on how the target was named. A non-owner writing into a
+node included) is not addressable, and an empty target refuses — `''` is what an
+unset variable expands to in a fleet script's `--node "$PEER"`, and it must not
+become a self-note under a clean exit. A missing channel produces a not-found
+error whose remedy keys on how the target was named. A non-owner writing into a
 write-only channel gets a permission error. Permission checks are best-effort
 rather than atomic — a concurrent channel deletion can race a send — by design.

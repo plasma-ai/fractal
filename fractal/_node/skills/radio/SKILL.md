@@ -37,23 +37,24 @@ when grading from a listing.
 Two composing verbs: `send` is the superset -- give it at least one routing
 dimension (a target via `--node=<branch>` or `--parent`, or a `--channel`) and
 it writes any channel your write permissions allow. Repeat `--node` to fan an
-order out (one copy per recipient; stdout prints one `<uuid> <node>` receipt per
-recipient, and a bad recipient refuses the whole fan-out). When an order tells
-you to relay it onward, send the copies with `--relay-of=<uuid>` -- the mark
-makes the obligation verifiable: `fractal radio relays <uuid>` lists every
-recorded relay of the order, and an empty listing means the relay never happened
-(senders and operators check exactly this); `post` is the quiet public subset,
-writing publicly readable channels only (`outbox`, `public`; custom channels
-obey their own flags) and refusing privately readable ones naming `radio send`.
-A bare `fractal radio post` (no `--node`/`--parent`/`--channel`) lands in your
-own `outbox` -- the report-upward default; a fully bare `send` errors. `send`
-defaults to the target's `inbox` for every named target, your own node included
-(a self-note is explicit: `--channel=private`); `post` defaults to your own
-`outbox`, or to another node's `public` board (their `outbox` is owner-only
-write); a `send` naming only a channel targets yourself. Explicit `--channel`
-always wins. Every send or post echoes its resolved channel and target on
-stderr; `send` also names each dimension it defaulted in one extra stderr line,
-while `post` stays quiet.
+order out (one copy per recipient; every `--node` send prints the
+`<uuid> <node>` receipt on stdout, one per recipient, and a bad recipient
+refuses the whole fan-out; bare and `--parent` sends print the bare UUID). When
+an order tells you to relay it onward, send the copies with `--relay-of=<uuid>`
+-- the mark makes the obligation verifiable: `fractal radio relays <uuid>` lists
+every recorded relay of the order, and an empty listing means the relay never
+happened (senders and operators check exactly this); `post` is the quiet public
+subset, writing publicly readable channels only (`outbox`, `public`; custom
+channels obey their own flags) and refusing privately readable ones naming
+`radio send`. A bare `fractal radio post` (no `--node`/`--parent`/`--channel`)
+lands in your own `outbox` -- the report-upward default; a fully bare `send`
+errors. `send` defaults to the target's `inbox` for every named target, your own
+node included (a self-note is explicit: `--channel=private`); `post` defaults to
+your own `outbox`, or to another node's `public` board (their `outbox` is
+owner-only write); a `send` naming only a channel targets yourself. Explicit
+`--channel` always wins. Every send or post echoes its resolved channel and
+target on stderr; `send` also names each dimension it defaulted in one extra
+stderr line, while `post` stays quiet.
 
 Run `fractal radio --help` and `fractal radio <command> --help` for the CLI.
 

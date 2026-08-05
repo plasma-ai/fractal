@@ -277,7 +277,7 @@ def test_failed_commands_end_with_an_unmistakable_failed_line(repo: dict) -> Non
     assert sent.returncode == 0
     assert 'FAILED' not in sent.stderr
     # round-trip: withdraw the probe message so the shared mailbox stays clean
-    result = _radio(alpha, 'unsend', sent.stdout.strip())
+    result = _radio(alpha, 'unsend', sent.stdout.split()[0])
     assert result.returncode == 0
 
 
@@ -387,7 +387,7 @@ def test_named_target_channel_defaults(
         '5',
     )
     assert written.returncode == 0, written.stderr
-    uuid = written.stdout.strip()
+    uuid = written.stdout.split()[0]
     assert f"'{channel}' channel" in written.stderr
     listing = _radio(repo[host], 'messages', '--all', '--channel', channel).stdout
     assert uuid in listing
@@ -465,7 +465,7 @@ def test_send_crosses_classes_and_post_refuses_private(repo: dict) -> None:
         '5',
     )
     assert crossed.returncode == 0, crossed.stderr
-    uuid = crossed.stdout.strip()
+    uuid = crossed.stdout.split()[0]
     assert crossed.stderr.strip() == "sent to main.beta's 'public' channel"
     assert uuid in _radio(beta, 'messages', '--all', '--channel', 'public').stdout
     # a post into a privately readable channel is send's job
@@ -632,7 +632,8 @@ def test_send_and_post_echo_resolved_channel(
     extra stderr line naming the resolution; a fully explicit ``send``
     and every ``post`` (self-defaulting silently -- it is the quiet
     reporting verb) add nothing beyond the echo. Stdout stays exactly
-    the message UUID so scripts capturing it keep working.
+    the receipt: ``<uuid> <node>`` for a ``--node`` send, the bare UUID
+    otherwise, so scripts capturing it keep one contract per form.
     """
     alpha = repo['alpha']
     sent = _radio(
@@ -650,9 +651,15 @@ def test_send_and_post_echo_resolved_channel(
     expected = [notice] if notice else []
     expected.append(f"sent to {target}'s '{channel}' channel")
     assert sent.stderr.strip().splitlines() == expected
-    # stdout is the bare UUID, nothing else
-    assert sent.stdout.strip() == sent.stdout.strip().splitlines()[0]
-    assert len(sent.stdout.strip()) == 8
+    # stdout is the one-line receipt: uuid plus the recipient on a --node
+    # send, the bare uuid on every other form
+    [receipt] = sent.stdout.strip().splitlines()
+    if verb == 'send' and '--node' in target_args:
+        uuid, receipt_target = receipt.split()
+        assert receipt_target == target
+    else:
+        uuid = receipt
+    assert len(uuid) == 8
 
 
 def test_bare_messages_defaults_to_inbox(repo: dict) -> None:
@@ -925,7 +932,7 @@ def test_send_sender_follows_node_env(repo: dict) -> None:
         _NODE=f'{alpha}',
     )
     assert sent.returncode == 0, sent.stderr
-    uuid = sent.stdout.strip()
+    uuid = sent.stdout.split()[0]
     # the send attributes to alpha: alpha's sent listing carries it ...
     assert uuid in _radio(alpha, 'sent').stdout
     # ... and the root's does not
@@ -949,7 +956,7 @@ def test_send_sender_follows_node_env(repo: dict) -> None:
         _NODE=f'{alpha}',
     )
     assert explicit.returncode == 0, explicit.stderr
-    assert explicit.stdout.strip() in _radio(beta, 'sent').stdout
+    assert explicit.stdout.split()[0] in _radio(beta, 'sent').stdout
 
 
 def test_sealed_inbox_holds_the_seat_but_not_the_operator(repo: dict) -> None:
@@ -993,11 +1000,13 @@ def test_sealed_inbox_holds_the_seat_but_not_the_operator(repo: dict) -> None:
 
 
 def test_send_fans_out_with_receipts_and_relays_lists_lineage(repo: dict) -> None:
-    """A repeated ``--node`` returns per-recipient receipts; relays verify.
+    """Any ``--node`` send returns per-recipient receipts; relays verify.
 
-    A fan-out prints one ``<uuid> <node>`` receipt per recipient (each copy
-    its own message), and ``radio relays <uuid>`` answers whether an order
-    was ever relayed onward: empty lineage before, the marked copy after.
+    A ``--node`` roster prints one ``<uuid> <node>`` receipt per recipient
+    (each copy its own message) whatever its length -- a fleet driver
+    building the roster never special-cases a roster of one -- and
+    ``radio relays <uuid>`` answers whether an order was ever relayed
+    onward: empty lineage before, the marked copy after.
     """
     alpha, beta = repo['alpha'], repo['beta']
     fan = _radio(
@@ -1021,6 +1030,22 @@ def test_send_fans_out_with_receipts_and_relays_lists_lineage(repo: dict) -> Non
         assert target == expected
         uuids.append(uuid)
     assert len(set(uuids)) == 2
+    # a roster of one keeps the receipt shape
+    single = _radio(
+        alpha,
+        'send',
+        'fleet order',
+        '--node',
+        'main.beta',
+        '--subject',
+        'fo',
+        '--priority',
+        '8',
+    )
+    assert single.returncode == 0, single.stderr
+    single_uuid, single_target = single.stdout.split()
+    assert single_target == 'main.beta'
+    uuids.append(single_uuid)
     order = uuids[0]
     # before any relay the lineage is empty -- the obligation reads unmet
     empty = _radio(beta, 'relays', order)
@@ -1046,7 +1071,7 @@ def test_send_fans_out_with_receipts_and_relays_lists_lineage(repo: dict) -> Non
         ('main.beta', 'main', f'relay:{order}')
     ]
     # round-trip: withdraw the probe messages so the shared mailboxes stay clean
-    for uuid in (*uuids, relayed.stdout.strip()):
+    for uuid in (*uuids, relayed.stdout.split()[0]):
         sender = alpha if uuid in uuids else beta
         assert _radio(sender, 'unsend', uuid).returncode == 0
 
@@ -1081,7 +1106,7 @@ def test_listings_read_your_writes_and_close_with_a_watermark(repo: dict) -> Non
         _NODE=f'{alpha}',
     )
     assert sent.returncode == 0, sent.stderr
-    uuid = sent.stdout.strip()
+    uuid = sent.stdout.split()[0]
     # the very next listing from the same foreign cwd shows the send ...
     listing = _run(root, 'radio', 'sent', _NODE=f'{alpha}')
     assert uuid in listing.stdout
@@ -1970,7 +1995,9 @@ def _send(
 
     An omitted ``node`` self-targets the sending node explicitly (its
     worktree directory is named after its branch), keeping every helper
-    send fully explicit and its stderr free of defaulting notices.
+    send fully explicit and its stderr free of defaulting notices. A
+    ``--node`` send prints the ``<uuid> <node>`` receipt shape, so the
+    UUID is the receipt's first field.
     """
     args = [
         'send',
@@ -1986,7 +2013,7 @@ def _send(
     ]
     result = _radio(path, *args)
     assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
+    return result.stdout.split()[0]
 
 
 def _post(

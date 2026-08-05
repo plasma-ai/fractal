@@ -24,6 +24,7 @@ __all__ = [
     'test_send_routes_to_target',
     'test_send_parent_lands_in_the_dotted_parents_inbox',
     'test_send_unknown_node',
+    'test_send_refuses_an_empty_node_target',
     'test_send_nonexistent_channel',
     'test_send_rejects_invalid_priority',
     'test_post_enforces_publicly_readable_class',
@@ -38,6 +39,7 @@ __all__ = [
     'test_relays_refuses_an_unknown_uuid',
     'test_send_many_reports_each_landing_before_a_later_failure',
     'test_relay_lineage_marks_copies_and_lists_them',
+    'test_relays_answers_for_a_withdrawn_original',
     'test_sent_includes_own_replies',
     'test_messages_order_by_priority_then_created_at',
     'test_messages_channel_filter',
@@ -318,6 +320,30 @@ def test_send_unknown_node(radio: Radio) -> None:
     """Sending to an unregistered node is rejected."""
     with pytest.raises(ValueError, match='Node not found'):
         radio.send('main.ghost', subject='s', data='d', priority=0)
+
+
+def test_send_refuses_an_empty_node_target(radio: Radio) -> None:
+    """An empty target refuses instead of self-delivering.
+
+    ``''`` is what an unset variable expands to in a fleet script's
+    ``--node "$PEER"`` -- resolving it to self would land an urgent order
+    in the sender's own inbox under a clean exit. Only ``None`` (the
+    target left unnamed) means self.
+    """
+    with pytest.raises(ValueError, match='Empty node target'):
+        radio.send('', subject='urgent', data='d', priority=9)
+    # the fan-out's dry pass refuses the whole roster on one empty entry
+    with pytest.raises(ValueError, match='Empty node target'):
+        radio.send_many(
+            ['', radio.node.branch],
+            subject='urgent',
+            data='d',
+            priority=9,
+        )
+    assert radio.messages(channel='inbox') == []
+    # an unnamed target still self-delivers by design
+    _, target, _ = radio.send(subject='note', data='d', priority=1)
+    assert target == radio.node.branch
 
 
 def test_send_nonexistent_channel(radio: Radio) -> None:
@@ -780,6 +806,37 @@ def test_relay_lineage_marks_copies_and_lists_them(
             priority=5,
             relay_of='ZZZZ9999',
         )
+
+
+def test_relays_answers_for_a_withdrawn_original(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """A withdrawn original leaves its relay lineage queryable.
+
+    The lineage keys on the recorded ``relay:<uuid>`` marks, and an
+    unsend deletes the original while leaving the relay copies -- so a
+    discharged obligation must stay auditable after the order is
+    withdrawn, not vanish behind a not-found error blaming the wrong
+    object. The unknown-uuid refusal stands for an empty lineage only.
+    """
+    root, peer = radio_pair
+    order, _, _ = root.send(
+        peer.node.branch,
+        subject='fleet order',
+        data='wind down',
+        priority=9,
+    )
+    relayed, _, _ = peer.send(
+        parent=True,
+        subject='fleet order (relayed)',
+        data='wind down',
+        priority=9,
+        relay_of=order,
+    )
+    root.unsend(order)
+    [copy] = root.relays(order)
+    assert copy['message_uuid'] == relayed
+    assert copy['metadata'] == f'relay:{order}'
 
 
 def test_sent_includes_own_replies(radio_pair: tuple[Radio, Radio]) -> None:

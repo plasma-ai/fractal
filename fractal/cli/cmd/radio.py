@@ -245,7 +245,14 @@ def radio_send(app: typer.Typer) -> typer.Typer:
             priority=priority,
             relay_of=relay_of,
         )
-        typer.echo(message_uuid)
+        # any --node send keeps the roster receipt shape, a roster of one
+        # included -- a fleet driver building its recipient list must not
+        # parse two stdout contracts; bare and --parent sends stay a bare
+        # UUID for scripts
+        if node:
+            typer.echo(f'{message_uuid} {target}')
+        else:
+            typer.echo(message_uuid)
         # name a defaulted routing dimension on stderr so the caller sees the
         # resolution it left implicit; an untargeted write to a publicly
         # readable channel is a post in disguise, so nudge the quiet verb
@@ -269,8 +276,8 @@ def radio_send(app: typer.Typer) -> typer.Typer:
                 err=True,
             )
         # echo the resolved routing so a misdelivered send is visible
-        # immediately -- on stderr (stdout stays the bare UUID for scripts)
-        # and unconditionally, since the misdelivery victims are agents, not
+        # immediately -- on stderr (stdout carries only the receipt) and
+        # unconditionally, since the misdelivery victims are agents, not
         # interactive TTY users
         typer.echo(f"sent to {target}'s {channel!r} channel", err=True)
 
