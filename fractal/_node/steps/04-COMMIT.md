@@ -9,9 +9,11 @@ requires_approval: false
    not self-complete with active children. Then signal completion (if empty,
    never self-complete): `fractal node finish --reason="<reason>"`.
 
-   After finishing, if your parent is the user (root) node, post a brief
-   sign-off to them -- what you accomplished, the final state, and any decision
-   the user owns:
+   After finishing, post a brief sign-off to your parent -- what you
+   accomplished, the final state, and any decision your parent or the user owns.
+   The sign-off is unconditional: it fires whatever your position in the tree,
+   and any signal an operator ordered fires with it (artifact verification is
+   the operator's fallback, never your excuse to skip one):
    `fractal radio send "<summary>" --parent --subject="<subject>" --priority=<0-10>`.
    Fire-and-forget; do not wait for a reply.
 

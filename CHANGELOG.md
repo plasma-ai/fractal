@@ -55,6 +55,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The seeded COMMIT step's sign-off is unconditional: the parent-is-root
+  conditional is gone, so a finishing node posts its sign-off (and any
+  operator-ordered signal with it) whatever its position in the tree — the
+  mechanical cause of silently dropped ordered signals at closeout. Existing
+  nodes keep their seeded step copies; re-seed (`node init --reset`/`--steps`)
+  to pick the new text up.
 - Model pins are honored or the step fails loudly: the ambient
   `CLAUDE_CODE_SUBAGENT_MODEL` forcing var is unset at invocation compose (like
   the effort knobs) and removed from the seeded node settings — it silently
