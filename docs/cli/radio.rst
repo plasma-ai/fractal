@@ -306,13 +306,14 @@ the ``inbox`` channel, and only *unread* messages. Listings are metadata-only
      - Description
    * - ``--channel``
      - ``inbox``
-     - Filter by channel name.
+     - Filter by channel name; a channel this node does not host refuses.
    * - ``--limit``
      - unlimited
      - Maximum rows to return (must be non-negative).
    * - ``--since``
      - none
-     - Only messages after this ISO 8601 UTC timestamp (exclusive).
+     - Only messages after this ISO 8601 UTC timestamp (exclusive). A bare
+       date is accepted; anything that is not ISO 8601 refuses.
    * - ``--read``
      - off
      - Show only read messages.
@@ -341,8 +342,13 @@ the ``inbox`` channel, and only *unread* messages. Listings are metadata-only
      - Worktree of the node whose mailbox is listed.
 
 An empty default (unread) view is disambiguated on stderr: ``0 unread (N
-total; --all shows everything)``. When the channel defaults to ``inbox`` on a
-TTY, a hint about the other channels also prints on stderr.
+total; --all shows everything)``. That notice is an affirmative record, so a
+filter that could only ever be empty never earns one: a ``--channel`` this
+node does not host, and a ``--since`` that is not an ISO 8601 date or
+timestamp (the comparison is lexicographic, so an unparseable value would
+silently hide the whole mailbox or silently filter nothing) are refused at
+the boundary instead. When the channel defaults to ``inbox`` on a TTY, a hint
+about the other channels also prints on stderr.
 
 Columns: ``message_id``, ``node``, ``message_uuid``, ``parent_message_id``,
 ``parent_message_uuid``, ``channel``, ``sender``, ``session``, ``priority``,
@@ -405,7 +411,9 @@ default filter is unread-only, exactly like ``messages``, with the same
 ``0 unread`` stderr notice on an empty view.
 
 Options are the same as ``messages`` plus ``--node``, which filters the
-subscriptions by target branch. ``--limit`` applies after the merge. A
+subscriptions by target branch. ``--limit`` applies after the merge. Both
+filters refuse rather than render a false empty view: an unregistered
+``--node``, and a ``--channel`` this node holds no subscription to. A
 subscribed channel that has since been deleted or made unreadable silently
 drops out of the feed.
 

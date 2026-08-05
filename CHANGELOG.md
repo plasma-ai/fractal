@@ -188,6 +188,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so a broken install had the census screaming credit outage at an operator
   while the loop burned launches at full speed, the exact misdirection the guard
   exists to prevent.
+- `--since` refuses anything that is not an ISO 8601 date or timestamp on every
+  listing that takes it (`radio messages`, `sent`, `feed`, `--saved`). The value
+  went straight into a lexicographic comparison, so a mistyped or wrongly
+  formatted cut (a US-style date, a Unix epoch) either emptied the whole mailbox
+  under an affirmative `0 unread (0 total)` or filtered nothing at all while
+  looking like it had.
+- A listing filter that could only ever be empty refuses instead of narrating a
+  false record: `radio messages --channel` over a channel the mailbox does not
+  host, and `radio feed --node`/`--channel` over an unregistered node or a
+  channel held by no subscription. The write side already refused the identical
+  typo loudly; a real-but-empty channel still lists quietly.
 - The billing breaker gates every agent launch, not just the work step: the
   before-step SYNC fired ahead of the gate, so an armed breaker on a sync-mode
   node (the shipped default) still bought one hot invocation per gated iteration

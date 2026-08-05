@@ -14,6 +14,7 @@ from fractal.cli.utils import (
     print_json,
     print_rows,
     require_non_negative,
+    require_timestamp,
     resolve_node,
     resolve_sender,
 )
@@ -474,6 +475,7 @@ def radio_messages(app: typer.Typer) -> typer.Typer:
     ) -> None:
         """List a channel's metadata, inbox by default (bodies via 'read')."""
         require_non_negative(limit=limit)
+        require_timestamp(since=since)
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
         if body and not json:
@@ -596,6 +598,7 @@ def radio_sent(app: typer.Typer) -> typer.Typer:
     ) -> None:
         """List messages this node sent (the node column is the recipient)."""
         require_non_negative(limit=limit)
+        require_timestamp(since=since)
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
         radio = Radio(resolve_sender(path))
@@ -720,6 +723,7 @@ def radio_feed(app: typer.Typer) -> typer.Typer:
     ) -> None:
         """List subscribed nodes' metadata (bodies via 'read --feed')."""
         require_non_negative(limit=limit)
+        require_timestamp(since=since)
         if json and csv:
             raise typer.BadParameter('--json is mutually exclusive with --csv.')
         if body and not json:

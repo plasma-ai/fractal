@@ -29,7 +29,11 @@ shows everything, `--read` only receipted rows. Listings sort by priority then
 age (`--recent` for newest-first), take `--limit`/`--since`, and output a table,
 CSV (forced by `--csv`, default when piped), or `--json`. An empty unread view
 names the uncapped total on stderr, so "no mail" and "all read" are
-distinguishable.
+distinguishable. That notice is an affirmative record, so a filter that could
+only ever be empty refuses rather than earning one: a `--channel` the mailbox
+does not host, and a `--since` that is not an ISO 8601 date or timestamp (the
+comparison is lexicographic, so an unparseable value hides the whole mailbox or
+filters nothing at all, both while looking like a real cut).
 
 `fractal radio sent` is the outbound counterpart — messages this node authored,
 across every recipient's channel-space, with each row's node column naming the

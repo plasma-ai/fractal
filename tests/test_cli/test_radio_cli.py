@@ -74,6 +74,7 @@ __all__ = [
     'test_channel_create_and_delete_lifecycle',
     'test_cross_node_read_emits_receipt_without_mutating_sender',
     'test_empty_messages_query_emits_a_header',
+    'test_listing_filters_that_can_only_be_empty_refuse',
     'test_empty_and_populated_headers_match',
     'test_json_listings_mirror_csv_shape',
     'test_body_column_is_json_only',
@@ -1733,6 +1734,47 @@ def test_empty_messages_query_emits_a_header(repo: dict) -> None:
     assert '0 unread' not in zeroed.stderr
     # consume the seeded unread row so later tests see the all-read channel
     assert _radio(beta, 'read', unread).returncode == 0
+
+
+def test_listing_filters_that_can_only_be_empty_refuse(repo: dict) -> None:
+    """A filter matching nothing refuses instead of narrating an empty view.
+
+    An empty listing is a record: consumers grade verdicts off it, and the
+    ``0 unread (0 total)`` notice states affirmatively that the mailbox
+    holds nothing. A typo'd channel, an unknown feed target, and a
+    ``--since`` that is not a timestamp all render exactly that view over
+    a full mailbox -- and ``--since`` is worse than empty in the other
+    direction, since a value sorting below the rows filters nothing at all
+    while looking like it filtered. Each refuses at the boundary; a real
+    channel that happens to be empty still lists quietly.
+    """
+    beta, alpha = repo['beta'], repo['alpha']
+    # a real channel with no mail is a true empty view, not a refusal
+    populated = _radio(beta, 'messages', '--channel', 'outbox', '--all')
+    assert populated.returncode == 0, populated.stderr
+    # a typo'd channel names what the mailbox actually has
+    typo = _radio(beta, 'messages', '--channel', 'inbx')
+    assert typo.returncode == 1
+    assert "No 'inbx' channel on main.beta" in typo.stderr
+    assert '0 unread' not in typo.stderr
+    # so does a feed filter matching no subscription, and an unknown target
+    unsubscribed = _radio(beta, 'feed', '--channel', 'inbx')
+    assert unsubscribed.returncode == 1
+    assert "No 'inbx' subscription" in unsubscribed.stderr
+    unknown = _radio(beta, 'feed', '--node', 'main.nope')
+    assert unknown.returncode == 1
+    assert "Node not found: 'main.nope'" in unknown.stderr
+    # --since is compared lexicographically against ISO 8601 instants, so a
+    # non-timestamp is refused as a usage error on every listing that takes it
+    for verb in ('messages', 'sent', 'feed'):
+        for value in ('NOPE', '05/08/2026', '1785902960'):
+            refused = _radio(alpha, verb, '--since', value)
+            assert refused.returncode == 2, (verb, value, refused.stderr)
+            assert 'ISO 8601' in refused.stderr
+    # a bare date and a full instant both stand: they sort as real cuts
+    for value in ('2026-01-31', '2026-01-31T14:00:00Z'):
+        accepted = _radio(alpha, 'messages', '--all', '--since', value)
+        assert accepted.returncode == 0, accepted.stderr
 
 
 def test_empty_and_populated_headers_match(repo: dict) -> None:

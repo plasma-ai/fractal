@@ -1369,7 +1369,11 @@ def test_channel_delete_refuses_messages_without_force(radio: Radio) -> None:
     # --force deletes the channel and cascades its messages
     radio.channel_delete('team', force=True)
     assert [c['channel'] for c in radio.channels() if c['channel'] == 'team'] == []
-    assert radio.messages(channel='team') == []
+    where = {'node': radio.node.branch, 'channel': 'team'}
+    assert radio.db.count('messages', where=where) == 0
+    # the channel is gone, so listing it refuses rather than reading empty
+    with pytest.raises(ValueError, match="No 'team' channel"):
+        radio.messages(channel='team')
 
 
 def test_subscribe_and_unsubscribe(radio: Radio) -> None:

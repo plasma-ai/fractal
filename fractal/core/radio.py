@@ -453,7 +453,12 @@ class Radio:
             (:meth:`seal_binds`): every hosted message is held out of the
             sealed seat's view.
 
+        Raises:
+            ValueError: If ``channel`` names no channel on this node.
+
         """
+        if channel is not None:
+            self._require_channel(channel)
         if self.seal_binds():
             return []
         return self._query_messages(
@@ -534,7 +539,18 @@ class Radio:
         Returns:
             Merged and sorted list of message dicts.
 
+        Raises:
+            ValueError: If ``node`` is not registered, or ``channel``
+                matches no subscription this feed reads from.
+
         """
+        # a filter that can only ever match nothing is a typo, not an empty
+        # feed: an empty listing is a record consumers grade verdicts off, so
+        # refuse it the way the subscribing side refuses the identical typo
+        if node is not None:
+            node = self._resolve_target(node)
+        if channel is not None:
+            self._require_subscription(channel, node=node)
         # fan out across the own subscriptions; the cap applies post-merge
         messages = self._feed_messages(
             self.node.branch,
@@ -1194,6 +1210,59 @@ class Radio:
     def subs(self: Radio) -> list[Row]:
         """List this node's subscriptions."""
         return self.db.read('subs', where={'node': self.node.branch})
+
+    def _require_channel(self: Radio, channel: str) -> None:
+        """Refuse a mailbox filter naming a channel this node does not host.
+
+        An empty listing is a record -- instruments and agents grade
+        verdicts off it -- so a filter that can only ever be empty must
+        refuse rather than answer zero rows under a ``0 unread (0 total)``
+        notice indistinguishable from a genuinely empty mailbox. The write
+        side (:meth:`send`) refuses the identical typo.
+
+        Args:
+            channel: The channel name filtered on.
+
+        Raises:
+            ValueError: If this node hosts no such channel.
+
+        """
+        branch = self.node.branch
+        if self.db.exists('channels', where={'node': branch, 'channel': channel}):
+            return
+        known = ', '.join(sorted(row['channel'] for row in self.channels()))
+        raise ValueError(f'No {channel!r} channel on {branch} (has: {known}).')
+
+    def _require_subscription(
+        self: Radio,
+        channel: str,
+        *,
+        node: Optional[str] = None,
+    ) -> None:
+        """Refuse a feed filter matching none of this node's subscriptions.
+
+        The feed reads subscriptions, so a channel it holds none of can
+        only ever render empty -- the same false record
+        :meth:`_require_channel` refuses on the mailbox surface.
+
+        Args:
+            channel: The channel name filtered on.
+            node: The target node the filter is scoped to, if any.
+
+        Raises:
+            ValueError: If no subscription matches.
+
+        """
+        where = {'node': self.node.branch, 'channel': channel}
+        if node is not None:
+            where['target'] = node
+        if self.db.exists('subs', where=where):
+            return
+        known = ', '.join(sorted({row['channel'] for row in self.subs()})) or 'none'
+        scope = f' on {node}' if node is not None else ''
+        raise ValueError(
+            f'No {channel!r} subscription{scope} to feed from (subscribed: {known}).'
+        )
 
     def _resolve_target(self: Radio, node: Optional[str]) -> str:
         """Normalize a target to a branch name, defaulting to the own node.

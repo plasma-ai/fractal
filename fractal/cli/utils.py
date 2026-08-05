@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import functools
 import json
 import os
@@ -31,6 +32,7 @@ __all__ = [
     'SQLITE_INT_MAX',
     'command',
     'require_non_negative',
+    'require_timestamp',
     'parse_reserve_budget',
     'StreamRenderer',
     'print_rows',
@@ -119,6 +121,39 @@ def require_non_negative(**limits: Optional[float]) -> None:
         if isinstance(value, int) and not isinstance(value, bool):
             if value >= SQLITE_INT_MAX:
                 raise typer.BadParameter(f'--{flag} must be < {SQLITE_INT_MAX}.')
+
+
+def require_timestamp(**instants: Optional[str]) -> None:
+    """Reject non-ISO-8601 timestamp CLI options as ``BadParameter``.
+
+    Each keyword maps an instant option's name to its value (``None`` is
+    skipped). The stored instants are ISO 8601 strings and the filters
+    compare them lexicographically, so an unparseable value is not an
+    error downstream -- it silently empties the listing (anything sorting
+    above the rows) or silently filters nothing (anything below), and a
+    mistyped ``--since`` becomes indistinguishable from an empty mailbox.
+    A bare date is accepted: it sorts as the prefix of that day's first
+    instant, which is exactly the cut it names.
+
+    Args:
+        **instants: Option name mapped to its value (e.g. ``since=since``).
+
+    Raises:
+        typer.BadParameter: If any value is not an ISO 8601 date or
+            timestamp.
+
+    """
+    for name, value in instants.items():
+        if value is None:
+            continue
+        flag = name.replace('_', '-')
+        try:
+            datetime.datetime.fromisoformat(value)
+        except ValueError:
+            raise typer.BadParameter(
+                f'--{flag} expects an ISO 8601 date or timestamp'
+                f' (e.g. 2026-01-31 or 2026-01-31T14:00:00Z); got {value!r}.'
+            ) from None
 
 
 def parse_reserve_budget(
