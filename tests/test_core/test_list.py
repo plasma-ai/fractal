@@ -460,8 +460,9 @@ def test_list_flags_billing_backoff(
     instantly at $0, so the loop is backing off dead credits and the
     listing must say so loudly. A launch that spent real money breaks the
     streak -- an expensive genuine failure never reads as an outage --
-    and so does a cannot-exec launch, the class the loop's breaker
-    excludes (a broken agent install is hot-retrying, not backing off).
+    and so does either shape of cannot-exec launch, the class the loop's
+    breaker excludes (a broken agent install is hot-retrying, not backing
+    off): a spawn that never execs, and a wrapper that runs and exits 127.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
     run_id = child.record.runs(limit=1)[0]['run_id']
@@ -494,5 +495,12 @@ def test_list_flags_billing_backoff(
     reason = 'agent launch failed: [Errno 2] No such file or directory'
     for number, metadata in ((5, reason), (6, reason), (7, f'{reason}; retry')):
         _failed_step(number, None, metadata=metadata)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'PAUSED: billing' not in (rows[child.branch] or '')
+    # the other cannot-exec shape: the wrapper runs and exits 127 itself, so
+    # the step row books a plain failed/1 and only the reason carries the code
+    exec_127 = 'agent error (exit 127): claude: command not found'
+    for number, metadata in ((8, exec_127), (9, exec_127), (10, f'{exec_127}; retry')):
+        _failed_step(number, 0.0, metadata=metadata)
     rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
     assert 'PAUSED: billing' not in (rows[child.branch] or '')

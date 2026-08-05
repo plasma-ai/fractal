@@ -182,6 +182,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `fractal init` refuses under a drain like every other creation verb: the
   user-node branch returned before the guard, so a draining seat could stand up
   a whole new tree — its own database, radio, and a root to spawn from.
+- The census `PAUSED: billing` mirror also excludes the other cannot-exec shape:
+  an agent or wrapper that runs and exits 127 books `agent error (exit 127)`,
+  and only the spawn-level `agent launch failed` was disqualifying the streak —
+  so a broken install had the census screaming credit outage at an operator
+  while the loop burned launches at full speed, the exact misdirection the guard
+  exists to prevent.
+- The billing breaker gates every agent launch, not just the work step: the
+  before-step SYNC fired ahead of the gate, so an armed breaker on a sync-mode
+  node (the shipped default) still bought one hot invocation per gated iteration
+  — one per hour even at the backoff cap. SYNC outcomes now arm and clear the
+  streak too, so an outage trips the breaker after three dead launches instead
+  of six.
 
 ### Changed
 

@@ -1612,6 +1612,15 @@ class Loop:
                     self._iter_interrupted = True
                     break
 
+            # hold the step's first launch through the breaker's backoff --
+            # the SYNC below is a full agent invocation, so a gate that sat
+            # after it would buy one hot call per gated iteration for as
+            # long as the outage lasts
+            if not self._billing_gate(steps, step_num):
+                if self._paused:
+                    return True
+                break
+
             # --- SYNC before each step ---
             if self._sync_mode and self._sync_file.is_file():
                 started = True
@@ -1665,6 +1674,14 @@ class Loop:
                     print(f'--- SYNC failed (non-fatal), continuing to {step_name} ---')
             # --- end SYNC ---
 
+            # the SYNC was a launch of its own, so re-read the breaker it may
+            # have just armed: the work step must never be the hot call the
+            # gate above exists to refuse
+            if not self._billing_gate(steps, step_num):
+                if self._paused:
+                    return True
+                break
+
             # if finishing, wait for children before last step
             if step_num == step_count and self._signal('finish'):
                 # the drain is bounded by the run wall alone -- clear the
@@ -1700,50 +1717,6 @@ class Loop:
             # its own step row, so cost and duration attribute honestly; a
             # model drop (a completed launch served off its pinned model)
             # re-dispatches once, outside the failure-retry allowance
-            # billing breaker: never buy a fresh launch hot while the last
-            # failures carried the dead-credits signature -- back off
-            # exponentially and let the launch after the wait be the probe
-            if self._billing_fails >= _BILLING_OUTAGE_THRESHOLD:
-                wait = self._billing_wait()
-                print(
-                    f'=== PAUSED: billing — {self._billing_fails} instant'
-                    f' zero-cost failure(s); probing again in {wait}s ==='
-                )
-                # an interrupted wait never buys a hot launch: a pause
-                # parks, and a stop, finish, or spent ceiling ends the
-                # step loop
-                if not self._retry_backoff(seconds=wait):
-                    if self._paused:
-                        return True
-                    # book the gated step and the never-run tail as real
-                    # rows (start + immediate stopped close, mirroring the
-                    # failure path's tail booking) so `node activity`
-                    # answers which steps the interrupt consumed -- the
-                    # gated step has no row of its own yet, so the slice
-                    # starts at it, one back from the failure path's
-                    for missed in steps[step_num - 1 :]:
-                        try:
-                            missed_id = node.record.step_start(
-                                iter_id=self._iter_id,
-                                run_id=self._run_id,
-                                step=missed.number,
-                                step_name=missed.name,
-                            )
-                            node.record.step_end(
-                                step_id=missed_id,
-                                status='stopped',
-                                exit_code=0,
-                                metadata='billing gate interrupted',
-                            )
-                            # never launched, so the spend is a knowable zero
-                            node.record.step_cost(step_id=missed_id, cost=0.0)
-                        except Exception:
-                            pass
-                    # the sequence was cut short: never book this iteration
-                    # 'completed' off steps it only ever recorded as stopped
-                    self._iter_interrupted = True
-                    break
-
             attempt = 0
             drop_retried = False
             # the newest step name rides every backstop commit's context
@@ -1965,20 +1938,7 @@ class Loop:
                 if self._paused:
                     return True
 
-                # billing-class accounting: an instant zero-cost agent
-                # failure carries the dead-credits signature and arms the
-                # breaker; any completed launch is the probe that clears it
-                if step_status == 'completed':
-                    if self._billing_fails >= _BILLING_OUTAGE_THRESHOLD:
-                        print('=== billing breaker cleared (a call succeeded) ===')
-                    self._billing_fails = 0
-                elif failed:
-                    if self._billing_failure(result, duration):
-                        self._billing_fails += 1
-                    else:
-                        # consecutive means consecutive: a failure that paid
-                        # or ran long is not the outage, and breaks the streak
-                        self._billing_fails = 0
+                self._book_billing(result, duration)
 
                 # every drop lands an event; the first re-dispatches the step
                 # once (infrastructure weather can silently serve a different
@@ -2956,6 +2916,10 @@ class Loop:
                     node.record.step_cost(step_id=self._step_id, cost=0.0)
             except Exception:
                 pass
+        # book the breaker off this launch while the sync's own step id still
+        # stands (the caller's is restored below) -- its cost is what the
+        # dead-credits signature is read against
+        self._book_billing(result, duration)
 
         if not strict:
             print(f'--- SYNC ({close or label}): done ---')
@@ -3115,6 +3079,96 @@ class Loop:
             _BILLING_BACKOFF_CAP_SECONDS,
             _BILLING_BACKOFF_BASE_SECONDS * 2**doublings,
         )
+
+    def _billing_gate(self: Loop, steps: list[Step], step_num: int) -> bool:
+        """Hold the next launch through the breaker's backoff, if it is armed.
+
+        Never buy a fresh launch hot while the last failures carried the
+        dead-credits signature: back off exponentially and let the launch
+        after the wait be the probe. Called before every launch a step
+        buys -- the before-step SYNC and the work step alike -- since one
+        gate per step would leave whichever launch follows the other one
+        hot for as long as the outage lasts.
+
+        Args:
+            steps: The iteration's whole step sequence.
+            step_num: The gated step's 1-based number.
+
+        Returns:
+            Whether the step loop may proceed. ``False`` means the wait
+            was interrupted: the caller parks on ``_paused``, else ends
+            the sequence.
+
+        """
+        if self._billing_fails < _BILLING_OUTAGE_THRESHOLD:
+            return True
+        node = self.node
+        wait = self._billing_wait()
+        print(
+            f'=== PAUSED: billing — {self._billing_fails} instant'
+            f' zero-cost failure(s); probing again in {wait}s ==='
+        )
+        # an interrupted wait never buys a hot launch: a pause parks, and a
+        # stop, finish, or spent ceiling ends the step loop
+        if self._retry_backoff(seconds=wait):
+            return True
+        if self._paused:
+            return False
+        # book the gated step and the never-run tail as real rows (start +
+        # immediate stopped close, mirroring the failure path's tail booking)
+        # so `node activity` answers which steps the interrupt consumed --
+        # the gated step has no row of its own yet, so the slice starts at
+        # it, one back from the failure path's
+        for missed in steps[step_num - 1 :]:
+            try:
+                missed_id = node.record.step_start(
+                    iter_id=self._iter_id,
+                    run_id=self._run_id,
+                    step=missed.number,
+                    step_name=missed.name,
+                )
+                node.record.step_end(
+                    step_id=missed_id,
+                    status='stopped',
+                    exit_code=0,
+                    metadata='billing gate interrupted',
+                )
+                # never launched, so the spend is a knowable zero
+                node.record.step_cost(step_id=missed_id, cost=0.0)
+            except Exception:
+                pass
+        # the sequence was cut short: never book this iteration 'completed'
+        # off steps it only ever recorded as stopped
+        self._iter_interrupted = True
+        return False
+
+    def _book_billing(self: Loop, result: StepResult, duration: int) -> None:
+        """Fold one agent launch's outcome into the billing breaker's streak.
+
+        Every launch counts, work step and SYNC alike -- the outage the
+        breaker detects belongs to the account, not to one step, and a
+        streak counted over work steps alone takes twice as many dead
+        launches to trip on a sync-mode node. A completed launch is the
+        probe that clears the breaker, a failure carrying the dead-credits
+        signature arms it, and any other failure -- one that paid, or ran
+        long -- breaks the streak, since consecutive means consecutive.
+        Deliberate outcomes (paused, budget-skipped) leave it untouched:
+        no launch was bought.
+
+        Args:
+            result: The launch's result.
+            duration: The launch's whole-second duration.
+
+        """
+        if result.status == 'completed':
+            if self._billing_fails >= _BILLING_OUTAGE_THRESHOLD:
+                print('=== billing breaker cleared (a call succeeded) ===')
+            self._billing_fails = 0
+        elif result.status in ('failed', 'timed out'):
+            if self._billing_failure(result, duration):
+                self._billing_fails += 1
+            else:
+                self._billing_fails = 0
 
     def _billing_failure(self: Loop, result: StepResult, duration: int) -> bool:
         """Return whether a failed launch carries the billing signature.

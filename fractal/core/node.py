@@ -66,6 +66,12 @@ _STALE_AGE_FLOOR_SECONDS = 300.0
 # rounds to cents -- the ledger commands report the full precision
 _SPEND_PRECISION = 2
 
+# recorded reason heads of a launch that could not exec: a spawn that never
+# started, and a wrapper that ran and exited 127 (the 'command not found'
+# convention). Both are the class the loop's billing breaker refuses to arm
+# on, so the census mirror must disqualify both too
+_CANNOT_EXEC_REASONS = ('agent launch failed', 'agent error (exit 127)')
+
 
 class Node:
     """An autonomous agent node in a git worktree.
@@ -3408,11 +3414,15 @@ class Node:
         instant, and zero-cost -- the loop is backing off dead credits
         (its own breaker uses the same signature), so the census must say
         so loudly rather than render an idle-looking active row. A
-        cannot-exec launch (recorded ``agent launch failed``) is the class
-        the loop's breaker refuses to arm on, so it disqualifies the
-        streak here too -- a broken agent install must never steer the
-        operator at a credit refill. Active nodes only: a settled node's
-        trailing failures are history.
+        cannot-exec launch is the class the loop's breaker refuses to arm
+        on, so it disqualifies the streak here too -- a broken agent
+        install must never steer the operator at a credit refill. Both of
+        its recorded shapes count: a spawn that never execs
+        (``agent launch failed``) and a wrapper that runs and exits 127,
+        the ``command not found`` convention (``agent error (exit 127)``
+        -- the step row's own exit code is the binary failure marker, so
+        the reason is where the code survives). Active nodes only: a
+        settled node's trailing failures are history.
         """
         if self.status() != 'active':
             return False
@@ -3428,9 +3438,9 @@ class Node:
             ):
                 continue
             # a cannot-exec launch books failed/instant with no cost, but is
-            # not billing-shaped -- the recorded reason (retry-marker safe:
+            # not billing-shaped -- either recorded reason (retry-marker safe:
             # the marker is a suffix) breaks the streak like a paid failure
-            if row['metadata'].startswith('agent launch failed'):
+            if row['metadata'].startswith(_CANNOT_EXEC_REASONS):
                 return False
             if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
                 return False

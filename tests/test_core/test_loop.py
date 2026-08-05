@@ -2689,6 +2689,40 @@ def test_billing_failures_back_off_exponentially_and_a_success_clears(
     assert 'billing breaker' not in out
 
 
+def test_billing_gate_holds_the_sync_launch_and_counts_it(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A SYNC is a launch: the breaker gates it and counts it like any other.
+
+    On a sync-mode node -- the shipped default -- the before-step SYNC is
+    a full agent invocation. Gating only the work step would buy one hot
+    call per gated iteration for as long as the outage lasts, still one
+    per hour at the backoff cap, and a streak counted over work steps
+    alone needs twice as many dead launches to trip. So the gate sits
+    ahead of the SYNC, and every dead launch on either side of it feeds
+    the streak.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    node = loop_node
+    _seed_steps(node, ['01-PLAN.md'])
+    _configure(node, max_iters=3, sync=True, step_retries=0)
+    # every launch (SYNC and PLAN alike) dies instantly at $0
+    loop = MockLoop(node, results=[StepResult(status='failed', exit_code=1)] * 6)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    # SYNC launches count: iteration 2's SYNC is the third dead launch, so
+    # the breaker arms on it rather than after twice as many
+    assert 'PAUSED: billing — 3 instant zero-cost failure(s)' in out
+    # and every launch is gated, the SYNC first -- iteration 3 opens on the
+    # wait, not on a hot sync call
+    _, third = out.split('=== Iteration 3 of 3', 1)
+    assert third.index('PAUSED: billing') < third.index('SYNC (before PLAN)')
+    assert len(loop.launched) == 6
+
+
 def test_interrupted_billing_gate_books_the_consumed_steps(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
