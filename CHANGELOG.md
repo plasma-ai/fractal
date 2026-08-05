@@ -87,6 +87,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An empty `--node` value refuses instead of resolving to self: `--node "$PEER"`
   with an unset variable landed an urgent fleet order in the sender's own inbox
   under a clean exit 0.
+- The fill-sheet pin gate reads every `pin:` spelling git accepts: uppercase hex
+  and short (4+ hex) abbreviations validate and gate against `--pin` case-blind,
+  and a spelling the gate cannot read as a sha (symbolic, or below the four-hex
+  floor) refuses outright — any such line was silently invisible to the gate,
+  deploying unvalidated and anchoring the charter's docket rows at HEAD instead
+  of the declared commission pin.
+- A profile-seeded node's init banner says the seeded task is ready to review
+  and start, instead of instructing the operator to author the charter the
+  profile already authored (following that instruction invited overwriting a
+  pinned commission).
 - Seal enforcement closes its archive and environment bypasses: a sealed seat
   can no longer `radio save` a hosted message and read the body back through
   `messages --saved` (the archive is a body surface; pre-seal archives are held

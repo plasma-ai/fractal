@@ -627,7 +627,8 @@ class Node:
         - the charter carries its two authored sections (a truncated seed
           dies here);
         - every ``pin: <sha>`` line in the charter resolves to a commit and
-          matches ``--pin`` (prefix-wise) when one is given;
+          matches ``--pin`` (prefix-wise, case-blind) when one is given --
+          a ``pin:`` spelling that is not a hex sha refuses outright;
         - every ``docket: <path>`` line resolves at the pin (the charter's
           own when ``--pin`` is absent, else ``HEAD``).
 
@@ -658,7 +659,16 @@ class Node:
                     f'Profile charter {charter} is missing {heading!r}'
                     ' (truncated or stale seed).'
                 )
-        pins = re.findall(r'^pin:\s*([0-9a-f]{7,40})\s*$', text, flags=re.M)
+        # every pin: line is load-bearing -- a spelling the gate cannot read
+        # as a commit sha (symbolic, or truncated below git's four-hex
+        # abbreviation floor) refuses rather than deploying unvalidated
+        pins = []
+        for declared in re.findall(r'^pin:\s*(.*?)\s*$', text, flags=re.M):
+            if not re.fullmatch(r'[0-9a-fA-F]{4,40}', declared):
+                raise ValueError(
+                    f'Charter pin is not a commit sha: {declared!r} (stale seed).'
+                )
+            pins.append(declared.lower())
         for declared in pins:
             if not _commit(declared):
                 raise ValueError(
@@ -666,7 +676,7 @@ class Node:
                     ' (stale seed).'
                 )
             if pin is not None and not (
-                pin.startswith(declared) or declared.startswith(pin)
+                pin.lower().startswith(declared) or declared.startswith(pin.lower())
             ):
                 raise ValueError(
                     f'Charter pin {declared!r} does not match --pin {pin!r}'

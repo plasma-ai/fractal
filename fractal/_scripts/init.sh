@@ -725,8 +725,16 @@ fi
 echo ""
 echo "Initialized $WORKTREE_DIR"
 
-# surface the next steps: the task contract location and the start command
-echo ""
-echo "Next: author the node's task in $NODE_DIR/NODE.md"
-echo "(its Instructions and Completion Requirements sections start blank),"
-echo "then start the loop: fractal node start $BRANCH"
+# surface the next steps: a profile charter arrives deployment-ready, so
+# only the placeholder charter asks to be authored -- telling the operator
+# to fill in seeded sections invites overwriting a pinned commission
+if [[ -n "$CHARTER" ]]; then
+    echo ""
+    echo "Next: review the seeded task in $NODE_DIR/NODE.md,"
+    echo "then start the loop: fractal node start $BRANCH"
+else
+    echo ""
+    echo "Next: author the node's task in $NODE_DIR/NODE.md"
+    echo "(its Instructions and Completion Requirements sections start blank),"
+    echo "then start the loop: fractal node start $BRANCH"
+fi

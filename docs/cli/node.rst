@@ -121,7 +121,8 @@ node at ``--path``.
        seeds the step list (like ``--steps``), ``NODE.md`` a
        deployment-ready charter. The charter's fill-sheet is validated at
        init: its two authored sections must be present, every ``pin:``
-       line must resolve to a commit (and match ``--pin``), and every
+       line must resolve to a commit (and match ``--pin``, case-blind —
+       a spelling that is not a hex sha refuses outright), and every
        ``docket: <path>`` line must resolve at the pin — a stale or
        truncated seed dies at init, not at the commission's first seat.
        Mutually exclusive with ``--steps``/``--inherit=steps``.

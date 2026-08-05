@@ -152,7 +152,8 @@ explicit reserve must stay below 99% of `--max-cost`.
   `.fractal/profiles/<name>/`: `steps/` seeds the step list (like `--steps`) and
   `NODE.md` a deployment-ready charter, whose fill-sheet is validated at init
   (`## Instructions`/`## Completion Requirements` present; every `pin:` line
-  resolves to a commit and matches `--pin`; every `docket: <path>` line resolves
+  resolves to a commit and matches `--pin` case-blind, and a `pin:` spelling
+  that is not a hex sha refuses outright; every `docket: <path>` line resolves
   at the pin) -- stale or truncated commission seeds die at init.
 - `--pin=<sha>` -- the commission pin the profile charter must agree with.
 - `--sealed` -- seal the node's mailbox: its own seat cannot read hosted

@@ -1495,9 +1495,24 @@ def test_init_profile_seeds_and_validates_the_fill_sheet(
     charter.write_text('## Instructions\n\nVerify.\n', encoding='utf-8')
     with pytest.raises(ValueError, match='Completion Requirements'):
         Node(git_repo).init(name='v1', profile='steward')
-    # a coherent seed deploys: charter verbatim, profile steps in place
-    _write_charter(f'pin: {head}', 'README.md')
-    Node(git_repo).init(name='v1', profile='steward', pin=head)
+    # a pin spelling git itself accepts is validated, never skipped:
+    # uppercase hex resolves (or refuses) like lowercase ...
+    _write_charter('pin: DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF', 'README.md')
+    with pytest.raises(ValueError, match='pin does not resolve'):
+        Node(git_repo).init(name='v1', profile='steward')
+    # ... a short abbreviation still gates against --pin ...
+    _write_charter(f'pin: {head[:5]}', 'README.md')
+    with pytest.raises(ValueError, match='does not match --pin'):
+        Node(git_repo).init(name='v1', profile='steward', pin=newer)
+    # ... and a spelling the gate cannot read as a sha refuses outright
+    _write_charter('pin: nosuchbranch', 'README.md')
+    with pytest.raises(ValueError, match='not a commit sha'):
+        Node(git_repo).init(name='v1', profile='steward')
+    # a coherent seed deploys: charter verbatim (case-blind pin match),
+    # profile steps in place, and the next-steps banner says the seeded
+    # task is ready to start rather than asking to author blank sections
+    _write_charter(f'pin: {head.upper()}', 'README.md')
+    output = Node(git_repo).init(name='v1', profile='steward', pin=head)
     node_dir = git_repo / '.worktrees' / 'main.v1' / '.fractal' / 'main.v1'
     assert (node_dir / 'NODE.md').read_text(encoding='utf-8') == charter.read_text(
         encoding='utf-8'
@@ -1505,3 +1520,9 @@ def test_init_profile_seeds_and_validates_the_fill_sheet(
     assert [f.name for f in sorted((node_dir / 'steps').glob('*.md'))] == [
         '00-VERIFY.md'
     ]
+    assert 'start the loop' in output
+    assert 'sections start blank' not in output
+    # a charterless init keeps the author-your-task banner
+    output = Node(git_repo).init(name='v2')
+    assert 'author the node' in output
+    assert 'sections start blank' in output
