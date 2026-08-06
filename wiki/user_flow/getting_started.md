@@ -24,12 +24,12 @@ Fractal ships on PyPI as `plasma-fractal`; the `fractal` project there is a
 metadata-only pointer dist that pins the same version, so `pip install fractal`
 and `pip install plasma-fractal` are equivalent. Install it into the environment
 whose `fractal` executable you want on PATH (a project `.venv` works — node
-launches re-export it into their tmux sessions).
+launches re-export it into their loop runtimes).
 
-Two external requirements shape the experience: **git** (every node lives in a
-git worktree) and **tmux** (every node runs in a tmux session;
-`fractal node start` refuses without it). You also need at least one agent CLI
-on PATH — `claude`, `codex`, `grok`, `opencode`, or `omp` — since nodes drive an
+Every node lives in a **git** worktree. **tmux** is the default runtime and
+provides attachable live panes; on a host where tmux is unavailable, launch with
+`fractal node start --headless` instead. You also need at least one agent CLI on
+PATH — `claude`, `codex`, `grok`, `opencode`, or `omp` — since nodes drive an
 agent, not a model API directly.
 
 Then run `fractal install` once. It copies the bundled **fractal** and **wiki**
@@ -124,13 +124,25 @@ after the fact.
 fractal node start <name>
 ```
 
-The node launches in a tmux session named after the repository and branch
-(`repo (branch)`, dots dashed so tmux treats each as one name) and its status
-flips from `idle` to `active`. All run parameters come from `config.json` —
-start takes no tuning flags of its own (only `--continue`/`--clean`/
-`--max-cost`, the relaunch path described in [[user_flow/continue_resume]]). The
-CLI prints the session name; `fractal node attach <name>` drops you into the
-live session, and detaching leaves the node running.
+By default the node launches in a tmux session named after the repository and
+branch (`repo (branch)`, dots dashed so tmux treats each as one name) and its
+status flips from `idle` to `active`. All run parameters come from `config.json`
+— start takes no tuning flags of its own (only the runtime choice and
+`--continue`/`--clean`/`--max-cost`, the relaunch path described in
+[[user_flow/continue_resume]]). The CLI prints the session name;
+`fractal node attach <name>` drops you into the live session, and detaching
+leaves the node running.
+
+In a locked-down or non-interactive environment, use:
+
+```bash
+fractal node start <name> --headless
+```
+
+The loop runs in a detached process group and writes its output to
+`<node_dir>/headless.log`. Headless mode is inherited by child starts, so a
+delegating node can build and run a full tree without tmux. Pass `--tmux` to a
+child start to opt that launch back into tmux.
 
 From here the loop is autonomous: it iterates through its steps, commits its
 work each iteration to its own branch, and reports over radio. The operator's

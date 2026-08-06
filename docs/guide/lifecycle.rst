@@ -149,7 +149,8 @@ start
    $ fractal node start parser --continue --max-cost 10
 
 ``fractal node start [node]`` launches the node's iteration loop in a
-detached tmux session. All run parameters come from the node's
+detached tmux session, or in an independent process group with
+``--headless``. All run parameters come from the node's
 ``config.json``; the launch itself takes only these flags:
 
 .. list-table::
@@ -172,6 +173,10 @@ detached tmux session. All run parameters come from the node's
        relaunch — applied through the parent's retune and echoed
        ``max_cost: old -> new``. **Required** when the last run ended on
        its cost budget.
+   * - ``--headless`` / ``--tmux``
+     - Select the detached process-group backend or tmux. Headless mode captures
+       output in ``headless.log`` and is inherited by delegated child starts;
+       ``--tmux`` overrides that inherited choice.
 
 A fresh start requires the status to be exactly ``idle``; anything else
 refuses with a pointer to ``--continue``. Both forms re-validate the stored
@@ -196,8 +201,8 @@ from ``killed`` surfaces the recorded kill attribution as a notice. Every
 successful launch logs a completed ``start`` event (metadata ``continue`` on
 continues), so the event log carries the node's restart chain.
 
-While a node is ``active``, ``fractal node attach [node]`` attaches to its
-tmux session (it refuses any other status).
+While a tmux node is ``active``, ``fractal node attach [node]`` attaches to its
+session. A headless node instead reports the ``headless.log`` path.
 
 finish
 ~~~~~~
@@ -364,10 +369,10 @@ Crash reconciliation
 --------------------
 
 A loop that dies without settling — a hard kill, a direct
-``tmux kill-session``, a host crash — leaves ``.status`` reading ``active``
-with no
-tmux session. Because ``start.sh`` enforces one loop per node, a *provably*
-missing session is proof the loop is gone, and fractal heals the node on the
+``tmux kill-session``, a headless process death, or a host crash — leaves
+``.status`` reading ``active`` with no live runtime. Because ``start.sh``
+enforces one loop per node, a *provably* missing runtime is proof the loop is
+gone, and fractal heals the node on the
 next read or verb: the status is stamped ``exited``, the still-open run,
 iteration, and step rows are closed, any surviving process groups the loop
 recorded are reaped with an ``orphan`` event (a headless agent would

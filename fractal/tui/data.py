@@ -19,6 +19,7 @@ import contextlib
 import datetime as dt
 import json
 import math
+import os
 import pathlib
 import sqlite3
 from collections.abc import Iterator
@@ -27,8 +28,8 @@ from typing import Any, Optional
 import fractal.core.agent
 import fractal.core.worktree
 import fractal.util
-from fractal.constants import CONFIG_FILE, STATUS_FILE
-from fractal.core.node import Node, node_dir, tmux_session_name
+from fractal.constants import CONFIG_FILE, HEADLESS_FILE, PGID_FILE, STATUS_FILE
+from fractal.core.node import Node, _recorded_group, node_dir, tmux_session_name
 
 __all__ = [
     'leaf_of',
@@ -247,6 +248,28 @@ class TuiData:
         ``exited`` shows until a writer (``node start``/``merge``/...) persists it.
         """
         return fractal.util.tmux.sessions()
+
+    def loop_alive(self: TuiData, branch: str, sessions: frozenset[str]) -> bool:
+        """Return whether the branch's selected loop runtime is alive.
+
+        Headless loops are process-group supervised through their launch-time
+        PGID record. Tmux loops use the caller's one-per-refresh session set.
+        This is display-only: a failed read renders the loop settled but never
+        mutates lifecycle state.
+        """
+        node_dir = self.node_dir(branch)
+        if node_dir is not None and (node_dir / HEADLESS_FILE).is_file():
+            pgid_file = node_dir / PGID_FILE
+            try:
+                recorded_at = pgid_file.stat().st_mtime
+                pgid = int(pgid_file.read_text(encoding='utf-8').strip())
+                os.killpg(pgid, 0)
+            except PermissionError:
+                return True
+            except (FileNotFoundError, ProcessLookupError, ValueError):
+                return False
+            return _recorded_group(pgid, recorded_at)
+        return self.tmux_session_name(branch) in sessions
 
     @staticmethod
     def rows(

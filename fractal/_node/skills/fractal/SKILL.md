@@ -216,12 +216,16 @@ pool a cheaper token rate buys more steps, not a lower bill.
    `fractal node config set <key>=<value>`, read one with
    `fractal node config get <key>`, or edit the file directly). A configured
    `max_cost` must be positive; a missing `max_cost` launches uncapped with a
-   loud warning. Add `--continue` only to continue a stopped/exited child.
-   Starting is its own turn: when a spawn gate (child/descendant census, budget
-   arithmetic) decides the launch, read it in one command and start in a
-   separate one -- a chained start commits before you can see the read's output.
-   The init gate re-checks census and budget at start, so treat a rejected start
-   as the gate working; re-read before retrying.
+   loud warning. Add `--continue` only to continue a stopped/exited child. A
+   parent running with `FRACTAL_HEADLESS=true` automatically launches the child
+   in a detached process group, so the command returns immediately and the tree
+   does not require tmux. Use `--tmux` only to override that inherited backend
+   for this child; headless output lives in its `headless.log`. Starting is its
+   own turn: when a spawn gate (child/descendant census, budget arithmetic)
+   decides the launch, read it in one command and start in a separate one -- a
+   chained start commits before you can see the read's output. The init gate
+   re-checks census and budget at start, so treat a rejected start as the gate
+   working; re-read before retrying.
 
 ### Configure
 

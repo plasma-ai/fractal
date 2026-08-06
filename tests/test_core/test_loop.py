@@ -39,6 +39,7 @@ __all__ = [
     'test_malformed_midrun_retune_warns_and_keeps_the_previous_value',
     'test_provider_frontmatter_rebinds_the_boot_agent',
     'test_agent_env_publishes_node_branch',
+    'test_agent_env_inherits_headless_launches',
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
@@ -424,6 +425,17 @@ def test_agent_env_publishes_node_branch(
     # every launch published the node's branch for external consumers
     assert loop.envs
     assert all(env['NODE_BRANCH'] == loop_node.branch for env in loop.envs)
+
+
+def test_agent_env_inherits_headless_launches(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agents in a headless loop start delegated children headlessly too."""
+    monkeypatch.setenv('_NODE', '')
+    (loop_node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    loop = MockLoop(loop_node)
+    assert loop._agent_env('work')['FRACTAL_HEADLESS'] == 'true'
 
 
 def test_boot_records_the_tmux_socket_for_the_reconcile_probe(

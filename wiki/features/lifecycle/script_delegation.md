@@ -26,14 +26,16 @@ uniform and per-deployment customization has a place to land.
 
 Status flips and slot checks happen under the `.worktrees` file lock: per-node
 helpers re-check their guards under that lock so concurrent fan-outs serialize,
-and flips are atomic. The scripts themselves run *outside* the lock — they do
-slow work (git worktrees, tmux, remotes) that must not hold up every other
-lifecycle operation on the tree.
+and flips are atomic. Scripts that perform slow work (git worktrees, remotes)
+run *outside* the lock so they do not hold up lifecycle operations elsewhere in
+the tree. `start.sh` is the bounded exception: start holds the lock through its
+runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
 
 ## What the scripts do
 
-- `start.sh` launches the run's tmux session and execs the iteration loop
-  (`fractal node _loop`) inside it; the loop itself is in-process Python.
+- `start.sh` launches the run's tmux session or, with `--headless`, a detached
+  process group whose output lands in `headless.log`, then execs the iteration
+  loop (`fractal node _loop`) inside it; the loop itself is in-process Python.
 - `pause.sh` reaps the recorded step process group, aborting the in-flight agent
   so the loop can park.
 - `resume.sh` relaunches the loop; the relaunched loop withdraws the run's
@@ -51,7 +53,8 @@ lifecycle operation on the tree.
 The loop and its scripts coordinate through small marker files in the node
 directory, all git-ignored via the repository's exclude file (kept in lockstep
 with the marker set): `.status` (the current status), `.session` and `.socket`
-(tmux coordinates), `.pgid` and `.step_pgid` (process groups for pause/kill
-reaping), `.paused` (the tree-wide pause latch beside the central database) and
-`.pause_abort`. Signals the loop observes — finish, stop, pause — take effect at
-iteration or step boundaries; the escalation path that does not wait is kill.
+(tmux coordinates), `.headless` (the selected detached backend), `.pgid` and
+`.step_pgid` (process groups for liveness and pause/kill reaping), `.paused`
+(the tree-wide pause latch beside the central database) and `.pause_abort`.
+Signals the loop observes — finish, stop, pause — take effect at iteration or
+step boundaries; the escalation path that does not wait is kill.

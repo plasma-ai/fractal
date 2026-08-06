@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import sys
 from typing import Optional
 
@@ -19,7 +20,7 @@ from fractal.cli.utils import (
     resolve_node,
     resolve_target,
 )
-from fractal.constants import STATUSES
+from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, PGID_FILE, STATUSES
 from fractal.core.agent import seed_agents
 from fractal.core.loop import Loop
 from fractal.core.node import Node
@@ -46,6 +47,7 @@ __all__ = [
     'node_chat',
     'node_update',
     'node_loop',
+    'node_launch',
     'node_seed',
 ]
 
@@ -378,6 +380,17 @@ def node_start(app: typer.Typer) -> typer.Typer:
         ' old -> new; required when the last run ended on its budget.'
     )
     max_cost = typer.Option(None, '--max-cost', help=max_cost_help)
+    # runtime option
+    headless_help = (
+        'Run without tmux in a detached process group; inherited by child'
+        ' starts. Use --tmux to override an inherited headless launch.'
+    )
+    headless = typer.Option(
+        False,
+        '--headless/--tmux',
+        envvar='FRACTAL_HEADLESS',
+        help=headless_help,
+    )
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
@@ -388,9 +401,10 @@ def node_start(app: typer.Typer) -> typer.Typer:
         continue_: bool = continue_,
         clean: bool = clean,
         max_cost: Optional[float] = max_cost,
+        headless: bool = headless,
         path: str = path,
     ) -> None:
-        """Launch a node in a tmux session.
+        """Launch a node in tmux or a detached headless process group.
 
         Run parameters come from ``config.json`` (set at init or
         edited before launch); only ``--continue``/``--clean``/
@@ -405,7 +419,12 @@ def node_start(app: typer.Typer) -> typer.Typer:
         if max_cost is not None and not continue_:
             raise typer.BadParameter('--max-cost requires --continue.')
         node = resolve_target(path, node)
-        output = node.start(continue_run=continue_, clean=clean, max_cost=max_cost)
+        output = node.start(
+            continue_run=continue_,
+            clean=clean,
+            max_cost=max_cost,
+            headless=headless,
+        )
         if output:
             typer.echo(output)
 
@@ -841,7 +860,7 @@ def node_list(app: typer.Typer) -> typer.Typer:
     # live flag
     live_help = (
         "Trust each child's real status: relabel a crashed active node"
-        ' (no tmux session) as exited, and drop nodes whose worktree is gone.'
+        ' (no live loop runtime) as exited, and drop nodes whose worktree is gone.'
     )
     live = typer.Option(False, '--live', help=live_help)
     # count flag
@@ -1270,7 +1289,7 @@ def node_loop(app: typer.Typer) -> typer.Typer:
         resume: bool = resume,
         path: str = path,
     ) -> None:
-        """Run the node's iteration loop (invoked by start.sh inside tmux)."""
+        """Run the node's iteration loop (invoked by the selected runtime)."""
         node = resolve_node(path)
         loop = Loop(
             node,
@@ -1282,6 +1301,64 @@ def node_loop(app: typer.Typer) -> typer.Typer:
         code = loop.run()
         if code:
             raise SystemExit(code)
+
+    return app
+
+
+def node_launch(app: typer.Typer) -> typer.Typer:
+    """Register the private headless launcher command."""
+    # continue flag
+    continue_help = 'Continue a stopped/exited node.'
+    continue_ = typer.Option(False, '--continue', help=continue_help)
+    # resume flag
+    resume_help = 'Resume a paused node.'
+    resume = typer.Option(False, '--resume', help=resume_help)
+    # path option
+    path_help = 'Worktree directory.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, '_launch')
+    def _launch(
+        continue_: bool = continue_,
+        resume: bool = resume,
+        path: str = path,
+    ) -> None:
+        """Launch a node loop in an independent process group."""
+        node = resolve_node(path)
+        log_path = node.node_dir / HEADLESS_LOG
+        pgid_path = node.node_dir / PGID_FILE
+        loop_args = [
+            sys.executable,
+            '-m',
+            'fractal.cli.main',
+            'node',
+            '_loop',
+            f'--path={node._root}',
+        ]
+        if continue_:
+            loop_args.append('--continue')
+        if resume:
+            loop_args.append('--resume')
+        wrapper = (
+            'for _ in {1..100}; do [[ -f "$1" ]] && break; sleep 0.01; done; '
+            '[[ -f "$1" ]] || exit 1; shift; exec "$@"'
+        )
+        command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_path}', *loop_args]
+        try:
+            with log_path.open('w', encoding='utf-8') as stream:
+                process = subprocess.Popen(
+                    command_args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            pgid_path.write_text(f'{process.pid}\n', encoding='utf-8')
+        except Exception:
+            (node.node_dir / HEADLESS_FILE).unlink(missing_ok=True)
+            pgid_path.unlink(missing_ok=True)
+            raise
+        typer.echo(f'Started headless node: {process.pid} (log: {log_path})')
 
     return app
 

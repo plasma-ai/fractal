@@ -154,8 +154,8 @@ class SnapshotBuilder:
         self._feed_scope: Optional[str] = None
         self._sublog_scope: Optional[str] = None
         self._snapshot: Optional[Snapshot] = None
-        # live tmux sessions, refreshed once per build, to display-reconcile a
-        # crashed-but-active node as 'exited' (never persisted -- read-only)
+        # live tmux sessions, refreshed once per build; headless liveness uses
+        # each node's process-group record (never persisted -- read-only)
         self._live_sessions: frozenset[str] = frozenset()
 
     def build(
@@ -194,7 +194,7 @@ class SnapshotBuilder:
         for branch in moved:
             self._drop(branch)
         # reconcile crashed-but-active nodes for display only: a loop that died
-        # leaves .status 'active' with no tmux session; fetch the live sessions
+        # leaves .status 'active' with no live runtime; fetch the live sessions
         # once and drop any brief whose session is gone so it rebuilds as the
         # honest 'exited'; a crash doesn't move the .status mtime, so the poller
         # can't catch it -- liveness is checked here EVERY build, ahead of the
@@ -205,7 +205,7 @@ class SnapshotBuilder:
         for branch in self._topo or ():
             brief = self._brief.get(branch)
             if brief is not None and brief['status'] == 'active':
-                if self._data.tmux_session_name(branch) not in self._live_sessions:
+                if not self._data.loop_alive(branch, self._live_sessions):
                     self._drop(branch)
                     reconciled = True
         # short-circuit: nothing moved (a crash reconcile counts as movement)
@@ -378,18 +378,18 @@ class SnapshotBuilder:
         """Cache the branch's status + pending signal.
 
         Status comes from the ``.status`` file, display-reconciled to ``exited``
-        when it reads ``active`` but the node's tmux session is gone (a crashed
+        when it reads ``active`` but the node's loop runtime is gone (a crashed
         loop); the signal query runs only for an active node (a settled tree
         polls with zero queries).
         """
         if branch in self._brief:
             return
         status = self._data.status(branch)
-        # display-reconcile a crashed-but-active node: active with no live tmux
-        # session means the loop died without ending; show the honest 'exited'
+        # display-reconcile a crashed-but-active node: active with no live loop
+        # runtime means it died without ending; show the honest 'exited'
         # (display only -- never persisted; the cockpit is read-only)
         if status == 'active':
-            if self._data.tmux_session_name(branch) not in self._live_sessions:
+            if not self._data.loop_alive(branch, self._live_sessions):
                 status = 'exited'
         signal = ''
         if status == 'active':

@@ -65,6 +65,7 @@ def cli(**kwargs: Any) -> None:
     cmd.node_pending(node_app)
     cmd.node_chat(node_app)
     cmd.node_update(node_app)
+    cmd.node_launch(node_app)
     cmd.node_loop(node_app)
     cmd.node_seed(node_app)
     cmd.time_remaining(time_app)

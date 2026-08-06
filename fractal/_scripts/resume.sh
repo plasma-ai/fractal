@@ -65,6 +65,17 @@ if tmux list-sessions -F '#{session_name}' 2>/dev/null \
     exit 1
 fi
 
-# start.sh hosts the tmux launch; --resume makes the loop adopt the
-# paused run instead of opening a fresh one
-exec bash "$SCRIPT_DIR/start.sh" "$WORKTREE_DIR" --resume
+# start.sh hosts the launch; a headless node resumes with the same backend,
+# and --resume makes the loop adopt the paused run instead of opening a fresh one
+HEADLESS_ARGS=()
+if [[ -n "$BRANCH" ]]; then
+    PROJECT=$(cat "$REPO_ROOT/.worktrees/.project/$BRANCH" 2>/dev/null || echo ".")
+    if [[ "$PROJECT" == "." ]]; then
+        NODE_DIR="$WORKTREE_DIR/.fractal/$BRANCH"
+    else
+        NODE_DIR="$WORKTREE_DIR/$PROJECT/.fractal/$BRANCH"
+    fi
+    [[ -f "$NODE_DIR/.headless" ]] && HEADLESS_ARGS+=(--headless)
+fi
+exec bash "$SCRIPT_DIR/start.sh" "$WORKTREE_DIR" \
+    ${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"} --resume

@@ -11,8 +11,9 @@ A fractal is a tree of autonomous agent loops, each in its own git worktree. A
 node iterates toward a goal and can spawn child nodes that work subtasks in
 parallel.
 
-This skill configures a node with the user, then launches it in tmux; from there
-it runs autonomously — iterating, committing, and spawning children as needed.
+This skill configures a node with the user, then launches it in tmux or a
+detached headless process group; from there it runs autonomously — iterating,
+committing, and spawning children as needed.
 
 Your role does not end at launch. The user (root) node has no loop of its own —
 **you are it.** Once a node is running you are its *operator*: you watch the
@@ -396,7 +397,8 @@ arguments — only `--continue` (plus `--clean` to discard uncommitted project
 files, and `--max-cost` to re-arm the cap after a budget-ended run) when
 continuing a stopped/exited node. If the user wants to tweak a setting first,
 edit `<node_dir>/config.json`, then start. The node launches in a detached tmux
-session.
+session by default. When tmux is unavailable, use `start --headless`; child
+starts inherit headless mode and write their output to `headless.log`.
 
 ### Step 4: Post-launch briefing
 

@@ -18,6 +18,10 @@
 # Tree pause latch
 .paused
 
+# Headless runtime
+.headless
+headless.log
+
 # Process group handles
 .pgid
 .step_pgid

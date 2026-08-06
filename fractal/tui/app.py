@@ -35,6 +35,7 @@ from textual.message import Message
 from textual.widgets import Input, OptionList, Static, TextArea
 from textual.worker import Worker, get_current_worker
 
+from fractal.constants import HEADLESS_FILE, HEADLESS_LOG
 from fractal.core.agent import Agent, Invocation
 from fractal.core.node import Node
 
@@ -424,6 +425,10 @@ class FractalApp(App):
         on the viewed session is the way out, advertised on the session's
         status line for the duration.
         """
+        node_dir = self.data.node_dir(self.scope)
+        if node_dir is not None and (node_dir / HEADLESS_FILE).is_file():
+            self.notify(f'headless output: {node_dir / HEADLESS_LOG}')
+            return
         session = self.data.tmux_session_name(self.scope)
         if session not in self.data.live_sessions():
             self.notify('no running session', severity='warning')
