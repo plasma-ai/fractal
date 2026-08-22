@@ -4,6 +4,18 @@ This file provides guidance to coding agents (Claude Code, Codex) when working
 with code in this repository. If you are not Claude Code (which already reads
 parent directories), also check the parent directory for `AGENTS.md`.
 
+Especially important points to keep in mind (each expanded in its section
+below):
+
+- **Questions are not edit requests.** When a message asks a question without
+  explicitly requesting a change, answer and stop (Communication).
+- **Write clear and concise English.** Write clear, concise, plain English which
+  can be quickly and easily parsed by the user - answer questions directly in
+  short form unless elaboration is requested (Writing Style).
+- **Seek the best solution, not agreement.** When you think the user is wrong,
+  don't be afraid to say so — the right answer matters more than the path of
+  least resistance (Pushing Back).
+
 ## Overview
 
 `plasma-fractal` is a standalone plugin providing the **fractal** skill.
@@ -165,13 +177,19 @@ sync.
 
 ## Communication
 
-- **Questions are not edit requests.** When the user asks a question like "why
-  is this done this way?", "what does this do?", or "why did you do this?" —
-  answer the question and stop. This holds even when the question implies
-  something may be wrong ("why is this done this way instead of X?", "this looks
-  wrong, why?") — answer, propose the change, and wait for the user to ask for
-  it. Edit only when the message explicitly requests a change (e.g. "why is this
-  X? Fix it").
+- **Questions are not edit requests.** Before acting on any message, find the
+  words that request action ("fix it", "update X", "go ahead") — if you cannot
+  quote them, answer and stop. A question gets an answer, not an edit. That
+  holds even when the question implies something is wrong, when you discover a
+  real bug while answering, or when the fix seems small and obvious: answer,
+  propose the change, and wait for the user to ask. When in doubt, treat the
+  message as a question — a proposal costs one turn; an unwanted edit costs a
+  revert.
+- **Wait for an explicit go-ahead.** An action proposed or offered earlier stays
+  pending until the user clearly says to proceed — discussing it or deferring it
+  ("before we do that, ...") is not approval, and approval covers only the
+  action it names. When iterating, apply only the edits the current message asks
+  for, and check that the user is ready before starting anything still queued.
 - **Lead with the answer.** When the user asks a question, answer it in the
   first sentence. Provide reasoning and context after, not before. If a task is
   complete, say so — don't narrate what you did step by step unless the user
@@ -189,6 +207,22 @@ sync.
   scope of the current task — a bug in adjacent code, an inconsistency in
   naming, a missing edge case — mention it. Do not fix it unilaterally. The user
   tracks their own priorities.
+
+### Writing Style
+
+Write all conversational prose — chat replies, questions, plans — in clear,
+concise, plain English that is easy to read. Plain does not mean imprecise —
+technical terms stay. These rules govern how sentences read, not what they say.
+Docs, commit messages, and code comments follow local conventions.
+
+- **Short sentences, common words.** One idea per sentence. Prefer the simple
+  word over the impressive one.
+- **Front-load the point.** Conclusion first, reasoning after.
+- **Concrete over abstract.** Name the file, the command, the number.
+- **No unexplained jargon.** Expand abbreviations on first use; define terms the
+  reader may not know.
+- **No flourishes.** No metaphors, no rhetorical buildup, no cleverness.
+- **The two-read test.** If a sentence needs a second read, rewrite it.
 
 ## Pushing Back
 
