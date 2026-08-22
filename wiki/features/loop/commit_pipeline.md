@@ -48,13 +48,13 @@ ambient PATH, so a foreign install cannot answer the hook's reads.
 
 Staging appends a fixed exclude set to every sweep: virtualenvs, the central
 database and its sidecars, the status and pause markers, crash-stranded
-atomic-write temp files, and engine-materialized system skills
-(`skills/.system/`) never ride a work commit. Two advisory guards warn without
-blocking: workspace files silently eaten by tracked host ignore rules are
-counted and reported (fractal's own runtime ignores and self-managing ignored
-directories stay silent), and any staged file at or over 10MB is listed by name
--- an oversized file is usually an accident, but large commits are also
-legitimate.
+atomic-write temp files, the headless runtime marker and captured output, and
+engine-materialized system skills (`skills/.system/`) never ride a work commit.
+Two advisory guards warn without blocking: workspace files silently eaten by
+tracked host ignore rules are counted and reported (fractal's own runtime
+ignores and self-managing ignored directories stay silent), and any staged file
+at or over 10MB is listed by name -- an oversized file is usually an accident,
+but large commits are also legitimate.
 
 ## Commit, retry, and the backstop
 

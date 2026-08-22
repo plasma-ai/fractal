@@ -36,6 +36,9 @@ _STAGE_EXCLUDES = (
     # the status and pause markers
     ':!**/.status',
     ':!**/.paused',
+    # the headless runtime marker and captured output
+    ':!**/.headless',
+    ':!**/headless.log',
     # the config write lock
     ':!**/config.json.lock',
     # write_atomic's crash-stranded temps

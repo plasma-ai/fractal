@@ -515,10 +515,10 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
     The cleanup runs in a worktree that may carry no info/exclude at all (a
     fresh clone, a block predating an exclude's entry), so the stage
     excludes must ride its probe: runtime artifacts -- the engine skill
-    tree, virtualenv contents, the DB -- never ride the operator-edit
-    commit, and alone they never trigger one. Operator git surgery (a
-    staged rename, a staged deletion) commits cleanly rather than crashing
-    the launch.
+    tree, virtualenv contents, the DB, and headless state -- never ride the
+    operator-edit commit, and alone they never trigger one. Operator git
+    surgery (a staged rename, a staged deletion) commits cleanly rather
+    than crashing the launch.
     """
     node = node_with_db
     repo = node.worktree
@@ -533,30 +533,36 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
         )
         return result.stdout
 
-    # engine-materialized system skills and a virtualenv beside the node
-    # seed, in a repo carrying no info/exclude block at all
+    # runtime dirt beside the node seed, in a repo carrying no
+    # info/exclude block at all
     system = node.node_dir / 'skills' / '.system' / 'imagegen'
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
     venv = node.node_dir / '.venv' / 'bin'
     venv.mkdir(parents=True)
     (venv / 'python').write_text('#!interpreter\n', encoding='utf-8')
+    (node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    (node.node_dir / 'headless.log').write_text('captured output\n', encoding='utf-8')
     (node.node_dir / 'note.md').write_text('steer left\n', encoding='utf-8')
     loop = MockLoop(node)
     loop._clean_worktree()
     # the operator-edit commit (the seed's untracked files) never sweeps
-    # the engine tree, the venv, or the DB
+    # runtime dirt
     tracked = _git('ls-files')
     assert 'config.json' in tracked
     assert 'note.md' in tracked
     assert 'skills/.system' not in tracked
     assert '.venv' not in tracked
     assert '.db' not in tracked
-    # engine dirt alone never triggers the commit: re-materialize what the
+    assert '.headless' not in tracked
+    assert 'headless.log' not in tracked
+    # runtime dirt alone never triggers the commit: re-materialize what the
     # clean removed and rerun -- HEAD stays put
     head = _git('rev-parse', 'HEAD')
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
+    (node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    (node.node_dir / 'headless.log').write_text('captured output\n', encoding='utf-8')
     loop._clean_worktree()
     assert _git('rev-parse', 'HEAD') == head
     # operator git surgery commits cleanly: a staged rename and a staged

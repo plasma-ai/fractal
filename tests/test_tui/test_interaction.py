@@ -341,15 +341,15 @@ async def test_attach_without_a_live_session_notifies(
 
 
 async def test_attach_headless_node_reports_log(
-    cockpit_app: Callable[..., FractalApp],
+    pair_tree: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """^a on a headless node points at its captured output."""
-    app = cockpit_app(branch='main.alpha')
-    node_dir = app.data.node_dir('main.alpha')
-    assert node_dir is not None
-    (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    app = FractalApp(resolve_node(pair_tree), branch='main.alpha')
     async with app.run_test(size=(150, 48)) as pilot:
+        node_dir = app.data.node_dir('main.alpha')
+        assert node_dir is not None
+        (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
         notes: list[str] = []
         monkeypatch.setattr(
             app,

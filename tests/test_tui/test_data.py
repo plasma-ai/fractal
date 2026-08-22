@@ -137,15 +137,18 @@ def test_tree_shows_crashed_active_as_exited(
     ],
 )
 def test_tree_reconciles_headless_process_identity(
-    data: TuiData,
-    builder: SnapshotBuilder,
+    pair_tree: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: str,
     recorded: bool,
     expected: str,
 ) -> None:
     """Headless display liveness is conservative and rejects PID reuse."""
-    branch = 'main.gamma'
+    branch = 'main.alpha'
+    Node(pair_tree / '.worktrees' / branch).status_set('active')
+    data = TuiData(resolve_node(pair_tree))
+    builder = SnapshotBuilder(data, NodePoller(data.db_dir), now=lambda: NOW_EPOCH)
+    builder.build('main')
     node_dir = data.node_dir(branch)
     assert node_dir is not None
     (node_dir / '.headless').write_text('headless\n', encoding='utf-8')

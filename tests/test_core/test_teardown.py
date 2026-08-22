@@ -691,9 +691,9 @@ def test_teardown_refuses_on_inconclusive_tmux_probe(
     runner.status_set('active')
     # tmux gives no answer (e.g. no binary on this shell's PATH)
     monkeypatch.setattr('fractal.util.tmux.probe', lambda: None)
-    with pytest.raises(RuntimeError, match='tmux probe failed'):
+    with pytest.raises(RuntimeError, match='probe gave no answer'):
         Node.destroy(git_repo)
-    with pytest.raises(RuntimeError, match='tmux probe failed'):
+    with pytest.raises(RuntimeError, match='probe gave no answer'):
         Node.reset(git_repo)
     # nothing was torn down
     assert runner.worktree.is_dir()
