@@ -39,7 +39,9 @@ caches keyed by the poller's tokens) and returns the previous snapshot object
 untouched when nothing changed, so a steady tick runs zero queries and panes
 skip rebuilds by comparison. A tick launches at most one off-thread build;
 results land as messages back on the UI thread, so keys never wait behind a
-build.
+build. Runtime liveness is reconciled on every build: a definitively missing or
+recycled runtime renders `exited`, while an existing headless process group
+whose identity probe is inconclusive stays `active`.
 
 ## The read stack
 

@@ -305,14 +305,15 @@ class Node:
         """Return whether this node uses the detached process backend."""
         return (self.node_dir / HEADLESS_FILE).is_file()
 
-    def _headless_process_exists(self: Node) -> bool:
+    def _headless_process_exists(self: Node) -> Optional[bool]:
         """Return whether the node's recorded headless process group is alive.
 
         The launcher records the group before it execs the loop, closing the
         boot window where an ``idle`` node is already running. The record's
         timestamp also fences PID reuse through :func:`_recorded_group`, so a
         stale marker never makes an unrelated same-user process look like this
-        node's loop.
+        node's loop. ``None`` means the live group's identity could not be
+        verified.
         """
         pgid_file = self.node_dir / PGID_FILE
         try:
@@ -322,7 +323,7 @@ class Node:
         except (FileNotFoundError, ValueError, ProcessLookupError):
             return False
         except PermissionError:
-            return True
+            return None
         return _recorded_group(pgid, recorded_at)
 
     def _loop_exists(self: Node) -> Optional[bool]:
@@ -352,11 +353,11 @@ class Node:
         ``paused`` node is never healed: no session is its *normal* parked
         state (the loop exits at pause; ``resume`` relaunches it), on this
         host or after a filesystem transplant to another. An inconclusive
-        probe (no answer from tmux) also skips the heal: the reap keys off
-        proof the session is gone, never off ignorance -- a shell without
-        tmux visibility (a cron/CI host) must not kill a healthy loop's
-        process groups, and a shell on a *different* socket gets its proof
-        from the loop's recorded one (see :meth:`_tmux_session_exists`).
+        runtime probe (no answer from tmux or the headless identity check) also
+        skips the heal: the reap keys off proof the runtime is gone, never off
+        ignorance -- a shell without runtime visibility must not kill a healthy
+        loop's process groups, and a shell on a *different* tmux socket gets its
+        proof from the loop's recorded one (see :meth:`_tmux_session_exists`).
 
         Never reconciles the node from inside its own running loop: the loop
         self-finishes (``send_budget_finish`` calls ``node finish``), and a
@@ -412,7 +413,7 @@ class Node:
                 pgid = 0
             # aliveness is not identity: a recycled pid answers the probe from
             # an unrelated group -- spare any group younger than its record
-            if pgid > 0 and not _recorded_group(pgid, recorded_at):
+            if pgid > 0 and _recorded_group(pgid, recorded_at) is not True:
                 pgid = 0
             # reap the group and audit the reap
             if pgid > 0:
@@ -2097,12 +2098,12 @@ class Node:
     ) -> str:
         """Kill this node only and mark its active rows ``killed``.
 
-        The status re-read and the kill's event/signal writes stay atomic
-        under the ``.worktrees`` flock; ``kill.sh`` and the row marking run
-        outside the lock. The attribution -- ``killed by <actor>``, with
-        the reason appended when one is given -- lands identically on the
-        kill event, the ``kill`` signal, and the killed run row, so every
-        surface answers who ended the run.
+        The status re-read, process-group vet, and kill's event/signal writes
+        stay atomic under the ``.worktrees`` flock; ``kill.sh`` and the row
+        marking run outside the lock. The attribution -- ``killed by
+        <actor>``, with the reason appended when one is given -- lands
+        identically on the kill event, the ``kill`` signal, and the killed run
+        row, so every surface answers who ended the run.
         """
         # compose the attribution: who killed, and why when a reason rides
         caller = self.resolve_caller()
@@ -2120,23 +2121,45 @@ class Node:
                     fan_out=fan_out,
                 )
                 return ''
+            # vet the recorded process groups before writing kill state:
+            # kill.sh gates on liveness alone, and a recycled id (the OS
+            # re-issued a dead group's id to an unrelated same-user group)
+            # answers that probe; an unknown identity must refuse before the
+            # node can claim a still-running loop was killed
+            for name in (PGID_FILE, STEP_PGID_FILE):
+                pgid_file = self.node_dir / name
+                try:
+                    recorded_at = pgid_file.stat().st_mtime
+                    pgid = int(pgid_file.read_text(encoding='utf-8').strip())
+                except (FileNotFoundError, ValueError):
+                    continue
+                try:
+                    os.killpg(pgid, 0)
+                except ProcessLookupError:
+                    pgid_file.unlink(missing_ok=True)
+                    continue
+                except PermissionError:
+                    self._signal_refuse(
+                        verb='kill',
+                        event='kill',
+                        reason='the process identity probe gave no answer',
+                        fan_out=fan_out,
+                    )
+                    return ''
+                recorded = _recorded_group(pgid, recorded_at)
+                if recorded is None:
+                    self._signal_refuse(
+                        verb='kill',
+                        event='kill',
+                        reason='the process identity probe gave no answer',
+                        fan_out=fan_out,
+                    )
+                    return ''
+                if not recorded:
+                    pgid_file.unlink(missing_ok=True)
             # set signal and log event; the tmux kill runs outside the lock
             event_id = self.record.event_start('kill', metadata=label)
             self.record.signal_set('kill', label)
-        # vet the recorded process groups before the script's fallback reap:
-        # kill.sh gates on liveness alone, and a recycled id (the OS re-issued
-        # a dead group's id to an unrelated same-user group) answers that
-        # probe -- drop any record whose live group is not the one it named
-        # (see _recorded_group), so the fallback only ever sees vetted files
-        for name in (PGID_FILE, STEP_PGID_FILE):
-            pgid_file = self.node_dir / name
-            try:
-                recorded_at = pgid_file.stat().st_mtime
-                pgid = int(pgid_file.read_text(encoding='utf-8').strip())
-            except (FileNotFoundError, ValueError):
-                continue
-            if not _recorded_group(pgid, recorded_at):
-                pgid_file.unlink(missing_ok=True)
         try:
             result = self._run_script('kill.sh', f'{self._root}')
         except Exception:
@@ -3105,16 +3128,16 @@ class Node:
             descendants = tree._live_descendants()
             # probe each node's recorded runtime: headless through its process
             # group, tmux through the socket the loop recorded at boot (see
-            # _tmux_session_exists); an inconclusive tmux probe means the node
-            # may still be running, so the irreversible teardown refuses
+            # _tmux_session_exists); an inconclusive runtime probe means the
+            # node may still be running, so the irreversible teardown refuses
             # rather than tearing down blind
             for _, descendant in descendants:
                 alive = descendant._loop_exists()
                 if alive is None:
                     raise RuntimeError(
                         f'Cannot {verb}: the runtime probe gave no answer, so'
-                        ' nodes may still be running. Restore tmux visibility'
-                        ' and retry.'
+                        ' nodes may still be running. Restore runtime'
+                        ' visibility and retry.'
                     )
                 if alive:
                     runtime = (
@@ -3354,14 +3377,14 @@ class Node:
         if live:
             # _live_descendants reconciles each row to the child's real status and
             # drops gone worktrees; additionally relabel a crashed-but-active node
-            # ('active' with no live tmux session) to 'exited' and a booting idle
-            # node (live session) to 'active' -- display-only, mirroring the TUI
+            # ('active' with no live runtime) to 'exited' and a booting idle
+            # node (live runtime) to 'active' -- display-only, mirroring the TUI
             # snapshot reconcile, so --live is the authoritative
             # settled-vs-crashed view; the batched probe only nominates
             # candidates, and each relabel confirms on the node's recorded
             # socket (a tmux answer is evidence about one server only -- see
-            # _tmux_session_exists); an inconclusive probe (no tmux answer)
-            # proves nothing, so the stored status stands
+            # _tmux_session_exists); an inconclusive runtime probe proves
+            # nothing, so the stored status stands
             sessions = fractal.util.tmux.probe()
             rows = []
             for row, node in self._live_descendants(max_depth=max_depth):
@@ -3538,7 +3561,7 @@ class Node:
         :meth:`_reconcile_status` (persisted, not just relabeled) and re-read.
         Tmux nodes share one batched probe; headless nodes use their recorded
         process groups. A row without a live node (worktree gone) passes
-        through untouched. An inconclusive tmux probe heals nothing --
+        through untouched. An inconclusive runtime probe heals nothing --
         stamping live loops ``exited`` on a blind host would reap them.
 
         Args:
@@ -3555,7 +3578,7 @@ class Node:
         healed = []
         for row, node in pairs:
             if _base_status(row.get('status')) == 'active' and node is not None:
-                absent = node.headless and not node._headless_process_exists()
+                absent = node.headless and node._headless_process_exists() is False
                 if sessions is not None and not node.headless:
                     absent = node.tmux_session not in sessions
                 if node.exists() and absent:
@@ -4770,7 +4793,7 @@ def _base_status(status: Optional[str]) -> str:
     return result
 
 
-def _recorded_group(pgid: int, recorded_at: float) -> bool:
+def _recorded_group(pgid: int, recorded_at: float) -> Optional[bool]:
     """Return whether a live process group is the one its record named.
 
     A group id is its leader's pid, and the leader is already running when
@@ -4778,15 +4801,16 @@ def _recorded_group(pgid: int, recorded_at: float) -> bool:
     recycled pid fronting an unrelated group. A group that outlived its
     leader still matches: the OS cannot re-issue the id while any member
     survives. No answer to arbitrate with (``ps`` failed, an unparseable
-    instant) reads as not the recorded group -- sparing a stranger beats
-    reaping a maybe-orphan.
+    instant) is inconclusive, so lifecycle probes never mistake ignorance for
+    proof that the loop died.
 
     Args:
         pgid: A live process group id (its leader's pid).
         recorded_at: Epoch instant the group was recorded.
 
     Returns:
-        Whether the group can be treated as the recorded one.
+        Whether the group is the recorded one, or ``None`` when its identity
+        cannot be verified.
 
     """
     # ask ps for the leader's start instant (LC_ALL pins the format)
@@ -4799,16 +4823,19 @@ def _recorded_group(pgid: int, recorded_at: float) -> bool:
             env=env,
         )
     except OSError:
-        return False
+        return None
     lstart = result.stdout.strip()
-    # no process wears the leader's pid: the live group outlived its
-    # leader, which pins its identity
-    if result.returncode != 0 or not lstart:
+    # ps reports an unmatched selection as one with no output: the live group
+    # outlived its leader, which pins its identity; every other failed or empty
+    # answer is inconclusive
+    if result.returncode == 1 and not lstart and not result.stderr.strip():
         return True
+    if result.returncode != 0 or not lstart:
+        return None
     try:
         started = time.mktime(time.strptime(lstart, '%a %b %d %H:%M:%S %Y'))
     except ValueError:
-        return False
+        return None
     # a second of slack: lstart floors to the second, and the record
     # follows the leader's spawn within the same one
     return started <= recorded_at + 1.0

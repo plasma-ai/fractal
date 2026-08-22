@@ -4,7 +4,7 @@ A loop that dies without ending leaves an ``active`` status with no
 tmux session; the reject-active operations reconcile it to the honest
 ``exited`` (closing open rows and healing cap drift) before
 proceeding. Also pins the heal's definitive-answer requirement (an
-inconclusive tmux probe never reaps), the reap's identity guard (a
+inconclusive runtime probe never reaps), the reap's identity guard (a
 recycled pgid is spared), and kill's stale-active behavior.
 """
 
@@ -18,8 +18,8 @@ import time
 
 import pytest
 
-from fractal.constants import PGID_FILE, SOCKET_FILE
-from fractal.core.node import Node
+from fractal.constants import HEADLESS_FILE, PGID_FILE, SOCKET_FILE
+from fractal.core.node import Node, _recorded_group
 from tests._helpers import _stub_run_script
 
 from .conftest import _spawn_parent_child
@@ -29,8 +29,13 @@ __all__ = [
     'test_reconcile_closes_crashed_runs_open_rows',
     'test_reconcile_status_heals_caps_on_crashed_node',
     'test_reconcile_requires_a_definitive_tmux_answer',
+    'test_recorded_group_returns_unknown_on_failed_identity_probe',
+    'test_recorded_group_accepts_a_confirmed_missing_leader',
+    'test_headless_process_identity_is_unknown_without_probe_permission',
+    'test_reconcile_requires_a_definitive_headless_identity',
     'test_kill_unchanged_on_stale_active',
     'test_reap_orphan_reaps_only_the_recorded_group',
+    'test_reap_orphan_spares_a_group_with_unknown_identity',
 ]
 
 
@@ -225,6 +230,98 @@ def test_reconcile_requires_a_definitive_tmux_answer(
     assert run_row['status'] == expected
 
 
+@pytest.mark.parametrize(
+    'probe',
+    ['unavailable', 'unparseable', 'failed', 'empty'],
+)
+def test_recorded_group_returns_unknown_on_failed_identity_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    probe: str,
+) -> None:
+    """A failed identity probe is unknown, not evidence of PID reuse."""
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        if probe == 'unavailable':
+            raise FileNotFoundError(2, 'No such file or directory', 'ps')
+        if probe == 'failed':
+            return subprocess.CompletedProcess(
+                args=['ps'],
+                returncode=2,
+                stdout='',
+                stderr='ps failed\n',
+            )
+        if probe == 'empty':
+            return subprocess.CompletedProcess(
+                args=['ps'],
+                returncode=0,
+                stdout='',
+                stderr='',
+            )
+        return subprocess.CompletedProcess(
+            args=['ps'],
+            returncode=0,
+            stdout='not a process start instant\n',
+            stderr='',
+        )
+
+    monkeypatch.setattr('fractal.core.node.subprocess.run', run)
+    assert _recorded_group(4242, time.time()) is None
+
+
+def test_recorded_group_accepts_a_confirmed_missing_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selection miss identifies a live group that outlived its leader."""
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=['ps'],
+            returncode=1,
+            stdout='',
+            stderr='',
+        )
+
+    monkeypatch.setattr('fractal.core.node.subprocess.run', run)
+    assert _recorded_group(4242, time.time()) is True
+
+
+def test_headless_process_identity_is_unknown_without_probe_permission(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permission failure proves existence but not process ownership."""
+    node = node_with_db
+    (node.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
+    (node.node_dir / PGID_FILE).write_text('4242\n', encoding='utf-8')
+
+    def killpg(pgid: int, sig: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', killpg)
+    assert node._headless_process_exists() is None
+
+
+def test_reconcile_requires_a_definitive_headless_identity(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live group with unknown identity keeps its active run open."""
+    node = node_with_db
+    node.status_set('active')
+    run_id = node.record.run_start()
+    (node.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
+    (node.node_dir / PGID_FILE).write_text('4242\n', encoding='utf-8')
+    monkeypatch.setattr('fractal.core.node.os.killpg', lambda pgid, signal: None)
+    monkeypatch.setattr(
+        'fractal.core.node._recorded_group',
+        lambda pgid, recorded_at: None,
+    )
+    node._reconcile_status()
+    assert node.status() == 'active'
+    run = node.db.read('runs', where={'run_id': run_id})[0]
+    assert run['status'] == 'active'
+
+
 def test_kill_unchanged_on_stale_active(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -301,3 +398,26 @@ def test_reap_orphan_reaps_only_the_recorded_group(
         except ProcessLookupError:
             pass
         leader.wait()
+
+
+def test_reap_orphan_spares_a_group_with_unknown_identity(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inconclusive identity probe never authorizes an orphan signal."""
+    pgid_file = node_with_db.node_dir / PGID_FILE
+    pgid_file.write_text('4242\n', encoding='utf-8')
+    signals: list[tuple[int, int]] = []
+
+    def killpg(pgid: int, sig: int) -> None:
+        signals.append((pgid, sig))
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', killpg)
+    monkeypatch.setattr(
+        'fractal.core.node._recorded_group',
+        lambda pgid, recorded_at: None,
+    )
+    node_with_db._reap_orphan()
+    assert signals == [(4242, 0)]
+    assert not pgid_file.exists()
+    assert not node_with_db.db.read('events', where={'event': 'orphan'})

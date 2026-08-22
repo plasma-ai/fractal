@@ -58,3 +58,9 @@ with the marker set): `.status` (the current status), `.session` and `.socket`
 (the tree-wide pause latch beside the central database) and `.pause_abort`.
 Signals the loop observes — finish, stop, pause — take effect at iteration or
 step boundaries; the escalation path that does not wait is kill.
+
+Headless liveness first probes the recorded process group, then compares its
+leader's start instant with the marker timestamp to fence PID reuse. A missing
+or unparseable identity answer is inconclusive: reconciliation keeps the run
+active, teardown and explicit kill refuse, and reaping spares any group it
+cannot positively identify.

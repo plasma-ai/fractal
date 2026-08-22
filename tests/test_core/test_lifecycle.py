@@ -52,6 +52,8 @@ __all__ = [
     'test_signal_rejects_active_node_without_run',
     'test_finish_accepts_reason',
     'test_kill_vets_recorded_group_before_script',
+    'test_kill_refuses_an_unknown_process_identity',
+    'test_kill_drops_a_dead_group_without_identity_probe',
     'test_kill_sets_killed_status',
     'test_kill_marks_all_active',
     'test_kill_keeps_loop_terminal_status_when_raced',
@@ -577,6 +579,58 @@ def test_kill_vets_recorded_group_before_script(
         except ProcessLookupError:
             pass
         leader.wait()
+
+
+def test_kill_refuses_an_unknown_process_identity(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill leaves the loop active when its process identity is unknown."""
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('4242\n', encoding='utf-8')
+    monkeypatch.setattr(
+        'fractal.core.node._recorded_group',
+        lambda pgid, recorded_at: None,
+    )
+    monkeypatch.setattr('fractal.core.node.os.killpg', lambda pgid, sig: None)
+
+    def run_script(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        raise AssertionError('kill.sh must not run after an inconclusive probe')
+
+    monkeypatch.setattr(node, '_run_script', run_script)
+    with pytest.raises(RuntimeError, match='process identity probe gave no answer'):
+        node.kill()
+    assert node.status() == 'active'
+    assert node.record.signal_get('kill') is None
+    assert pgid_file.exists()
+
+
+def test_kill_drops_a_dead_group_without_identity_probe(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead stale group cannot make kill depend on process identity."""
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('4242\n', encoding='utf-8')
+
+    def dead_group(pgid: int, sig: int) -> None:
+        raise ProcessLookupError
+
+    def recorded_group(pgid: int, recorded_at: float) -> bool:
+        raise AssertionError('a dead group has no identity to arbitrate')
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', dead_group)
+    monkeypatch.setattr('fractal.core.node._recorded_group', recorded_group)
+    _stub_run_script(monkeypatch, node)
+    node.kill()
+    assert not pgid_file.exists()
+    assert node.status() == 'killed'
 
 
 def test_kill_sets_killed_status(

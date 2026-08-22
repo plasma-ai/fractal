@@ -134,13 +134,14 @@ def test_tree_shows_crashed_active_as_exited(
         ('live', True, 'active'),
         ('permission', False, 'active'),
         ('recycled', False, 'exited'),
+        ('unknown', None, 'active'),
     ],
 )
 def test_tree_reconciles_headless_process_identity(
     pair_tree: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: str,
-    recorded: bool,
+    recorded: Optional[bool],
     expected: str,
 ) -> None:
     """Headless display liveness is conservative and rejects PID reuse."""

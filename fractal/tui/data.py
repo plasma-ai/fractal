@@ -254,8 +254,9 @@ class TuiData:
 
         Headless loops are process-group supervised through their launch-time
         PGID record. Tmux loops use the caller's one-per-refresh session set.
-        This is display-only: a failed read renders the loop settled but never
-        mutates lifecycle state.
+        This is display-only: an existing group whose identity cannot be
+        verified stays active, while a definitively recycled group renders
+        settled. Neither result mutates lifecycle state.
         """
         node_dir = self.node_dir(branch)
         if node_dir is not None and (node_dir / HEADLESS_FILE).is_file():
@@ -268,7 +269,7 @@ class TuiData:
                 return True
             except (FileNotFoundError, ProcessLookupError, ValueError):
                 return False
-            return _recorded_group(pgid, recorded_at)
+            return _recorded_group(pgid, recorded_at) is not False
         return self.tmux_session_name(branch) in sessions
 
     @staticmethod

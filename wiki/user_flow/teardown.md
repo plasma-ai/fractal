@@ -94,12 +94,14 @@ initialized; a new `fractal init` starts from zero.
 
 ## The guards, across tiers
 
-All three tiers refuse over a **running** node — any live tmux session stops the
-teardown before it touches anything, with the kill command named in the error.
-The guards travel with the scope: `reset` and `destroy <name>` pre-flight only
-that tree's nodes, so an ended tree can be torn down while a sibling tree runs,
-and `destroy --all` pre-flights every tree before touching any of them. Paused
-nodes split the tiers: `delete` refuses over them (resume or kill first), while
+All three tiers refuse over a **running** node — any live tmux session or
+headless process group stops the teardown before it touches anything, with the
+kill command named in the error. An inconclusive runtime probe refuses too; the
+teardown never treats missing visibility as proof that a loop is dead. The
+guards travel with the scope: `reset` and `destroy <name>` pre-flight only that
+tree's nodes, so an ended tree can be torn down while a sibling tree runs, and
+`destroy --all` pre-flights every tree before touching any of them. Paused nodes
+split the tiers: `delete` refuses over them (resume or kill first), while
 `reset` and `destroy` **kill paused nodes as part of the confirmed teardown** —
 the confirmation prompt (or `--force`) is what authorizes discarding the frozen
 mid-step work their parked worktrees hold. Both also refuse from inside a node
