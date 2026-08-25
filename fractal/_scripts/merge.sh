@@ -306,26 +306,25 @@ fi
 # nothing staged after seed strip means no-op merge -- a fresh merge found the
 # child had nothing new, but a --continue's operator resolved every change the
 # child offered back to the target's own content; that is still an adjudication
-# of the child's work, so it runs the rest of the tail (squash state cleared,
-# merge-base advanced) and only the commit is skipped -- exiting here as a
-# fresh merge does would leave the target mid-squash and replay the very
-# conflict the operator just resolved on the next merge
+# of the child's work, so it runs the rest of the tail (merge-base advanced)
+# and only the commit is skipped -- exiting as the fresh arm does would replay
+# the very conflict the operator just resolved on the next merge
 if git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet; then
     trap - INT TERM
-    if [[ "$CONTINUE" -eq 0 ]]; then
-        end_merge_event completed
-        echo "Nothing to merge: $BRANCH has no changes for $PARENT_BRANCH"
-        exit 0
-    fi
-    # the squash markers are git's own state, cleared by the commit this path
-    # skips -- left behind they fake a squash still in progress, and a bare
-    # git commit would prefill the squash message from MERGE_MSG
-    for MARKER in "$SQUASH_MSG_FILE" \
+    # the squash markers are git's own state, cleared by the commit both arms
+    # skip -- left behind they fake a squash still in progress, and a bare
+    # git commit would prefill the stale squash message
+    for MARKER in "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path SQUASH_MSG)" \
         "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path MERGE_MSG)" \
         "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path AUTO_MERGE)"; do
         [[ "$MARKER" = /* ]] || MARKER="$PARENT_WORKTREE_DIR/$MARKER"
         rm -f "$MARKER"
     done
+    if [[ "$CONTINUE" -eq 0 ]]; then
+        end_merge_event completed
+        echo "Nothing to merge: $BRANCH has no changes for $PARENT_BRANCH"
+        exit 0
+    fi
     advance_merge_base
     warn_resolved_against_node
     end_merge_event completed
@@ -374,7 +373,7 @@ fi
 # wiki state the parent regenerates as its own bytes -- an adjudicated no-op
 # the pre-refresh guard cannot see, and the commit below would die on the
 # empty index; the squash staged content, so the markers exist on both paths
-# and are cleared like the --continue no-op above
+# and are cleared like the no-op above
 if git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet; then
     trap - INT TERM
     for MARKER in "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path SQUASH_MSG)" \

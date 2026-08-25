@@ -27,6 +27,11 @@ real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   lands on the designed "Nothing to merge" exit instead of dying on the empty
   index -- and with the cache never entering history, disjoint sibling wiki
   work merges without a conflict at all.
+- **``merge.sh`` pre-refresh no-op** clears git's squash markers on the fresh
+  "Nothing to merge" exit: a re-merge whose squash staged only the stripped
+  seed skips the commit that would consume ``SQUASH_MSG``, and left behind it
+  prefills a later bare ``git commit`` in the target with the stale squash
+  message.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
   a conflicted merge with the merge's own tail -- seed strip, commit,
   merge-base advance -- and refuses when no squash is in progress. A resolution
@@ -65,6 +70,7 @@ __all__ = [
     'test_merge_preserves_a_target_edit_that_lands_during_the_merge',
     'test_merge_re_merges_an_iterating_child_without_conflict',
     'test_merge_re_merge_of_a_merged_node_is_a_no_op',
+    'test_merge_re_merge_offering_only_the_seed_is_a_no_op',
     'test_merge_sibling_wiki_work_lands_without_conflict',
     'test_failed_merge_restore_removes_the_staged_child_additions',
     'test_merge_advances_the_merge_base_past_a_refused_estate_file',
@@ -381,6 +387,68 @@ def test_merge_re_merge_of_a_merged_node_is_a_no_op(tmp_path: pathlib.Path) -> N
     merged_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
 
     # the re-merge stages only the cache churn, which the refresh reverts
+    second = subprocess.run(
+        ['bash', f'{merge_sh}', f'{worktree}'],
+        cwd=f'{repo}',
+        capture_output=True,
+        text=True,
+        env=_cli_env(),
+    )
+
+    assert second.returncode == 0, (second.stdout, second.stderr)
+    assert 'Nothing to merge' in second.stdout
+    # no commit landed, and no squash state remains to fake a merge in
+    # progress or prefill a bare git commit's message
+    assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == merged_head
+    assert not (repo / '.git' / 'SQUASH_MSG').exists()
+    assert not (repo / '.git' / 'MERGE_MSG').exists()
+
+
+def test_merge_re_merge_offering_only_the_seed_is_a_no_op(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A re-merge whose squash stages only the stripped seed leaves no markers.
+
+    Once a merge lands and the merge-base advances, the child's only diff
+    against the target is its own seed, which the merge strips from the staged
+    squash: the merge exits 0 on the designed "Nothing to merge" outcome before
+    the index refresh. The squash still wrote ``SQUASH_MSG``, which only the
+    skipped commit would consume -- left behind it fakes a squash still in
+    progress and prefills a later bare ``git commit`` in the target with the
+    stale squash message, so the no-op exit clears it.
+    """
+    repo = _init_tree(tmp_path / 'seednoopremergerepo')
+    # settle the wiki so the merge's index refresh stages nothing of its own:
+    # the seed must be the squash's whole offering to no-op before the refresh
+    settle = subprocess.run(
+        ['wiki', 'update', '--path', f'{repo}/wiki'],
+        capture_output=True,
+        text=True,
+        env=_cli_env(),
+    )
+    assert settle.returncode == 0, settle.stderr
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'settle wiki')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    # the child commits real work; the first merge lands it (with the node's
+    # inherited scaffolding) and advances the merge-base
+    (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work')
+    merge_sh = _scripts_dir() / 'merge.sh'
+    first = subprocess.run(
+        ['bash', f'{merge_sh}', f'{worktree}'],
+        cwd=f'{repo}',
+        capture_output=True,
+        text=True,
+        env=_cli_env(),
+    )
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    merged_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+
+    # the re-merge stages only the seed, which the strip empties back out
     second = subprocess.run(
         ['bash', f'{merge_sh}', f'{worktree}'],
         cwd=f'{repo}',
