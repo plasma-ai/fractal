@@ -386,7 +386,7 @@ Refuses when:
   skips the prompt;
 - the tmux probe is inconclusive (nodes may still be running — restore tmux
   visibility and retry);
-- any node worktree is locked;
+- any of the tree's node worktrees is locked;
 - the caller stands inside one of the tree's node worktrees (run from the
   repo root).
 
