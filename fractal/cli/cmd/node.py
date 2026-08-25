@@ -427,7 +427,9 @@ def node_start(app: typer.Typer) -> typer.Typer:
 
         Run parameters come from ``config.json`` (set at init or
         edited before launch); only ``--continue``/``--clean``/
-        ``--max-cost`` are set here. Runs are isolated -- each launch
+        ``--drain``/``--max-cost`` are set here. With ``--continue``,
+        ``--drain`` runs the new run as a drain -- the harness forbids
+        spawns and re-arms from it. Runs are isolated -- each launch
         arms the cap anew -- but a run that ended on its cost budget
         refuses a bare ``--continue``: pass ``--max-cost`` to arm the
         next run explicitly.
