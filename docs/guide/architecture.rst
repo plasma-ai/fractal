@@ -65,7 +65,7 @@ It records:
 
 - the node registry — every agent node, its title, status, and caps;
 - one row per run, per iteration, and per step, with cost and timing;
-- lifecycle events (init, start, finish, kill, merge, delete, …) and pending
+- lifecycle events (init, start, finish, kill, merge, delete, ...) and pending
   signals;
 - every radio message, subscription, and read receipt (see
   :doc:`/guide/radio`).

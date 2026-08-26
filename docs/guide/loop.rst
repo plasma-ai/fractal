@@ -203,7 +203,8 @@ prompts they are re-derived per step from live config — only
      - The boot-pinned mode flags (``true``/``false``) and the meta
        target branch.
    * - ``FRACTAL_HEADLESS``
-     - The run's launch backend (exactly ``true``/``false``), boot-pinned;
+     - The run's launch backend (exactly ``true``/``false``), exported to
+       every seat's environment only — never substituted in prompts;
        ``node start`` reads it when the flag is absent, so a seat's child
        starts follow the parent's backend.
 

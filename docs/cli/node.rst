@@ -288,15 +288,17 @@ launch time.
 ``--headless`` / ``--tmux``
    Select the runtime backend: ``--headless`` runs the loop in a detached
    process group, appending its output to the node's ``headless.log`` with
-   one ``=== Launched ... ===`` banner per launch (truncate or delete the
-   file when it grows). The backend is sticky: with neither flag nor
-   ``FRACTAL_HEADLESS`` set, a launch reuses the backend the node last
-   launched with (tmux for a node that has never run headless), and the
-   flags force and re-record it. Seats always export the parent's backend
-   in ``FRACTAL_HEADLESS`` (exactly ``true``/``false``), so a delegated
-   child start follows its parent unless the seat passes a flag. ``resume``
-   always relaunches through the recorded backend — the flags and
-   ``FRACTAL_HEADLESS`` do not apply to it.
+   one ``=== Launched ... ===`` banner per launch (truncate the file when
+   it grows; delete it only while the node is not running — the live loop
+   keeps writing to a deleted file's inode, unseen). The backend is sticky:
+   with neither flag nor ``FRACTAL_HEADLESS`` set, a launch reuses the
+   backend the node last launched with (tmux for a node that has never run
+   headless), and the flags force and re-record it. Seats always export
+   the parent's backend in ``FRACTAL_HEADLESS`` (exactly
+   ``true``/``false``), so a delegated child start follows its parent
+   unless the seat passes a flag. ``resume`` always relaunches through
+   the recorded backend — the flags and ``FRACTAL_HEADLESS`` do not apply
+   to it.
 
 A fresh start requires status exactly ``idle``. Starting refuses on: the user
 node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a

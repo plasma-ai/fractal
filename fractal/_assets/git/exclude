@@ -28,6 +28,9 @@ headless.log
 .pgid
 .step_pgid
 
+# Launch handoff lock
+.pgid.lock
+
 # Tmux socket handle
 .socket
 

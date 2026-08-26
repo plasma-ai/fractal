@@ -40,6 +40,7 @@ __all__ = [
     'test_bare_loop_group_decides_when_tmux_denies_or_is_silent',
     'test_blind_probe_spares_a_record_less_bare_loop',
     'test_reconcile_stands_down_for_a_relaunch_racing_the_probe',
+    'test_reconcile_stands_down_for_a_kill_landing_during_the_reap',
     'test_kill_unchanged_on_stale_active',
     'test_reap_orphan_reaps_only_the_recorded_group',
     'test_reap_orphan_spares_a_group_with_unknown_identity',
@@ -515,6 +516,46 @@ def test_reconcile_stands_down_for_a_relaunch_racing_the_probe(
         except ProcessLookupError:
             pass
         leader.wait()
+
+
+def test_reconcile_stands_down_for_a_kill_landing_during_the_reap(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The heal never overwrites a rival verb that settled the node mid-reap.
+
+    ``_reconcile_status`` holds no flock and its reap can stall through a
+    TERM grace, so a flock'd kill (or a continue's fresh boot) can settle
+    the node between the act-time re-verify and the terminal writes. The
+    heal re-checks its license after the reap: a status no longer ``active``
+    stands it down, keeping the rival's stamp and its rows untouched.
+    """
+    node = node_with_db
+    node.status_set('active')
+    run_id = node.record.run_start()
+    (node.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
+    # the crashed launch's record names a provably dead group
+    crashed = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    os.killpg(crashed.pid, signal.SIGKILL)
+    crashed.wait()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text(f'{crashed.pid}\n', encoding='utf-8')
+    real_reap = node._reap_orphan
+
+    def stalled_reap(
+        snapshot: Optional[tuple[Optional[tuple[float, str]], ...]] = None,
+    ) -> None:
+        real_reap(snapshot)
+        # the rival kill completes while the reap TERM-polls: its stamp
+        # lands before the heal's terminal writes
+        node.status_set('killed')
+
+    monkeypatch.setattr(node, '_reap_orphan', stalled_reap)
+    node._reconcile_status()
+    # the rival's stamp survives, and the heal closed none of its rows
+    assert node.status() == 'killed'
+    run = node.db.read('runs', where={'run_id': run_id})[0]
+    assert run['status'] == 'active'
 
 
 def test_kill_unchanged_on_stale_active(

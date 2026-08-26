@@ -40,9 +40,13 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
   the private `node _launch`, a thin front for `Node._launch_headless`, which
   refuses while a still-live recorded `.pgid` group holds the node (the
   identity-checked liveness law, so a recycled process-group id never blocks a
-  relaunch), then records the `.headless` marker and `.pgid` together (rolled
-  back together when the spawn fails) and starts `_loop` in its own session,
-  appending one launch banner to `headless.log`.
+  relaunch), then serializes the handoff under a launch flock and claims `.pgid`
+  with an exclusive create before spawning — of two launches racing the same
+  dead-or-absent record, exactly one boots and the loser refuses as it would
+  over a live record. It records the `.headless` marker and `.pgid` together
+  (rolled back together when the spawn fails, and a spawn that exits before the
+  loop boots is reported as a failed launch) and starts `_loop` in its own
+  session, appending one launch banner to `headless.log`.
 - `pause.sh` reaps the recorded step process group, aborting the in-flight agent
   so the loop can park.
 - `resume.sh` relaunches the loop through the backend the node's `.headless`
@@ -74,10 +78,10 @@ drops a stale record; any other boot under `$TMUX` records the server it sees as
 its own), `.headless` (the node's backend record — written by the headless
 launcher beside `.pgid`, it outlives the run, survives heals and kills, and only
 a tmux launch clears it), `.pgid` and `.step_pgid` (process groups for liveness
-and pause/kill reaping), `.paused` (the tree-wide pause latch beside the central
-database) and `.pause_abort`. Signals the loop observes — finish, stop, pause —
-take effect at iteration or step boundaries; the escalation path that does not
-wait is kill.
+and pause/kill reaping), `.pgid.lock` (the launch handoff's flock sidecar),
+`.paused` (the tree-wide pause latch beside the central database) and
+`.pause_abort`. Signals the loop observes — finish, stop, pause — take effect at
+iteration or step boundaries; the escalation path that does not wait is kill.
 
 Liveness is one law (`Node._loop_alive`). A `.headless` node is judged by its
 recorded `.pgid` process group alone and tmux is never asked, so a host without

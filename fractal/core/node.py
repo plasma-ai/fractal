@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import functools
 import itertools
 import json
@@ -24,6 +25,7 @@ from fractal.constants import (
     FRACTAL_FOLDER,
     HEADLESS_FILE,
     HEADLESS_LOG,
+    LOCK_FILE,
     PAUSED_FILE,
     PGID_FILE,
     PROJECT_FOLDER,
@@ -74,6 +76,12 @@ _SPEND_PRECISION = 2
 # convention). Both are the class the loop's billing breaker refuses to arm
 # on, so the census mirror must disqualify both too
 _CANNOT_EXEC_REASONS = ('agent launch failed', 'agent error (exit 127)')
+
+# a headless launch's claimed .pgid record stays empty only until its pid
+# write, and the spawned child stops waiting for the pid five seconds in --
+# so an empty claim aged past this bound belongs to a launcher that died
+# before recording, not to a launch still in flight
+_ABANDONED_CLAIM_SECONDS = 60.0
 
 
 class Node:
@@ -298,13 +306,16 @@ class Node:
         the definitive ``no server running``) -- so the reconcile path never
         mistakes a blind host for a dead loop.
         """
-        # probe the recorded socket, not whichever one this shell resolves
+        # probe the recorded socket, not whichever one this shell resolves;
+        # a parking loop can drop the record mid-probe, and a vanished
+        # record leaves only the ambient socket to ask
         socket_file = self.node_dir / SOCKET_FILE
-        if socket_file.exists():
+        try:
             socket = socket_file.read_text(encoding='utf-8').strip()
-            sessions = fractal.util.tmux.probe(socket=socket)
-        else:
+        except FileNotFoundError:
             sessions = fractal.util.tmux.probe()
+        else:
+            sessions = fractal.util.tmux.probe(socket=socket)
         if sessions is None:
             return None
         return self.tmux_session in sessions
@@ -458,6 +469,13 @@ class Node:
         if self.status() != 'active' or self._records_snapshot() != snapshot:
             return
         self._reap_orphan(snapshot)
+        # the reap can stall through its TERM grace while a rival verb
+        # settles the node -- a flock'd kill stamping killed, a continue
+        # re-arming a fresh boot -- so the license is re-checked before the
+        # terminal writes: the reap itself acted only on the judged
+        # snapshot, which a relaunch's rewritten record already escapes
+        if self.status() != 'active':
+            return
         self.record.close_open('exited')
         self.status_set('exited')
         self.config.reconcile()
@@ -2196,12 +2214,15 @@ class Node:
         kills, and only a tmux launch clears it -- so it lands only around a
         spawn and always names a backend the node actually launched with.
         The launch claims the ``.pgid`` record with an exclusive create
-        before spawning -- no flock covers this handoff (resume takes none,
-        and a nested ``.worktrees`` flock would deadlock under start's), so
-        the claim is what arbitrates two launches whose vets both read the
-        same dead-or-absent record. The child waits for the pid to land in
-        the claimed record before exec'ing the loop, so no probe ever sees a
-        booted headless loop without its record (:func:`_group_alive`), and
+        before spawning -- no ``.worktrees`` flock covers this handoff
+        (resume takes none, and a nested one would deadlock under start's),
+        so a launch sidecar flock plus the claim arbitrate two launches
+        whose vets both read the same dead-or-absent record, and an empty
+        claim abandoned by a launcher that died before its pid write clears
+        by age rather than wedging every relaunch. The child waits for the
+        pid to land in the claimed record before exec'ing the loop, so no
+        probe ever sees a booted headless loop without its record
+        (:func:`_group_alive`), and
         the launch banner is flushed before that record lands, so it always
         precedes the loop's first output in ``headless.log`` -- which appends
         across launches, one banner line per launch. A failed or stalled
@@ -2262,80 +2283,105 @@ class Node:
             else 'headless node process already exists: a rival launch'
             ' claimed the record'
         )
-        # a record the vet judged dead clears for the claim; one it could not
-        # even parse is a rival's claim in flight (the pid lands only after
-        # the spawn), refused like a live record rather than swept
-        try:
-            int(pgid_file.read_text(encoding='utf-8').strip())
-        except FileNotFoundError:
-            pass
-        except ValueError:
-            raise RuntimeError(claimed) from None
-        else:
-            pgid_file.unlink(missing_ok=True)
-        try:
-            claim = os.open(f'{pgid_file}', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            raise RuntimeError(claimed) from None
-        os.close(claim)
-        # build the loop argv
-        loop_args = [
-            sys.executable,
-            '-m',
-            'fractal.cli.main',
-            'node',
-            '_loop',
-            f'--path={self._root}',
-        ]
-        if continue_run:
-            loop_args.append('--continue')
-        if resume:
-            loop_args.append('--resume')
-        if drain:
-            loop_args.append('--drain')
-        # hold the exec until the pid lands in the claimed record, so the
-        # group is probeable first (-s: the bare claim is not yet a record)
-        wrapper = (
-            'for _ in {1..500}; do [[ -s "$1" ]] && break; sleep 0.01; done; '
-            '[[ -s "$1" ]] || exit 1; shift; exec "$@"'
-        )
-        command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_file}', *loop_args]
-        # the banner names the launch kind, so a post-mortem reads which
-        # relaunch produced each appended tail
-        kind = 'resume' if resume else 'continue' if continue_run else 'start'
-        if drain:
-            kind += ' drain'
-        marker = self.node_dir / HEADLESS_FILE
-        recorded = marker.exists()
-        try:
-            marker.write_text('headless\n', encoding='utf-8')
-            with log_path.open('a', encoding='utf-8') as stream:
-                process = subprocess.Popen(
-                    command_args,
-                    stdin=subprocess.DEVNULL,
-                    stdout=stream,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
+        # the clear-claim-spawn-record sequence below is not atomic on its
+        # own -- two rivals over the same dead record can both parse it
+        # before either clears, and the loser's clear would sweep the
+        # winner's fresh claim -- so a launch sidecar flock (kernel-held,
+        # auto-released if the launcher dies, never nested inside another
+        # flock) serializes the whole handoff through the pid write; the
+        # loser refuses exactly as it would over a rival's claim
+        lock_path = self.node_dir / (PGID_FILE + LOCK_FILE)
+        with open(lock_path, 'a', encoding='utf-8') as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise RuntimeError(claimed) from None
+            # a record the vet judged dead clears for the claim; one it
+            # could not even parse is a rival's claim in flight (the pid
+            # lands only after the spawn), refused like a live record rather
+            # than swept -- unless the claim is provably abandoned by its
+            # age, in which case it clears like a dead group
+            try:
+                int(pgid_file.read_text(encoding='utf-8').strip())
+            except FileNotFoundError:
+                pass
+            except ValueError:
+                try:
+                    claimed_at = pgid_file.stat().st_mtime
+                except FileNotFoundError:
+                    claimed_at = 0.0
+                if time.time() - claimed_at < _ABANDONED_CLAIM_SECONDS:
+                    raise RuntimeError(claimed) from None
+                pgid_file.unlink(missing_ok=True)
+            else:
+                pgid_file.unlink(missing_ok=True)
+            try:
+                claim = os.open(
+                    f'{pgid_file}',
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o644,
                 )
-                stream.write(
-                    f'=== Launched {kind} at {fractal.util.time.utc_now()}'
-                    f' (pid {process.pid}) ===\n'
-                )
-                stream.flush()
-            pgid_file.write_text(f'{process.pid}\n', encoding='utf-8')
-            # the wrapper holds the exec only so long: a child that gave up
-            # waiting exits before the loop boots, and reporting success
-            # would strand the node idle behind a dead record
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f'the headless launch exited before boot (log: {log_path})'
-                )
-        except Exception:
-            if not recorded:
-                marker.unlink(missing_ok=True)
-            pgid_file.unlink(missing_ok=True)
-            raise
-        return f'Started headless node: {process.pid} (log: {log_path})'
+            except FileExistsError:
+                raise RuntimeError(claimed) from None
+            os.close(claim)
+            # build the loop argv
+            loop_args = [
+                sys.executable,
+                '-m',
+                'fractal.cli.main',
+                'node',
+                '_loop',
+                f'--path={self._root}',
+            ]
+            if continue_run:
+                loop_args.append('--continue')
+            if resume:
+                loop_args.append('--resume')
+            if drain:
+                loop_args.append('--drain')
+            # hold the exec until the pid lands in the claimed record, so the
+            # group is probeable first (-s: the bare claim is not yet a record)
+            wrapper = (
+                'for _ in {1..500}; do [[ -s "$1" ]] && break; sleep 0.01; done; '
+                '[[ -s "$1" ]] || exit 1; shift; exec "$@"'
+            )
+            command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_file}', *loop_args]
+            # the banner names the launch kind, so a post-mortem reads which
+            # relaunch produced each appended tail
+            kind = 'resume' if resume else 'continue' if continue_run else 'start'
+            if drain:
+                kind += ' drain'
+            marker = self.node_dir / HEADLESS_FILE
+            recorded = marker.exists()
+            try:
+                marker.write_text('headless\n', encoding='utf-8')
+                with log_path.open('a', encoding='utf-8') as stream:
+                    process = subprocess.Popen(
+                        command_args,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stream,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                    stream.write(
+                        f'=== Launched {kind} at {fractal.util.time.utc_now()}'
+                        f' (pid {process.pid}) ===\n'
+                    )
+                    stream.flush()
+                pgid_file.write_text(f'{process.pid}\n', encoding='utf-8')
+                # the wrapper holds the exec only so long: a child that gave up
+                # waiting exits before the loop boots, and reporting success
+                # would strand the node idle behind a dead record
+                if process.poll() is not None:
+                    raise RuntimeError(
+                        f'the headless launch exited before boot (log: {log_path})'
+                    )
+            except Exception:
+                if not recorded:
+                    marker.unlink(missing_ok=True)
+                pgid_file.unlink(missing_ok=True)
+                raise
+            return f'Started headless node: {process.pid} (log: {log_path})'
 
     def attach(self: Node) -> None:
         """Attach to the node's tmux session."""
@@ -2841,6 +2887,30 @@ class Node:
                     )
                     return ''
                 if alive is False:
+                    # a False verdict also covers a record still empty
+                    # mid-claim (a launch writes the pid only after its
+                    # spawn) -- sweep only a record naming a pid, and refuse
+                    # the claim in flight like a live record
+                    try:
+                        content = pgid_file.read_text(encoding='utf-8').strip()
+                    except FileNotFoundError:
+                        continue
+                    try:
+                        int(content)
+                    except ValueError:
+                        self._signal_refuse(
+                            verb='kill',
+                            event='kill',
+                            reason=(
+                                f'the {name} record names no process group'
+                                ' yet, so a launch may be claiming it; retry'
+                                f' once its pid lands, or remove the {name}'
+                                ' record from the node directory if no'
+                                ' launch is running'
+                            ),
+                            fan_out=fan_out,
+                        )
+                        return ''
                     pgid_file.unlink(missing_ok=True)
             # set signal and log event; the reap runs outside the lock
             event_id = self.record.event_start('kill', metadata=label)

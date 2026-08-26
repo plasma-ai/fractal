@@ -487,8 +487,8 @@ Two deliberate limits:
   socket-less node with no record stays unhealed. A headless or bare loop's
   probe is inconclusive only when ``ps`` cannot date the live group's
   leader; that too heals nothing, and teardown, kill, and
-  ``start``/``--continue`` refuse, naming the check to run. A group owned by another user is not inconclusive: its
-  leader's start instant decides.
+  ``start``/``--continue`` refuse, naming the check to run. A group owned
+  by another user is not inconclusive: its leader's start instant decides.
 
 Separate from crash healing, ``fractal node reconcile [node]`` is the audit
 step after out-of-band cleanup: for each registered descendant whose

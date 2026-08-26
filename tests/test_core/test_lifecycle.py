@@ -19,7 +19,7 @@ from typing import NoReturn, Optional
 
 import pytest
 
-from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, PGID_FILE
+from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, LOCK_FILE, PGID_FILE
 from fractal.core.node import Node
 from tests._helpers import _git, _stub_run_script
 
@@ -43,9 +43,14 @@ __all__ = [
     'test_start_headless_selects_detached_backend',
     'test_launch_headless_records_marker_and_group_around_the_spawn',
     'test_launch_headless_failed_spawn_keeps_the_prior_backend_record',
+    'test_launch_headless_dead_before_boot',
     'test_start_vets_the_recorded_group',
+    'test_start_proceeds_over_a_vanished_record',
     'test_headless_start_vets_a_same_named_session',
     'test_launch_headless_refuses_a_rival_claim',
+    'test_launch_headless_clears_an_abandoned_claim',
+    'test_launch_headless_refuses_while_a_rival_holds_the_launch_lock',
+    'test_launch_headless_proceeds_over_a_vanished_record',
     'test_start_serializes_runtime_backends',
     'test_start_continue_re_arms_after_drained_run',
     'test_start_continue_refuses_after_budget_end',
@@ -58,6 +63,8 @@ __all__ = [
     'test_finish_accepts_reason',
     'test_kill_vets_recorded_group_before_script',
     'test_kill_refuses_an_unknown_process_identity',
+    'test_kill_reaps_over_a_vanished_record',
+    'test_kill_refuses_an_in_flight_record_claim',
     'test_kill_drops_a_dead_group_without_identity_probe',
     'test_kill_drops_a_foreign_owned_recycled_group',
     'test_kill_sets_killed_status',
@@ -346,6 +353,42 @@ def test_launch_headless_failed_spawn_keeps_the_prior_backend_record(
     assert not (node.node_dir / PGID_FILE).exists()
 
 
+@pytest.mark.parametrize('recorded', [False, True], ids=['fresh', 'recorded'])
+def test_launch_headless_dead_before_boot(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: bool,
+) -> None:
+    """A spawn that exits before the loop boots rolls back and reports.
+
+    The wrapper child holds the loop's exec only until its record wait runs
+    out, so a child already gone at the post-spawn check never booted --
+    reporting success would strand the node idle behind a dead record. The
+    launch raises instead, dropping the ``.pgid`` record and rolling the
+    marker back to its prior state, so ``--continue`` stays the retry path.
+    """
+    node = node_with_db
+
+    class _Spawned:
+        pid = 4242
+
+        def poll(self: _Spawned) -> int:
+            """Report the child as already exited."""
+            return 1
+
+    monkeypatch.setattr(
+        'fractal.core.node.subprocess.Popen',
+        lambda *args, **kwargs: _Spawned(),
+    )
+    marker = node.node_dir / HEADLESS_FILE
+    if recorded:
+        marker.write_text('headless\n', encoding='utf-8')
+    with pytest.raises(RuntimeError, match='exited before boot'):
+        node._launch_headless()
+    assert marker.exists() is recorded
+    assert not (node.node_dir / PGID_FILE).exists()
+
+
 @pytest.mark.parametrize('continue_run', [False, True], ids=['start', 'continue'])
 @pytest.mark.parametrize(
     argnames='verdict',
@@ -414,15 +457,39 @@ def test_start_vets_the_recorded_group(
         leader.wait()
 
 
+@pytest.mark.parametrize('continue_run', [False, True], ids=['start', 'continue'])
+def test_start_proceeds_over_a_vanished_record(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    continue_run: bool,
+) -> None:
+    """A record that vanishes mid-vet is the exit hook's own proof of death.
+
+    The parking loop drops ``.pgid`` between the liveness probe and the
+    vet's confirming read; the vanished record coerces the verdict to dead
+    on both arms, so the launch proceeds instead of crashing or refusing
+    over a file that no longer exists.
+    """
+    node = node_with_db
+    node.config.set('max_cost', 1.0)
+    if continue_run:
+        node.status_set('stopped')
+    # the probe answers for a record the exit hook has already dropped
+    monkeypatch.setattr('fractal.core.node._group_alive', lambda pgid_file: True)
+    run_scripts = _stub_run_script(monkeypatch, node)
+    node.start(continue_run=continue_run)
+    assert [call[0] for call in run_scripts] == ['start.sh']
+
+
 @pytest.mark.parametrize(
-    argnames='foreign',
-    argvalues=[True, False],
-    ids=['foreign', 'own-boot'],
+    argnames='attribution',
+    argvalues=['foreign', 'own-boot', 'no-answer'],
+    ids=['foreign', 'own-boot', 'no-answer'],
 )
 def test_headless_start_vets_a_same_named_session(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
-    foreign: bool,
+    attribution: str,
 ) -> None:
     """A headless fresh start passes only a provably foreign same-named session.
 
@@ -432,12 +499,13 @@ def test_headless_start_vets_a_same_named_session(
     node's own tmux boot still racing its ``.pgid`` record, which must keep
     refusing. The pane's argv names the launch's worktree at every exec
     stage, so the vet attributes the session by it; ours-or-no-answer
-    refuses.
+    refuses -- a ``ps`` that returns nothing proves nothing foreign.
     """
     node = node_with_db
     node.config.set('max_cost', 1.0)
     session = node.tmux_session
     monkeypatch.setattr('fractal.util.tmux.probe', lambda **kwargs: {session})
+    foreign = attribution == 'foreign'
     worktree = '/elsewhere/repo/.worktrees/main' if foreign else f'{node._root}'
     real_run = subprocess.run
 
@@ -449,6 +517,8 @@ def test_headless_start_vets_a_same_named_session(
         if cmd[:2] == ['tmux', 'list-panes']:
             return subprocess.CompletedProcess(cmd, 0, f'{session}\t4242\n', '')
         if cmd[0] == 'ps':
+            if attribution == 'no-answer':
+                return subprocess.CompletedProcess(cmd, 1, '', '')
             return subprocess.CompletedProcess(
                 cmd, 0, f'bash start.sh {worktree} --resume\n', ''
             )
@@ -481,11 +551,99 @@ def test_launch_headless_refuses_a_rival_claim(
     node = node_with_db
     pgid_file = node.node_dir / PGID_FILE
     pgid_file.write_text('', encoding='utf-8')
-    with pytest.raises(RuntimeError, match='a rival launch claimed the record'):
+    # the arm-specific wording carries the guidance: resume advises waiting
+    # out the parking loop, start reports the second-launch refusal
+    match = (
+        'still running or parking.*a rival launch claimed the record'
+        if resume
+        else 'already exists: a rival launch claimed the record'
+    )
+    with pytest.raises(RuntimeError, match=match):
         node._launch_headless(resume=resume)
     # the rival's claim survives for its own pid write; no backend recorded
     assert pgid_file.exists()
     assert not (node.node_dir / HEADLESS_FILE).exists()
+
+
+def test_launch_headless_clears_an_abandoned_claim(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty claim aged past the launch window never wedges the relaunch.
+
+    A launcher killed between its exclusive claim and its pid write leaves a
+    zero-length ``.pgid`` no launch is still filling -- the wrapper child
+    stops waiting for the pid seconds after the claim -- so an aged empty
+    record clears like a dead group instead of refusing every relaunch.
+    """
+    node = node_with_db
+
+    class _Spawned:
+        pid = 4242
+
+        def poll(self: _Spawned) -> None:
+            """Report the child as still running."""
+            return None
+
+    monkeypatch.setattr(
+        'fractal.core.node.subprocess.Popen',
+        lambda *args, **kwargs: _Spawned(),
+    )
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('', encoding='utf-8')
+    stale = time.time() - 3600
+    os.utime(pgid_file, (stale, stale))
+    node._launch_headless()
+    assert pgid_file.read_text(encoding='utf-8') == '4242\n'
+
+
+def test_launch_headless_refuses_while_a_rival_holds_the_launch_lock(
+    node_with_db: Node,
+) -> None:
+    """A launch loses to a rival already inside the handoff.
+
+    The clear-claim-spawn-record sequence runs under a sidecar flock, so a
+    rival mid-handoff refuses the newcomer before it can parse or clear the
+    record -- the arbitration two unlocked launches over the same dead
+    record otherwise lack.
+    """
+    node = node_with_db
+    lock_path = node.node_dir / (PGID_FILE + LOCK_FILE)
+    with open(lock_path, 'a', encoding='utf-8') as rival:
+        fcntl.flock(rival, fcntl.LOCK_EX)
+        with pytest.raises(RuntimeError, match='rival launch claimed the record'):
+            node._launch_headless()
+    assert not (node.node_dir / PGID_FILE).exists()
+    assert not (node.node_dir / HEADLESS_FILE).exists()
+
+
+def test_launch_headless_proceeds_over_a_vanished_record(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handoff's own vet tolerates a record that vanished mid-probe.
+
+    The parking loop can drop ``.pgid`` between the liveness probe and the
+    vet's confirming read; the vanished record coerces the verdict to dead,
+    so the relaunch boots instead of crashing on the read.
+    """
+    node = node_with_db
+
+    class _Spawned:
+        pid = 4242
+
+        def poll(self: _Spawned) -> None:
+            """Report the child as still running."""
+            return None
+
+    monkeypatch.setattr(
+        'fractal.core.node.subprocess.Popen',
+        lambda *args, **kwargs: _Spawned(),
+    )
+    # the probe answers for a record the exit hook has already dropped
+    monkeypatch.setattr('fractal.core.node._group_alive', lambda pgid_file: True)
+    node._launch_headless()
+    assert (node.node_dir / PGID_FILE).read_text(encoding='utf-8') == '4242\n'
 
 
 def test_start_serializes_runtime_backends(
@@ -863,6 +1021,57 @@ def test_kill_refuses_an_unknown_process_identity(
         node.kill()
     assert node.status() == 'active'
     assert node.record.signal_get('kill') is None
+    assert pgid_file.exists()
+
+
+def test_kill_reaps_over_a_vanished_record(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record that vanishes after an inconclusive probe never wedges kill.
+
+    The parking loop can drop its record between kill's probe and the vet's
+    confirming read; a vanished record leaves nothing to arbitrate, so the
+    reap proceeds instead of refusing over a file that no longer exists.
+    """
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    # the probe answers for a record the exit hook has already dropped
+    monkeypatch.setattr('fractal.core.node._group_alive', lambda pgid_file: None)
+    run_scripts = _stub_run_script(monkeypatch, node)
+    node.kill()
+    assert [call[0] for call in run_scripts] == ['kill.sh']
+    assert node.status() == 'killed'
+
+
+def test_kill_refuses_an_in_flight_record_claim(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill never sweeps a record a rival launch is still filling.
+
+    A launch claims ``.pgid`` empty and writes the pid only after its spawn,
+    so an empty record is a claim in flight -- sweeping it would strand the
+    booting group with its only record gone. Kill refuses like it does over
+    a live record, naming the record to clear.
+    """
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('', encoding='utf-8')
+
+    def run_script(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        raise AssertionError('kill.sh must not run over an in-flight claim')
+
+    monkeypatch.setattr(node, '_run_script', run_script)
+    with pytest.raises(RuntimeError, match='names no process group yet'):
+        node.kill()
+    assert node.status() == 'active'
     assert pgid_file.exists()
 
 

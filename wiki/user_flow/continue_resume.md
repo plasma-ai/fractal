@@ -115,15 +115,15 @@ clean boundary rather than thaw mid-thought.
 
 A resumed iteration replays a frozen plan, so the harness re-reads the node's
 unread inbox and appends the digest (metadata, priority first) to every seat's
-prompt -- directives that arrived after the plan froze are in context before any
+prompt — directives that arrived after the plan froze are in context before any
 replayed decision executes, and a sealed mailbox stays sealed. For wind-downs,
 `node start --continue --drain` runs a drain: `_DRAIN` rides every seat's
 environment, `node init` (spawns and whole new trees alike), `node start`,
 `node update`, and `node resume` refuse under it (spawns, re-arms, and subtree
 wake-ups are harness-blocked, not just discouraged), and the DRAIN mode doc
 tells the seat to close out instead of expanding. The refusal reaches
-`node _loop` too -- the re-arm primitive those four verbs front, and what
-`start.sh` actually execs -- so the front doors are not locked over an open back
+`node _loop` too — the re-arm primitive those four verbs front, and what
+`start.sh` actually execs — so the front doors are not locked over an open back
 one. The drain run's own relaunch after a park is exempt: it names the parked
 seat itself, which no other re-arm does.
 
@@ -131,7 +131,7 @@ Three sources answer "is this a draining seat", because the first two ask the
 seat who it is and a seat can move. `_DRAIN` is the seat's own environment;
 `Node.drain_bound` reads the run's durable `drain` signal against the resolved
 actor, which survives an env scrub but still falls back to the node owning the
-working directory -- so a seat that steps into a sibling worktree resolves to a
+working directory — so a seat that steps into a sibling worktree resolves to a
 real but *wrong* node, and one that steps outside every worktree resolves to
 none and fails open. `Node.drain_lineage` closes both: the loop makes each agent
 invocation its own process group leader and records the id (`.step_pgid`), so
@@ -139,4 +139,4 @@ every command that seat runs inherits it, and the tree asks which of its open
 draining runs owns this process. No `env -u` or `cd` rewrites a process group.
 The handle is identity-checked like the orphan reap's, so a stale record naming
 a recycled id never refuses an unrelated caller, and a caller in any other group
--- an operator's shell -- acts normally while the drain runs.
+— an operator's shell — acts normally while the drain runs.
