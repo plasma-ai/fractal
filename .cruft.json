@@ -1,6 +1,6 @@
 {
   "template": "https://github.com/plasma-ai/templates.git",
-  "commit": "3e122fe5619de93a1c334d8ed416c4acaf912a19",
+  "commit": "c578a8df12719f0b3233eb312fa7a5002f7c5540",
   "checkout": null,
   "context": {
     "cookiecutter": {
