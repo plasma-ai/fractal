@@ -118,12 +118,9 @@ if tmux list-sessions -F '#{session_name}' 2>/dev/null \
     SESSION_EXISTS=true
 fi
 
+# backend-neutral no-op: no pane, session, or live recorded group to reap
 if [[ -z "$PANE_PID" && "$SESSION_EXISTS" != true && -z "$PGID" && -z "$STEP_PGID" ]]; then
-    if tmux list-sessions &>/dev/null; then
-        echo "No running node found: $TMUX_SESSION_NAME"
-    else
-        echo "tmux server not running (node already dead): $TMUX_SESSION_NAME"
-    fi
+    echo "No running node found: $TMUX_SESSION_NAME"
     exit 0
 fi
 
