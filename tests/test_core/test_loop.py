@@ -451,47 +451,67 @@ def test_agent_env_publishes_node_branch(
     assert all(env['NODE_BRANCH'] == loop_node.branch for env in loop.envs)
 
 
-def test_agent_env_inherits_headless_launches(
-    loop_node: Node,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Agents in a headless loop start delegated children headlessly too."""
-    monkeypatch.setenv('_NODE', '')
-    (loop_node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
-    loop = MockLoop(loop_node)
-    assert loop._agent_env('work')['FRACTAL_HEADLESS'] == 'true'
-
-
 @pytest.mark.parametrize(
     argnames='headless',
     argvalues=[False, True],
     ids=['tmux-backed', 'headless'],
 )
-def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
+def test_agent_env_inherits_headless_launches(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
     headless: bool,
 ) -> None:
-    """A tmux-backed boot records the pane's socket; a headless boot never does.
+    """Agents inherit the loop's backend through ``FRACTAL_HEADLESS``.
+
+    The export carries the run's launch backend in both directions: a
+    headless loop's seats start delegated children headlessly, and a
+    tmux-backed loop's seats export ``false`` -- so a child carrying a
+    ``.headless`` marker still follows its tmux parent on delegated starts.
+    """
+    monkeypatch.setenv('_NODE', '')
+    if headless:
+        (loop_node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    loop = MockLoop(loop_node)
+    expected = 'true' if headless else 'false'
+    assert loop._agent_env('work')['FRACTAL_HEADLESS'] == expected
+
+
+@pytest.mark.parametrize(
+    argnames='mode',
+    argvalues=['tmux-backed', 'headless', 'bare'],
+    ids=['tmux-backed', 'headless', 'bare'],
+)
+def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """A tmux-backed boot records the pane's socket; no other boot keeps one.
 
     ``Node._reconcile_status`` probes the server the node's own session
     lives on via this record, so it must land before any step runs (a
     reconcile racing a fresh boot from a different-socket shell must
     already find it) and must not outlive the loop -- a surviving record,
     like ``.pgid``, would mark a death no cleanup could catch. A headless
-    loop joins no server whatever ``$TMUX`` its launching shell carries:
-    it records no socket and drops a stale record from an earlier tmux
-    run. Either way ``.pgid`` lands after the socket record and the
-    active stamp lands last, so an active row always carries its
+    loop joins no server whatever ``$TMUX`` its launching shell carries,
+    and a bare launch (no marker, no ``$TMUX``) joins none either: both
+    record no socket and drop a stale record from an earlier tmux run --
+    kept, it would pin a later reconcile to a dead server and misread the
+    live loop as gone. Either way ``.pgid`` lands after the socket record
+    and the active stamp lands last, so an active row always carries its
     liveness records and '.pgid and no .socket' reliably reads 'booted
     outside a pane'.
     """
     socket_path = '/tmp/fx-test/socket'  # noqa: S108
-    monkeypatch.setenv('TMUX', f'{socket_path},4242,0')
+    if mode == 'bare':
+        monkeypatch.delenv('TMUX', raising=False)
+    else:
+        monkeypatch.setenv('TMUX', f'{socket_path},4242,0')
     socket_file = loop_node.node_dir / SOCKET_FILE
     pgid_file = loop_node.node_dir / PGID_FILE
-    if headless:
+    if mode == 'headless':
         (loop_node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    if mode != 'tmux-backed':
         socket_file.write_text('/tmp/fx-test/stale\n', encoding='utf-8')  # noqa: S108
 
     class RecordingLoop(MockLoop):
@@ -535,22 +555,22 @@ def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
     monkeypatch.setattr(pathlib.Path, 'write_text', recording_write_text)
     assert loop.run() == 0
     assert loop.recorded
-    if headless:
-        # no step saw a socket, and the stale record is gone for good
-        assert all(text is None for text in loop.recorded)
-    else:
+    if mode == 'tmux-backed':
         # every step ran under the recorded socket
         assert all(
             text is not None and text.strip() == socket_path for text in loop.recorded
         )
+    else:
+        # no step saw a socket, and the stale record is gone for good
+        assert all(text is None for text in loop.recorded)
     # the exit dropped both records
     assert not socket_file.exists()
     assert not pgid_file.exists()
     # the active stamp found .pgid on record, and the socket only under tmux
-    assert stamped == [(True, not headless)]
+    assert stamped == [(True, mode == 'tmux-backed')]
     # .pgid landed once, after the socket record (or after the stale drop),
     # so '.pgid and no .socket' reliably reads 'booted outside a pane'
-    assert pgid_stamp == [not headless]
+    assert pgid_stamp == [mode == 'tmux-backed']
 
 
 def test_continue_restore_lands_config_all_or_nothing(

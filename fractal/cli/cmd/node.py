@@ -415,13 +415,9 @@ def node_start(app: typer.Typer) -> typer.Typer:
     # headless flag (seat-supplied via $FRACTAL_HEADLESS; unset reuses the
     # node's recorded backend)
     headless_help = (
-        'Run without tmux in a detached process group. With neither flag nor'
-        ' FRACTAL_HEADLESS (exactly true/false; any other value refuses)'
-        ' set, a relaunch reuses the backend'
-        ' the node last launched with (tmux for a node that has never run'
-        ' headless); --headless/--tmux force and re-record it. Seats always'
-        " export the parent's backend in FRACTAL_HEADLESS, so a delegated"
-        ' child start follows its parent unless the seat overrides.'
+        'Run without tmux in a detached process group (default: the'
+        " node's recorded backend, tmux for a node that has never run"
+        ' headless; the exported FRACTAL_HEADLESS overrides the record).'
     )
     headless = typer.Option(None, '--headless/--tmux', help=headless_help)
     # path option
@@ -448,6 +444,14 @@ def node_start(app: typer.Typer) -> typer.Typer:
         each launch arms the cap anew -- but a run that ended on its cost
         budget refuses a bare ``--continue``: pass ``--max-cost`` to arm
         the next run explicitly.
+
+        The backend is sticky. With neither flag nor FRACTAL_HEADLESS
+        set, a relaunch reuses the backend the node last launched with;
+        the flags and the exported FRACTAL_HEADLESS (true/false, matched
+        case-insensitively; anything else refuses) force and re-record
+        it. Seats always export the parent's backend in
+        FRACTAL_HEADLESS, so a delegated child start follows its parent
+        unless the seat overrides.
         """
         require_non_negative(max_cost=max_cost)
         if clean and not continue_:

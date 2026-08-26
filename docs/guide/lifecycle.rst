@@ -218,8 +218,9 @@ detached tmux session, or in an independent process group with
        appends output to ``headless.log``, one launch banner per launch.
        The backend is sticky: an unflagged launch reuses the backend the
        node last launched with, recorded in the ``.headless`` marker, and
-       the flags or the seat-exported ``FRACTAL_HEADLESS`` (exactly
-       ``true``/``false``) override and re-record it — so a delegated
+       the flags or the seat-exported ``FRACTAL_HEADLESS``
+       (``true``/``false``, matched case-insensitively; anything else
+       refuses) override and re-record it — so a delegated
        child start follows its parent unless the seat passes a flag.
        ``resume`` always relaunches through the recorded backend — the
        flags and ``FRACTAL_HEADLESS`` do not apply to it.
@@ -243,7 +244,14 @@ the command line instead of inside a dying tmux pane. Start also refuses:
   relaunches it, and the relaunch keeps draining;
 - a fresh start when a foreign tmux session already holds this node's
   session name (another fractal sharing the repository basename — rename a
-  repository directory, never kill the foreign session);
+  repository directory, never kill the foreign session); a headless fresh
+  start tolerates a provably foreign session and refuses only one that may
+  be this node's own tmux boot still recording its process group;
+- a recorded process group that is still alive — the loop is booting,
+  running, or parking, identity-verified against the record's timestamp so
+  a recycled process-group id never blocks — or whose identity ``ps``
+  cannot verify: the refusal names the ``ps -p <pgid>`` check and the
+  ``.pgid`` record to remove if the group is not this node's;
 - a stored non-positive ``max_cost``;
 - a bare ``--continue`` after a **budget-ended** run: the error names the
   spent and armed figures and requires an explicit ``--max-cost`` to
@@ -478,8 +486,8 @@ Two deliberate limits:
   group defers to that group instead, exactly as a headless one does, and a
   socket-less node with no record stays unhealed. A headless or bare loop's
   probe is inconclusive only when ``ps`` cannot date the live group's
-  leader; that too heals nothing, and teardown and kill refuse, naming the
-  check to run. A group owned by another user is not inconclusive: its
+  leader; that too heals nothing, and teardown, kill, and
+  ``start``/``--continue`` refuse, naming the check to run. A group owned by another user is not inconclusive: its
   leader's start instant decides.
 
 Separate from crash healing, ``fractal node reconcile [node]`` is the audit

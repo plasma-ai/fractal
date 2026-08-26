@@ -26,7 +26,12 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 - **``start.sh`` headless marker ownership** leaves the ``.headless`` write to
   ``node _launch``, which records it beside ``.pgid`` around the spawn -- so a
   handoff that fails leaves no marker and the record only ever names a backend
-  the node actually launched with.
+  the node actually launched with; a tmux relaunch whose ``new-session``
+  refuses rolls the pre-cleared marker back for the same reason.
+- **``kill.sh`` per-backend teardown** reaps a headless node's recorded
+  ``.pgid``/``.step_pgid`` groups without consulting tmux at all, so a
+  same-named session from another repo sharing the basename survives the kill
+  and the node's own loop is the one reaped.
 - **``merge.sh`` interrupt safety** re-asserts the target worktree is clean
   immediately before the destructive squash, so an edit that lands in the
   target *during* the merge is refused -- never absorbed into the squash commit
@@ -87,6 +92,8 @@ __all__ = [
     'test_resume_reselects_the_recorded_backend',
     'test_headless_relaunch_vets_the_recorded_group',
     'test_headless_handoff_failure_records_no_backend',
+    'test_tmux_relaunch_failure_keeps_the_backend_record',
+    'test_kill_reaps_only_the_recorded_group_for_a_headless_node',
     'test_merge_preserves_a_target_edit_that_lands_during_the_merge',
     'test_merge_re_merges_an_iterating_child_without_conflict',
     'test_merge_re_merge_of_a_merged_node_is_a_no_op',
@@ -428,6 +435,103 @@ def test_headless_handoff_failure_records_no_backend(
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert 'launch refused' in result.stderr, result.stderr
     assert not (node_dir / '.headless').exists()
+
+
+def test_tmux_relaunch_failure_keeps_the_backend_record(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A failed tmux relaunch restores the pre-cleared ``.headless`` marker.
+
+    Only a tmux launch that actually starts clears the marker: ``start.sh``
+    clears it before ``new-session`` so a successful handoff re-records the
+    backend, and a refused spawn must roll the record back -- a silently
+    erased marker would flip the next bare continue onto tmux for a launch
+    that never happened. A ``tmux`` PATH shim answers the version probe and
+    lists no sessions, but refuses ``new-session``.
+    """
+    repo = _init_tree(tmp_path / 'rollbackrepo')
+    node_dir = repo / '.fractal' / 'main'
+    (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    bindir = tmp_path / 'rollback-bin'
+    bindir.mkdir()
+    tmux = bindir / 'tmux'
+    tmux.write_text(
+        '#!/bin/sh\n'
+        'case "$1" in\n'
+        "    -V) echo 'tmux 3.4' ;;\n"
+        '    new-session) exit 1 ;;\n'
+        'esac\n',
+        encoding='utf-8',
+    )
+    tmux.chmod(0o755)
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    result = subprocess.run(
+        ['bash', f'{_scripts_dir() / "start.sh"}', f'{repo}'],
+        cwd=f'{repo}',
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert (node_dir / '.headless').read_text(encoding='utf-8') == 'headless\n'
+
+
+# ------ kill.sh: the per-backend teardown
+
+
+def test_kill_reaps_only_the_recorded_group_for_a_headless_node(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A headless kill reaps the recorded groups and never touches tmux.
+
+    ``kill.sh``'s pane and session teardown is per-backend (mirroring
+    ``resume.sh``'s guard): a headless node owns no session, so a same-named
+    session from another repo sharing the basename must survive its kill --
+    the pane lookup, session check, and session destroy are all skipped and
+    the recorded ``.pgid`` group is the one reaped. A ``tmux`` PATH shim that
+    lists the colliding session records every invocation; none may happen.
+    """
+    repo = _init_tree(tmp_path / 'killrepo')
+    node_dir = repo / '.fractal' / 'main'
+    (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    capture = tmp_path / 'kill-tmux.txt'
+    bindir = tmp_path / 'kill-bin'
+    bindir.mkdir()
+    tmux = bindir / 'tmux'
+    session = f'{repo.name} (main)'
+    tmux.write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$*" >>"{capture}"\n'
+        f"printf '%s\\n' '{session}'\n",
+        encoding='utf-8',
+    )
+    tmux.chmod(0o755)
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    # a live group whose record postdates its leader, i.e. the node's own
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    pgid_file = node_dir / '.pgid'
+    pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+    try:
+        result = subprocess.run(
+            ['bash', f'{_scripts_dir() / "kill.sh"}', f'{repo}'],
+            cwd=f'{repo}',
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        # the recorded group drew the TERM and the record handle is dropped
+        assert leader.wait(timeout=10) != 0
+        assert not pgid_file.exists()
+        # tmux was never consulted -- the collision session survives
+        assert not capture.exists()
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 # ------ merge.sh: an edit landing in the target during the merge

@@ -526,8 +526,9 @@ Inspection
 Print the node's current status, possibly decorated: ``active (pausing)``,
 ``active (stopping)``, or ``active (finishing)`` when a signal is pending,
 and ``exited (<reason>)`` when the latest run recorded why it ended. The read
-is self-reconciling — a crashed node (``active`` on record with provably no
-tmux session or headless process group) is healed to ``exited`` first.
+is self-reconciling — a crashed node, ``active`` on record with its loop
+runtime (the tmux session, or a headless or bare loop's recorded process
+group) provably gone, is healed to ``exited`` first.
 
 .. code-block:: console
 
@@ -586,9 +587,10 @@ activity, with a ``!`` suffix flagging an active node quiet past
    valid list.
 
 ``--live``
-   Trust each child's real state: relabel a crashed active node (no tmux
-   session or headless process group) as ``exited``, a booting idle node as
-   ``active``, and drop nodes whose worktree is gone. This view is read-only;
+   Trust each child's real state: relabel a crashed active node — its loop
+   runtime (the tmux session, or a headless or bare loop's recorded process
+   group) provably gone — as ``exited``, a booting idle node as ``active``,
+   and drop nodes whose worktree is gone. This view is read-only;
    the plain listing instead persists the crash heal and flags worktree-less
    rows as ``orphan`` (or ``<status> (orphaned)`` when settled).
 

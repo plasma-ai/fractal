@@ -309,6 +309,47 @@ class Node:
             return None
         return self.tmux_session in sessions
 
+    def _session_is_foreign(self: Node, session: str) -> bool:
+        """Return whether a same-named tmux session provably belongs elsewhere.
+
+        Two repos sharing a basename collide on session names, and a headless
+        launch owns no session -- but a matching name can also be this node's
+        own tmux boot still racing its ``.pgid`` record, which a headless
+        fresh start must refuse. The pane pid survives every exec stage of
+        the launch (``env _NODE=...``, ``start.sh <worktree>``, ``node _loop
+        --path=<worktree>``), so its argv names the launch's worktree
+        throughout: a pane command that never names this node's worktree is
+        another tree's. Ours-or-no-answer returns ``False`` -- ignorance
+        refuses the launch, mirroring the group vet.
+        """
+        # resolve the pane pid by exact session-name match (mirrors kill.sh:
+        # spaces/parens in the name defeat split-on-space lookup)
+        listing = subprocess.run(
+            ['tmux', 'list-panes', '-a', '-F', '#{session_name}\t#{pane_pid}'],
+            capture_output=True,
+            text=True,
+        )
+        if listing.returncode != 0:
+            return False
+        pane_pid = ''
+        for line in listing.stdout.splitlines():
+            name, _, pid = line.rpartition('\t')
+            if name == session:
+                pane_pid = pid
+                break
+        if not pane_pid:
+            return False
+        # the argv carries the worktree path at every stage of the launch
+        result = subprocess.run(
+            ['ps', '-p', pane_pid, '-o', 'command='],
+            capture_output=True,
+            text=True,
+        )
+        command = result.stdout.strip()
+        if result.returncode != 0 or not command:
+            return False
+        return f'{self._root}' not in command
+
     @property
     def headless(self: Node) -> bool:
         """Return whether this node uses the detached process backend."""
@@ -371,7 +412,12 @@ class Node:
         (:meth:`Config.reconcile`): a loop that died before its next iteration
         boundary never ran the boundary reconcile, and the dead row would
         otherwise carry the drift forever. A no-op unless the status is
-        ``active``, so a settled node never pays the tmux probe -- and a
+        ``active``, so a settled node never pays the tmux probe. The heal
+        re-verifies at act time -- status still ``active`` and the group
+        records untouched since the probe -- and reaps on that snapshot (no
+        flock covers this path), so a continue's relaunch racing the probe
+        (its fresh boot rewrites ``.pgid`` before the active stamp) stands
+        the heal down instead of being reaped as the crash it replaced. A
         ``paused`` node is never healed: no session is its *normal* parked
         state (the loop exits at pause; ``resume`` relaunches it), on this
         host or after a filesystem transplant to another. An inconclusive
@@ -398,17 +444,51 @@ class Node:
             return
         if self.status() != 'active':
             return
-        if self._loop_alive() is False:
-            self._reap_orphan()
-            self.record.close_open('exited')
-            self.status_set('exited')
-            self.config.reconcile()
-            # the heal is the record's catch -- the settled node keeps no
-            # socket handle (the next boot writes a fresh one); the .headless
-            # record stays, because it names the backend, not the run
-            (self.node_dir / SOCKET_FILE).unlink(missing_ok=True)
+        # fingerprint the group records before the probe: the verdict below
+        # licenses action against exactly this state, and a record that moves
+        # after the probe marks a relaunch the verdict never judged
+        snapshot = self._records_snapshot()
+        if self._loop_alive() is not False:
+            return
+        # re-verify before acting -- no flock covers this heal (signal verbs
+        # run it under theirs already): a continue that raced the probe
+        # re-armed the status, and its fresh boot rewrites .pgid before the
+        # active stamp, so either change means the dead verdict no longer
+        # describes this node and the heal must stand down
+        if self.status() != 'active' or self._records_snapshot() != snapshot:
+            return
+        self._reap_orphan(snapshot)
+        self.record.close_open('exited')
+        self.status_set('exited')
+        self.config.reconcile()
+        # the heal is the record's catch -- the settled node keeps no
+        # socket handle (the next boot writes a fresh one); the .headless
+        # record stays, because it names the backend, not the run
+        (self.node_dir / SOCKET_FILE).unlink(missing_ok=True)
 
-    def _reap_orphan(self: Node) -> None:
+    def _records_snapshot(
+        self: Node,
+    ) -> tuple[Optional[tuple[float, str]], ...]:
+        """Fingerprint the group records for the heal's act-time re-verify.
+
+        One ``(mtime, content)`` pair per record (``None`` for a missing
+        file), so :meth:`_reconcile_status` can prove the state its liveness
+        verdict judged is still the state it is about to reap.
+        """
+        snapshot: list[Optional[tuple[float, str]]] = []
+        for name in (PGID_FILE, STEP_PGID_FILE):
+            pgid_file = self.node_dir / name
+            try:
+                recorded_at = pgid_file.stat().st_mtime
+                snapshot.append((recorded_at, pgid_file.read_text(encoding='utf-8')))
+            except OSError:
+                snapshot.append(None)
+        return tuple(snapshot)
+
+    def _reap_orphan(
+        self: Node,
+        snapshot: Optional[tuple[Optional[tuple[float, str]], ...]] = None,
+    ) -> None:
         """Kill surviving process groups recorded by a dead loop.
 
         The loop records its process group at run start (``.pgid``) and
@@ -416,25 +496,29 @@ class Node:
         on any in-band exit, so a file that outlives the loop runtime marks
         an out-of-band death (tmux kill/crash, headless process death, host
         OOM) whose agent may still be running -- and spending -- unseen. The
-        reap follows ``kill.sh``'s TERM-grace-KILL cadence and logs an
-        ``orphan`` event naming each reaped pgid. Best-effort: a dead,
-        recycled, or foreign group reads as already gone -- recycled meaning
-        the OS re-issued a dead group's id to an unrelated same-user group,
-        which answers a liveness probe but is younger than its record
-        (:func:`_recorded_group`).
+        reap acts on the caller's ``snapshot`` (the record state its liveness
+        verdict judged; taken fresh when none rides in), never a kill-time
+        re-read -- a record a relaunch rewrote since names a live loop, which
+        keeps both its group and its record. The reap follows ``kill.sh``'s
+        TERM-grace-KILL cadence and logs an ``orphan`` event naming each
+        reaped pgid. Best-effort: a dead, recycled, or foreign group reads as
+        already gone -- recycled meaning the OS re-issued a dead group's id
+        to an unrelated same-user group, which answers a liveness probe but
+        is younger than its record (:func:`_recorded_group`).
         """
-        for name in (PGID_FILE, STEP_PGID_FILE):
+        if snapshot is None:
+            snapshot = self._records_snapshot()
+        for name, entry in zip((PGID_FILE, STEP_PGID_FILE), snapshot):
             pgid_file = self.node_dir / name
-            if not pgid_file.exists():
+            if entry is None:
                 continue
+            recorded_at, content = entry
             # trust the record only while its group is still alive; a record
             # a rival reconciler already swept reads as gone
             try:
-                recorded_at = pgid_file.stat().st_mtime
-                pgid = int(pgid_file.read_text(encoding='utf-8').strip())
+                pgid = int(content.strip())
                 os.killpg(pgid, 0)
             except (
-                FileNotFoundError,
                 ValueError,
                 ProcessLookupError,
                 PermissionError,
@@ -459,7 +543,17 @@ class Node:
                     metadata=f'reaped pgid {pgid}',
                 )
                 self.record.event_end(event_id=event_id, status='completed')
-            pgid_file.unlink(missing_ok=True)
+            # drop only the record the reap judged -- one a relaunch rewrote
+            # since belongs to the new loop
+            try:
+                unchanged = (
+                    pgid_file.stat().st_mtime == recorded_at
+                    and pgid_file.read_text(encoding='utf-8') == content
+                )
+            except OSError:
+                unchanged = False
+            if unchanged:
+                pgid_file.unlink(missing_ok=True)
 
     def _is_own_loop(self: Node) -> bool:
         """Return whether this process is running inside this node's own loop.
@@ -1961,12 +2055,19 @@ class Node:
                     pgid_file = self.node_dir / PGID_FILE
                     alive = _group_alive(pgid_file)
                     if alive is not False:
-                        pgid = pgid_file.read_text(encoding='utf-8').strip()
+                        # the parking loop can drop the record between the
+                        # probe and this read -- a vanished record is the
+                        # exit hook's own proof the loop is gone
+                        try:
+                            pgid = pgid_file.read_text(encoding='utf-8').strip()
+                        except FileNotFoundError:
+                            alive = False
+                    if alive is not False:
                         if alive is None:
                             raise RuntimeError(
                                 'Cannot continue: the process identity probe'
                                 f' gave no answer for process group {pgid},'
-                                f' so a loop may still be running; check ps'
+                                f' so the loop may still be running; check ps'
                                 f' -p {pgid} and remove the {PGID_FILE}'
                                 ' record from the node directory if that'
                                 ' group is not this node.'
@@ -2010,10 +2111,25 @@ class Node:
                     )
                 # a first-start node has no tmux session of its own, so this
                 # exact name belongs to another fractal sharing the repo name;
-                # the check also stops a headless launch racing a tmux boot
+                # the check also stops a headless launch racing a tmux boot.
+                # A headless launch owns no session, so a provably foreign one
+                # never blocks it (mirrors resume.sh); it still refuses its
+                # own tmux boot racing the .pgid record, or a pane the probe
+                # cannot attribute
                 session = self.tmux_session
                 sessions = fractal.util.tmux.probe()
-                if sessions is not None and session in sessions:
+                if (
+                    sessions is not None
+                    and session in sessions
+                    and not (headless and self._session_is_foreign(session))
+                ):
+                    if headless:
+                        raise RuntimeError(
+                            f'Cannot start: the tmux session {session!r} is'
+                            " already active and may be this node's own tmux"
+                            ' boot still recording its process group. Retry'
+                            ' once it settles, or stop that node first.'
+                        )
                     raise RuntimeError(
                         f'Cannot start: the tmux session {session!r} is already'
                         f' active for another fractal (a repository sharing this'
@@ -2028,14 +2144,21 @@ class Node:
                 pgid_file = self.node_dir / PGID_FILE
                 alive = _group_alive(pgid_file)
                 if alive is not False:
-                    pgid = pgid_file.read_text(encoding='utf-8').strip()
+                    # the parking loop can drop the record between the probe
+                    # and this read -- a vanished record is the exit hook's
+                    # own proof the loop is gone
+                    try:
+                        pgid = pgid_file.read_text(encoding='utf-8').strip()
+                    except FileNotFoundError:
+                        alive = False
+                if alive is not False:
                     if alive is None:
                         raise RuntimeError(
                             'Cannot start: the process identity probe gave no'
-                            f' answer for process group {pgid}, so a loop may'
-                            f' still be running; check ps -p {pgid} and remove'
-                            f' the {PGID_FILE} record from the node directory'
-                            ' if that group is not this node.'
+                            f' answer for process group {pgid}, so the loop'
+                            f' may still be running; check ps -p {pgid} and'
+                            f' remove the {PGID_FILE} record from the node'
+                            ' directory if that group is not this node.'
                         )
                     raise RuntimeError(
                         f'Cannot start: node process already exists: {pgid}.'
@@ -2072,12 +2195,17 @@ class Node:
         node's backend record -- it outlives the run, survives heals and
         kills, and only a tmux launch clears it -- so it lands only around a
         spawn and always names a backend the node actually launched with.
-        The child waits for the ``.pgid`` record before exec'ing the loop, so
-        no probe ever sees a booted headless loop without its record
-        (:func:`_group_alive`), and the launch banner is flushed before that
-        record lands, so it always precedes the loop's first output in
-        ``headless.log`` -- which appends across launches, one banner line
-        per launch. A failed spawn drops the record and rolls the marker back
+        The launch claims the ``.pgid`` record with an exclusive create
+        before spawning -- no flock covers this handoff (resume takes none,
+        and a nested ``.worktrees`` flock would deadlock under start's), so
+        the claim is what arbitrates two launches whose vets both read the
+        same dead-or-absent record. The child waits for the pid to land in
+        the claimed record before exec'ing the loop, so no probe ever sees a
+        booted headless loop without its record (:func:`_group_alive`), and
+        the launch banner is flushed before that record lands, so it always
+        precedes the loop's first output in ``headless.log`` -- which appends
+        across launches, one banner line per launch. A failed or stalled
+        spawn drops the record and rolls the marker back
         to its prior state (a pre-existing marker names an earlier headless
         launch, and a failure must not rewrite the recorded backend), so
         ``--continue`` stays the retry path. A recorded group the same
@@ -2102,7 +2230,14 @@ class Node:
         # guidance for a loop that is still parking)
         alive = _group_alive(pgid_file)
         if alive is not False:
-            pgid = pgid_file.read_text(encoding='utf-8').strip()
+            # the parking loop can drop the record between the probe and
+            # this read -- a vanished record is the exit hook's own proof
+            # the loop is gone
+            try:
+                pgid = pgid_file.read_text(encoding='utf-8').strip()
+            except FileNotFoundError:
+                alive = False
+        if alive is not False:
             if alive is None:
                 raise RuntimeError(
                     'the process identity probe gave no answer for process'
@@ -2115,6 +2250,34 @@ class Node:
                     f'the loop is still running or parking: {pgid}; retry once it exits'
                 )
             raise RuntimeError(f'headless node process already exists: {pgid}')
+        # claim the record exclusively before the spawn: the vet alone cannot
+        # arbitrate two launches racing each other (resume holds no flock, and
+        # a nested .worktrees flock would deadlock under start's, which spans
+        # this handoff), so the O_EXCL create is the single-boot gate and the
+        # loser refuses exactly as it would over a live record
+        claimed = (
+            'the loop is still running or parking: a rival launch claimed'
+            ' the record; retry once it exits'
+            if resume
+            else 'headless node process already exists: a rival launch'
+            ' claimed the record'
+        )
+        # a record the vet judged dead clears for the claim; one it could not
+        # even parse is a rival's claim in flight (the pid lands only after
+        # the spawn), refused like a live record rather than swept
+        try:
+            int(pgid_file.read_text(encoding='utf-8').strip())
+        except FileNotFoundError:
+            pass
+        except ValueError:
+            raise RuntimeError(claimed) from None
+        else:
+            pgid_file.unlink(missing_ok=True)
+        try:
+            claim = os.open(f'{pgid_file}', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            raise RuntimeError(claimed) from None
+        os.close(claim)
         # build the loop argv
         loop_args = [
             sys.executable,
@@ -2130,10 +2293,11 @@ class Node:
             loop_args.append('--resume')
         if drain:
             loop_args.append('--drain')
-        # hold the exec until the record lands, so the group is probeable first
+        # hold the exec until the pid lands in the claimed record, so the
+        # group is probeable first (-s: the bare claim is not yet a record)
         wrapper = (
-            'for _ in {1..100}; do [[ -f "$1" ]] && break; sleep 0.01; done; '
-            '[[ -f "$1" ]] || exit 1; shift; exec "$@"'
+            'for _ in {1..500}; do [[ -s "$1" ]] && break; sleep 0.01; done; '
+            '[[ -s "$1" ]] || exit 1; shift; exec "$@"'
         )
         command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_file}', *loop_args]
         # the banner names the launch kind, so a post-mortem reads which
@@ -2159,6 +2323,13 @@ class Node:
                 )
                 stream.flush()
             pgid_file.write_text(f'{process.pid}\n', encoding='utf-8')
+            # the wrapper holds the exec only so long: a child that gave up
+            # waiting exits before the loop boots, and reporting success
+            # would strand the node idle behind a dead record
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f'the headless launch exited before boot (log: {log_path})'
+                )
         except Exception:
             if not recorded:
                 marker.unlink(missing_ok=True)
@@ -2610,12 +2781,13 @@ class Node:
 
         The status re-read, process-group vet, and kill's event/signal writes
         stay atomic under the ``.worktrees`` flock; ``kill.sh`` and the row
-        marking run outside the lock. An idle target is also stamped ``killed``
-        under that flock: it has no terminal to clobber and possibly no session
-        yet, and only a stamp that precedes the reap lets the loop's flock'd
-        boot check stand a racing start down -- stamped after, the loop boots
-        in the window, kill.sh has already no-op'd, and nothing ever reaps it
-        (the loop never polls the kill signal). An unverifiable recorded group
+        marking run outside the lock. An idle or paused target is also stamped
+        ``killed`` under that flock: neither has a terminal to clobber or a
+        session the stamp could orphan, and only a stamp that precedes the
+        reap lets the loop's flock'd boot check stand a racing start or
+        resume down -- stamped after, the relaunched loop boots in the
+        window, kill.sh has already no-op'd over the park, and nothing ever
+        reaps it (the loop never polls the kill signal). An unverifiable recorded group
         refuses before any kill state is written, naming the ``ps`` check and
         the record to clear. The attribution -- ``killed by <actor>``, with
         the reason appended when one is given -- lands identically on the kill
@@ -2649,7 +2821,13 @@ class Node:
                 pgid_file = self.node_dir / name
                 alive = _group_alive(pgid_file)
                 if alive is None:
-                    pgid = pgid_file.read_text(encoding='utf-8').strip()
+                    # the parking loop can drop the record between the probe
+                    # and this read -- a vanished record leaves nothing to
+                    # arbitrate, so the reap proceeds over it
+                    try:
+                        pgid = pgid_file.read_text(encoding='utf-8').strip()
+                    except FileNotFoundError:
+                        continue
                     self._signal_refuse(
                         verb='kill',
                         event='kill',
@@ -2671,9 +2849,11 @@ class Node:
             # the write rather than warn over a reap that worked
             if self.record.runs(limit=1):
                 self.record.signal_set('kill', label)
-            # an idle target is stamped here, not after the reap -- see the
-            # docstring: the boot-window race is only closed flock-to-flock
-            if current == 'idle':
+            # an idle or paused target is stamped here, not after the reap --
+            # see the docstring: the boot-window race is only closed
+            # flock-to-flock, and neither state has a runtime the early
+            # stamp could clobber
+            if current in ('idle', 'paused'):
                 self.status_set('killed')
         try:
             result = self._run_script('kill.sh', f'{self._root}')
@@ -3670,7 +3850,13 @@ class Node:
                         and pgid_file.exists()
                     )
                     if group_backed:
-                        pgid = pgid_file.read_text(encoding='utf-8').strip()
+                        # the parking loop can drop the record between the
+                        # probe and this read -- a vanished record is the
+                        # exit's own proof this node is settling
+                        try:
+                            pgid = pgid_file.read_text(encoding='utf-8').strip()
+                        except FileNotFoundError:
+                            continue
                         runtime = f'as process group {pgid}'
                         if descendant.headless:
                             runtime += f' (log: {descendant.node_dir / HEADLESS_LOG})'

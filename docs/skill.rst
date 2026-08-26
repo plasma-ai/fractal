@@ -347,8 +347,9 @@ continue flags. The node launches in a detached tmux session by default and
 runs autonomously from there; when tmux is unavailable, ``start --headless``
 runs it in a detached process group instead — child starts follow the
 parent's backend and append their output to ``headless.log``. Without a
-flag, a relaunch (``--continue`` or ``resume``) reuses the backend the node
-last launched with; ``--headless``/``--tmux`` re-record it.
+flag, ``--continue`` reuses the backend the node last launched with and
+``--headless``/``--tmux`` re-record it; ``resume`` always relaunches through
+the recorded backend.
 
 Post-launch briefing
 ~~~~~~~~~~~~~~~~~~~~

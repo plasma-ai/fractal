@@ -37,10 +37,11 @@ the path set (`REPO_DIR`, `PROJECT_DIR`, `SCOPE_DIR`, `WORKTREE_DIR`,
 limits (`MAX_DEPTH`, `MAX_CHILDREN`, `MAX_DESCENDANTS`), and the config-derived
 mode flags (`DETACHED_MODE`, `META_MODE` with `META_TARGET`); the boot-pinned
 copy the loop exports into every seat adds `FRACTAL_HEADLESS`, the run's launch
-backend (`true`/`false`), so a seat's `fractal node start` inherits the backend
-through the option's envvar. `SCOPE_DIR` space-joins the scope roots when
-several are configured, and the project and wiki paths nest under the project
-prefix for a sub-project node.
+backend (`true`/`false`), so a seat's `fractal node start` inherits the backend:
+the CLI's backend resolution reads the seat-exported `FRACTAL_HEADLESS` when the
+flag is absent. `SCOPE_DIR` space-joins the scope roots when several are
+configured, and the project and wiki paths nest under the project prefix for a
+sub-project node.
 
 Run-scoped variables have no static derivation -- the caller supplies them as
 overrides, and overrides always win over the derived map. The loop passes its

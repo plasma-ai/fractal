@@ -49,15 +49,18 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
   marker records — the same record an unflagged `start --continue` reuses; the
   relaunched loop withdraws the run's recorded pause signals itself as it adopts
   the run, so a bare resume works even after a node transplant. Its
-  still-parking session guard runs only without the `.headless` marker -- a
+  still-parking session guard runs only without the `.headless` marker — a
   headless node owns no session, so a same-named session from another repo
   sharing the basename never blocks its resume; a headless node's own
   still-parking loop is refused by the relaunch's group vet instead.
 - `kill.sh` reaps the node's live process groups — the in-flight agent's
   recorded step group and the tmux pane's or, with no pane, the recorded `.pgid`
-  group of a headless loop — escalating a polite termination to a forced one,
-  then destroys the tmux session. When nothing is alive (a paused park), it
-  exits cleanly and the kill is pure bookkeeping.
+  group — escalating a polite termination to a forced one, then destroys the
+  tmux session. The teardown is per-backend like `resume.sh`'s guard: under the
+  `.headless` marker the pane lookup, session check, and session destroy are all
+  skipped and only the recorded groups are reaped, so a same-named session from
+  another repo sharing the basename is never cross-fired. When nothing is alive
+  (a paused park), it exits cleanly and the kill is pure bookkeeping.
 - `delete.sh` removes one node's worktree, local branch, and remote branch; the
   recursive delete calls it once per node, deepest first.
 

@@ -424,9 +424,9 @@ when continuing a stopped/exited node. If the user wants to tweak a setting
 first, edit `<node_dir>/config.json`, then start. The node launches in a
 detached tmux session by default; when tmux is unavailable, use
 `start --headless` — child starts follow the parent's backend and append their
-output to `headless.log`. Without a flag, a relaunch (`--continue` or `resume`)
-reuses the backend the node last launched with; `--headless`/`--tmux` re-record
-it.
+output to `headless.log`. Without a flag, `--continue` reuses the backend the
+node last launched with and `--headless`/`--tmux` re-record it; `resume` always
+relaunches through the recorded backend.
 
 ### Step 4: Post-launch briefing
 

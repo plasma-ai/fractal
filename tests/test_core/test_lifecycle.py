@@ -43,7 +43,9 @@ __all__ = [
     'test_start_headless_selects_detached_backend',
     'test_launch_headless_records_marker_and_group_around_the_spawn',
     'test_launch_headless_failed_spawn_keeps_the_prior_backend_record',
-    'test_start_refuses_a_live_recorded_group',
+    'test_start_vets_the_recorded_group',
+    'test_headless_start_vets_a_same_named_session',
+    'test_launch_headless_refuses_a_rival_claim',
     'test_start_serializes_runtime_backends',
     'test_start_continue_re_arms_after_drained_run',
     'test_start_continue_refuses_after_budget_end',
@@ -60,7 +62,7 @@ __all__ = [
     'test_kill_drops_a_foreign_owned_recycled_group',
     'test_kill_sets_killed_status',
     'test_kill_reaps_idle_node_before_start',
-    'test_kill_stamps_idle_killed_before_the_reap',
+    'test_kill_stamps_a_runtimeless_target_before_the_reap',
     'test_kill_marks_all_active',
     'test_kill_keeps_loop_terminal_status_when_raced',
     'test_retire_sets_status',
@@ -284,6 +286,10 @@ def test_launch_headless_records_marker_and_group_around_the_spawn(
     class _Spawned:
         pid = 4242
 
+        def poll(self: _Spawned) -> None:
+            """Report the child as still running."""
+            return None
+
     monkeypatch.setattr(
         'fractal.core.node.subprocess.Popen',
         lambda *args, **kwargs: _Spawned(),
@@ -340,20 +346,29 @@ def test_launch_headless_failed_spawn_keeps_the_prior_backend_record(
     assert not (node.node_dir / PGID_FILE).exists()
 
 
-@pytest.mark.parametrize('continue_run', [False, True])
-def test_start_refuses_a_live_recorded_group(
+@pytest.mark.parametrize('continue_run', [False, True], ids=['start', 'continue'])
+@pytest.mark.parametrize(
+    argnames='verdict',
+    argvalues=['live', 'unknown', 'recycled'],
+    ids=['live', 'unknown', 'recycled'],
+)
+def test_start_vets_the_recorded_group(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
+    verdict: str,
     continue_run: bool,
 ) -> None:
-    """A start refuses while a recorded process group still runs.
+    """A start judges the recorded group by the identity-checked law.
 
     The idle boot window (a headless handoff returned, the loop's preflight
     has not stamped ``active`` yet) and the parking window (the loop stamped
     its terminal status, its exit hook has not dropped the record yet) leave
-    the recorded group as the only evidence a loop exists -- judged by the
-    identity-checked law, the fresh and continue arms both refuse before
-    ``start.sh`` could boot a second loop over it.
+    the recorded group as the only evidence a loop exists. The fresh and
+    continue arms both refuse a live recorded group before ``start.sh``
+    could boot a second loop over it, refuse an unverifiable one naming the
+    ``ps`` check (ignorance never authorizes a boot), and proceed over a
+    recycled id -- a stranger's group younger than its record is not this
+    node's loop.
     """
     node = node_with_db
     node.config.set('max_cost', 1.0)
@@ -363,20 +378,114 @@ def test_start_refuses_a_live_recorded_group(
     pgid_file = node.node_dir / PGID_FILE
     try:
         pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        if verdict == 'unknown':
+            monkeypatch.setattr(
+                'fractal.core.node._recorded_group',
+                lambda pgid, recorded_at: None,
+            )
+        if verdict == 'recycled':
+            # backdating the record makes the leader postdate it: a
+            # recycled pid fronting a stranger's group
+            stale = time.time() - 3600
+            os.utime(pgid_file, (stale, stale))
         run_scripts = _stub_run_script(monkeypatch, node)
         verb = 'continue' if continue_run else 'start'
-        with pytest.raises(
-            RuntimeError, match=f'Cannot {verb}: node process already exists'
-        ):
+        if verdict == 'recycled':
             node.start(continue_run=continue_run)
-        assert run_scripts == []
-        assert leader.poll() is None
+            assert [call[0] for call in run_scripts] == ['start.sh']
+        else:
+            messages = {
+                'live': f'Cannot {verb}: node process already exists',
+                'unknown': (
+                    f'Cannot {verb}: the process identity probe gave no answer'
+                ),
+            }
+            with pytest.raises(RuntimeError, match=messages[verdict]):
+                node.start(continue_run=continue_run)
+            assert run_scripts == []
+            # the record and the group both survive the refusal
+            assert pgid_file.read_text(encoding='utf-8') == f'{leader.pid}\n'
+            assert leader.poll() is None
     finally:
         try:
             os.killpg(leader.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         leader.wait()
+
+
+@pytest.mark.parametrize(
+    argnames='foreign',
+    argvalues=[True, False],
+    ids=['foreign', 'own-boot'],
+)
+def test_headless_start_vets_a_same_named_session(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    foreign: bool,
+) -> None:
+    """A headless fresh start passes only a provably foreign same-named session.
+
+    A headless launch owns no tmux session, so a same-named session from
+    another repo sharing the basename must not block it (the rule
+    ``resume.sh`` already applies) -- but the matching name can also be this
+    node's own tmux boot still racing its ``.pgid`` record, which must keep
+    refusing. The pane's argv names the launch's worktree at every exec
+    stage, so the vet attributes the session by it; ours-or-no-answer
+    refuses.
+    """
+    node = node_with_db
+    node.config.set('max_cost', 1.0)
+    session = node.tmux_session
+    monkeypatch.setattr('fractal.util.tmux.probe', lambda **kwargs: {session})
+    worktree = '/elsewhere/repo/.worktrees/main' if foreign else f'{node._root}'
+    real_run = subprocess.run
+
+    def fake_run(
+        cmd: list,
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess:
+        if cmd[:2] == ['tmux', 'list-panes']:
+            return subprocess.CompletedProcess(cmd, 0, f'{session}\t4242\n', '')
+        if cmd[0] == 'ps':
+            return subprocess.CompletedProcess(
+                cmd, 0, f'bash start.sh {worktree} --resume\n', ''
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr('fractal.core.node.subprocess.run', fake_run)
+    run_scripts = _stub_run_script(monkeypatch, node)
+    if foreign:
+        node.start(headless=True)
+        assert run_scripts == [('start.sh', f'{node._root}', '--headless')]
+    else:
+        with pytest.raises(RuntimeError, match='own tmux boot'):
+            node.start(headless=True)
+        assert run_scripts == []
+
+
+@pytest.mark.parametrize('resume', [False, True], ids=['start', 'resume'])
+def test_launch_headless_refuses_a_rival_claim(
+    node_with_db: Node,
+    resume: bool,
+) -> None:
+    """A launch never boots over a rival's in-flight record claim.
+
+    The headless handoff claims ``.pgid`` with an exclusive create before it
+    spawns and writes the pid only after, so a rival's claim shows as an
+    empty record -- which the vet must refuse like a live one rather than
+    sweep: clearing it would hand both launches the claim and double-boot
+    the loop.
+    """
+    node = node_with_db
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('', encoding='utf-8')
+    with pytest.raises(RuntimeError, match='a rival launch claimed the record'):
+        node._launch_headless(resume=resume)
+    # the rival's claim survives for its own pid write; no backend recorded
+    assert pgid_file.exists()
+    assert not (node.node_dir / HEADLESS_FILE).exists()
 
 
 def test_start_serializes_runtime_backends(
@@ -862,22 +971,29 @@ def test_kill_reaps_idle_node_before_start(
         node.start()
 
 
-def test_kill_stamps_idle_killed_before_the_reap(
+@pytest.mark.parametrize('status', ['idle', 'paused'], ids=['idle', 'paused'])
+def test_kill_stamps_a_runtimeless_target_before_the_reap(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
+    status: str,
 ) -> None:
-    """An idle kill stamps ``killed`` under the flock, before ``kill.sh``.
+    """Kill stamps an idle or paused target under the flock, before ``kill.sh``.
 
-    The boot window: a kill landing while a start is mid-validation finds
-    no session to reap, so a stamp that trailed the reap would let the
-    loop boot in between, flock-read ``idle``, stamp ``active``, and run
-    forever under a ``killed`` census row -- kill.sh already no-op'd and
-    the loop never polls the kill signal. The pre-reap stamp serializes
-    the outcomes: the loop's flock'd boot check sees ``killed`` and
-    stands down.
+    The relaunch window: a kill landing while a start is mid-validation, or
+    while a resume relaunches a parked run, finds no session or group to
+    reap -- so a stamp that trailed the reap would let the loop boot in
+    between, flock-read the pre-kill status, stamp ``active``, and run
+    forever under a ``killed`` census row: kill.sh already no-op'd and the
+    loop never polls the kill signal. The pre-reap stamp serializes the
+    outcomes: the loop's flock'd boot check sees ``killed`` and stands down.
     """
     node = node_with_db
-    # a never-started node: idle, no run rows, no tmux session
+    if status == 'paused':
+        # a parked run: the loop exited at pause, nothing is alive to reap
+        node.status_set('active')
+        node.record.run_start()
+        node.status_set('paused')
+    # no runtime either way: no tmux session (idle also has no run rows)
     monkeypatch.setattr(Node, '_tmux_session_exists', lambda self: False)
     stamped: list[str] = []
 

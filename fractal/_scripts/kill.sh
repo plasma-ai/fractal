@@ -57,6 +57,7 @@ fi
 
 # derive the node's data directory (mirrors Node.node_dir): the project
 # prefix comes from the .worktrees/.project/<branch> cache in the main repo
+NODE_DIR=""
 PGID_FILE=""
 if [[ -n "$REPO_ROOT" && -n "$BRANCH" ]]; then
     PROJECT="."
@@ -65,19 +66,29 @@ if [[ -n "$REPO_ROOT" && -n "$BRANCH" ]]; then
         PROJECT=$(cat "$PROJECT_FILE")
     fi
     if [[ "$PROJECT" == "." ]]; then
-        PGID_FILE="$WORKTREE_DIR/.fractal/$BRANCH/.pgid"
+        NODE_DIR="$WORKTREE_DIR/.fractal/$BRANCH"
     else
-        PGID_FILE="$WORKTREE_DIR/$PROJECT/.fractal/$BRANCH/.pgid"
+        NODE_DIR="$WORKTREE_DIR/$PROJECT/.fractal/$BRANCH"
     fi
+    PGID_FILE="$NODE_DIR/.pgid"
 fi
+
+# the teardown is per-backend (mirrors resume.sh): a headless node owns no
+# session, so a matching name is another repo's sharing this basename --
+# reap only the recorded groups and never touch tmux
+HEADLESS=false
+[[ -n "$NODE_DIR" && -f "$NODE_DIR/.headless" ]] && HEADLESS=true
 
 # resolve pane pid by exact session_name match (spaces/parens
 # defeat split-on-space lookup)
-PANE_PID=$(
-    tmux list-panes -a -F '#{session_name}'$'\t''#{pane_pid}' 2>/dev/null \
-        | awk -F'\t' -v name="$TMUX_SESSION_NAME" '$1 == name { print $2; exit }' \
-        || true
-)
+PANE_PID=""
+if [[ "$HEADLESS" != true ]]; then
+    PANE_PID=$(
+        tmux list-panes -a -F '#{session_name}'$'\t''#{pane_pid}' 2>/dev/null \
+            | awk -F'\t' -v name="$TMUX_SESSION_NAME" '$1 == name { print $2; exit }' \
+            || true
+    )
+fi
 
 # capture pgid before teardown -- pane shell vanishes but orphans keep the pgid
 PGID=""
@@ -113,7 +124,8 @@ fi
 # grep -qxF (exact match), not tmux -t: -t resolves targets by
 # prefix/fnmatch, so a short name false-matches longer session names
 SESSION_EXISTS=false
-if tmux list-sessions -F '#{session_name}' 2>/dev/null \
+if [[ "$HEADLESS" != true ]] \
+    && tmux list-sessions -F '#{session_name}' 2>/dev/null \
     | grep -qxF "$TMUX_SESSION_NAME"; then
     SESSION_EXISTS=true
 fi
@@ -156,8 +168,11 @@ if _alive; then
 fi
 
 # '=' pins the target to the exact name -- a bare -t falls back to
-# prefix/fnmatch resolution and could retarget another live session
-tmux kill-session -t "=$TMUX_SESSION_NAME" 2>/dev/null || true
+# prefix/fnmatch resolution and could retarget another live session;
+# a headless node owns no session, so a same-named one is another repo's
+if [[ "$HEADLESS" != true ]]; then
+    tmux kill-session -t "=$TMUX_SESSION_NAME" 2>/dev/null || true
+fi
 # drop the recorded pgid handles -- the groups are dead either way
 [[ -n "$PGID_FILE" ]] && rm -f "$PGID_FILE" 2>/dev/null || true
 [[ -n "$STEP_PGID_FILE" ]] && rm -f "$STEP_PGID_FILE" 2>/dev/null || true

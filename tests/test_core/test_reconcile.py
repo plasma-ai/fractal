@@ -37,8 +37,9 @@ __all__ = [
     'test_reconcile_requires_a_definitive_headless_identity',
     'test_headless_liveness_reconciles_a_dead_process_group',
     'test_headless_liveness_never_asks_tmux',
-    'test_bare_loop_group_overrules_a_definitive_tmux_answer',
+    'test_bare_loop_group_decides_when_tmux_denies_or_is_silent',
     'test_blind_probe_spares_a_record_less_bare_loop',
+    'test_reconcile_stands_down_for_a_relaunch_racing_the_probe',
     'test_kill_unchanged_on_stale_active',
     'test_reap_orphan_reaps_only_the_recorded_group',
     'test_reap_orphan_spares_a_group_with_unknown_identity',
@@ -414,7 +415,7 @@ def test_headless_liveness_never_asks_tmux(
     argvalues=[(True, 'active'), (None, 'active'), (False, 'exited')],
     ids=['recorded', 'unknown', 'recycled'],
 )
-def test_bare_loop_group_overrules_a_definitive_tmux_answer(
+def test_bare_loop_group_decides_when_tmux_denies_or_is_silent(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
     recorded: Optional[bool],
@@ -464,6 +465,56 @@ def test_blind_probe_spares_a_record_less_bare_loop(
     assert node.status() == 'active'
     run = node.db.read('runs', where={'run_id': run_id})[0]
     assert run['status'] == 'active'
+
+
+def test_reconcile_stands_down_for_a_relaunch_racing_the_probe(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The heal never reaps a loop that relaunched after its dead verdict.
+
+    ``_reconcile_status`` holds no flock, so a continue can re-arm the node
+    and boot a fresh loop between the healer's probe and its reap. The heal
+    acts only on the exact state the probe judged -- status still ``active``
+    and the group records untouched -- so a rewritten ``.pgid`` (a fresh
+    boot records its group before the active stamp) stands the heal down:
+    the new group is never signaled, its record survives, and the run stays
+    open for the loop that owns it.
+    """
+    node = node_with_db
+    node.status_set('active')
+    run_id = node.record.run_start()
+    (node.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
+    # the crashed launch's record names a provably dead group
+    crashed = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    os.killpg(crashed.pid, signal.SIGKILL)
+    crashed.wait()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text(f'{crashed.pid}\n', encoding='utf-8')
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+
+    def racing_loop_alive() -> Optional[bool]:
+        verdict = Node._loop_alive(node)
+        # the rival relaunch lands between the probe and the reap: its
+        # fresh boot rewrites the record before the active stamp
+        pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        return verdict
+
+    monkeypatch.setattr(node, '_loop_alive', racing_loop_alive)
+    try:
+        node._reconcile_status()
+        # the fresh loop keeps its group, its record, and its open run
+        assert leader.poll() is None
+        assert pgid_file.read_text(encoding='utf-8') == f'{leader.pid}\n'
+        assert node.status() == 'active'
+        run = node.db.read('runs', where={'run_id': run_id})[0]
+        assert run['status'] == 'active'
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 def test_kill_unchanged_on_stale_active(
