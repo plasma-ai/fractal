@@ -126,8 +126,8 @@ may include breaking changes, each listed under a Breaking heading.
 - A draining seat can no longer spawn its way out by moving. The drain's
   spawn/re-arm refusals resolved the acting node from `_NODE`, else the working
   directory — both the seat's to rewrite — so
-  `env -u _DRAIN -u _NODE -C <sibling worktree> fractal node init …` resolved to
-  a real but *wrong* node the drain never binds, and the same command from
+  `env -u _DRAIN -u _NODE -C <sibling worktree> fractal node init ...` resolved
+  to a real but *wrong* node the drain never binds, and the same command from
   outside every worktree resolved to no node at all and failed open. Two nodes
   were spawned from a live drain that way. The guard now also asks the operating
   system: the loop makes each agent invocation its own process group leader and

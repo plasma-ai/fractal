@@ -277,7 +277,7 @@ class FractalApp(App):
             self.message_pane.post(
                 branch=branch,
                 who='error',
-                text=f'{theme.WARN} agent silent for {fmt.dur(_CHAT_IDLE_S)} — cancelled',
+                text=f'{theme.WARN} agent silent for {fmt.dur(_CHAT_IDLE_S)} -- cancelled',
             )
         # launch-if-idle: at most one poll build in flight; the result lands
         # as a SnapshotReady message, never built on the UI thread
