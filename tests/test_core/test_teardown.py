@@ -15,7 +15,7 @@ from typing import Optional
 
 import pytest
 
-from fractal.constants import SOCKET_FILE
+from fractal.constants import HEADLESS_FILE, PGID_FILE, SOCKET_FILE
 from fractal.core.node import Node
 from tests._helpers import _stub_run_script
 
@@ -47,6 +47,7 @@ __all__ = [
     'test_delete_locked_worktree_aborts_before_remote',
     'test_teardown_running_preflight_precedes_paused_settle',
     'test_teardown_refuses_on_inconclusive_tmux_probe',
+    'test_teardown_refuses_on_inconclusive_headless_probe',
     'test_teardown_refuses_session_alive_on_recorded_socket',
     'test_destroy_rejects_from_inside_worktree',
     'test_teardown_locked_preflight_precedes_paused_settle',
@@ -691,11 +692,36 @@ def test_teardown_refuses_on_inconclusive_tmux_probe(
     runner.status_set('active')
     # tmux gives no answer (e.g. no binary on this shell's PATH)
     monkeypatch.setattr('fractal.util.tmux.probe', lambda: None)
-    with pytest.raises(RuntimeError, match='tmux probe failed'):
+    with pytest.raises(RuntimeError, match='probe gave no answer'):
         Node.destroy(git_repo)
-    with pytest.raises(RuntimeError, match='tmux probe failed'):
+    with pytest.raises(RuntimeError, match='probe gave no answer'):
         Node.reset(git_repo)
     # nothing was torn down
+    assert runner.worktree.is_dir()
+    assert runner.status() == 'active'
+
+
+def test_teardown_refuses_on_inconclusive_headless_probe(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A teardown never treats an unknown process identity as a dead loop."""
+    node = Node(git_repo)
+    node.init(agent='claude', user=True)
+    node.init(name='runner')
+    runner = Node(git_repo / '.worktrees' / 'main.runner')
+    runner.status_set('active')
+    (runner.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
+    (runner.node_dir / PGID_FILE).write_text('4242\n', encoding='utf-8')
+    monkeypatch.setattr('fractal.core.node.os.killpg', lambda pgid, signal: None)
+    monkeypatch.setattr(
+        'fractal.core.node._recorded_group',
+        lambda pgid, recorded_at: None,
+    )
+    with pytest.raises(RuntimeError, match='probe gave no answer'):
+        Node.destroy(git_repo)
+    with pytest.raises(RuntimeError, match='probe gave no answer'):
+        Node.reset(git_repo)
     assert runner.worktree.is_dir()
     assert runner.status() == 'active'
 

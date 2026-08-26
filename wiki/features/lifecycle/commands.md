@@ -29,14 +29,17 @@ the tree limits and the parent's budget are enforced — that gate is specified 
 ## start
 
 `start` takes an `idle` node into `active`: it opens a run row and launches the
-iteration loop inside a tmux session. `start --continue` re-arms a settled node
-for another run — this re-entry re-checks the width and descendant caps, since
-it returns one unsettled node to the tree exactly as a spawn adds one. A run
-that ended on its cost budget never re-arms silently: a bare `--continue`
-refuses, naming the spent and armed figures, until an explicit `--max-cost`
-rides it (applied through the parent's retune — see
-[[features/cost/budgets|budgets]]). A tree-wide pause latch makes any start
-refuse until resume.
+iteration loop inside a tmux session. `start --headless` instead launches an
+independent process group and captures its output in the node's `headless.log`;
+the command still returns immediately, and delegated child starts inherit the
+headless backend through the loop environment. `--tmux` overrides that inherited
+choice. `start --continue` re-arms a settled node for another run — this
+re-entry re-checks the width and descendant caps, since it returns one unsettled
+node to the tree exactly as a spawn adds one. A run that ended on its cost
+budget never re-arms silently: a bare `--continue` refuses, naming the spent and
+armed figures, until an explicit `--max-cost` rides it (applied through the
+parent's retune — see [[features/cost/budgets|budgets]]). A tree-wide pause
+latch makes any start refuse until resume.
 
 ## finish and stop
 
@@ -68,11 +71,14 @@ records no signal there is anything to adopt.
 
 `kill` is the escape hatch: it targets `active`, `paused`, and `idle` nodes — a
 booting spawn is reaped and a never-started one is stamped `killed` so it can
-never activate — reaps the tmux session (when one lives), and closes open run
-and iteration rows as `killed`. It is pure bookkeeping plus process reaping — no
-graceful wind-down. The descendant sweep re-enumerates the subtree to a fixpoint
-so children registered mid-sweep are still caught, and proceeds best-effort per
-node.
+never activate — reaps the loop runtime (the tmux session, or a headless or bare
+loop's recorded process group, when one lives), and closes open run and
+iteration rows as `killed`. It is pure bookkeeping plus process reaping — no
+graceful wind-down. It refuses only a status outside those three or a recorded
+process group whose identity `ps` cannot verify; that refusal names the `ps -p`
+check and the record to remove. The descendant sweep re-enumerates the subtree
+to a fixpoint so children registered mid-sweep are still caught, and proceeds
+best-effort per node.
 
 ## pause and resume
 

@@ -30,6 +30,7 @@ __all__ = [
     'test_display_name_of',
     'test_tree_topology_and_flags',
     'test_tree_shows_crashed_active_as_exited',
+    'test_tree_reconciles_headless_process_identity',
     'test_crash_between_quiet_builds_reconciles_to_exited',
     'test_active_card_streams_live_state',
     'test_settled_card_is_a_time_machine',
@@ -125,6 +126,59 @@ def test_tree_shows_crashed_active_as_exited(
     assert snap.counts == (9, 4)
     # display only: the stored status file still reads active
     assert data.status('main.gamma') == 'active'
+
+
+@pytest.mark.parametrize(
+    ('backend', 'probe', 'recorded', 'expected'),
+    [
+        ('headless', 'live', True, 'active'),
+        ('headless', 'permission', False, 'exited'),
+        ('headless', 'permission', None, 'active'),
+        ('headless', 'recycled', False, 'exited'),
+        ('headless', 'unknown', None, 'active'),
+        ('bare', 'live', True, 'active'),
+        ('bare', 'recycled', False, 'exited'),
+    ],
+)
+def test_tree_reconciles_headless_process_identity(
+    pair_tree: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    probe: str,
+    recorded: Optional[bool],
+    expected: str,
+) -> None:
+    """Process-group display liveness mirrors the lifecycle law.
+
+    EPERM arbitrates by identity, only a failed ``ps`` stays active, and a
+    bare loop renders as core judges it.
+    """
+    branch = 'main.alpha'
+    Node(pair_tree / '.worktrees' / branch).status_set('active')
+    data = TuiData(resolve_node(pair_tree))
+    builder = SnapshotBuilder(data, NodePoller(data.db_dir), now=lambda: NOW_EPOCH)
+    builder.build('main')
+    node_dir = data.node_dir(branch)
+    assert node_dir is not None
+    if backend == 'headless':
+        (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    (node_dir / '.pgid').write_text('4242\n', encoding='utf-8')
+    monkeypatch.setattr(data, 'live_sessions', frozenset)
+    if probe == 'permission':
+
+        def killpg(pgid: int, signal: int) -> None:
+            raise PermissionError
+
+        monkeypatch.setattr('fractal.core.node.os.killpg', killpg)
+    else:
+        monkeypatch.setattr('fractal.core.node.os.killpg', lambda pgid, signal: None)
+    monkeypatch.setattr(
+        'fractal.core.node._recorded_group',
+        lambda pgid, recorded_at: recorded,
+    )
+    snap = builder.build('main')
+    statuses = {row['branch']: row['status'] for row in snap.tree}
+    assert statuses[branch] == expected
 
 
 def test_crash_between_quiet_builds_reconciles_to_exited(

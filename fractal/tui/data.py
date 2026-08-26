@@ -27,8 +27,14 @@ from typing import Any, Optional
 import fractal.core.agent
 import fractal.core.worktree
 import fractal.util
-from fractal.constants import CONFIG_FILE, STATUS_FILE
-from fractal.core.node import Node, node_dir, tmux_session_name
+from fractal.constants import (
+    CONFIG_FILE,
+    HEADLESS_FILE,
+    PGID_FILE,
+    SOCKET_FILE,
+    STATUS_FILE,
+)
+from fractal.core.node import Node, _group_alive, node_dir, tmux_session_name
 
 __all__ = [
     'leaf_of',
@@ -247,6 +253,26 @@ class TuiData:
         ``exited`` shows until a writer (``node start``/``merge``/...) persists it.
         """
         return fractal.util.tmux.sessions()
+
+    def loop_alive(self: TuiData, branch: str, sessions: frozenset[str]) -> bool:
+        """Return whether the branch's loop is alive, for display.
+
+        The cockpit's copy of core's liveness law (``Node._loop_exists``) over
+        the caller's one-per-refresh session set instead of a per-node tmux
+        probe: a ``.headless`` node is judged by its recorded process group
+        alone; any other node by its listed session, except that a socket-less
+        loop (a bare launch) with no listed session is judged by its group. An
+        inconclusive group probe stays ``active`` -- display never settles a
+        loop core would spare -- and nothing here mutates lifecycle state.
+        """
+        node_dir = self.node_dir(branch)
+        alive = self.tmux_session_name(branch) in sessions
+        if node_dir is None:
+            return alive
+        headless = (node_dir / HEADLESS_FILE).is_file()
+        if headless or (not alive and not (node_dir / SOCKET_FILE).exists()):
+            return _group_alive(node_dir / PGID_FILE) is not False
+        return alive
 
     @staticmethod
     def rows(

@@ -39,6 +39,8 @@ def test_exclude_template_ships_as_package_data() -> None:
         '.worktrees/',
         '.db',
         '.status',
+        '.headless',
+        'headless.log',
         'claude.err',
         'codex.err',
         'grok.err',

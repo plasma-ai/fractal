@@ -222,7 +222,7 @@ Recover after a crash
 
 Crash healing is read-driven — there is no separate repair command to run
 first. A loop that dies without settling leaves its node ``active`` with no
-live tmux session; the next read or lifecycle verb that touches it
+live runtime; the next read or lifecycle verb that touches it
 (``fractal node status``, ``fractal node list``, ``fractal node start``, and
 the teardown verbs) detects that state, stamps the node ``exited``, closes
 its open run, iteration, and step rows, and reaps any recorded leftover
@@ -235,12 +235,14 @@ process groups:
    $ fractal node start parser --continue
 
 ``fractal node list --live`` gives the same authoritative view read-only,
-relabeling without persisting. A ``paused`` node is never healed: no tmux
-session is its normal parked state. Neither is a loop launched bare
-(``fractal node _loop``, what ``start.sh`` execs — the harness and a
-tmux-less host launch it directly): it never joined a tmux server, so the
-probe's "no such session" says nothing about it, and its own recorded process
-group keeps the heal — and the reap that comes with it — off a running loop.
+relabeling without persisting. A ``paused`` node is never healed: no live
+runtime is its normal parked state. Neither is a loop whose recorded process
+group is still alive: a ``--headless`` node (what a tmux-less host uses) is
+judged by that group alone, and a loop launched bare (``fractal node _loop``,
+what ``start.sh`` execs — the harness launches it directly) never joined a
+tmux server, so the probe's "no such session" says nothing about it, and its
+own recorded group keeps the heal — and the reap that comes with it — off a
+running loop.
 
 ``--continue`` restores the worktree before relaunching: uncommitted project
 files refuse without ``--clean`` (which acknowledges discarding them), and a
@@ -283,8 +285,9 @@ refusals.
    Removes every node worktree, local branch, and registration in the tree.
    The user node's data — config and the central database with all history
    — plus the wiki and baseline commits survive, and fresh nodes can spawn
-   immediately afterwards. Refuses while any node's tmux session is alive;
-   paused nodes are killed as part of the confirmed teardown. Also clears a
+   immediately afterwards. Refuses while any node's loop runtime — a tmux
+   session or a recorded process group — is alive; paused nodes are killed
+   as part of the confirmed teardown. Also clears a
    stale tree-wide pause latch. Remote branches are left in place and
    listed.
 

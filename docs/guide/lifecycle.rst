@@ -183,7 +183,8 @@ start
    $ fractal node start parser --continue --max-cost 10
 
 ``fractal node start [node]`` launches the node's iteration loop in a
-detached tmux session. All run parameters come from the node's
+detached tmux session, or in an independent process group with
+``--headless``. All run parameters come from the node's
 ``config.json``; the launch itself takes only these flags:
 
 .. list-table::
@@ -212,6 +213,14 @@ detached tmux session. All run parameters come from the node's
        relaunch — applied through the parent's retune and echoed
        ``max_cost: old -> new``. **Required** when the last run ended on
        its cost budget.
+   * - ``--headless`` / ``--tmux``
+     - Select the detached process-group backend or tmux (envvar
+       ``FRACTAL_HEADLESS``). Headless mode captures output in
+       ``headless.log`` and is inherited by delegated child starts;
+       ``--tmux`` overrides that inherited choice. A ``--continue`` opens a
+       new run and takes its backend from ``--headless``/``--tmux`` or
+       ``FRACTAL_HEADLESS``; ``resume`` adopts the paused run's recorded
+       backend.
 
 A fresh start requires the status to be exactly ``idle``; anything else
 refuses with a pointer to ``--continue``. Both forms re-validate the stored
@@ -245,7 +254,8 @@ successful launch logs a completed ``start`` event (metadata ``continue`` on
 continues), so the event log carries the node's restart chain.
 
 While a node is ``active``, ``fractal node attach [node]`` attaches to its
-tmux session (it refuses any other status).
+tmux session (it refuses any other status). A headless node refuses too,
+naming its ``headless.log`` to follow instead.
 
 finish
 ~~~~~~
@@ -324,9 +334,10 @@ kill
 ~~~~
 
 ``fractal node kill [node] [--reason <text>]`` ends a node immediately: it
-reaps the tmux session and the recorded process groups (TERM, a five-second
-grace, then KILL) and closes the node's open rows as ``killed``. Killable
-states:
+reaps the loop runtime — the tmux session, or a headless or bare loop's
+recorded process group — and any step group the loop recorded (TERM, a
+five-second grace, then KILL) and closes the node's open rows as ``killed``.
+Killable states:
 
 - ``active`` — the normal case;
 - ``paused`` — the escape hatch for a parked subtree; with no loop alive the
@@ -336,9 +347,11 @@ states:
   activate (an unwanted spawn is reapable before it starts burning).
 
 Anything else refuses (``Cannot kill: node is not active, paused, or
-idle``). The
-sweep reaps descendants first and re-enumerates to a fixpoint, so a spawn
-already in flight when the kill lands is caught rather than escaping. The
+idle``). The one other refusal is a recorded process group whose identity
+the ``ps`` probe cannot verify: the kill refuses before writing any kill
+state and names ``ps -p <pgid>`` and the record file to remove. The sweep
+reaps descendants first and re-enumerates to a fixpoint, so a spawn already
+in flight when the kill lands is caught rather than escaping. The
 attribution — ``killed by <actor>``, with the reason appended — lands
 identically on the kill event, the signal, and the killed run row, and a
 later ``start --continue`` surfaces it as a notice.
@@ -431,29 +444,34 @@ Crash reconciliation
 --------------------
 
 A loop that dies without settling — a hard kill, a direct
-``tmux kill-session``, a host crash — leaves ``.status`` reading ``active``
-with no
-tmux session. Because ``start.sh`` enforces one loop per node, a *provably*
-missing session is proof the loop is gone — with one exception: a loop
-launched bare (``fractal node _loop`` outside tmux, which records no
-``.socket``) whose recorded ``.pgid`` process group is still alive, and is
-the group the record named, is running and is left alone. Otherwise fractal
-heals the node on the next read or verb: the status is stamped ``exited``,
-the still-open run, iteration, and step rows are closed, any surviving
-process groups the loop recorded are reaped with an ``orphan`` event (a
-headless agent would otherwise keep spending unseen), and config/registry
-cap drift is healed. This runs automatically before every signal verb,
-``merge``, ``delete``, ``retire``, ``start --continue``, and on listings —
-there is no command to run.
+``tmux kill-session``, a headless process death, or a host crash — leaves
+``.status`` reading ``active`` with no live runtime. Because ``start.sh``
+enforces one loop per node, a *provably* missing runtime is proof the loop is
+gone. The proof is per backend: a tmux node's recorded session, or a headless
+node's recorded ``.pgid`` process group — alive, and the group the record
+named rather than a recycled id. The same process-group proof spares a loop
+launched bare (``fractal node _loop`` under neither backend, which records no
+``.socket``): while its group lives, it is left alone. Otherwise fractal heals
+the node on the next read or verb: the status is stamped ``exited``, the
+still-open run, iteration, and step rows are closed, any surviving process
+groups the loop recorded are reaped with an ``orphan`` event (an orphaned
+agent would otherwise keep spending unseen), and config/registry cap drift is
+healed. This runs automatically before every signal verb, ``merge``,
+``delete``, ``retire``, ``start --continue``, and on listings — there is no
+command to run.
 
 Two deliberate limits:
 
 - **A ``paused`` node is never healed.** No session is its normal parked
   state, on this host or after a filesystem transplant.
-- **An inconclusive tmux probe heals nothing.** The probe asks the server
-  the loop recorded at boot; when tmux gives no answer (binary absent, no
-  visibility from a cron/CI shell), the heal keys off proof, never
-  ignorance, so a blind host cannot kill a healthy loop.
+- **An inconclusive runtime probe heals nothing.** A tmux node's probe asks
+  the server the loop recorded at boot; when tmux gives no answer (binary
+  absent, no visibility from a cron/CI shell), the heal keys off proof,
+  never ignorance, so a blind host cannot kill a healthy loop. A headless or
+  bare loop's probe is inconclusive only when ``ps`` cannot date the live
+  group's leader; that too heals nothing, and teardown and kill refuse,
+  naming the check to run. A group owned by another user is not
+  inconclusive: its leader's start instant decides.
 
 Separate from crash healing, ``fractal node reconcile [node]`` is the audit
 step after out-of-band cleanup: for each registered descendant whose
@@ -551,10 +569,12 @@ branches left by out-of-band worktree removals and clears a stale tree-wide
 pause latch.
 
 Reset refuses when the caller stands inside a node worktree, while any
-node's tmux session is alive (probed per node on its recorded socket), when
-the tmux probe is **inconclusive** ("Restore tmux visibility and retry" —
-an irreversible teardown never proceeds blind), and over any locked
-worktree. Paused nodes are killed as part of the confirmed teardown.
+node's loop runtime is alive (a tmux session probed per node on its recorded
+socket, or a headless or bare loop's recorded process group), when that
+runtime probe is **inconclusive** (the refusal names the
+``tmux list-sessions`` and ``ps`` checks to run before retrying — an
+irreversible teardown never proceeds blind), and over any locked worktree.
+Paused nodes are killed as part of the confirmed teardown.
 ``.worktrees/`` itself stays (it keeps the root's project-cache entry and
 the lock), remote branches are left on origin and listed in the output, and
 a repo with no worktrees at all is a clean no-op.

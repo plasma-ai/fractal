@@ -56,6 +56,20 @@ TMUX_SESSION_NAME="${REPO_NAME//[.:]/-}"
 if BRANCH=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null); then
     TMUX_SESSION_NAME="${REPO_NAME//[.:]/-} (${BRANCH//./-})"
 fi
+# derive the node's data directory (mirrors start.sh): the project prefix
+# comes from the .worktrees/.project/<branch> cache in the main repo
+HEADLESS_FILE=""
+PGID_FILE=""
+if [[ -n "$BRANCH" ]]; then
+    PROJECT=$(cat "$REPO_ROOT/.worktrees/.project/$BRANCH" 2>/dev/null || echo ".")
+    if [[ "$PROJECT" == "." ]]; then
+        NODE_DIR="$WORKTREE_DIR/.fractal/$BRANCH"
+    else
+        NODE_DIR="$WORKTREE_DIR/$PROJECT/.fractal/$BRANCH"
+    fi
+    HEADLESS_FILE="$NODE_DIR/.headless"
+    PGID_FILE="$NODE_DIR/.pgid"
+fi
 # grep -qxF (exact match), not tmux -t: -t resolves targets by
 # prefix/fnmatch, so a short name false-matches longer session names
 if tmux list-sessions -F '#{session_name}' 2>/dev/null \
@@ -64,7 +78,19 @@ if tmux list-sessions -F '#{session_name}' 2>/dev/null \
     echo "Retry once it exits" >&2
     exit 1
 fi
+# a headless loop has no session to list -- probe its recorded process group
+if [[ -f "$HEADLESS_FILE" && -f "$PGID_FILE" ]]; then
+    PGID=$(tr -d '[:space:]' <"$PGID_FILE") || true
+    if [[ -n "${PGID:-}" ]] && kill -0 -- "-$PGID" 2>/dev/null; then
+        echo "Error: the loop is still running or parking: $PGID" >&2
+        echo "Retry once it exits" >&2
+        exit 1
+    fi
+fi
 
-# start.sh hosts the tmux launch; --resume makes the loop adopt the
-# paused run instead of opening a fresh one
-exec bash "$SCRIPT_DIR/start.sh" "$WORKTREE_DIR" --resume
+# start.sh hosts the launch; a headless node resumes with the same backend,
+# and --resume makes the loop adopt the paused run instead of opening a fresh one
+HEADLESS_ARGS=()
+[[ -f "$HEADLESS_FILE" ]] && HEADLESS_ARGS+=(--headless)
+exec bash "$SCRIPT_DIR/start.sh" "$WORKTREE_DIR" \
+    ${HEADLESS_ARGS[@]+"${HEADLESS_ARGS[@]}"} --resume

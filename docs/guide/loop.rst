@@ -202,6 +202,10 @@ prompts they are re-derived per step from live config — only
    * - ``DETACHED_MODE``, ``META_MODE``, ``META_TARGET``
      - The boot-pinned mode flags (``true``/``false``) and the meta
        target branch.
+   * - ``FRACTAL_HEADLESS``
+     - The run's launch backend (``true``/``false``), boot-pinned so a
+       seat's ``node start`` inherits the backend through the option's
+       envvar.
 
 Run-scoped variables are refreshed for every step:
 

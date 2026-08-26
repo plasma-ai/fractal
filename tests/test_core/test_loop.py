@@ -41,6 +41,7 @@ __all__ = [
     'test_malformed_midrun_retune_warns_and_keeps_the_previous_value',
     'test_provider_frontmatter_rebinds_the_boot_agent',
     'test_agent_env_publishes_node_branch',
+    'test_agent_env_inherits_headless_launches',
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
@@ -450,6 +451,17 @@ def test_agent_env_publishes_node_branch(
     assert all(env['NODE_BRANCH'] == loop_node.branch for env in loop.envs)
 
 
+def test_agent_env_inherits_headless_launches(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agents in a headless loop start delegated children headlessly too."""
+    monkeypatch.setenv('_NODE', '')
+    (loop_node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    loop = MockLoop(loop_node)
+    assert loop._agent_env('work')['FRACTAL_HEADLESS'] == 'true'
+
+
 def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -527,10 +539,10 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
     The cleanup runs in a worktree that may carry no info/exclude at all (a
     fresh clone, a block predating an exclude's entry), so the stage
     excludes must ride its probe: runtime artifacts -- the engine skill
-    tree, virtualenv contents, the DB -- never ride the operator-edit
-    commit, and alone they never trigger one. Operator git surgery (a
-    staged rename, a staged deletion) commits cleanly rather than crashing
-    the launch.
+    tree, virtualenv contents, the DB, and headless state -- never ride the
+    operator-edit commit, and alone they never trigger one. Operator git
+    surgery (a staged rename, a staged deletion) commits cleanly rather
+    than crashing the launch.
     """
     node = node_with_db
     repo = node.worktree
@@ -545,30 +557,36 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
         )
         return result.stdout
 
-    # engine-materialized system skills and a virtualenv beside the node
-    # seed, in a repo carrying no info/exclude block at all
+    # runtime dirt beside the node seed, in a repo carrying no
+    # info/exclude block at all
     system = node.node_dir / 'skills' / '.system' / 'imagegen'
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
     venv = node.node_dir / '.venv' / 'bin'
     venv.mkdir(parents=True)
     (venv / 'python').write_text('#!interpreter\n', encoding='utf-8')
+    (node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    (node.node_dir / 'headless.log').write_text('captured output\n', encoding='utf-8')
     (node.node_dir / 'note.md').write_text('steer left\n', encoding='utf-8')
     loop = MockLoop(node)
     loop._clean_worktree()
     # the operator-edit commit (the seed's untracked files) never sweeps
-    # the engine tree, the venv, or the DB
+    # runtime dirt
     tracked = _git('ls-files')
     assert 'config.json' in tracked
     assert 'note.md' in tracked
     assert 'skills/.system' not in tracked
     assert '.venv' not in tracked
     assert '.db' not in tracked
-    # engine dirt alone never triggers the commit: re-materialize what the
+    assert '.headless' not in tracked
+    assert 'headless.log' not in tracked
+    # runtime dirt alone never triggers the commit: re-materialize what the
     # clean removed and rerun -- HEAD stays put
     head = _git('rev-parse', 'HEAD')
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
+    (node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    (node.node_dir / 'headless.log').write_text('captured output\n', encoding='utf-8')
     loop._clean_worktree()
     assert _git('rev-parse', 'HEAD') == head
     # operator git surgery commits cleanly: a staged rename and a staged

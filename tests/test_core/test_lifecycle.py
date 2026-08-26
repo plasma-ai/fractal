@@ -7,11 +7,13 @@ merge-to-parent semantics.
 
 from __future__ import annotations
 
+import concurrent.futures
 import fcntl
 import os
 import pathlib
 import signal
 import subprocess
+import threading
 import time
 from typing import NoReturn, Optional
 
@@ -38,6 +40,8 @@ __all__ = [
     'test_start_only_from_idle',
     'test_start_continue_from_terminal',
     'test_start_drain_reaches_the_launch_and_requires_continue',
+    'test_start_headless_selects_detached_backend',
+    'test_start_serializes_runtime_backends',
     'test_start_continue_re_arms_after_drained_run',
     'test_start_continue_refuses_after_budget_end',
     'test_start_continue_rolls_back_retune_on_refusal_or_failed_launch',
@@ -48,6 +52,9 @@ __all__ = [
     'test_signal_rejects_active_node_without_run',
     'test_finish_accepts_reason',
     'test_kill_vets_recorded_group_before_script',
+    'test_kill_refuses_an_unknown_process_identity',
+    'test_kill_drops_a_dead_group_without_identity_probe',
+    'test_kill_drops_a_foreign_owned_recycled_group',
     'test_kill_sets_killed_status',
     'test_kill_reaps_idle_node_before_start',
     'test_kill_stamps_idle_killed_before_the_reap',
@@ -238,6 +245,71 @@ def test_start_drain_reaches_the_launch_and_requires_continue(
     node.start(continue_run=True)
     launch = next(call for call in run_scripts if call[0] == 'start.sh')
     assert '--drain' not in launch
+
+
+def test_start_headless_selects_detached_backend(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A headless start delegates the backend choice to ``start.sh``.
+
+    The core launch keeps the same validation and event boundary as tmux; the
+    sole process-layer delta is the explicit flag passed to the lifecycle
+    script, where the detached group and output capture are established.
+    """
+    node = node_with_db
+    node.config.set('max_cost', 1.0)
+    run_scripts = _stub_run_script(monkeypatch, node)
+    node.start(headless=True)
+    assert run_scripts == [('start.sh', f'{node._root}', '--headless')]
+
+
+def test_start_serializes_runtime_backends(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tmux start cannot enter while a headless handoff is in progress.
+
+    Both launch arms run ``start.sh`` under the ``.worktrees`` flock, so a
+    competing start blocks until the handoff lets go and then re-reads the
+    status under that same lock -- the loser refuses on ``active`` instead
+    of booting a second loop.
+    """
+    node = node_with_db
+    node.config.set('max_cost', 1.0)
+    node.status_set('stopped')
+    entered = threading.Event()
+    raced = threading.Event()
+    release = threading.Event()
+
+    # hold the headless handoff inside the lock until released
+    def run_script(
+        script: str,
+        *args: str,
+    ) -> subprocess.CompletedProcess[str]:
+        entered.set()
+        assert release.wait(timeout=5)
+        node.status_set('active')
+        return subprocess.CompletedProcess([script, *args], 0, '', '')
+
+    def start_tmux() -> str:
+        raced.set()
+        return node.start()
+
+    monkeypatch.setattr(node, '_run_script', run_script)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        # race a tmux start against the held handoff: it blocks on the lock
+        launch = pool.submit(node.start, continue_run=True, headless=True)
+        assert entered.wait(timeout=5)
+        competing = pool.submit(start_tmux)
+        assert raced.wait(timeout=5)
+        with pytest.raises(concurrent.futures.TimeoutError):
+            competing.result(timeout=0.1)
+        # release the handoff: the loser re-reads status and refuses
+        release.set()
+        launch.result(timeout=5)
+        with pytest.raises(RuntimeError, match="Cannot start from status: 'active'"):
+            competing.result(timeout=5)
 
 
 def test_start_continue_re_arms_after_drained_run(
@@ -526,6 +598,107 @@ def test_kill_vets_recorded_group_before_script(
         except ProcessLookupError:
             pass
         leader.wait()
+
+
+@pytest.mark.parametrize('probe', ['live', 'permission'])
+def test_kill_refuses_an_unknown_process_identity(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: str,
+) -> None:
+    """Kill leaves the loop active when its process identity is unknown.
+
+    Alive is not identity: only ``ps`` can say a live group is this loop, so
+    an unanswered probe refuses rather than stamp ``killed`` over a running
+    loop.
+    """
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('4242\n', encoding='utf-8')
+
+    def live_group(pgid: int, sig: int) -> None:
+        if probe == 'permission':
+            raise PermissionError
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', live_group)
+    monkeypatch.setattr(
+        'fractal.core.node._recorded_group',
+        lambda pgid, recorded_at: None,
+    )
+
+    def run_script(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        raise AssertionError('kill.sh must not run after an inconclusive probe')
+
+    monkeypatch.setattr(node, '_run_script', run_script)
+    with pytest.raises(RuntimeError, match='process identity probe gave no answer'):
+        node.kill()
+    assert node.status() == 'active'
+    assert node.record.signal_get('kill') is None
+    assert pgid_file.exists()
+
+
+def test_kill_drops_a_dead_group_without_identity_probe(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead stale group cannot make kill depend on process identity.
+
+    ``ESRCH`` is definitive on its own: a gone group has no leader for ``ps``
+    to date, so the stale record drops without an identity probe.
+    """
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('4242\n', encoding='utf-8')
+
+    def dead_group(pgid: int, sig: int) -> NoReturn:
+        raise ProcessLookupError
+
+    def recorded_group(pgid: int, recorded_at: float) -> bool:
+        raise AssertionError('a dead group has no identity to arbitrate')
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', dead_group)
+    monkeypatch.setattr('fractal.core.node._recorded_group', recorded_group)
+    _stub_run_script(monkeypatch, node)
+    node.kill()
+    assert not pgid_file.exists()
+    assert node.status() == 'killed'
+
+
+def test_kill_drops_a_foreign_owned_recycled_group(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill drops a record whose id another user's younger group now holds.
+
+    ``EPERM`` proves a group exists, not that it is the loop; ``ps`` reads any
+    user's process, so a leader younger than the record marks a recycled id
+    and the record drops as it would for a same-user stranger.
+    """
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('4242\n', encoding='utf-8')
+
+    def foreign_group(pgid: int, sig: int) -> NoReturn:
+        raise PermissionError
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', foreign_group)
+    monkeypatch.setattr(
+        'fractal.core.node._recorded_group',
+        lambda pgid, recorded_at: False,
+    )
+    _stub_run_script(monkeypatch, node)
+    node.kill()
+    assert not pgid_file.exists()
+    assert node.status() == 'killed'
 
 
 def test_kill_sets_killed_status(

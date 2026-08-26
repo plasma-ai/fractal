@@ -11,6 +11,7 @@ import pathlib
 import re
 import signal
 import subprocess
+import sys
 import time
 import typing
 from collections.abc import Callable, Iterator
@@ -21,6 +22,8 @@ from fractal.constants import (
     CONFIG_FILE,
     DB_FILE,
     FRACTAL_FOLDER,
+    HEADLESS_FILE,
+    HEADLESS_LOG,
     PAUSED_FILE,
     PGID_FILE,
     PROJECT_FOLDER,
@@ -306,67 +309,68 @@ class Node:
             return None
         return self.tmux_session in sessions
 
-    def _bare_loop_alive(self: Node) -> bool:
-        """Return whether a live loop is running with no tmux session of its own.
+    @property
+    def headless(self: Node) -> bool:
+        """Return whether this node uses the detached process backend."""
+        return (self.node_dir / HEADLESS_FILE).is_file()
 
-        ``fractal node _loop`` is a supported entry point -- ``start.sh``
-        execs it inside the pane, but the harness and a tmux-less host
-        launch it bare -- and a bare launch records no socket
-        (:meth:`_tmux_session_exists` drops any stale one at boot), so
-        "no such session" is an answer about a server this loop never
-        joined rather than proof it died. What a bare loop does leave is
-        its own process group (``.pgid``, written at run start and removed
-        on any in-band exit): alive, and the recorded group rather than a
-        recycled id (:func:`_recorded_group`), it proves the loop is
-        running. A tmux-backed loop is excluded by its socket record --
-        for that one a group outliving the pane is the headless orphan the
-        reap exists for, not a loop to spare.
+    def _loop_exists(self: Node) -> Optional[bool]:
+        """Return whether a live loop still runs this node (``None`` unknown).
 
-        Returns:
-            Whether a bare-launched loop is provably still running.
-
+        A ``.headless`` launch never joined a tmux server, so its recorded
+        process group (``.pgid``, written by :meth:`_launch_headless` before
+        the loop boots) is the whole answer and tmux is never asked -- a host
+        without tmux still heals it, and a ``.socket`` inherited from a tmux
+        shell cannot mislead it. Every other node asks tmux on the loop's
+        recorded socket (:meth:`_tmux_session_exists`). A definitive "no such
+        session" is proof only for a loop that recorded a socket: ``fractal
+        node _loop`` is a supported bare entry point (the harness, a cron
+        host) that joins no server, so a socket-less node's own live,
+        identity-checked group (:func:`_group_alive`) overrules the probe and
+        an unverified group leaves the answer unknown. A socket-recorded loop
+        gets no overrule: its group outliving the pane is the orphan the reap
+        exists for. ``None`` from either probe never reads as gone.
         """
-        if (self.node_dir / SOCKET_FILE).exists():
-            return False
-        pgid_file = self.node_dir / PGID_FILE
-        try:
-            recorded_at = pgid_file.stat().st_mtime
-            pgid = int(pgid_file.read_text(encoding='utf-8').strip())
-            os.killpg(pgid, 0)
-        except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
-            return False
-        return _recorded_group(pgid, recorded_at)
+        if self.headless:
+            return _group_alive(self.node_dir / PGID_FILE)
+        alive = self._tmux_session_exists()
+        # a bare launch is judged by its own group; an unknown group stays unknown
+        if alive is False and not (self.node_dir / SOCKET_FILE).exists():
+            group = _group_alive(self.node_dir / PGID_FILE)
+            if group is not False:
+                return group
+        return alive
 
     def _reconcile_status(self: Node) -> None:
         """Stamp a crashed-but-active node ``exited``.
 
         A loop that dies without ending (a hard kill, a direct
-        ``tmux kill-session``, a host crash) leaves the ``.status`` file
-        ``active`` with no tmux session, wedging the reject-active guards. The
-        one-loop-per-node invariant (``start.sh`` refuses to launch while the
-        session exists) makes a missing session proof the loop is gone, so
-        stamp the same honest terminal :meth:`Record.run_start` uses for a
-        stranded run -- both the ``.status`` file and the crashed run's
-        still-open runs/iters/steps rows, so a later merge/delete/retire (none
-        of which start a loop) cannot leave the DB reading ``active`` while the
-        status reads ``exited``. The settle also heals any config/registry cap
-        drift (:meth:`Config.reconcile`): a loop that died before its next iteration
+        ``tmux kill-session``, a headless process death, a host crash) leaves
+        the ``.status`` file ``active`` with no live runtime, wedging the
+        reject-active guards. The one-loop-per-node invariant (``start.sh``
+        refuses to launch while the runtime exists) makes a missing runtime
+        proof the loop is gone, so stamp the same honest terminal
+        :meth:`Record.run_start` uses for a stranded run -- both the
+        ``.status`` file and the crashed run's still-open runs/iters/steps
+        rows, so a later merge/delete/retire (none of which start a loop)
+        cannot leave the DB reading ``active`` while the status reads
+        ``exited``. The settle also heals any config/registry cap drift
+        (:meth:`Config.reconcile`): a loop that died before its next iteration
         boundary never ran the boundary reconcile, and the dead row would
         otherwise carry the drift forever. A no-op unless the status is
         ``active``, so a settled node never pays the tmux probe -- and a
         ``paused`` node is never healed: no session is its *normal* parked
         state (the loop exits at pause; ``resume`` relaunches it), on this
         host or after a filesystem transplant to another. An inconclusive
-        probe (no answer from tmux) also skips the heal: the reap keys off
-        proof the session is gone, never off ignorance -- a shell without
-        tmux visibility (a cron/CI host) must not kill a healthy loop's
-        process groups, and a shell on a *different* socket gets its proof
-        from the loop's recorded one (see :meth:`_tmux_session_exists`).
-        A definitive "no such session" is proof only for a loop that had
-        one: a bare ``node _loop`` launch never joined a server, so its own
-        live process group overrules the probe (:meth:`_bare_loop_alive`)
-        -- without that, any read-only census SIGKILLed a healthy
-        tmux-less loop and its in-flight agent.
+        runtime probe (no answer from tmux or the headless identity check) also
+        skips the heal: the reap keys off proof the runtime is gone, never off
+        ignorance -- a shell without runtime visibility must not kill a healthy
+        loop's process groups, and a shell on a *different* tmux socket gets its
+        proof from the loop's recorded one (see :meth:`_tmux_session_exists`).
+        A definitive "no such session" is proof only for a loop that recorded
+        a socket: a bare ``node _loop`` launch never joined a server, so its
+        own live, identity-checked process group overrules the probe, and a
+        ``.headless`` launch never asks tmux at all (:meth:`_loop_exists`).
 
         Never reconciles the node from inside its own running loop: the loop
         self-finishes (``send_budget_finish`` calls ``node finish``), and a
@@ -378,7 +382,7 @@ class Node:
             return
         if self.status() != 'active':
             return
-        if self._tmux_session_exists() is False and not self._bare_loop_alive():
+        if self._loop_exists() is False:
             self._reap_orphan()
             self.record.close_open('exited')
             self.status_set('exited')
@@ -391,16 +395,16 @@ class Node:
         """Kill surviving process groups recorded by a dead loop.
 
         The loop records its process group at run start (``.pgid``) and
-        each agent invocation's own group
-        (``.step_pgid``); both are removed on any in-band exit, so a file
-        that outlives the tmux session marks an out-of-band pane death (tmux
-        kill/crash, host OOM) whose agent may still be running -- and
-        spending -- headless. The reap follows ``kill.sh``'s TERM-grace-KILL
-        cadence and logs an ``orphan`` event naming each reaped pgid.
-        Best-effort: a dead, recycled, or foreign group reads as already
-        gone -- recycled meaning the OS re-issued a dead group's id to an
-        unrelated same-user group, which answers a liveness probe but is
-        younger than its record (:func:`_recorded_group`).
+        each agent invocation's own group (``.step_pgid``); both are removed
+        on any in-band exit, so a file that outlives the loop runtime marks
+        an out-of-band death (tmux kill/crash, headless process death, host
+        OOM) whose agent may still be running -- and spending -- unseen. The
+        reap follows ``kill.sh``'s TERM-grace-KILL cadence and logs an
+        ``orphan`` event naming each reaped pgid. Best-effort: a dead,
+        recycled, or foreign group reads as already gone -- recycled meaning
+        the OS re-issued a dead group's id to an unrelated same-user group,
+        which answers a liveness probe but is younger than its record
+        (:func:`_recorded_group`).
         """
         for name in (PGID_FILE, STEP_PGID_FILE):
             pgid_file = self.node_dir / name
@@ -421,7 +425,7 @@ class Node:
                 pgid = 0
             # aliveness is not identity: a recycled pid answers the probe from
             # an unrelated group -- spare any group younger than its record
-            if pgid > 0 and not _recorded_group(pgid, recorded_at):
+            if pgid > 0 and _recorded_group(pgid, recorded_at) is not True:
                 pgid = 0
             # reap the group and audit the reap
             if pgid > 0:
@@ -585,7 +589,7 @@ class Node:
                 recorded = int(pgid_file.read_text(encoding='utf-8').strip())
             except (OSError, ValueError):
                 continue
-            if recorded == pgid and _recorded_group(pgid, recorded_at):
+            if recorded == pgid and _recorded_group(pgid, recorded_at) is True:
                 return True
         return False
 
@@ -1664,14 +1668,14 @@ class Node:
         clean: bool = False,
         drain: bool = False,
         max_cost: Optional[float] = None,
+        headless: bool = False,
     ) -> str:
-        """Launch the node in a tmux session.
+        """Launch the node loop in tmux or a detached process group.
 
-        Creates a tmux session (or window if already inside
-        tmux) that runs the iteration loop. All run parameters
-        are read from ``config.json`` (set at init or edited
-        before launch); ``continue_run`` (with its optional ``max_cost``
-        retune) is the only launch-time action.
+        Creates a tmux session, or an independent process group in headless
+        mode, that runs the iteration loop. All run parameters are read from
+        ``config.json`` (set at init or edited before launch); ``continue_run``
+        (with its optional ``max_cost`` retune) is the only launch-time action.
 
         ``drain`` runs the continued run as a wind-down: the loop exports
         ``_DRAIN`` into every seat's environment (init/start/update/resume
@@ -1701,6 +1705,8 @@ class Node:
             max_cost: New cost cap in USD for the continued run, applied
                 through the parent's retune; required when the last run
                 ended on its cost budget.
+            headless: Launch without tmux and capture output to the node's
+                ``headless.log`` file.
 
         Returns:
             Script output, prefixed by any launch-time notices (the
@@ -1743,22 +1749,6 @@ class Node:
             raise RuntimeError(
                 f'Cannot start under a paused node ({latched}). Resume it first.'
             )
-        # refuse a foreign tmux-session collision on a fresh start: a
-        # first-start node has no session of its own, so a live session under
-        # its name belongs to another fractal sharing this repo's basename,
-        # and `node kill`/attach would resolve ambiguously across both; a
-        # continue is exempt -- its own session may legitimately be present,
-        # and start.sh's exact-name check still backstops that path
-        if not continue_run:
-            session = self.tmux_session
-            sessions = fractal.util.tmux.probe()
-            if sessions is not None and session in sessions:
-                raise RuntimeError(
-                    f'Cannot start: the tmux session {session!r} is already'
-                    f' active for another fractal (a repository sharing this'
-                    f' basename and node name). Stop it, or rename one'
-                    f' repository directory.'
-                )
         # launch-time notices (the retune echo, the kill countermand) ride
         # the returned confirmation -- core never prints; the CLI echoes it
         notices: list[str] = []
@@ -1893,12 +1883,12 @@ class Node:
         # steering path edits config.json directly, bypassing the init/update
         # setters' checks; a bad duration or cost ordering would otherwise abort
         # the loop after start prints "Started", wedging the node idle with the
-        # only error on a dying tmux pane
+        # only error on a dying pane or in headless.log
         self.config.validate()
         # resolve the stored agent against the registry the way the loop's
         # boot does (the loop reads this node's own config key, never the
         # ancestor walk) -- the same steering path can typo or drop it, and
-        # the loop's registry error would land on the same dying pane
+        # the loop's registry error would land on the same dying pane or log
         agent = self.config.get('agent')
         if not agent:
             raise ValueError('No agent configured; set --agent at node init.')
@@ -1914,6 +1904,8 @@ class Node:
             args.append('--continue')
         if drain:
             args.append('--drain')
+        if headless:
+            args.append('--headless')
         # ensure git excludes
         self._git_exclude()
         if continue_run:
@@ -1944,14 +1936,13 @@ class Node:
                         )
                     self._enforce_rearm_limits()
                     self.status_set('idle')
-                # launch outside the lock -- the idle re-arm above already holds
-                # the slot; roll a failed launch back to the settled status so
-                # --continue stays the retry path (idle reads as never-started)
-                try:
-                    result = self._run_script('start.sh', *args)
-                except Exception:
-                    self.status_set(current_status)
-                    raise
+                    # keep the boot handoff atomic across runtime backends; roll
+                    # a failed launch back so --continue stays the retry path
+                    try:
+                        result = self._run_script('start.sh', *args)
+                    except Exception:
+                        self.status_set(current_status)
+                        raise
             except Exception:
                 # a refused gate or failed launch must not keep the retune --
                 # restore the priors in both stores (config.json, and the
@@ -1968,8 +1959,29 @@ class Node:
                     )
                 raise
         else:
-            # run script
-            result = self._run_script('start.sh', *args)
+            # serialize the boot handoff across runtime backends: the loop
+            # remains idle until its own preflight stamps active, so the lock
+            # closes the window where concurrent starts could both launch
+            with worktree.lock(self.repo_dir):
+                current_status = self.status()
+                if current_status != 'idle':
+                    raise RuntimeError(
+                        f'Cannot start from status: {current_status!r}.'
+                        f' Use --continue to restart.'
+                    )
+                # a first-start node has no tmux session of its own, so this
+                # exact name belongs to another fractal sharing the repo name;
+                # the check also stops a headless launch racing a tmux boot
+                session = self.tmux_session
+                sessions = fractal.util.tmux.probe()
+                if sessions is not None and session in sessions:
+                    raise RuntimeError(
+                        f'Cannot start: the tmux session {session!r} is already'
+                        f' active for another fractal (a repository sharing this'
+                        f' basename and node name). Stop it, or rename one'
+                        f' repository directory.'
+                    )
+                result = self._run_script('start.sh', *args)
         # log the lineage only after start.sh returns, on both paths -- the
         # continue arm rolls a failed launch back to the settled status (a
         # lock-time event would survive that rollback as a phantom), so the
@@ -1984,11 +1996,75 @@ class Node:
             output = '\n'.join([*notices, output])
         return output
 
+    def _launch_headless(
+        self: Node,
+        *,
+        continue_run: bool = False,
+        resume: bool = False,
+        drain: bool = False,
+    ) -> str:
+        """Start the loop in its own process group, recording it before it boots.
+
+        The ``start.sh`` headless arm's handoff (``node _launch``). The
+        interpreter-pinned argv (``sys.executable -m fractal.cli.main``) is
+        immune to PATH shims. The child waits for the ``.pgid`` record before
+        exec'ing the loop, so no probe ever sees a booted headless loop without
+        its record (:func:`_group_alive`); a failed spawn drops the marker and
+        record so ``--continue`` stays the retry path.
+
+        Returns:
+            Confirmation message naming the pid and the log.
+
+        """
+        log_path = self.node_dir / HEADLESS_LOG
+        pgid_file = self.node_dir / PGID_FILE
+        # build the loop argv
+        loop_args = [
+            sys.executable,
+            '-m',
+            'fractal.cli.main',
+            'node',
+            '_loop',
+            f'--path={self._root}',
+        ]
+        if continue_run:
+            loop_args.append('--continue')
+        if resume:
+            loop_args.append('--resume')
+        if drain:
+            loop_args.append('--drain')
+        # hold the exec until the record lands, so the group is probeable first
+        wrapper = (
+            'for _ in {1..100}; do [[ -f "$1" ]] && break; sleep 0.01; done; '
+            '[[ -f "$1" ]] || exit 1; shift; exec "$@"'
+        )
+        command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_file}', *loop_args]
+        try:
+            with log_path.open('w', encoding='utf-8') as stream:
+                process = subprocess.Popen(
+                    command_args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            pgid_file.write_text(f'{process.pid}\n', encoding='utf-8')
+        except Exception:
+            (self.node_dir / HEADLESS_FILE).unlink(missing_ok=True)
+            pgid_file.unlink(missing_ok=True)
+            raise
+        return f'Started headless node: {process.pid} (log: {log_path})'
+
     def attach(self: Node) -> None:
         """Attach to the node's tmux session."""
         # validate status
         if self.status() != 'active':
             raise RuntimeError('Cannot attach: node is not active.')
+        if self.headless:
+            raise RuntimeError(
+                'Cannot attach to a headless node; follow its log instead:'
+                f' tail -f {self.node_dir / HEADLESS_LOG}'
+            )
         # run attach script, then attach to the tmux session (named by start.sh);
         # the interactive handoff bypasses _run_script: tmux owns the terminal,
         # so output is not captured and tmux reports its own errors
@@ -2353,7 +2429,7 @@ class Node:
     def kill(self: Node, reason: Optional[str] = None) -> str:
         """Kill the node and its unsettled descendants (children first).
 
-        Reaps each tmux session and marks its active rows ``killed``. Paused
+        Reaps each loop runtime and marks its active rows ``killed``. Paused
         nodes are killable -- the escape hatch for a parked subtree; with no
         loop alive the kill is pure bookkeeping (``kill.sh`` no-ops and the
         open rows close ``killed``). Idle nodes are killable too
@@ -2421,19 +2497,20 @@ class Node:
     ) -> str:
         """Kill this node only and mark its active rows ``killed``.
 
-        The status re-read and the kill's event/signal writes stay atomic
-        under the ``.worktrees`` flock; ``kill.sh`` and the row marking run
-        outside the lock. An idle target is also stamped ``killed`` under
-        that flock: it has no terminal to clobber and possibly no session
-        yet, and only a stamp that precedes the reap lets the loop's
-        flock'd boot check stand a racing start down -- stamped after,
-        the loop boots in the window, kill.sh has already no-op'd, and
-        nothing ever reaps it (the loop never polls the kill signal). The
-        attribution -- ``killed by <actor>``, with the reason appended when
-        one is given -- lands identically on the kill event, the ``kill``
-        signal, and the killed run row, so every surface answers who ended
-        the run; a never-started spawn has none of the latter two, and its
-        event alone carries the attribution.
+        The status re-read, process-group vet, and kill's event/signal writes
+        stay atomic under the ``.worktrees`` flock; ``kill.sh`` and the row
+        marking run outside the lock. An idle target is also stamped ``killed``
+        under that flock: it has no terminal to clobber and possibly no session
+        yet, and only a stamp that precedes the reap lets the loop's flock'd
+        boot check stand a racing start down -- stamped after, the loop boots
+        in the window, kill.sh has already no-op'd, and nothing ever reaps it
+        (the loop never polls the kill signal). An unverifiable recorded group
+        refuses before any kill state is written, naming the ``ps`` check and
+        the record to clear. The attribution -- ``killed by <actor>``, with
+        the reason appended when one is given -- lands identically on the kill
+        event, the ``kill`` signal, and the killed run row, so every surface
+        answers who ended the run; a never-started spawn has none of the
+        latter two, and its event alone carries the attribution.
         """
         # compose the attribution: who killed, and why when a reason rides
         caller = self.resolve_caller()
@@ -2451,7 +2528,32 @@ class Node:
                     fan_out=fan_out,
                 )
                 return ''
-            # set signal and log event; the tmux kill runs outside the lock
+            # vet the recorded process groups before writing kill state: kill.sh
+            # gates on liveness alone, and a recycled id (the OS re-issued a dead
+            # group's id to an unrelated same-user group) answers that probe --
+            # drop a record whose group is gone or not the one it named, and
+            # refuse on an unverifiable one before the node can claim a
+            # still-running loop was killed
+            for name in (PGID_FILE, STEP_PGID_FILE):
+                pgid_file = self.node_dir / name
+                alive = _group_alive(pgid_file)
+                if alive is None:
+                    pgid = pgid_file.read_text(encoding='utf-8').strip()
+                    self._signal_refuse(
+                        verb='kill',
+                        event='kill',
+                        reason=(
+                            'the process identity probe gave no answer for process'
+                            f' group {pgid}, so the loop may still be running; check'
+                            f' ps -p {pgid} and remove the {name} record from the node'
+                            ' directory if that group is not this node'
+                        ),
+                        fan_out=fan_out,
+                    )
+                    return ''
+                if alive is False:
+                    pgid_file.unlink(missing_ok=True)
+            # set signal and log event; the reap runs outside the lock
             event_id = self.record.event_start('kill', metadata=label)
             # a never-started spawn has no run for a signal to hang off -- the
             # kill event and the killed stamp are its whole record, so skip
@@ -2462,20 +2564,6 @@ class Node:
             # docstring: the boot-window race is only closed flock-to-flock
             if current == 'idle':
                 self.status_set('killed')
-        # vet the recorded process groups before the script's fallback reap:
-        # kill.sh gates on liveness alone, and a recycled id (the OS re-issued
-        # a dead group's id to an unrelated same-user group) answers that
-        # probe -- drop any record whose live group is not the one it named
-        # (see _recorded_group), so the fallback only ever sees vetted files
-        for name in (PGID_FILE, STEP_PGID_FILE):
-            pgid_file = self.node_dir / name
-            try:
-                recorded_at = pgid_file.stat().st_mtime
-                pgid = int(pgid_file.read_text(encoding='utf-8').strip())
-            except (FileNotFoundError, ValueError):
-                continue
-            if not _recorded_group(pgid, recorded_at):
-                pgid_file.unlink(missing_ok=True)
         try:
             result = self._run_script('kill.sh', f'{self._root}')
         except Exception:
@@ -3223,7 +3311,7 @@ class Node:
         plumbing survive; the block is stripped only when no tree remains.
         Committed artifacts (the project wiki, baseline commits), remote
         branches, and the tree's own root branch are left in place. Refuses
-        while any in-scope node's tmux session is alive; paused nodes are
+        while any in-scope node's loop runtime is alive; paused nodes are
         killed as part of the teardown -- the caller's confirmation
         authorized discarding the frozen mid-step work their parked
         worktrees hold.
@@ -3313,7 +3401,7 @@ class Node:
         data -- config, memory, and the central database with every history
         row -- plus the wiki and baseline commits survive, so fresh nodes
         spawn immediately after. Sibling trees are untouched. Refuses while
-        any of the tree's tmux sessions is alive; paused nodes are killed as
+        any of the tree's loop runtimes is alive; paused nodes are killed as
         part of the teardown -- the caller's confirmation authorized
         discarding the frozen mid-step work their parked worktrees hold.
 
@@ -3408,11 +3496,11 @@ class Node:
         """Run a tree-teardown script behind the pre-flight, settle, and flock.
 
         The shared ``destroy``/``reset`` shape. Pre-flights the script's
-        own refusals first -- a live tmux session or a locked worktree
+        own refusals first -- a live loop runtime or a locked worktree
         anywhere in the trees in scope -- because the paused settle below is
         irreversible (the kills close the parked runs), so a teardown the
         script would refuse must abort here with nothing touched. Then
-        settles frozen work: a paused node has no session for the
+        settles frozen work: a paused node has no loop runtime for the
         liveness refusal to catch, and the confirmed teardown already
         authorized discarding its frozen mid-step work, so each parked
         node is killed -- pure bookkeeping with no loop alive: the open
@@ -3423,7 +3511,7 @@ class Node:
         same lock ``child_add`` takes) -- but only when ``.worktrees``
         exists; creating it would defeat the script's nothing-to-tear-down
         check, which keys off that directory. The script re-checks every
-        guard under the lock, backstopping a session, lock, or pause that
+        guard under the lock, backstopping a runtime, lock, or pause that
         lands after the pre-flight.
 
         Args:
@@ -3447,27 +3535,40 @@ class Node:
                 continue
             # pre-flight the script's refusals before the irreversible settle
             # (the user node runs no loop, so only descendants can hold a
-            # session): one pass per guard, mirroring the script's ordering
+            # runtime): one pass per guard, mirroring the script's ordering
             descendants = tree._live_descendants()
-            # probe each node's recorded socket, never the ambient one alone:
-            # a session alive on the socket the loop recorded at boot is
-            # invisible to a shell resolving a different server (see
-            # _tmux_session_exists); an inconclusive probe means the node may
-            # still be running, so the irreversible teardown refuses rather
-            # than tearing down blind
+            # probe each node through the one liveness law: a socket-recording
+            # loop through the server it recorded at boot, a headless or
+            # socket-less loop through its recorded process group (see
+            # _loop_exists); an inconclusive answer means the node may still be
+            # running, so the irreversible teardown refuses rather than tearing
+            # down blind
             for _, descendant in descendants:
-                alive = descendant._tmux_session_exists()
+                alive = descendant._loop_exists()
+                pgid_file = descendant.node_dir / PGID_FILE
                 if alive is None:
                     raise RuntimeError(
-                        f'Cannot {verb}: the tmux probe failed (tmux list-sessions'
-                        ' gave no answer), so nodes may still be running. Restore'
-                        ' tmux visibility and retry.'
+                        f'Cannot {verb}: the runtime probe gave no answer for'
+                        f' {descendant.branch}, so it may still be running. Check'
+                        ' tmux list-sessions (on the socket in .socket when one is'
+                        f' recorded) and ps -p against {pgid_file}, then retry.'
                     )
                 if alive:
+                    group_backed = descendant.headless or (
+                        not (descendant.node_dir / SOCKET_FILE).exists()
+                        and pgid_file.exists()
+                    )
+                    if group_backed:
+                        pgid = pgid_file.read_text(encoding='utf-8').strip()
+                        runtime = f'as process group {pgid}'
+                        if descendant.headless:
+                            runtime += f' (log: {descendant.node_dir / HEADLESS_LOG})'
+                    else:
+                        runtime = f'in tmux ({descendant.tmux_session})'
                     raise RuntimeError(
-                        f'Cannot {verb}: node is still running in tmux'
-                        f' ({descendant.tmux_session}). Kill it first with:'
-                        f' fractal node kill {descendant.branch}.'
+                        f'Cannot {verb}: node is still running {runtime}.'
+                        f' Kill it first with: fractal node kill'
+                        f' {descendant.branch}.'
                     )
             for _, descendant in descendants:
                 git_dir = fractal.util.git.run(
@@ -3804,7 +3905,7 @@ class Node:
 
         Queries the ``nodes`` table with optional depth and
         status filters. A crashed-but-active row (worktree present, no live
-        tmux session) is reconciled -- persisted via
+        loop runtime) is reconciled -- persisted via
         :meth:`_reconcile_status`, not just relabeled -- before listing, so
         the fleet's default steering read never echoes a dead loop as
         ``active``. Cap columns render each present child's live config
@@ -3828,8 +3929,8 @@ class Node:
                 (overrides the retired/all default).
             live: Reconcile each row against the child's real
                 ``.status()``, dropping descendants whose worktree is gone,
-                relabeling a crashed ``active`` node (no live tmux session)
-                to ``exited``, and a booting ``idle`` node (live session,
+                relabeling a crashed ``active`` node (no live loop runtime)
+                to ``exited``, and a booting ``idle`` node (live runtime,
                 the loop not yet stamped) to ``active`` (the authoritative
                 view). Read-only -- it does not persist the relabel.
             decorated: Record each descendant's status qualifier (a
@@ -3846,31 +3947,42 @@ class Node:
         if live:
             # _live_descendants reconciles each row to the child's real status and
             # drops gone worktrees; additionally relabel a crashed-but-active node
-            # ('active' with no live tmux session) to 'exited' and a booting idle
-            # node (live session) to 'active' -- display-only, mirroring the TUI
+            # ('active' with no live runtime) to 'exited' and a booting idle
+            # node (live runtime) to 'active' -- display-only, mirroring the TUI
             # snapshot reconcile, so --live is the authoritative
             # settled-vs-crashed view; the batched probe only nominates
-            # candidates, and each relabel confirms on the node's recorded
-            # socket (a tmux answer is evidence about one server only -- see
-            # _tmux_session_exists); an inconclusive probe (no tmux answer)
+            # candidates, and each relabel confirms through the node's own
+            # liveness law (see _loop_exists); an inconclusive runtime probe
             # proves nothing, so the stored status stands
             sessions = fractal.util.tmux.probe()
             rows = []
             for row, node in self._live_descendants(max_depth=max_depth):
-                if sessions is not None:
-                    if _base_status(row.get('status')) == 'active':
-                        unlisted = node.tmux_session not in sessions
-                        if unlisted and node._tmux_session_exists() is False:
+                current = _base_status(row.get('status'))
+                if current in ('active', 'idle'):
+                    # the batched listing settles a tmux loop it names; anything
+                    # else (unlisted, headless, or no tmux answer) confirms
+                    # through the node's own liveness law -- recorded socket or
+                    # process group
+                    if (
+                        sessions is not None
+                        and not node.headless
+                        and node.tmux_session in sessions
+                    ):
+                        alive: Optional[bool] = True
+                    else:
+                        alive = node._loop_exists()
+                    if current == 'active':
+                        if alive is False:
                             row = {**row, 'status': 'exited'}
-                    # a started child holds 'idle' until its loop stamps
-                    # 'active' after preflight, but its session is already
-                    # live -- read the boot window as 'active', so a finishing
-                    # ancestor's drain never completes over a child started
-                    # seconds earlier; a sessionless idle node (spawned, never
-                    # started) stays idle and never blocks a drain
-                    elif _base_status(row.get('status')) == 'idle':
-                        if node.tmux_session in sessions or node._tmux_session_exists():
-                            row = {**row, 'status': 'active'}
+                        # a started child holds 'idle' until its loop stamps
+                        # 'active' after preflight, but its session is already
+                        # live -- read the boot window as 'active', so a
+                        # finishing ancestor's drain never completes over a
+                        # child started seconds earlier; a sessionless idle node
+                        # (spawned, never started) stays idle and never blocks a
+                        # drain
+                    elif current == 'idle' and alive:
+                        row = {**row, 'status': 'active'}
                 rows.append(row)
         else:
             rows = self.child_list(max_depth=max_depth)
@@ -4032,13 +4144,15 @@ class Node:
         """Persist the reconcile for crashed-but-active rows (the shared pass).
 
         Reads are where staleness is observed: a row still ``active`` with no
-        live tmux session is healed through the child's own
+        live runtime is healed through the child's own
         :meth:`_reconcile_status` (persisted, not just relabeled) and re-read.
-        The tmux probe is paid only while something reads ``active`` (one
-        batched probe for the whole set); a row without a live node (worktree
-        gone) passes through untouched. An inconclusive probe (no answer from
-        tmux) heals nothing -- stamping live loops ``exited`` on a blind host
-        would reap them.
+        One batched tmux probe nominates tmux rows whose session it does not
+        list; a headless row is nominated on every pass, since its recorded
+        group is its only witness and a host without tmux must still heal it.
+        :meth:`_reconcile_status` is the one confirming probe, so no row is
+        probed twice. A row without a live node (worktree gone) passes
+        through untouched. An inconclusive runtime probe heals nothing --
+        stamping live loops ``exited`` on a blind host would reap them.
 
         Args:
             pairs: ``(row, node)`` per registry row -- ``node`` is ``None``
@@ -4051,12 +4165,16 @@ class Node:
         if not any(_base_status(row.get('status')) == 'active' for row, _ in pairs):
             return pairs
         sessions = fractal.util.tmux.probe()
-        if sessions is None:
-            return pairs
         healed = []
         for row, node in pairs:
             if _base_status(row.get('status')) == 'active' and node is not None:
-                if node.exists() and node.tmux_session not in sessions:
+                # nominate only -- the reconcile confirms on the node's own
+                # record: a headless row always (the listing says nothing about
+                # it), a tmux row when a definitive listing misses it
+                absent = node.headless or (
+                    sessions is not None and node.tmux_session not in sessions
+                )
+                if node.exists() and absent:
                     node._reconcile_status()
                     row = {**row, 'status': node.status()}
             healed.append((row, node))
@@ -5306,7 +5424,43 @@ def _draining(node: Node) -> bool:
     return node.drain_lineage()
 
 
-def _recorded_group(pgid: int, recorded_at: float) -> bool:
+def _group_alive(pgid_file: pathlib.Path) -> Optional[bool]:
+    """Return whether the process group a record names is alive and is that group.
+
+    A ``.pgid``/``.step_pgid`` record names a group by its leader's pid and
+    dates it by its mtime. Alive is not identity: a recycled id answers
+    ``killpg`` from an unrelated group, so a live group counts only when
+    :func:`_recorded_group` dates its leader no later than the record.
+    ``EPERM`` proves the group exists but belongs to another user; the loop
+    runs as the operator, so ``ps`` -- which reads any user's process --
+    arbitrates that group the same way. Only a failed ``ps`` leaves the
+    answer open.
+
+    Args:
+        pgid_file: The record to probe.
+
+    Returns:
+        ``True`` for the recorded group alive; ``False`` for no record, an
+        unparseable one, a gone group, or a recycled id; ``None`` when the
+        live group's identity cannot be verified.
+
+    """
+    try:
+        recorded_at = pgid_file.stat().st_mtime
+        pgid = int(pgid_file.read_text(encoding='utf-8').strip())
+    except (FileNotFoundError, ValueError):
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # alive but foreign-owned: the leader's start instant arbitrates below
+        pass
+    return _recorded_group(pgid, recorded_at)
+
+
+def _recorded_group(pgid: int, recorded_at: float) -> Optional[bool]:
     """Return whether a live process group is the one its record named.
 
     A group id is its leader's pid, and the leader is already running when
@@ -5314,15 +5468,16 @@ def _recorded_group(pgid: int, recorded_at: float) -> bool:
     recycled pid fronting an unrelated group. A group that outlived its
     leader still matches: the OS cannot re-issue the id while any member
     survives. No answer to arbitrate with (``ps`` failed, an unparseable
-    instant) reads as not the recorded group -- sparing a stranger beats
-    reaping a maybe-orphan.
+    instant) is inconclusive, so lifecycle probes never mistake ignorance for
+    proof that the loop died.
 
     Args:
         pgid: A live process group id (its leader's pid).
         recorded_at: Epoch instant the group was recorded.
 
     Returns:
-        Whether the group can be treated as the recorded one.
+        Whether the group is the recorded one, or ``None`` when its identity
+        cannot be verified.
 
     """
     # ask ps for the leader's start instant (LC_ALL pins the format)
@@ -5335,16 +5490,19 @@ def _recorded_group(pgid: int, recorded_at: float) -> bool:
             env=env,
         )
     except OSError:
-        return False
+        return None
     lstart = result.stdout.strip()
-    # no process wears the leader's pid: the live group outlived its
-    # leader, which pins its identity
-    if result.returncode != 0 or not lstart:
+    # ps reports an unmatched selection as one with no output: the live group
+    # outlived its leader, which pins its identity; every other failed or empty
+    # answer is inconclusive
+    if result.returncode == 1 and not lstart and not result.stderr.strip():
         return True
+    if result.returncode != 0 or not lstart:
+        return None
     try:
         started = time.mktime(time.strptime(lstart, '%a %b %d %H:%M:%S %Y'))
     except ValueError:
-        return False
+        return None
     # a second of slack: lstart floors to the second, and the record
     # follows the leader's spawn within the same one
     return started <= recorded_at + 1.0

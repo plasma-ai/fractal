@@ -19,7 +19,13 @@ import typing
 from typing import Any, Optional
 
 import fractal.util
-from fractal.constants import PAUSE_ABORT_FILE, PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
+from fractal.constants import (
+    HEADLESS_FILE,
+    PAUSE_ABORT_FILE,
+    PGID_FILE,
+    SOCKET_FILE,
+    STEP_PGID_FILE,
+)
 from fractal.exceptions import AgentStreamError, _Abort
 
 from . import commit, pricing, render, worktree
@@ -3694,7 +3700,7 @@ class Loop:
         over it; one query for both statuses, so a child flipping
         between them mid-poll is never missed by two separate snapshots.
         A booting child counts too -- the live view reads an idle node
-        with a live tmux session as ``active``, so a child started by a
+        with a live loop runtime as ``active``, so a child started by a
         late step (its loop still in preflight, the active stamp pending)
         is never read as drained.
         """
@@ -4419,6 +4425,9 @@ def _boot_env(node: Node, *, detached: bool, meta: str) -> dict[str, str]:
     base['DETACHED_MODE'] = 'true' if detached else 'false'
     base['META_MODE'] = 'true' if meta else 'false'
     base['META_TARGET'] = meta
+    base['FRACTAL_HEADLESS'] = (
+        'true' if (node.node_dir / HEADLESS_FILE).is_file() else 'false'
+    )
     return base
 
 

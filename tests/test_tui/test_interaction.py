@@ -36,6 +36,7 @@ __all__ = [
     'test_log_scope_defaults_and_persists_per_node',
     'test_scope_zone_sits_between_runs_and_log',
     'test_attach_without_a_live_session_notifies',
+    'test_attach_headless_node_reports_log',
     'test_card_zone_chats_the_shown_session',
     'test_radio_reply_prefills_compose',
     'test_slash_node_resolves_a_leaf_to_a_full_branch',
@@ -337,6 +338,27 @@ async def test_attach_without_a_live_session_notifies(
         await pilot.press('ctrl+a')
         await pilot.pause()
         assert notes == ['no running session']
+
+
+async def test_attach_headless_node_reports_log(
+    pair_tree: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """^a on a headless node points at its captured output."""
+    app = FractalApp(resolve_node(pair_tree), branch='main.alpha')
+    async with app.run_test(size=(150, 48)) as pilot:
+        node_dir = app.data.node_dir('main.alpha')
+        assert node_dir is not None
+        (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+        notes: list[str] = []
+        monkeypatch.setattr(
+            app,
+            'notify',
+            lambda message, **kwargs: notes.append(message),
+        )
+        await pilot.press('ctrl+a')
+        await pilot.pause()
+        assert notes == [f'headless output: {node_dir / "headless.log"}']
 
 
 async def test_card_zone_chats_the_shown_session(

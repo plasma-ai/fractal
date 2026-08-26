@@ -101,8 +101,9 @@ skills (pass `--link` for symlinked install).
 A fractal is a tree of git worktrees, each running an autonomous agent loop. The
 root (user) node is your current branch itself — it has no worktree or loop of
 its own; top-level nodes branch from it, and child nodes branch from their
-parent. Agents iterate in tmux sessions, and all state (runs, iters, steps,
-costs, signals) is tracked in a local SQLite database.
+parent. Agents iterate in tmux sessions (or, with `--headless`, in detached
+process groups), and all state (runs, iters, steps, costs, signals) is tracked
+in a local SQLite database.
 
 Five agent backends are supported — Claude Code (`claude`), Codex (`codex`),
 Grok Build (`grok`), OpenCode (`opencode`), and Oh My Pi (`omp`) — selected per
@@ -121,7 +122,8 @@ instructions. The agent interprets the directive and prints any suggested
 directive, plus a table of every parameter (empty where the directive said
 nothing), then asks for anything it could not infer. From there it walks you
 through refining the node's definition and, once you approve, launches the node
-in a tmux session.
+in a tmux session. On hosts where tmux cannot run, add `--headless`; delegated
+child starts inherit the headless backend and write output to `headless.log`.
 
 Parameters the skill interprets from the directive:
 

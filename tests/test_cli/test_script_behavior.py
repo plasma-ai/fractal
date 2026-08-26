@@ -1,7 +1,7 @@
 """Script-internal behavior of the node lifecycle shells (``_scripts/``).
 
-Drives ``fractal/_scripts/{init,merge,delete}.sh`` against repos built by the
-real CLI, pinning edges the end-to-end lifecycle tests don't reach:
+Drives ``fractal/_scripts/{init,resume,merge,delete}.sh`` against repos built by
+the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 
 - **``init.sh`` worktree resolution** parses ``git worktree list --porcelain``
   with ``substr`` (not ``$2``), so a repo path containing a space resolves the
@@ -13,6 +13,9 @@ real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   package unless the spawn passes ``--inherit=skills``, which copies the
   parent's set wholesale; the snapshot is one-shot, so a ``--reset``
   re-inherits only when the flag is passed again.
+- **``resume.sh`` backend selection** relaunches a paused headless node through
+  ``start.sh --headless --resume`` and a paused tmux node through plain
+  ``start.sh --resume``.
 - **``merge.sh`` interrupt safety** re-asserts the target worktree is clean
   immediately before the destructive squash, so an edit that lands in the
   target *during* the merge is refused -- never absorbed into the squash commit
@@ -58,6 +61,8 @@ import pathlib
 import shutil
 import subprocess
 
+import pytest
+
 import fractal
 from tests._helpers import _git
 
@@ -67,6 +72,7 @@ __all__ = [
     'test_init_resolves_parent_worktree_under_a_space_path',
     'test_init_allows_a_repo_under_a_worktrees_path',
     'test_init_inherits_parent_skills_on_request',
+    'test_resume_reselects_the_recorded_backend',
     'test_merge_preserves_a_target_edit_that_lands_during_the_merge',
     'test_merge_re_merges_an_iterating_child_without_conflict',
     'test_merge_re_merge_of_a_merged_node_is_a_no_op',
@@ -231,6 +237,60 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
     assert reset.returncode == 0, reset.stderr
     kin_md = (kin_skills / 'fractal' / 'SKILL.md').read_text(encoding='utf-8')
     assert revised in kin_md
+
+
+# ------ resume.sh: backend selection
+
+
+@pytest.mark.parametrize('headless', [False, True], ids=['tmux', 'headless'])
+def test_resume_reselects_the_recorded_backend(
+    tmp_path: pathlib.Path,
+    headless: bool,
+) -> None:
+    """A paused node resumes through the backend recorded by its marker.
+
+    ``resume.sh`` delegates the actual relaunch to ``start.sh``. A headless
+    marker must add ``--headless`` before ``--resume``; without the marker the
+    relaunch remains on tmux. A PATH shim records that final handoff without
+    starting either runtime.
+    """
+    repo = _init_tree(tmp_path / f'resumerepo-{headless}')
+    node_dir = repo / '.fractal' / 'main'
+    if headless:
+        (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+
+    capture = tmp_path / f'resume-{headless}.txt'
+    bindir = tmp_path / f'resume-bin-{headless}'
+    bindir.mkdir()
+    bash = bindir / 'bash'
+    bash.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$@" >"$RESUME_CAPTURE"\n',
+        encoding='utf-8',
+    )
+    bash.chmod(0o755)
+    tmux = bindir / 'tmux'
+    tmux.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
+    tmux.chmod(0o755)
+
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    env['RESUME_CAPTURE'] = f'{capture}'
+    resume_sh = _scripts_dir() / 'resume.sh'
+    real_bash = shutil.which('bash') or 'bash'
+    result = subprocess.run(
+        [real_bash, f'{resume_sh}', f'{repo}'],
+        cwd=f'{repo}',
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    expected = [f'{_scripts_dir() / "start.sh"}', f'{repo}']
+    if headless:
+        expected.append('--headless')
+    expected.append('--resume')
+    assert capture.read_text(encoding='utf-8').splitlines() == expected
 
 
 # ------ merge.sh: an edit landing in the target during the merge

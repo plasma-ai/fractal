@@ -7,6 +7,20 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Added
+
+- `node start --headless` / `--tmux` (envvar `FRACTAL_HEADLESS`): the loop runs
+  in a detached process group instead of a tmux session, its output captured in
+  the node's `headless.log` and the backend recorded in a `.headless` marker, so
+  a tree runs on a host without tmux — child starts inherit the backend through
+  the seat environment (`--tmux` overrides it for one child), `resume` reselects
+  the recorded backend, and `attach` refuses on a headless node and names the
+  log to follow. Liveness, crash healing, kill, and teardown judge a headless or
+  bare loop by its recorded `.pgid` group and verify the group's identity
+  through `ps` (a group owned by another user is arbitrated the same way); kill
+  vets `.pgid`/`.step_pgid` under the flock and refuses only over a group whose
+  identity `ps` cannot verify, naming the check to run.
+
 ## [1.2.0] - 2026-08-24
 
 ### Breaking

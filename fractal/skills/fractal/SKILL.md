@@ -11,8 +11,9 @@ A fractal is a tree of autonomous agent loops, each in its own git worktree. A
 node iterates toward a goal and can spawn child nodes that work subtasks in
 parallel.
 
-This skill configures a node with the user, then launches it in tmux; from there
-it runs autonomously — iterating, committing, and spawning children as needed.
+This skill configures a node with the user, then launches it in tmux or a
+detached headless process group; from there it runs autonomously — iterating,
+committing, and spawning children as needed.
 
 Your role does not end at launch. The user (root) node has no loop of its own —
 **you are it.** Once a node is running you are its *operator*: you watch the
@@ -25,7 +26,8 @@ tree, steer it, and relay between it and the user on their behalf. See
 do. Interpret it: distill the node's goal, and map anything the user pinned down
 (a name, a budget, a model, limits, ...) onto the parameters below, each of
 which becomes the matching `fractal node init` flag. The `/fractal` skill routes
-all the configuration to `fractal node init` and passes only
+all the configuration to `fractal node init` and passes only `--headless` (when
+tmux is unavailable or the directive asks for it) and
 `--continue`/`--clean`/`--drain` (when the directive asks to continue an
 existing node) to `fractal node start` — plus `--max-cost` when it accompanies a
 continue (a continue re-arms the cap at start, not init).
@@ -93,6 +95,10 @@ continue (a continue re-arms the cap at start, not init).
 `config.json`. A `max_cost` in `config.json` must be positive if set; a missing
 `max_cost` launches uncapped with a loud warning. Its only arguments:
 
+- **`--headless`/`--tmux`**: run the loop in a detached process group instead of
+  a tmux session — child starts inherit the choice (envvar `FRACTAL_HEADLESS`)
+  and write their output to `<node_dir>/headless.log`; `--tmux` overrides an
+  inherited headless launch
 - **`--continue`**: continue a stopped/exited node — the launch restores the
   worktree, so uncommitted project files refuse without `--clean`
 - **`--clean`**: with `--continue`, discard uncommitted project files
@@ -410,11 +416,15 @@ seed files yourself: step frontmatter (`requires_approval:`, `agent:`,
 them.
 
 All run parameters were set at init (in `config.json`); `start` takes no config
-arguments — only `--continue` (plus `--clean` to discard uncommitted project
-files, `--drain` to run the new run as a drain, and `--max-cost` to re-arm the
-cap after a budget-ended run) when continuing a stopped/exited node. If the user
-wants to tweak a setting first, edit `<node_dir>/config.json`, then start. The
-node launches in a detached tmux session.
+arguments — only the runtime choice (`--headless`/`--tmux`) and `--continue`
+(plus `--clean` to discard uncommitted project files, `--drain` to run the new
+run as a drain, and `--max-cost` to re-arm the cap after a budget-ended run)
+when continuing a stopped/exited node. If the user wants to tweak a setting
+first, edit `<node_dir>/config.json`, then start. The node launches in a
+detached tmux session by default; when tmux is unavailable, use
+`start --headless` — child starts inherit headless mode and write their output
+to `headless.log`. A `--continue` is a new run and takes its backend from the
+flag or `FRACTAL_HEADLESS`; `resume` adopts the paused run's recorded backend.
 
 ### Step 4: Post-launch briefing
 
@@ -430,7 +440,9 @@ Once the node is running, briefly explain how to interact with it:
 - **Monitoring:** From the node's worktree (`cd <worktree>`), commands act on it
   directly — `fractal node status`, `fractal node cost spent`, and
   `fractal node attach` (watch live output — use this, not raw `tmux -t`, whose
-  prefix matching can attach the wrong session). `fractal node list` shows this
+  prefix matching can attach the wrong session; a headless node has no session,
+  so `attach` refuses and names its log — follow it with
+  `tail -f <node_dir>/headless.log` instead). `fractal node list` shows this
   node's subtree (from a leaf worktree, just its own descendants) — run it from
   the repo root to see the whole tree; it lists live nodes only (`--all`
   includes retired ones, `--retired` only those). Read `<node_dir>/memory/`

@@ -84,7 +84,8 @@ tmux sessions
 session — this is what makes nodes autonomous and observable. The session is
 named ``<repo> (<branch>)`` with dots flattened to dashes: in a repository
 ``myproject``, the node ``main.parser`` runs in the session
-``myproject (main-parser)``. tmux must be installed to start nodes.
+``myproject (main-parser)``. tmux must be installed for the default backend;
+``--headless`` runs the loop in a detached process group instead.
 
 A node has at most one session. The user node never has one, and a paused
 node has none either — no session is a parked node's normal state, not a

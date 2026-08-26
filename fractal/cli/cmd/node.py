@@ -46,6 +46,7 @@ __all__ = [
     'node_chat',
     'node_update',
     'node_loop',
+    'node_launch',
     'node_seed',
 ]
 
@@ -410,6 +411,19 @@ def node_start(app: typer.Typer) -> typer.Typer:
         ' old -> new; required when the last run ended on its budget.'
     )
     max_cost = typer.Option(None, '--max-cost', help=max_cost_help)
+    # headless flag
+    headless_help = (
+        'Run without tmux in a detached process group; inherited by child'
+        ' starts, and --tmux overrides an inherited headless launch. A'
+        ' --continue takes its backend from this flag or FRACTAL_HEADLESS;'
+        ' resume adopts the backend recorded by the paused launch.'
+    )
+    headless = typer.Option(
+        False,
+        '--headless/--tmux',
+        envvar='FRACTAL_HEADLESS',
+        help=headless_help,
+    )
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
@@ -421,18 +435,19 @@ def node_start(app: typer.Typer) -> typer.Typer:
         clean: bool = clean,
         drain: bool = drain,
         max_cost: Optional[float] = max_cost,
+        headless: bool = headless,
         path: str = path,
     ) -> None:
-        """Launch a node in a tmux session.
+        """Launch a node in tmux or a detached headless process group.
 
         Run parameters come from ``config.json`` (set at init or
         edited before launch); only ``--continue``/``--clean``/
-        ``--drain``/``--max-cost`` are set here. With ``--continue``,
-        ``--drain`` runs the new run as a drain -- the harness forbids
-        spawns and re-arms from it. Runs are isolated -- each launch
-        arms the cap anew -- but a run that ended on its cost budget
-        refuses a bare ``--continue``: pass ``--max-cost`` to arm the
-        next run explicitly.
+        ``--drain``/``--max-cost``/``--headless`` are set here. With
+        ``--continue``, ``--drain`` runs the new run as a drain -- the
+        harness forbids spawns and re-arms from it. Runs are isolated --
+        each launch arms the cap anew -- but a run that ended on its cost
+        budget refuses a bare ``--continue``: pass ``--max-cost`` to arm
+        the next run explicitly.
         """
         require_non_negative(max_cost=max_cost)
         if clean and not continue_:
@@ -447,6 +462,7 @@ def node_start(app: typer.Typer) -> typer.Typer:
             clean=clean,
             drain=drain,
             max_cost=max_cost,
+            headless=headless,
         )
         if output:
             typer.echo(output)
@@ -883,7 +899,7 @@ def node_list(app: typer.Typer) -> typer.Typer:
     # live flag
     live_help = (
         "Trust each child's real status: relabel a crashed active node"
-        ' (no tmux session) as exited, and drop nodes whose worktree is gone.'
+        ' (no live loop runtime) as exited, and drop nodes whose worktree is gone.'
     )
     live = typer.Option(False, '--live', help=live_help)
     # count flag
@@ -1338,7 +1354,7 @@ def node_loop(app: typer.Typer) -> typer.Typer:
         drain: bool = drain,
         path: str = path,
     ) -> None:
-        """Run the node's iteration loop (invoked by start.sh inside tmux)."""
+        """Run the node's iteration loop (invoked by the selected runtime)."""
         node = resolve_node(path)
         loop = Loop(
             node,
@@ -1351,6 +1367,43 @@ def node_loop(app: typer.Typer) -> typer.Typer:
         code = loop.run()
         if code:
             raise SystemExit(code)
+
+    return app
+
+
+def node_launch(app: typer.Typer) -> typer.Typer:
+    """Register the ``_launch`` command."""
+    # continue flag
+    continue_help = (
+        'Continue a stopped/exited node (further iterations); the worktree'
+        ' restore discards uncommitted project files.'
+    )
+    continue_ = typer.Option(False, '--continue', help=continue_help)
+    # resume flag
+    resume_help = 'Resume a paused node (adopt its open run where the pause left it).'
+    resume = typer.Option(False, '--resume', help=resume_help)
+    # drain flag
+    drain_help = 'With --continue: forbid spawns and re-arms for this run.'
+    drain = typer.Option(False, '--drain', help=drain_help)
+    # path option
+    path_help = 'Worktree directory.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, '_launch')
+    def _launch(
+        continue_: bool = continue_,
+        resume: bool = resume,
+        drain: bool = drain,
+        path: str = path,
+    ) -> None:
+        """Launch a node loop in an independent process group (invoked by start.sh)."""
+        node = resolve_node(path)
+        output = node._launch_headless(
+            continue_run=continue_,
+            resume=resume,
+            drain=drain,
+        )
+        typer.echo(output)
 
     return app
 

@@ -43,6 +43,8 @@ from .conftest import (
 
 __all__ = [
     'test_start_resolves_dirs_before_arg_check',
+    'test_headless_start_runs_without_tmux',
+    'test_headless_continue_forwards_drain',
     'test_continue_only_flags_reject_a_bare_start',
     'test_start_revalidates_hand_edited_config',
     'test_continue_refuses_to_discard_dirty_project_files',
@@ -124,6 +126,62 @@ def test_start_resolves_dirs_before_arg_check() -> None:
     assert result.returncode != 0
     assert 'path is required' in result.stderr
     assert 'unbound variable' not in result.stderr
+
+
+def test_headless_start_runs_without_tmux(repo: dict) -> None:
+    """``start --headless`` detaches, captures output, and settles normally.
+
+    The launch returns while the loop owns an independent process group, so
+    the caller remains free to orchestrate more nodes. The loop uses the same
+    status and run machinery as tmux and removes its PGID record on an in-band
+    exit; its transcript remains available in the node-local headless log.
+    """
+    worktree = _settled_node(repo, 'headless')
+    Node(worktree).status_set('idle')
+    result = _start(repo, worktree, '--headless')
+    assert result.returncode == 0, result.stderr
+    assert 'Started headless node:' in result.stdout
+    assert _await_settled(worktree), result.stdout
+    node_dir = worktree / '.fractal' / 'main.headless'
+    assert (node_dir / '.headless').read_text(encoding='utf-8') == 'headless\n'
+    assert not (node_dir / '.pgid').exists()
+    assert (node_dir / 'headless.log').read_text(encoding='utf-8')
+
+    # a delegated start receives the backend through the loop environment;
+    # pin the CLI's envvar route independently of the explicit flag above
+    inherited = _settled_node(repo, 'headlessenv')
+    Node(inherited).status_set('idle')
+    env = _cli_env()
+    bindir = repo['bindir']
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    env['FRACTAL_HEADLESS'] = 'true'
+    inherited_result = subprocess.run(
+        [_fractal_bin(), 'node', 'start'],
+        cwd=inherited,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=180,
+    )
+    assert inherited_result.returncode == 0, inherited_result.stderr
+    assert 'Started headless node:' in inherited_result.stdout
+    assert _await_settled(inherited), inherited_result.stdout
+    inherited_dir = inherited / '.fractal' / 'main.headlessenv'
+    assert (inherited_dir / '.headless').is_file()
+
+
+def test_headless_continue_forwards_drain(repo: dict) -> None:
+    """``--drain`` rides a headless continue through to the detached loop.
+
+    The drain flag travels the same handoff as the backend flag: ``start.sh``
+    forwards it into the detached launch, so a drain run boots headless and
+    settles on a terminal status like any other continue.
+    """
+    worktree = _settled_node(repo, 'headlessdrain')
+    result = _start_continue(repo, worktree, '--drain', '--headless')
+    assert result.returncode == 0, result.stderr
+    assert 'Started headless node:' in result.stdout
+    assert _await_settled(worktree), result.stdout
 
 
 @pytest.mark.parametrize('flag', ['--clean', '--max-cost=0.5'])

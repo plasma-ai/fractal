@@ -252,11 +252,12 @@ Running nodes
 .. code-block:: console
 
    $ fractal node start [NODE] [--continue] [--clean] [--drain]
-         [--max-cost <usd>]
+         [--max-cost <usd>] [--headless | --tmux]
 
 Launch the node's iteration loop in a tmux session (named
-``<repo> (<branch>)`` with dots flattened to dashes). Run parameters
-come from the node's ``config.json``; only the continue flags are set at
+``<repo> (<branch>)`` with dots flattened to dashes) or, with ``--headless``,
+in a detached process group. Run parameters come from the node's
+``config.json``; only the runtime choice and the continue flags are set at
 launch time.
 
 ``--continue``
@@ -284,12 +285,22 @@ launch time.
    budget — runs are isolated and each launch arms the cap anew, so a
    budget-ended run refuses a bare ``--continue``.
 
+``--headless`` / ``--tmux``
+   Select the runtime backend (envvar ``FRACTAL_HEADLESS``): ``--headless``
+   runs the loop in a detached process group and captures its output in the
+   node's ``headless.log``; ``--tmux`` is the default. Delegated child starts
+   inherit a headless parent's choice through the envvar, and ``--tmux`` opts
+   one child back into tmux. A ``--continue`` opens a new run and takes its
+   backend from the flag or ``FRACTAL_HEADLESS``; ``resume`` adopts the
+   paused run's recorded backend.
+
 A fresh start requires status exactly ``idle``. Starting refuses on: the user
 node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a
 paused ancestor or tree-wide pause latch; a foreign tmux session already
-holding the node's session name; and a stored config the launch re-validation
-rejects. Continuing from ``killed`` surfaces the recorded kill attribution as
-a notice. An uncapped start is allowed but warns loudly.
+holding the node's session name; a headless node whose recorded process group
+is still alive; and a stored config the launch re-validation rejects.
+Continuing from ``killed`` surfaces the recorded kill attribution as a
+notice. An uncapped start is allowed but warns loudly.
 
 .. code-block:: console
 
@@ -300,7 +311,8 @@ a notice. An uncapped start is allowed but warns loudly.
 ~~~~~~~~~~
 
 Attach the current terminal to the node's tmux session. Requires the node to
-be ``active``.
+be ``active``. A headless node refuses and names its ``headless.log`` to
+follow instead.
 
 .. code-block:: console
 
@@ -385,12 +397,16 @@ or when an ancestor is still paused.
 
 Kill the node immediately: descendant sessions and recorded process groups
 are reaped first (re-enumerated to a fixpoint, so mid-sweep spawns are
-caught), then the node's own, and open rows are marked ``killed``. Killable
+caught), then the node's own, and open rows are marked ``killed``. The reap
+covers the loop runtime (the tmux session, or a headless or bare loop's
+recorded process group) and any step group the loop recorded. Killable
 states are ``active``, ``paused``, and ``idle`` -- a booting node is reaped
 and a never-started spawn is stamped ``killed`` so it can never activate.
-The attribution ``killed by <actor>[: reason]`` lands on the event,
-the signal, and the run row, and is surfaced as a notice on a later
-``start --continue``.
+The only other refusal is a recorded process group whose identity the ``ps``
+probe cannot verify: the kill refuses before writing any kill state and
+names ``ps -p <pgid>`` and the record file to remove. The attribution
+``killed by <actor>[: reason]`` lands on the event, the signal, and the run
+row, and is surfaced as a notice on a later ``start --continue``.
 
 .. code-block:: console
 
@@ -506,7 +522,7 @@ Print the node's current status, possibly decorated: ``active (pausing)``,
 ``active (stopping)``, or ``active (finishing)`` when a signal is pending,
 and ``exited (<reason>)`` when the latest run recorded why it ended. The read
 is self-reconciling — a crashed node (``active`` on record with provably no
-tmux session) is healed to ``exited`` first.
+tmux session or headless process group) is healed to ``exited`` first.
 
 .. code-block:: console
 
@@ -566,10 +582,10 @@ activity, with a ``!`` suffix flagging an active node quiet past
 
 ``--live``
    Trust each child's real state: relabel a crashed active node (no tmux
-   session) as ``exited``, a booting idle node as ``active``, and drop nodes
-   whose worktree is gone. This view is read-only; the plain listing instead
-   persists the crash heal and flags worktree-less rows as ``orphan`` (or
-   ``<status> (orphaned)`` when settled).
+   session or headless process group) as ``exited``, a booting idle node as
+   ``active``, and drop nodes whose worktree is gone. This view is read-only;
+   the plain listing instead persists the crash heal and flags worktree-less
+   rows as ``orphan`` (or ``<status> (orphaned)`` when settled).
 
 ``--count``
    Print only the number of matching nodes (mutually exclusive with the

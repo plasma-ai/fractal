@@ -82,8 +82,9 @@ Prerequisites
   one when run outside a repo (``git init`` on a project-named branch plus an
   initial commit of an empty ``.gitignore``), and refuses a detached
   ``HEAD``.
-- **tmux** — every node loop runs in a detached tmux session;
-  ``fractal node start`` errors when tmux is missing. tmux 3.2 or newer is
+- **tmux (optional)** — tmux is the default and provides attachable panes;
+  ``fractal node start --headless`` uses an independent process group instead
+  when tmux cannot run. tmux 3.2 or newer is
   needed to forward provider keys into an already-running tmux server; on
   older versions the loop's preflight reports the missing key instead.
 - **A provider CLI** — the agent command a node is configured with must be on
@@ -223,6 +224,12 @@ the budget, and ``--drain`` to run a wind-down that forbids further spawns
 and re-arms) — see :doc:`/guide/lifecycle`, and :doc:`/cli/node` for the
 flag details.
 
+On a locked-down or non-interactive host, pass ``--headless``. The command
+still returns immediately, the loop runs in an independent process group, and
+its output is captured in the node's ``headless.log``. Delegated child starts
+inherit headless mode, so the entire tree runs without tmux; ``--tmux`` opts an
+individual child back into tmux.
+
 .. warning::
 
    Nodes run their agents with elevated permissions by design (e.g. Claude
@@ -244,6 +251,8 @@ From cheapest to richest:
 - ``fractal node attach parser`` attaches your terminal to the node's live
   tmux session (the node must be ``active``); detach with the standard tmux
   detach.
+- For a headless node, ``attach`` refuses and names
+  ``<node_dir>/headless.log``; follow that file instead.
 - ``fractal open`` launches the TUI cockpit — the whole tree, radio traffic,
   budgets, and event logs on one live screen; see :doc:`/tui`.
 

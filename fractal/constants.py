@@ -23,6 +23,10 @@ SEED_IGNORE_FILE = '.gitignore'
 PAUSE_ABORT_FILE = '.pause_abort'
 #: tree-wide pause marker beside the central database
 PAUSED_FILE = '.paused'
+#: marker selecting the detached process backend for the node loop
+HEADLESS_FILE = '.headless'
+#: captured stdout and stderr for a headless node loop
+HEADLESS_LOG = 'headless.log'
 #: process group id of the running loop
 PGID_FILE = '.pgid'
 #: agent session records for the node

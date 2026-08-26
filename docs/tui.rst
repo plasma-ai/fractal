@@ -84,9 +84,10 @@ Every node in the tree, as box-drawing rows, each with a status dot; the
 root row is tagged ``(user)``. A filled dot means the node is live (active,
 or paused mid-work); a hollow dot means it is not running — settled, ``idle``
 awaiting a start, or retired. The dot's color carries the specific lifecycle
-status (see :doc:`/guide/lifecycle`), and a pending signal overrides it. A node whose ``.status`` says ``active`` but whose tmux
-session has vanished displays as ``exited`` — a display-only reconciliation;
-nothing is written back.
+status (see :doc:`/guide/lifecycle`), and a pending signal overrides it. A
+node whose ``.status`` says ``active`` but whose tmux session or headless
+process group has vanished displays as ``exited`` — a display-only
+reconciliation; nothing is written back.
 
 ``up``/``down`` select a row, ``right``/``left`` unfold and fold a subtree,
 and ``enter`` re-scopes the whole cockpit to the selected branch — the pane's
@@ -286,11 +287,12 @@ Attaching to a session
 node's tmux session **read-only**: every key is ignored except ``esc``,
 which detaches (the session's status line advertises ``esc detach`` for the
 duration). If the node has no live session, a ``no running session`` toast
-appears instead. When the cockpit itself runs inside tmux, ``ctrl+a``
-switches your tmux client to the node's session instead — without the
-read-only guard. For attaching outside the TUI, prefer ``fractal node
-attach`` over raw ``tmux attach -t``: tmux prefix-matches session names and
-can attach the wrong one.
+appears instead; a headless node, which has no session to attach, gets a
+``headless output: <log>`` toast naming its ``headless.log``. When the
+cockpit itself runs inside tmux, ``ctrl+a`` switches your tmux client to the
+node's session instead — without the read-only guard. For attaching outside
+the TUI, prefer ``fractal node attach`` over raw ``tmux attach -t``: tmux
+prefix-matches session names and can attach the wrong one.
 
 Keybindings
 -----------

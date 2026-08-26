@@ -53,8 +53,9 @@ reason before the operation raises.
 
 - **`active`** accepts `finish`, `finish_cancel`, `stop`, and `pause` — each
   guarded by the same preamble: heal any crashed-but-active state first, then
-  require status `active` and an open run. `kill` is also always legal on an
-  active node.
+  require status `active` and an open run. `kill` is also legal on an active
+  node, refusing only over a recorded process group whose identity cannot be
+  verified.
 - **`paused`** accepts only `resume`, `kill`, and `chat`. Everything else
   refuses; a paused node holds its spawn slot and blocks ancestor finish-drains
   until resumed or killed.
