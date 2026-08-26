@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 from typing import Optional
 
@@ -49,6 +50,7 @@ __all__ = [
     'test_teardown_refuses_on_inconclusive_tmux_probe',
     'test_teardown_refuses_on_inconclusive_headless_probe',
     'test_teardown_refuses_session_alive_on_recorded_socket',
+    'test_teardown_refuses_group_alive_on_headless_node',
     'test_destroy_rejects_from_inside_worktree',
     'test_teardown_locked_preflight_precedes_paused_settle',
     'test_destroy_lifecycle',
@@ -761,6 +763,47 @@ def test_teardown_refuses_session_alive_on_recorded_socket(
     # nothing was torn down
     assert runner.worktree.is_dir()
     assert runner.status() == 'active'
+
+
+def test_teardown_refuses_group_alive_on_headless_node(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The teardown pre-flight judges a headless node by its recorded group.
+
+    A ``.headless`` loop never joined a tmux server, so its live,
+    identity-checked process group (``.pgid``) is the whole answer -- a
+    definitive-empty tmux probe must not read it as gone -- and the
+    refusal names the group and the log rather than a tmux session.
+    """
+    node = Node(git_repo)
+    node.init(agent='claude', user=True)
+    node.init(name='runner')
+    runner = Node(git_repo / '.worktrees' / 'main.runner')
+    runner.status_set('active')
+    (runner.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
+    # a live same-user group standing in for the loop's, recorded after it
+    # spawned so the identity check dates the leader no later than the record
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    pgid_file = runner.node_dir / PGID_FILE
+    try:
+        pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        monkeypatch.setattr('fractal.util.tmux.probe', lambda: frozenset())
+        refusal = rf'still running as process group {leader.pid} \(log: '
+        with pytest.raises(RuntimeError, match=refusal):
+            Node.destroy(git_repo)
+        with pytest.raises(RuntimeError, match=refusal):
+            Node.reset(git_repo)
+        # nothing was torn down and the live group was left unsignaled
+        assert runner.worktree.is_dir()
+        assert runner.status() == 'active'
+        assert leader.poll() is None
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 def test_destroy_rejects_from_inside_worktree(
