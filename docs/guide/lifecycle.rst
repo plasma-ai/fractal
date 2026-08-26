@@ -451,18 +451,20 @@ A loop that dies without settling — a hard kill, a direct
 enforces one loop per node, a *provably* missing runtime is proof the loop is
 gone. The proof is per backend: a tmux node's recorded session, or a headless
 node's recorded ``.pgid`` process group — alive, and the group the record
-named rather than a recycled id. The same process-group proof spares a loop
-launched bare (``fractal node _loop`` under neither backend, which records no
-``.socket``): while its group lives, it is left alone. Otherwise fractal heals
-the node on the next read or verb: the status is stamped ``exited``, the
-still-open run, iteration, and step rows are closed, any surviving process
-groups the loop recorded are reaped with an ``orphan`` event (an orphaned
-agent would otherwise keep spending unseen), and config/registry cap drift is
-healed. The ``.headless`` backend record survives the heal — it names how the
-node runs, not whether — so a bare ``--continue`` reselects the headless
-backend. This runs automatically before every signal verb, ``merge``,
-``delete``, ``retire``, ``start --continue``, and on listings — there is no
-command to run.
+named rather than a recycled id. A headless loop joins no server and records
+no ``.socket``, whatever ``$TMUX`` its launching shell carried; every other
+boot under ``$TMUX`` records the server it sees as its own. The same
+process-group proof spares a socket-less loop (``fractal node _loop``
+launched bare outside tmux, which records no ``.socket``): while its group
+lives, it is left alone. Otherwise fractal heals the node on the next read or
+verb: the status is stamped ``exited``, the still-open run, iteration, and
+step rows are closed, any surviving process groups the loop recorded are
+reaped with an ``orphan`` event (an orphaned agent would otherwise keep
+spending unseen), and config/registry cap drift is healed. The ``.headless``
+backend record survives the heal — it names how the node runs, not whether —
+so a bare ``--continue`` reselects the headless backend. This runs
+automatically before every signal verb, ``merge``, ``delete``, ``retire``,
+``start --continue``, and on listings — there is no command to run.
 
 Two deliberate limits:
 

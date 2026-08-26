@@ -348,9 +348,8 @@ class Node:
                 if group is not False:
                     return group
             # tmux gave no answer: the recorded group is the only witness;
-            # the record guard keeps the boot window unknown -- .pgid lands
-            # only after the active stamp, so a record-less node may be a
-            # booting loop, never provably a dead one
+            # a record-less node stays unknown -- a missing record is
+            # ignorance, not proof, so a blind host never heals over it
             elif alive is None and (self.node_dir / PGID_FILE).exists():
                 return _group_alive(self.node_dir / PGID_FILE)
         return alive

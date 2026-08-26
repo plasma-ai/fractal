@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 import pytest
 
-from fractal.constants import SOCKET_FILE, STEP_PGID_FILE
+from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
 from fractal.core import pricing
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
@@ -462,21 +462,37 @@ def test_agent_env_inherits_headless_launches(
     assert loop._agent_env('work')['FRACTAL_HEADLESS'] == 'true'
 
 
+@pytest.mark.parametrize(
+    argnames='headless',
+    argvalues=[False, True],
+    ids=['tmux-backed', 'headless'],
+)
 def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
+    headless: bool,
 ) -> None:
-    """Boot records the pane's tmux socket; an in-band exit drops the record.
+    """A tmux-backed boot records the pane's socket; a headless boot never does.
 
-    ``Node._reconcile_status`` probes the server the session lives on via
-    this record, so it must land before any step runs (a reconcile racing a
-    fresh boot from a different-socket shell must already find it) and must
-    not outlive the loop -- a surviving record, like ``.pgid``, would mark a
-    death no cleanup could catch.
+    ``Node._reconcile_status`` probes the server the node's own session
+    lives on via this record, so it must land before any step runs (a
+    reconcile racing a fresh boot from a different-socket shell must
+    already find it) and must not outlive the loop -- a surviving record,
+    like ``.pgid``, would mark a death no cleanup could catch. A headless
+    loop joins no server whatever ``$TMUX`` its launching shell carries:
+    it records no socket and drops a stale record from an earlier tmux
+    run. Either way ``.pgid`` lands after the socket record and the
+    active stamp lands last, so an active row always carries its
+    liveness records and '.pgid and no .socket' reliably reads 'booted
+    outside a pane'.
     """
     socket_path = '/tmp/fx-test/socket'  # noqa: S108
     monkeypatch.setenv('TMUX', f'{socket_path},4242,0')
     socket_file = loop_node.node_dir / SOCKET_FILE
+    pgid_file = loop_node.node_dir / PGID_FILE
+    if headless:
+        (loop_node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+        socket_file.write_text('/tmp/fx-test/stale\n', encoding='utf-8')  # noqa: S108
 
     class RecordingLoop(MockLoop):
         """Mock loop reading the socket record where a step would run."""
@@ -484,21 +500,57 @@ def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
         def __init__(self: RecordingLoop, node: Node, **kwargs: Any) -> None:
             """Initialize ``RecordingLoop``."""
             super().__init__(node, **kwargs)
-            self.recorded: list[str] = []
+            self.recorded: list[Optional[str]] = []
 
         def _launch(
             self: RecordingLoop, step: Step, prompt: str, **kwargs: Any
         ) -> StepResult:
             """Record the socket file's content alongside the outcome."""
-            self.recorded.append(socket_file.read_text(encoding='utf-8'))
+            if socket_file.exists():
+                self.recorded.append(socket_file.read_text(encoding='utf-8'))
+            else:
+                self.recorded.append(None)
             return super()._launch(step, prompt, **kwargs)
 
     loop = RecordingLoop(loop_node)
+    # capture which records exist the instant the boot stamps 'active'
+    stamped: list[tuple[bool, bool]] = []
+    status_set = loop_node.status_set
+
+    def recording_status_set(status: str) -> None:
+        if status == 'active':
+            stamped.append((pgid_file.exists(), socket_file.exists()))
+        status_set(status)
+
+    monkeypatch.setattr(loop_node, 'status_set', recording_status_set)
+    # capture whether the socket record is settled the instant .pgid lands
+    pgid_stamp: list[bool] = []
+    write_text = pathlib.Path.write_text
+
+    def recording_write_text(path: pathlib.Path, *args: Any, **kwargs: Any) -> int:
+        if path == pgid_file:
+            pgid_stamp.append(socket_file.exists())
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, 'write_text', recording_write_text)
     assert loop.run() == 0
-    # every step ran under the recorded socket, and the exit dropped it
     assert loop.recorded
-    assert all(text.strip() == socket_path for text in loop.recorded)
+    if headless:
+        # no step saw a socket, and the stale record is gone for good
+        assert all(text is None for text in loop.recorded)
+    else:
+        # every step ran under the recorded socket
+        assert all(
+            text is not None and text.strip() == socket_path for text in loop.recorded
+        )
+    # the exit dropped both records
     assert not socket_file.exists()
+    assert not pgid_file.exists()
+    # the active stamp found .pgid on record, and the socket only under tmux
+    assert stamped == [(True, not headless)]
+    # .pgid landed once, after the socket record (or after the stale drop),
+    # so '.pgid and no .socket' reliably reads 'booted outside a pane'
+    assert pgid_stamp == [not headless]
 
 
 def test_continue_restore_lands_config_all_or_nothing(
@@ -2533,6 +2585,8 @@ def test_killed_before_boot_stands_the_loop_down(
     # nothing was bought, and the stand-down is on the record
     assert loop.launched == []
     assert node.status() == 'killed'
+    # the stand-down never runs, so it leaves no group record behind
+    assert not (node.node_dir / PGID_FILE).exists()
     run = node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert run['status'] == 'exited'
     assert run['metadata'] == 'killed before boot'

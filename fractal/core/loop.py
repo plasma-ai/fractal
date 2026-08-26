@@ -20,7 +20,6 @@ from typing import Any, Optional
 
 import fractal.util
 from fractal.constants import (
-    HEADLESS_FILE,
     PAUSE_ABORT_FILE,
     PGID_FILE,
     SOCKET_FILE,
@@ -463,17 +462,19 @@ class Loop:
             self._adopt()
         except _Abort:
             return 1
-        # record the tmux socket the session lives on ($TMUX is
-        # "socket_path,server_pid,session_index" inside the pane), before
-        # the active stamp so no reconcile ever probes an active node
-        # without it: Node._reconcile_status asks this server, not
-        # whichever socket the probing shell resolves, so a shell with a
-        # different TMUX_TMPDIR never misreads the live session as gone; a
+        # record the tmux socket the node's own session lives on ($TMUX is
+        # "socket_path,server_pid,session_index" inside the pane) -- the
+        # record lands before the active stamp and before .pgid, the
+        # ordering the socket-less liveness rule (Node._loop_alive) relies
+        # on: Node._reconcile_status asks this server, not whichever socket
+        # the probing shell resolves, so a shell with a different
+        # TMUX_TMPDIR never misreads the live session as gone; a headless
+        # loop joined no server and records none, and a headless or
         # tmux-less launch (the test harness) drops any stale record so
-        # the ambient probe rules
+        # the group or ambient probe rules
         try:
             tmux_env = os.environ.get('TMUX', '')
-            if tmux_env:
+            if tmux_env and not node.headless:
                 socket_path, *_ = tmux_env.split(',')
                 (node.node_dir / SOCKET_FILE).write_text(
                     f'{socket_path}\n',
@@ -481,6 +482,20 @@ class Loop:
                 )
             else:
                 (node.node_dir / SOCKET_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
+        # record the run's process group beside .status, after the socket
+        # record (a .pgid with no .socket means 'booted outside a pane')
+        # and before the active stamp, so an active row always carries its
+        # liveness handle -- the one kill.sh and Node._reconcile_status
+        # fall back to when an out-of-band pane death leaves the agent
+        # group running headless; the headless launcher records the same
+        # group before the loop boots, so this write re-lands the same
+        # content; removed by _on_exit below, so a surviving file marks a
+        # death no cleanup could catch (SIGKILL / host crash)
+        try:
+            pgid = os.getpgid(0)
+            (node.node_dir / PGID_FILE).write_text(f'{pgid}\n', encoding='utf-8')
         except OSError:
             pass
         # stamp the node active -- under the .worktrees flock, so a retire
@@ -511,17 +526,13 @@ class Loop:
                 )
             except Exception:
                 pass
+            # a stand-down never runs, so drop the group record -- a
+            # surviving .pgid would mark a phantom crash
+            try:
+                (node.node_dir / PGID_FILE).unlink(missing_ok=True)
+            except OSError:
+                pass
             return 1
-        # record the run's process group beside .status -- the handle kill.sh
-        # and Node._reconcile_status fall back to when an out-of-band pane
-        # death leaves the agent group running headless; removed by _on_exit
-        # below, so a surviving file marks a death no cleanup could catch
-        # (SIGKILL / host crash)
-        try:
-            pgid = os.getpgid(0)
-            (node.node_dir / PGID_FILE).write_text(f'{pgid}\n', encoding='utf-8')
-        except OSError:
-            pass
         # an in-loop abort before the terminal cascade (an unhandled error)
         # would otherwise strand .status at 'active'; on exit, stamp the
         # honest terminal -- but only when the cascade never recorded one
@@ -4425,9 +4436,7 @@ def _boot_env(node: Node, *, detached: bool, meta: str) -> dict[str, str]:
     base['DETACHED_MODE'] = 'true' if detached else 'false'
     base['META_MODE'] = 'true' if meta else 'false'
     base['META_TARGET'] = meta
-    base['FRACTAL_HEADLESS'] = (
-        'true' if (node.node_dir / HEADLESS_FILE).is_file() else 'false'
-    )
+    base['FRACTAL_HEADLESS'] = 'true' if node.headless else 'false'
     return base
 
 
