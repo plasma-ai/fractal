@@ -13,7 +13,6 @@
 .db-*
 registry.db
 registry.db-*
-registry.db-*
 
 # Status file
 .status

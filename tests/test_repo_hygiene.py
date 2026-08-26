@@ -47,8 +47,9 @@ def test_gitignore_spares_node_artifact_names(tmp_path: pathlib.Path) -> None:
     Nodes park committable evidence under names like ``checker.log`` and
     ``run_logs/``; the template's log patterns (``*logs/``, bare ``log``,
     the Django-section ``*.log``) would silently drop them from commits.
-    The repo has no legitimate ignorable ``*.log`` producer -- agent stderr
-    is ``claude.err``/``codex.err`` via ``info/exclude``.
+    No log pattern belongs in the committed file: fractal's own runtime
+    logs (``claude.err``/``codex.err``, ``setup.log``, ``headless.log``)
+    are ignored by exact name through ``info/exclude``.
     """
     repo = tmp_path / 'repo'
     repo.mkdir()
