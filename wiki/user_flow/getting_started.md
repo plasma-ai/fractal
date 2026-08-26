@@ -139,10 +139,11 @@ In a locked-down or non-interactive environment, use:
 fractal node start <name> --headless
 ```
 
-The loop runs in a detached process group and writes its output to
-`<node_dir>/headless.log`. Headless mode is inherited by child starts, so a
-delegating node can build and run a full tree without tmux. Pass `--tmux` to a
-child start to opt that launch back into tmux.
+The loop runs in a detached process group and appends its output to
+`<node_dir>/headless.log`, one launch banner per launch. The backend is sticky —
+an unflagged relaunch reuses it — and child starts follow the parent's backend,
+so a delegating node can build and run a full tree without tmux. Pass `--tmux`
+to a child start to force and re-record a tmux launch.
 
 From here the loop is autonomous: it iterates through its steps, commits its
 work each iteration to its own branch, and reports over radio. The operator's

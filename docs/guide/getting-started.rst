@@ -226,9 +226,10 @@ flag details.
 
 On a locked-down or non-interactive host, pass ``--headless``. The command
 still returns immediately, the loop runs in an independent process group, and
-its output is captured in the node's ``headless.log``. Delegated child starts
-inherit headless mode, so the entire tree runs without tmux; ``--tmux`` opts an
-individual child back into tmux.
+its output appends to the node's ``headless.log``, one launch banner per
+launch. The backend is sticky — an unflagged relaunch reuses it — and
+delegated child starts follow the parent's backend, so the entire tree runs
+without tmux; ``--tmux`` forces and re-records a tmux launch.
 
 .. warning::
 

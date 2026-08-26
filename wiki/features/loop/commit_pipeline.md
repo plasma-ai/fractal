@@ -48,7 +48,7 @@ ambient PATH, so a foreign install cannot answer the hook's reads.
 
 Staging appends a fixed exclude set to every sweep: virtualenvs, the central
 database and its sidecars, the status and pause markers, the headless runtime
-marker and its captured output (`.headless`, `headless.log`), the config write
+marker and its appended output (`.headless`, `headless.log`), the config write
 lock (`config.json.lock`), crash-stranded atomic-write temp files,
 engine-materialized system skills (`skills/.system/`), and the wiki tool's
 self-ignored derived cache (`.wiki/cache/`) never ride a work commit -- the

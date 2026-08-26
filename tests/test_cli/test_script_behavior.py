@@ -23,6 +23,10 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   refuses the relaunch (a resume with the retry-never-kill wording), and an
   unanswerable identity probe refuses naming the ``ps`` check rather than
   reading ignorance as dead.
+- **``start.sh`` headless marker ownership** leaves the ``.headless`` write to
+  ``node _launch``, which records it beside ``.pgid`` around the spawn -- so a
+  handoff that fails leaves no marker and the record only ever names a backend
+  the node actually launched with.
 - **``merge.sh`` interrupt safety** re-asserts the target worktree is clean
   immediately before the destructive squash, so an edit that lands in the
   target *during* the merge is refused -- never absorbed into the squash commit
@@ -82,6 +86,7 @@ __all__ = [
     'test_init_inherits_parent_skills_on_request',
     'test_resume_reselects_the_recorded_backend',
     'test_headless_relaunch_vets_the_recorded_group',
+    'test_headless_handoff_failure_records_no_backend',
     'test_merge_preserves_a_target_edit_that_lands_during_the_merge',
     'test_merge_re_merges_an_iterating_child_without_conflict',
     'test_merge_re_merge_of_a_merged_node_is_a_no_op',
@@ -385,6 +390,44 @@ def test_headless_relaunch_vets_the_recorded_group(
         except ProcessLookupError:
             pass
         leader.wait()
+
+
+# ------ start.sh: the headless backend record
+
+
+def test_headless_handoff_failure_records_no_backend(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A failed headless handoff leaves no ``.headless`` marker behind.
+
+    ``start.sh``'s headless arm delegates the marker write to
+    ``node _launch``, which records it beside ``.pgid`` around the spawn --
+    so a handoff that dies before launching anything records no backend, and
+    a later bare relaunch never follows a marker for a launch that never
+    happened. A ``fractal`` PATH shim stands in for the failing handoff.
+    """
+    repo = _init_tree(tmp_path / 'markerrepo')
+    node_dir = repo / '.fractal' / 'main'
+    bindir = tmp_path / 'marker-bin'
+    bindir.mkdir()
+    shim = bindir / 'fractal'
+    shim.write_text(
+        '#!/bin/sh\necho "launch refused" >&2\nexit 1\n',
+        encoding='utf-8',
+    )
+    shim.chmod(0o755)
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    result = subprocess.run(
+        ['bash', f'{_scripts_dir() / "start.sh"}', f'{repo}', '--headless'],
+        cwd=f'{repo}',
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert 'launch refused' in result.stderr, result.stderr
+    assert not (node_dir / '.headless').exists()
 
 
 # ------ merge.sh: an edit landing in the target during the merge

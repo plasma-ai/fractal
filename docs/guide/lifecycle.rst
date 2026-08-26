@@ -214,13 +214,15 @@ detached tmux session, or in an independent process group with
        ``max_cost: old -> new``. **Required** when the last run ended on
        its cost budget.
    * - ``--headless`` / ``--tmux``
-     - Select the detached process-group backend or tmux (envvar
-       ``FRACTAL_HEADLESS``). Headless mode captures output in
-       ``headless.log`` and is inherited by delegated child starts;
-       ``--tmux`` overrides that inherited choice. A ``--continue`` opens a
-       new run and takes its backend from ``--headless``/``--tmux`` or
-       ``FRACTAL_HEADLESS``; ``resume`` adopts the paused run's recorded
-       backend.
+     - Select the detached process-group backend or tmux. Headless mode
+       appends output to ``headless.log``, one launch banner per launch.
+       The backend is sticky: an unflagged launch reuses the backend the
+       node last launched with, recorded in the ``.headless`` marker, and
+       the flags or the seat-exported ``FRACTAL_HEADLESS`` (exactly
+       ``true``/``false``) override and re-record it — so a delegated
+       child start follows its parent unless the seat passes a flag.
+       ``resume`` always relaunches through the recorded backend — the
+       flags and ``FRACTAL_HEADLESS`` do not apply to it.
 
 A fresh start requires the status to be exactly ``idle``; anything else
 refuses with a pointer to ``--continue``. Both forms re-validate the stored
@@ -456,7 +458,9 @@ the node on the next read or verb: the status is stamped ``exited``, the
 still-open run, iteration, and step rows are closed, any surviving process
 groups the loop recorded are reaped with an ``orphan`` event (an orphaned
 agent would otherwise keep spending unseen), and config/registry cap drift is
-healed. This runs automatically before every signal verb, ``merge``,
+healed. The ``.headless`` backend record survives the heal — it names how the
+node runs, not whether — so a bare ``--continue`` reselects the headless
+backend. This runs automatically before every signal verb, ``merge``,
 ``delete``, ``retire``, ``start --continue``, and on listings — there is no
 command to run.
 

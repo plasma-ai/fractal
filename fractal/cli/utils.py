@@ -41,6 +41,7 @@ __all__ = [
     'resolve_init_target',
     'resolve_node',
     'resolve_sender',
+    'resolve_headless',
     'resolve_user_node',
     'resolve_target',
     'resolve_ledger_target',
@@ -579,6 +580,43 @@ def resolve_sender(path: Optional[str]) -> Node:
             ' git worktree). Unset it or pass --path.'
         )
     return resolve_node('.')
+
+
+def resolve_headless(headless: Optional[bool], node: Node) -> bool:
+    """Resolve the launch backend: flag, else ``FRACTAL_HEADLESS``, else the record.
+
+    An explicit ``--headless``/``--tmux`` wins and re-records the backend.
+    Otherwise the exported ``FRACTAL_HEADLESS`` decides -- the loop derives
+    it for every seat from the parent's own record, so a delegated child
+    start follows its parent's backend. With neither set, the node's
+    ``.headless`` marker names the backend it last launched with (tmux for
+    a node that has never run headless).
+
+    Args:
+        headless: The ``--headless/--tmux`` flag, or ``None`` when not passed.
+        node: Resolved launch target, whose recorded backend is the default.
+
+    Returns:
+        Whether the launch runs headless.
+
+    Raises:
+        typer.BadParameter: If ``FRACTAL_HEADLESS`` carries anything but
+            ``true`` or ``false`` (a broken seat env refuses cleanly, never
+            coerces into a backend choice).
+
+    """
+    if headless is not None:
+        return headless
+    if (exported := os.environ.get('FRACTAL_HEADLESS')) is not None:
+        # the loop's exact exports, compared case-folded
+        value = exported.casefold()
+        if value in ('true', 'false'):
+            return value == 'true'
+        raise typer.BadParameter(
+            f'FRACTAL_HEADLESS must be true or false, not {exported!r}.'
+            ' Unset it or pass --headless/--tmux.'
+        )
+    return node.headless
 
 
 def resolve_user_node(path: PathLike, name: Optional[str] = None) -> Node:

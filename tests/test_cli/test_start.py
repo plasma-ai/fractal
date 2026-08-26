@@ -45,6 +45,8 @@ __all__ = [
     'test_start_resolves_dirs_before_arg_check',
     'test_headless_start_runs_without_tmux',
     'test_headless_continue_forwards_drain',
+    'test_continue_reuses_the_recorded_backend',
+    'test_seat_env_overrides_the_recorded_backend',
     'test_continue_only_flags_reject_a_bare_start',
     'test_start_revalidates_hand_edited_config',
     'test_continue_refuses_to_discard_dirty_project_files',
@@ -134,7 +136,8 @@ def test_headless_start_runs_without_tmux(repo: dict) -> None:
     The launch returns while the loop owns an independent process group, so
     the caller remains free to orchestrate more nodes. The loop uses the same
     status and run machinery as tmux and removes its PGID record on an in-band
-    exit; its transcript remains available in the node-local headless log.
+    exit; its transcript remains available in the node-local headless log,
+    which appends across launches with one banner line per launch.
     """
     worktree = _settled_node(repo, 'headless')
     Node(worktree).status_set('idle')
@@ -154,7 +157,22 @@ def test_headless_start_runs_without_tmux(repo: dict) -> None:
         deadline=time.monotonic() + 30,
     )
     assert pgid_gone, log.read_text(encoding='utf-8')
-    assert log.read_text(encoding='utf-8')
+    first = log.read_text(encoding='utf-8')
+    assert first
+
+    # the log appends across launches: a continue keeps the first run's
+    # transcript in place and opens with its own banner
+    continued = _start_continue(repo, worktree, '--headless')
+    assert continued.returncode == 0, continued.stderr
+    assert _await_settled(worktree), continued.stdout
+    transcript = log.read_text(encoding='utf-8')
+    assert transcript.startswith(first)
+    banners = [
+        line for line in transcript.splitlines() if line.startswith('=== Launched')
+    ]
+    assert len(banners) == 2, transcript
+    assert 'Launched start at' in banners[0]
+    assert 'Launched continue at' in banners[1]
 
     # a delegated start receives the backend through the loop environment;
     # pin the CLI's envvar route independently of the explicit flag above
@@ -191,6 +209,75 @@ def test_headless_continue_forwards_drain(repo: dict) -> None:
     assert result.returncode == 0, result.stderr
     assert 'Started headless node:' in result.stdout
     assert _await_settled(worktree), result.stdout
+
+
+def test_continue_reuses_the_recorded_backend(repo: dict) -> None:
+    """A bare continue relaunches through the backend the node last used.
+
+    The ``.headless`` marker is the node's backend record: with neither the
+    flag nor ``FRACTAL_HEADLESS`` set, a continue on a marker'd node
+    relaunches headless and keeps the record, so a headless node crashed on
+    a tmux-less host comes back with a bare ``start --continue``.
+    """
+    worktree = _settled_node(repo, 'sticky')
+    node_dir = worktree / '.fractal' / 'main.sticky'
+    (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    result = _start_continue(repo, worktree)
+    assert result.returncode == 0, result.stderr
+    assert 'Started headless node:' in result.stdout
+    assert _await_settled(worktree), result.stdout
+    assert (node_dir / '.headless').is_file()
+
+
+def test_tmux_continue_rerecords_the_backend(repo: dict) -> None:
+    """An explicit ``--tmux`` overrides the record and clears the marker.
+
+    ``--tmux`` on a marker'd node forces the tmux arm and re-records the
+    backend: the relaunch runs in a session and the ``.headless`` marker is
+    gone, so the next bare continue selects tmux.
+    """
+    _require_tmux()
+    worktree = _settled_node(repo, 'rerecord')
+    node_dir = worktree / '.fractal' / 'main.rerecord'
+    (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    relaunch = _start_continue(repo, worktree, '--tmux')
+    assert relaunch.returncode == 0, relaunch.stderr
+    assert 'Started tmux session:' in relaunch.stdout
+    assert _await_settled(worktree), relaunch.stdout
+    assert not (node_dir / '.headless').exists()
+
+
+def test_seat_env_overrides_the_recorded_backend(repo: dict) -> None:
+    """A seat-exported ``FRACTAL_HEADLESS=false`` beats the ``.headless`` record.
+
+    Seats always carry the parent's backend in ``FRACTAL_HEADLESS``, so a
+    delegated continue follows the parent even over the child's own record:
+    a tmux parent's ``false`` relaunches a once-headless child in tmux and
+    re-records it.
+    """
+    _require_tmux()
+    worktree = _settled_node(repo, 'seatenv')
+    node_dir = worktree / '.fractal' / 'main.seatenv'
+    (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    env = _cli_env()
+    bindir = repo['bindir']
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    env['FRACTAL_HEADLESS'] = 'false'
+    root_name = repo['root'].name
+    worktree_name = worktree.name.replace('.', '-')
+    repo.setdefault('sessions', []).append(f'{root_name} ({worktree_name})')
+    result = subprocess.run(
+        [_fractal_bin(), 'node', 'start', '--continue'],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert 'Started tmux session:' in result.stdout
+    assert _await_settled(worktree), result.stdout
+    assert not (node_dir / '.headless').exists()
 
 
 @pytest.mark.parametrize('flag', ['--clean', '--max-cost=0.5'])

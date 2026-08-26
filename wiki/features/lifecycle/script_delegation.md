@@ -40,16 +40,19 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
   the private `node _launch`, a thin front for `Node._launch_headless`, which
   refuses while a still-live recorded `.pgid` group holds the node (the
   identity-checked liveness law, so a recycled process-group id never blocks a
-  relaunch), then records `.pgid` and starts `_loop` in its own session.
+  relaunch), then records the `.headless` marker and `.pgid` together (rolled
+  back together when the spawn fails) and starts `_loop` in its own session,
+  appending one launch banner to `headless.log`.
 - `pause.sh` reaps the recorded step process group, aborting the in-flight agent
   so the loop can park.
 - `resume.sh` relaunches the loop through the backend the node's `.headless`
-  marker records; the relaunched loop withdraws the run's recorded pause signals
-  itself as it adopts the run, so a bare resume works even after a node
-  transplant. Its still-parking session guard runs only without the `.headless`
-  marker -- a headless node owns no session, so a same-named session from
-  another repo sharing the basename never blocks its resume; a headless node's
-  own still-parking loop is refused by the relaunch's group vet instead.
+  marker records — the same record an unflagged `start --continue` reuses; the
+  relaunched loop withdraws the run's recorded pause signals itself as it adopts
+  the run, so a bare resume works even after a node transplant. Its
+  still-parking session guard runs only without the `.headless` marker -- a
+  headless node owns no session, so a same-named session from another repo
+  sharing the basename never blocks its resume; a headless node's own
+  still-parking loop is refused by the relaunch's group vet instead.
 - `kill.sh` reaps the node's live process groups — the in-flight agent's
   recorded step group and the tmux pane's or, with no pane, the recorded `.pgid`
   group of a headless loop — escalating a polite termination to a forced one,
@@ -63,11 +66,13 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
 The loop and its scripts coordinate through small marker files in the node
 directory, all git-ignored via the repository's exclude file (kept in lockstep
 with the marker set): `.status` (the current status), `.session` and `.socket`
-(tmux coordinates), `.headless` (the selected detached backend), `.pgid` and
-`.step_pgid` (process groups for liveness and pause/kill reaping), `.paused`
-(the tree-wide pause latch beside the central database) and `.pause_abort`.
-Signals the loop observes — finish, stop, pause — take effect at iteration or
-step boundaries; the escalation path that does not wait is kill.
+(tmux coordinates), `.headless` (the node's backend record — written by the
+headless launcher beside `.pgid`, it outlives the run, survives heals and kills,
+and only a tmux launch clears it), `.pgid` and `.step_pgid` (process groups for
+liveness and pause/kill reaping), `.paused` (the tree-wide pause latch beside
+the central database) and `.pause_abort`. Signals the loop observes — finish,
+stop, pause — take effect at iteration or step boundaries; the escalation path
+that does not wait is kill.
 
 Liveness is one law (`Node._loop_exists`). A `.headless` node is judged by its
 recorded `.pgid` process group alone and tmux is never asked, so a host without

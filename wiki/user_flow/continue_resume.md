@@ -52,6 +52,9 @@ must be resumed instead, and a retired one unretired). What "fresh run" means:
   exhausting its cost cap, a bare `--continue` refuses, naming the spent and
   armed figures; pass an explicit `--max-cost` to arm the next run deliberately.
   The retune is applied before launch and echoed old → new.
+- **The backend is reused.** Without `--headless`/`--tmux` (or a seat's exported
+  `FRACTAL_HEADLESS`), the continue relaunches through the backend the node last
+  launched with, recorded in its `.headless` marker.
 - **Spawn gates re-check.** A continued node re-enters the tree's
   width/descendant accounting as at spawn, so it is refused over a cap.
 

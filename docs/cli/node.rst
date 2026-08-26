@@ -286,19 +286,24 @@ launch time.
    budget-ended run refuses a bare ``--continue``.
 
 ``--headless`` / ``--tmux``
-   Select the runtime backend (envvar ``FRACTAL_HEADLESS``): ``--headless``
-   runs the loop in a detached process group and captures its output in the
-   node's ``headless.log``; ``--tmux`` is the default. Delegated child starts
-   inherit a headless parent's choice through the envvar, and ``--tmux`` opts
-   one child back into tmux. A ``--continue`` opens a new run and takes its
-   backend from the flag or ``FRACTAL_HEADLESS``; ``resume`` adopts the
-   paused run's recorded backend.
+   Select the runtime backend: ``--headless`` runs the loop in a detached
+   process group, appending its output to the node's ``headless.log`` with
+   one ``=== Launched ... ===`` banner per launch (truncate or delete the
+   file when it grows). The backend is sticky: with neither flag nor
+   ``FRACTAL_HEADLESS`` set, a launch reuses the backend the node last
+   launched with (tmux for a node that has never run headless), and the
+   flags force and re-record it. Seats always export the parent's backend
+   in ``FRACTAL_HEADLESS`` (exactly ``true``/``false``), so a delegated
+   child start follows its parent unless the seat passes a flag. ``resume``
+   always relaunches through the recorded backend — the flags and
+   ``FRACTAL_HEADLESS`` do not apply to it.
 
 A fresh start requires status exactly ``idle``. Starting refuses on: the user
 node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a
 paused ancestor or tree-wide pause latch; a foreign tmux session already
-holding the node's session name; a headless node whose recorded process group
-is still alive; and a stored config the launch re-validation rejects.
+holding the node's session name; a node whose recorded process group is
+still alive (identity-verified, so a recycled group id never blocks); and a
+stored config the launch re-validation rejects.
 Continuing from ``killed`` surfaces the recorded kill attribution as a
 notice. An uncapped start is allowed but warns loudly.
 

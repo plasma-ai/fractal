@@ -15,6 +15,7 @@ from fractal.cli.utils import (
     print_json,
     print_rows,
     require_non_negative,
+    resolve_headless,
     resolve_init_target,
     resolve_node,
     resolve_target,
@@ -411,19 +412,18 @@ def node_start(app: typer.Typer) -> typer.Typer:
         ' old -> new; required when the last run ended on its budget.'
     )
     max_cost = typer.Option(None, '--max-cost', help=max_cost_help)
-    # headless flag
+    # headless flag (seat-supplied via $FRACTAL_HEADLESS; unset reuses the
+    # node's recorded backend)
     headless_help = (
-        'Run without tmux in a detached process group; inherited by child'
-        ' starts, and --tmux overrides an inherited headless launch. A'
-        ' --continue takes its backend from this flag or FRACTAL_HEADLESS;'
-        ' resume adopts the backend recorded by the paused launch.'
+        'Run without tmux in a detached process group. With neither flag nor'
+        ' FRACTAL_HEADLESS (exactly true/false; any other value refuses)'
+        ' set, a relaunch reuses the backend'
+        ' the node last launched with (tmux for a node that has never run'
+        ' headless); --headless/--tmux force and re-record it. Seats always'
+        " export the parent's backend in FRACTAL_HEADLESS, so a delegated"
+        ' child start follows its parent unless the seat overrides.'
     )
-    headless = typer.Option(
-        False,
-        '--headless/--tmux',
-        envvar='FRACTAL_HEADLESS',
-        help=headless_help,
-    )
+    headless = typer.Option(None, '--headless/--tmux', help=headless_help)
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
@@ -435,7 +435,7 @@ def node_start(app: typer.Typer) -> typer.Typer:
         clean: bool = clean,
         drain: bool = drain,
         max_cost: Optional[float] = max_cost,
-        headless: bool = headless,
+        headless: Optional[bool] = headless,
         path: str = path,
     ) -> None:
         """Launch a node in tmux or a detached headless process group.
@@ -457,6 +457,7 @@ def node_start(app: typer.Typer) -> typer.Typer:
         if max_cost is not None and not continue_:
             raise typer.BadParameter('--max-cost requires --continue.')
         node = resolve_target(path, node)
+        headless = resolve_headless(headless, node)
         output = node.start(
             continue_run=continue_,
             clean=clean,

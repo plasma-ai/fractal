@@ -222,14 +222,15 @@ pool a cheaper token rate buys more steps, not a lower bill.
    does not require tmux. Use `--tmux` only to override that inherited backend
    for this child. A headless child has no tmux session:
    `fractal node attach <branch>` refuses and names its log, so follow its
-   output with `tail -f <child_node_dir>/headless.log` instead. A `--continue`
-   is a new run and takes its backend from the flag or `FRACTAL_HEADLESS`;
-   `resume` adopts the paused run's recorded backend. Starting is its own turn:
-   when a spawn gate (child/descendant census, budget arithmetic) decides the
-   launch, read it in one command and start in a separate one -- a chained start
-   commits before you can see the read's output. The init gate re-checks census
-   and budget at start, so treat a rejected start as the gate working; re-read
-   before retrying.
+   output with `tail -f <child_node_dir>/headless.log` instead (the log appends
+   across launches). A `--continue` follows the same rule -- your seat's
+   exported backend, unless you pass a flag; `resume` relaunches through the
+   backend the child last launched with. Starting is its own turn: when a spawn
+   gate (child/descendant census, budget arithmetic) decides the launch, read it
+   in one command and start in a separate one -- a chained start commits before
+   you can see the read's output. The init gate re-checks census and budget at
+   start, so treat a rejected start as the gate working; re-read before
+   retrying.
 
 ### Configure
 

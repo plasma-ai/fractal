@@ -345,10 +345,10 @@ All run parameters were set at init; ``start`` takes no configuration
 arguments — only the runtime choice (``--headless``/``--tmux``) and the
 continue flags. The node launches in a detached tmux session by default and
 runs autonomously from there; when tmux is unavailable, ``start --headless``
-runs it in a detached process group instead — child starts inherit headless
-mode and write their output to ``headless.log``. A ``--continue`` is a new
-run and takes its backend from the flag or ``FRACTAL_HEADLESS``; ``resume``
-adopts the paused run's recorded backend.
+runs it in a detached process group instead — child starts follow the
+parent's backend and append their output to ``headless.log``. Without a
+flag, a relaunch (``--continue`` or ``resume``) reuses the backend the node
+last launched with; ``--headless``/``--tmux`` re-record it.
 
 Post-launch briefing
 ~~~~~~~~~~~~~~~~~~~~

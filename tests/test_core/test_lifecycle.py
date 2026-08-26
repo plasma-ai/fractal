@@ -19,7 +19,7 @@ from typing import NoReturn, Optional
 
 import pytest
 
-from fractal.constants import PGID_FILE
+from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, PGID_FILE
 from fractal.core.node import Node
 from tests._helpers import _git, _stub_run_script
 
@@ -41,6 +41,8 @@ __all__ = [
     'test_start_continue_from_terminal',
     'test_start_drain_reaches_the_launch_and_requires_continue',
     'test_start_headless_selects_detached_backend',
+    'test_launch_headless_records_marker_and_group_around_the_spawn',
+    'test_launch_headless_failed_spawn_keeps_the_prior_backend_record',
     'test_start_refuses_a_live_recorded_group',
     'test_start_serializes_runtime_backends',
     'test_start_continue_re_arms_after_drained_run',
@@ -265,6 +267,79 @@ def test_start_headless_selects_detached_backend(
     assert run_scripts == [('start.sh', f'{node._root}', '--headless')]
 
 
+def test_launch_headless_records_marker_and_group_around_the_spawn(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A headless launch lands the backend marker and the group record together.
+
+    ``_launch_headless`` writes ``.headless`` and ``.pgid`` around one spawn,
+    so the marker always names a backend the node actually launched with.
+    The log appends across launches -- a pre-existing transcript survives --
+    and each launch opens with a banner naming its kind, flushed before the
+    ``.pgid`` record releases the loop's exec.
+    """
+    node = node_with_db
+
+    class _Spawned:
+        pid = 4242
+
+    monkeypatch.setattr(
+        'fractal.core.node.subprocess.Popen',
+        lambda *args, **kwargs: _Spawned(),
+    )
+    marker = node.node_dir / HEADLESS_FILE
+    pgid_file = node.node_dir / PGID_FILE
+    log = node.node_dir / HEADLESS_LOG
+    log.write_text('earlier transcript\n', encoding='utf-8')
+    # a fresh start records marker and group together
+    node._launch_headless()
+    assert marker.read_text(encoding='utf-8') == 'headless\n'
+    assert pgid_file.read_text(encoding='utf-8') == '4242\n'
+    # a resume relaunches after the parked loop dropped its record; the log
+    # keeps every prior page and gains a second banner
+    pgid_file.unlink()
+    node._launch_headless(resume=True)
+    assert marker.is_file()
+    assert pgid_file.read_text(encoding='utf-8') == '4242\n'
+    transcript = log.read_text(encoding='utf-8')
+    assert transcript.startswith('earlier transcript\n')
+    banners = [line for line in transcript.splitlines() if line.startswith('===')]
+    assert len(banners) == 2
+    assert 'Launched start at' in banners[0]
+    assert 'Launched resume at' in banners[1]
+    assert all('(pid 4242)' in banner for banner in banners)
+
+
+@pytest.mark.parametrize('recorded', [False, True], ids=['fresh', 'recorded'])
+def test_launch_headless_failed_spawn_keeps_the_prior_backend_record(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: bool,
+) -> None:
+    """A failed spawn propagates and rolls the marker back to its prior state.
+
+    The ``.headless`` marker is the node's backend record, so a spawn that
+    never happened must not rewrite it: a marker recorded by an earlier
+    headless launch survives the failure, while one this launch created is
+    removed with the ``.pgid`` record -- either way ``--continue`` stays the
+    retry path.
+    """
+    node = node_with_db
+
+    def failing_popen(*args: object, **kwargs: object) -> NoReturn:
+        raise OSError('spawn failed')
+
+    monkeypatch.setattr('fractal.core.node.subprocess.Popen', failing_popen)
+    marker = node.node_dir / HEADLESS_FILE
+    if recorded:
+        marker.write_text('headless\n', encoding='utf-8')
+    with pytest.raises(OSError, match='spawn failed'):
+        node._launch_headless()
+    assert marker.exists() is recorded
+    assert not (node.node_dir / PGID_FILE).exists()
+
+
 @pytest.mark.parametrize('continue_run', [False, True])
 def test_start_refuses_a_live_recorded_group(
     node_with_db: Node,
@@ -289,7 +364,10 @@ def test_start_refuses_a_live_recorded_group(
     try:
         pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
         run_scripts = _stub_run_script(monkeypatch, node)
-        with pytest.raises(RuntimeError, match='already exists'):
+        verb = 'continue' if continue_run else 'start'
+        with pytest.raises(
+            RuntimeError, match=f'Cannot {verb}: node process already exists'
+        ):
             node.start(continue_run=continue_run)
         assert run_scripts == []
         assert leader.poll() is None

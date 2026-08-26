@@ -364,6 +364,8 @@ def test_headless_liveness_reconciles_a_dead_process_group(
     run = node.db.read('runs', where={'run_id': run_id})[0]
     assert run['status'] == 'exited'
     assert not (node.node_dir / PGID_FILE).exists()
+    # the backend record names the launch, not the run -- the heal keeps it
+    assert node.headless
 
 
 def test_headless_liveness_never_asks_tmux(
@@ -397,6 +399,8 @@ def test_headless_liveness_never_asks_tmux(
     run = node.db.read('runs', where={'run_id': run_id})[0]
     assert run['status'] == 'exited'
     assert not (node.node_dir / PGID_FILE).exists()
+    # the backend record names the launch, not the run -- the heal keeps it
+    assert node.headless
 
 
 @pytest.mark.parametrize(

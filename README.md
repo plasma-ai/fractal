@@ -122,8 +122,10 @@ instructions. The agent interprets the directive and prints any suggested
 directive, plus a table of every parameter (empty where the directive said
 nothing), then asks for anything it could not infer. From there it walks you
 through refining the node's definition and, once you approve, launches the node
-in a tmux session. On hosts where tmux cannot run, add `--headless`; delegated
-child starts inherit the headless backend and write output to `headless.log`.
+in a tmux session. On hosts where tmux cannot run, add `--headless`; the node's
+output appends to `headless.log`, delegated child starts follow the parent's
+backend, and an unflagged relaunch reuses the backend the node last launched
+with.
 
 Parameters the skill interprets from the directive:
 

@@ -30,16 +30,18 @@ the tree limits and the parent's budget are enforced — that gate is specified 
 
 `start` takes an `idle` node into `active`: it opens a run row and launches the
 iteration loop inside a tmux session. `start --headless` instead launches an
-independent process group and captures its output in the node's `headless.log`;
-the command still returns immediately, and delegated child starts inherit the
-headless backend through the loop environment. `--tmux` overrides that inherited
-choice. `start --continue` re-arms a settled node for another run — this
-re-entry re-checks the width and descendant caps, since it returns one unsettled
-node to the tree exactly as a spawn adds one. A run that ended on its cost
-budget never re-arms silently: a bare `--continue` refuses, naming the spent and
-armed figures, until an explicit `--max-cost` rides it (applied through the
-parent's retune — see [[features/cost/budgets|budgets]]). A tree-wide pause
-latch makes any start refuse until resume.
+independent process group whose output appends to the node's `headless.log`, one
+launch banner per launch; the command still returns immediately. The backend is
+sticky: an unflagged launch reuses the backend the node last launched with,
+delegated child starts follow the parent's backend through the seat-exported
+`FRACTAL_HEADLESS`, and `--headless`/`--tmux` force and re-record the choice.
+`start --continue` re-arms a settled node for another run — this re-entry
+re-checks the width and descendant caps, since it returns one unsettled node to
+the tree exactly as a spawn adds one. A run that ended on its cost budget never
+re-arms silently: a bare `--continue` refuses, naming the spent and armed
+figures, until an explicit `--max-cost` rides it (applied through the parent's
+retune — see [[features/cost/budgets|budgets]]). A tree-wide pause latch makes
+any start refuse until resume.
 
 ## finish and stop
 

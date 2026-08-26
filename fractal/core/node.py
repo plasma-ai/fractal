@@ -388,7 +388,8 @@ class Node:
             self.status_set('exited')
             self.config.reconcile()
             # the heal is the record's catch -- the settled node keeps no
-            # socket handle (the next boot writes a fresh one)
+            # socket handle (the next boot writes a fresh one); the .headless
+            # record stays, because it names the backend, not the run
             (self.node_dir / SOCKET_FILE).unlink(missing_ok=True)
 
     def _reap_orphan(self: Node) -> None:
@@ -1955,8 +1956,7 @@ class Node:
                                 ' group is not this node.'
                             )
                         raise RuntimeError(
-                            'Cannot continue: headless node process already'
-                            f' exists: {pgid}.'
+                            f'Cannot continue: node process already exists: {pgid}.'
                         )
                     self.status_set('idle')
                     # keep the boot handoff atomic across runtime backends; roll
@@ -2022,7 +2022,7 @@ class Node:
                             ' if that group is not this node.'
                         )
                     raise RuntimeError(
-                        f'Cannot start: headless node process already exists: {pgid}.'
+                        f'Cannot start: node process already exists: {pgid}.'
                     )
                 result = self._run_script('start.sh', *args)
         # log the lineage only after start.sh returns, on both paths -- the
@@ -2051,15 +2051,24 @@ class Node:
         The ``start.sh`` headless arm's handoff (``node _launch``). The argv
         pins the invoking interpreter (``sys.executable -m fractal.cli.main``)
         so the loop runs this installation's fractal, not whatever ``fractal``
-        a PATH shim or a fronted foreign install resolves to. The child waits
-        for the ``.pgid`` record before exec'ing the loop, so no probe ever
-        sees a booted headless loop without its record (:func:`_group_alive`);
-        a failed spawn drops the marker and record so ``--continue`` stays the
-        retry path. A recorded group the same identity-checked law judges
-        alive refuses the launch -- the loop is still booting, running, or
-        parking, and proceeding would clobber the one record that can reap
-        it -- and an unverifiable group refuses naming the ``ps`` check, so
-        ignorance never authorizes a second boot.
+        a PATH shim or a fronted foreign install resolves to. Writes the
+        ``.headless`` marker beside the ``.pgid`` record: the marker is the
+        node's backend record -- it outlives the run, survives heals and
+        kills, and only a tmux launch clears it -- so it lands only around a
+        spawn and always names a backend the node actually launched with.
+        The child waits for the ``.pgid`` record before exec'ing the loop, so
+        no probe ever sees a booted headless loop without its record
+        (:func:`_group_alive`), and the launch banner is flushed before that
+        record lands, so it always precedes the loop's first output in
+        ``headless.log`` -- which appends across launches, one banner line
+        per launch. A failed spawn drops the record and rolls the marker back
+        to its prior state (a pre-existing marker names an earlier headless
+        launch, and a failure must not rewrite the recorded backend), so
+        ``--continue`` stays the retry path. A recorded group the same
+        identity-checked law judges alive refuses the launch -- the loop is
+        still booting, running, or parking, and proceeding would clobber the
+        one record that can reap it -- and an unverifiable group refuses
+        naming the ``ps`` check, so ignorance never authorizes a second boot.
 
         Returns:
             Confirmation message naming the pid and the log.
@@ -2111,8 +2120,16 @@ class Node:
             '[[ -f "$1" ]] || exit 1; shift; exec "$@"'
         )
         command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_file}', *loop_args]
+        # the banner names the launch kind, so a post-mortem reads which
+        # relaunch produced each appended tail
+        kind = 'resume' if resume else 'continue' if continue_run else 'start'
+        if drain:
+            kind += ' drain'
+        marker = self.node_dir / HEADLESS_FILE
+        recorded = marker.exists()
         try:
-            with log_path.open('w', encoding='utf-8') as stream:
+            marker.write_text('headless\n', encoding='utf-8')
+            with log_path.open('a', encoding='utf-8') as stream:
                 process = subprocess.Popen(
                     command_args,
                     stdin=subprocess.DEVNULL,
@@ -2120,9 +2137,15 @@ class Node:
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
+                stream.write(
+                    f'=== Launched {kind} at {fractal.util.time.utc_now()}'
+                    f' (pid {process.pid}) ===\n'
+                )
+                stream.flush()
             pgid_file.write_text(f'{process.pid}\n', encoding='utf-8')
         except Exception:
-            (self.node_dir / HEADLESS_FILE).unlink(missing_ok=True)
+            if not recorded:
+                marker.unlink(missing_ok=True)
             pgid_file.unlink(missing_ok=True)
             raise
         return f'Started headless node: {process.pid} (log: {log_path})'

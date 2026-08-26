@@ -96,9 +96,10 @@ continue (a continue re-arms the cap at start, not init).
 `max_cost` launches uncapped with a loud warning. Its only arguments:
 
 - **`--headless`/`--tmux`**: run the loop in a detached process group instead of
-  a tmux session — child starts inherit the choice (envvar `FRACTAL_HEADLESS`)
-  and write their output to `<node_dir>/headless.log`; `--tmux` overrides an
-  inherited headless launch
+  a tmux session — output appends to `<node_dir>/headless.log`, one launch
+  banner per launch. An unflagged launch reuses the backend the node last
+  launched with; the flags and the seat-exported `FRACTAL_HEADLESS`
+  (`true`/`false`, the parent's backend) force and re-record it
 - **`--continue`**: continue a stopped/exited node — the launch restores the
   worktree, so uncommitted project files refuse without `--clean`
 - **`--clean`**: with `--continue`, discard uncommitted project files
@@ -422,9 +423,10 @@ run as a drain, and `--max-cost` to re-arm the cap after a budget-ended run)
 when continuing a stopped/exited node. If the user wants to tweak a setting
 first, edit `<node_dir>/config.json`, then start. The node launches in a
 detached tmux session by default; when tmux is unavailable, use
-`start --headless` — child starts inherit headless mode and write their output
-to `headless.log`. A `--continue` is a new run and takes its backend from the
-flag or `FRACTAL_HEADLESS`; `resume` adopts the paused run's recorded backend.
+`start --headless` — child starts follow the parent's backend and append their
+output to `headless.log`. Without a flag, a relaunch (`--continue` or `resume`)
+reuses the backend the node last launched with; `--headless`/`--tmux` re-record
+it.
 
 ### Step 4: Post-launch briefing
 

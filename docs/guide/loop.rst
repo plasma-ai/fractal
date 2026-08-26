@@ -203,9 +203,9 @@ prompts they are re-derived per step from live config — only
      - The boot-pinned mode flags (``true``/``false``) and the meta
        target branch.
    * - ``FRACTAL_HEADLESS``
-     - The run's launch backend (``true``/``false``), boot-pinned so a
-       seat's ``node start`` inherits the backend through the option's
-       envvar.
+     - The run's launch backend (exactly ``true``/``false``), boot-pinned;
+       ``node start`` reads it when the flag is absent, so a seat's child
+       starts follow the parent's backend.
 
 Run-scoped variables are refreshed for every step:
 

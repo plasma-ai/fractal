@@ -9,16 +9,19 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Added
 
-- `node start --headless` / `--tmux` (envvar `FRACTAL_HEADLESS`): the loop runs
-  in a detached process group instead of a tmux session, its output captured in
-  the node's `headless.log` and the backend recorded in a `.headless` marker, so
-  a tree runs on a host without tmux — child starts inherit the backend through
-  the seat environment (`--tmux` overrides it for one child), `resume` reselects
-  the recorded backend, and `attach` refuses on a headless node and names the
-  log to follow. Liveness, crash healing, kill, and teardown judge a headless or
-  bare loop by its recorded `.pgid` group and verify the group's identity
-  through `ps` (a group owned by another user is arbitrated the same way); kill
-  vets `.pgid`/`.step_pgid` under the flock and refuses only over a group whose
+- `node start --headless` / `--tmux`: the loop runs in a detached process group
+  instead of a tmux session, its output appended to the node's `headless.log`
+  with one `=== Launched ... ===` banner per launch, so a tree runs on a host
+  without tmux. The backend is sticky per node: the `.headless` marker records
+  the backend the node last launched with, an unflagged relaunch (`--continue`
+  or `resume`) reuses it, and on `start` the flags or the seat-exported
+  `FRACTAL_HEADLESS` (exactly `true`/`false`, carrying the parent's backend into
+  every delegated child start) force and re-record it. `attach` refuses on a
+  headless node and names the log to follow. Liveness, crash healing, kill,
+  teardown, and the relaunch guards judge a headless or bare loop by its
+  recorded `.pgid` group and verify the group's identity through `ps` (a group
+  owned by another user is arbitrated the same way); kill vets
+  `.pgid`/`.step_pgid` under the flock and refuses only over a group whose
   identity `ps` cannot verify, naming the check to run.
 
 ## [1.2.0] - 2026-08-24

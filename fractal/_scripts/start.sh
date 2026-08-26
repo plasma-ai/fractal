@@ -94,9 +94,9 @@ fi
 
 # the handoff (node _launch) vets the recorded .pgid group under the
 # identity-checked law and refuses a second launch while the loop is
-# still booting or running
+# still booting or running; it also records the .headless marker
+# beside the .pgid record, so a failed handoff records no backend
 if [[ "$HEADLESS" == true ]]; then
-    printf 'headless\n' >"$NODE_DIR/.headless"
     ENV_ARGS+=("FRACTAL_HEADLESS=true")
     exec env "${ENV_ARGS[@]}" fractal node _launch \
         --path="$WORKTREE_DIR" ${LOOP_ARGS[@]+"${LOOP_ARGS[@]}"}
