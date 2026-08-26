@@ -323,14 +323,16 @@ inside a single change stays bare-red and never commits red.
 ## Wiki Maintenance
 
 The project wiki at `wiki/` is the descriptive reference for fractal's concepts,
-modules, and architecture; coverage is partial and grows module by module.
-**Think of the wiki as a nested, dynamic-access AGENTS.md** — the structure
-mirrors the `fractal/` source tree, so when working in a module you read the
-corresponding wiki branch for context.
+modules, and architecture; coverage is partial and grows area by area. **Think
+of the wiki as a nested, dynamic-access AGENTS.md** — the wiki is organized by
+feature surface, so when working in a module you read the branch covering its
+feature area for context.
 
-- **Wiki paths mirror source paths.** Working on a module? Read the
-  corresponding wiki branch (e.g., `fractal/core/loop.py` → `wiki/core/loop/`).
-  Cross-cutting topics get their own folders beside the module branches.
+- **The wiki is feature-organized.** Topics live under `wiki/features/<area>/`
+  and `wiki/user_flow/`; cross-cutting topics get their own folders beside them.
+  Working on a module? Read the branch covering its feature area (e.g.,
+  `fractal/core/loop.py` → `wiki/features/loop/`); `wiki/source_map.md` maps
+  source paths to pages.
 - **Read the wiki first.** When the user asks about a fractal concept or module,
   check `wiki/` before answering. For covered topics the descriptive reference
   lives there, not in this file.
@@ -356,10 +358,9 @@ corresponding wiki branch for context.
   When a `desc` value exceeds ~100 characters, use a YAML block scalar (`|`)
   with indented continuation lines.
 - **Leaf pages vs. folders.** Use a standalone `.md` page (e.g.,
-  `project/releasing.md`) when the topic doesn't correspond to a code module and
-  doesn't need child pages. Use a folder with `_index.md` when the topic mirrors
-  a Python module or needs sub-pages. If a leaf page grows too large, consider
-  converting it to a folder with child pages.
+  `user_flow/finishing.md`) when the topic doesn't need child pages. Use a
+  folder with `_index.md` when it needs sub-pages. If a leaf page grows too
+  large, consider converting it to a folder with child pages.
 
 ## Code Style
 
