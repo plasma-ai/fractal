@@ -1935,6 +1935,29 @@ class Node:
                             f'Cannot continue from status: {current_status!r}'
                         )
                     self._enforce_rearm_limits()
+                    # a parking loop stamps its terminal status before its
+                    # exit hook drops the .pgid record, so a continue fired
+                    # on that stamp races the teardown -- a live or
+                    # unverifiable record, judged by the identity-checked
+                    # law, refuses either arm before start.sh could boot a
+                    # second loop over it
+                    pgid_file = self.node_dir / PGID_FILE
+                    alive = _group_alive(pgid_file)
+                    if alive is not False:
+                        pgid = pgid_file.read_text(encoding='utf-8').strip()
+                        if alive is None:
+                            raise RuntimeError(
+                                'Cannot continue: the process identity probe'
+                                f' gave no answer for process group {pgid},'
+                                f' so a loop may still be running; check ps'
+                                f' -p {pgid} and remove the {PGID_FILE}'
+                                ' record from the node directory if that'
+                                ' group is not this node.'
+                            )
+                        raise RuntimeError(
+                            'Cannot continue: headless node process already'
+                            f' exists: {pgid}.'
+                        )
                     self.status_set('idle')
                     # keep the boot handoff atomic across runtime backends; roll
                     # a failed launch back so --continue stays the retry path
@@ -1981,6 +2004,26 @@ class Node:
                         f' basename and node name). Stop it, or rename one'
                         f' repository directory.'
                     )
+                # the mirror race: a headless handoff recorded a group whose
+                # loop is still booting (the node stays idle until its
+                # preflight stamps active), so a live or unverifiable record
+                # -- judged by the identity-checked law -- refuses either arm
+                # before start.sh could boot a second loop over it
+                pgid_file = self.node_dir / PGID_FILE
+                alive = _group_alive(pgid_file)
+                if alive is not False:
+                    pgid = pgid_file.read_text(encoding='utf-8').strip()
+                    if alive is None:
+                        raise RuntimeError(
+                            'Cannot start: the process identity probe gave no'
+                            f' answer for process group {pgid}, so a loop may'
+                            f' still be running; check ps -p {pgid} and remove'
+                            f' the {PGID_FILE} record from the node directory'
+                            ' if that group is not this node.'
+                        )
+                    raise RuntimeError(
+                        f'Cannot start: headless node process already exists: {pgid}.'
+                    )
                 result = self._run_script('start.sh', *args)
         # log the lineage only after start.sh returns, on both paths -- the
         # continue arm rolls a failed launch back to the settled status (a
@@ -2005,19 +2048,48 @@ class Node:
     ) -> str:
         """Start the loop in its own process group, recording it before it boots.
 
-        The ``start.sh`` headless arm's handoff (``node _launch``). The
-        interpreter-pinned argv (``sys.executable -m fractal.cli.main``) is
-        immune to PATH shims. The child waits for the ``.pgid`` record before
-        exec'ing the loop, so no probe ever sees a booted headless loop without
-        its record (:func:`_group_alive`); a failed spawn drops the marker and
-        record so ``--continue`` stays the retry path.
+        The ``start.sh`` headless arm's handoff (``node _launch``). The argv
+        pins the invoking interpreter (``sys.executable -m fractal.cli.main``)
+        so the loop runs this installation's fractal, not whatever ``fractal``
+        a PATH shim or a fronted foreign install resolves to. The child waits
+        for the ``.pgid`` record before exec'ing the loop, so no probe ever
+        sees a booted headless loop without its record (:func:`_group_alive`);
+        a failed spawn drops the marker and record so ``--continue`` stays the
+        retry path. A recorded group the same identity-checked law judges
+        alive refuses the launch -- the loop is still booting, running, or
+        parking, and proceeding would clobber the one record that can reap
+        it -- and an unverifiable group refuses naming the ``ps`` check, so
+        ignorance never authorizes a second boot.
 
         Returns:
             Confirmation message naming the pid and the log.
 
+        Raises:
+            RuntimeError: If the recorded process group is still alive, or
+                its identity cannot be verified.
+
         """
         log_path = self.node_dir / HEADLESS_LOG
         pgid_file = self.node_dir / PGID_FILE
+        # vet the recorded group before touching the log or the record; the
+        # refusal wordings match the surfaces they serve on the script path
+        # (start.sh's second-launch refusal, resume.sh's retry-never-kill
+        # guidance for a loop that is still parking)
+        alive = _group_alive(pgid_file)
+        if alive is not False:
+            pgid = pgid_file.read_text(encoding='utf-8').strip()
+            if alive is None:
+                raise RuntimeError(
+                    'the process identity probe gave no answer for process'
+                    f' group {pgid}, so the loop may still be running; check'
+                    f' ps -p {pgid} and remove the {PGID_FILE} record from the'
+                    ' node directory if that group is not this node'
+                )
+            if resume:
+                raise RuntimeError(
+                    f'the loop is still running or parking: {pgid}; retry once it exits'
+                )
+            raise RuntimeError(f'headless node process already exists: {pgid}')
         # build the loop argv
         loop_args = [
             sys.executable,

@@ -59,7 +59,6 @@ fi
 # derive the node's data directory (mirrors start.sh): the project prefix
 # comes from the .worktrees/.project/<branch> cache in the main repo
 HEADLESS_FILE=""
-PGID_FILE=""
 if [[ -n "$BRANCH" ]]; then
     PROJECT=$(cat "$REPO_ROOT/.worktrees/.project/$BRANCH" 2>/dev/null || echo ".")
     if [[ "$PROJECT" == "." ]]; then
@@ -68,24 +67,19 @@ if [[ -n "$BRANCH" ]]; then
         NODE_DIR="$WORKTREE_DIR/$PROJECT/.fractal/$BRANCH"
     fi
     HEADLESS_FILE="$NODE_DIR/.headless"
-    PGID_FILE="$NODE_DIR/.pgid"
 fi
 # grep -qxF (exact match), not tmux -t: -t resolves targets by
-# prefix/fnmatch, so a short name false-matches longer session names
-if tmux list-sessions -F '#{session_name}' 2>/dev/null \
+# prefix/fnmatch, so a short name false-matches longer session names.
+# The guard is per-backend (mirrors start.sh): a headless node owns no
+# session, so a matching name is another repo's sharing this basename and
+# must not block the resume -- its own still-parking loop is vetted by
+# the relaunch itself (node _launch, on the recorded process group)
+if [[ ! -f "$HEADLESS_FILE" ]] \
+    && tmux list-sessions -F '#{session_name}' 2>/dev/null \
     | grep -qxF "$TMUX_SESSION_NAME"; then
     echo "Error: the loop is still running or parking: $TMUX_SESSION_NAME" >&2
     echo "Retry once it exits" >&2
     exit 1
-fi
-# a headless loop has no session to list -- probe its recorded process group
-if [[ -f "$HEADLESS_FILE" && -f "$PGID_FILE" ]]; then
-    PGID=$(tr -d '[:space:]' <"$PGID_FILE") || true
-    if [[ -n "${PGID:-}" ]] && kill -0 -- "-$PGID" 2>/dev/null; then
-        echo "Error: the loop is still running or parking: $PGID" >&2
-        echo "Retry once it exits" >&2
-        exit 1
-    fi
 fi
 
 # start.sh hosts the launch; a headless node resumes with the same backend,

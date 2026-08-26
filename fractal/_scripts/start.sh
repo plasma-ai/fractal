@@ -90,21 +90,13 @@ else
     [[ -n "${VIRTUAL_ENV:-}" ]] && ENV_ARGS+=("VIRTUAL_ENV=$VIRTUAL_ENV")
 fi
 
-# refuse a second launch while a headless loop is still booting or running
-HEADLESS_FILE="$NODE_DIR/.headless"
-PGID_FILE="$NODE_DIR/.pgid"
-if [[ -f "$HEADLESS_FILE" && -f "$PGID_FILE" ]]; then
-    PGID=$(tr -d '[:space:]' <"$PGID_FILE") || true
-    if [[ -n "${PGID:-}" ]] && kill -0 -- "-$PGID" 2>/dev/null; then
-        echo "Error: headless node process already exists: $PGID" >&2
-        exit 1
-    fi
-fi
-
 # ------ launch headless
 
+# the handoff (node _launch) vets the recorded .pgid group under the
+# identity-checked law and refuses a second launch while the loop is
+# still booting or running
 if [[ "$HEADLESS" == true ]]; then
-    printf 'headless\n' >"$HEADLESS_FILE"
+    printf 'headless\n' >"$NODE_DIR/.headless"
     ENV_ARGS+=("FRACTAL_HEADLESS=true")
     exec env "${ENV_ARGS[@]}" fractal node _launch \
         --path="$WORKTREE_DIR" ${LOOP_ARGS[@]+"${LOOP_ARGS[@]}"}

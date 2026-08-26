@@ -38,13 +38,18 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
   in-process Python (`fractal node _loop`). The tmux path re-enters `start.sh`
   inside the new session and execs `_loop` there; the headless path hands off to
   the private `node _launch`, a thin front for `Node._launch_headless`, which
-  records `.pgid` and starts `_loop` in its own session.
+  refuses while a still-live recorded `.pgid` group holds the node (the
+  identity-checked liveness law, so a recycled process-group id never blocks a
+  relaunch), then records `.pgid` and starts `_loop` in its own session.
 - `pause.sh` reaps the recorded step process group, aborting the in-flight agent
   so the loop can park.
 - `resume.sh` relaunches the loop through the backend the node's `.headless`
   marker records; the relaunched loop withdraws the run's recorded pause signals
   itself as it adopts the run, so a bare resume works even after a node
-  transplant.
+  transplant. Its still-parking session guard runs only without the `.headless`
+  marker -- a headless node owns no session, so a same-named session from
+  another repo sharing the basename never blocks its resume; a headless node's
+  own still-parking loop is refused by the relaunch's group vet instead.
 - `kill.sh` reaps the node's live process groups — the in-flight agent's
   recorded step group and the tmux pane's or, with no pane, the recorded `.pgid`
   group of a headless loop — escalating a polite termination to a forced one,

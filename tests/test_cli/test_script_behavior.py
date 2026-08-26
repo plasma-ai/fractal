@@ -1,7 +1,7 @@
 """Script-internal behavior of the node lifecycle shells (``_scripts/``).
 
-Drives ``fractal/_scripts/{init,resume,merge,delete}.sh`` against repos built by
-the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
+Drives ``fractal/_scripts/{init,start,resume,merge,delete}.sh`` against repos
+built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 
 - **``init.sh`` worktree resolution** parses ``git worktree list --porcelain``
   with ``substr`` (not ``$2``), so a repo path containing a space resolves the
@@ -15,7 +15,14 @@ the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   re-inherits only when the flag is passed again.
 - **``resume.sh`` backend selection** relaunches a paused headless node through
   ``start.sh --headless --resume`` and a paused tmux node through plain
-  ``start.sh --resume``.
+  ``start.sh --resume``; its still-parking tmux guard is per-backend, so a
+  same-named session from another repo sharing the basename never blocks a
+  headless resume.
+- **``start.sh``/``resume.sh`` headless second-launch vet** hands the guard to
+  ``node _launch``'s identity-checked liveness law: a live recorded group
+  refuses the relaunch (a resume with the retry-never-kill wording), and an
+  unanswerable identity probe refuses naming the ``ps`` check rather than
+  reading ignorance as dead.
 - **``merge.sh`` interrupt safety** re-asserts the target worktree is clean
   immediately before the destructive squash, so an edit that lands in the
   target *during* the merge is refused -- never absorbed into the squash commit
@@ -59,6 +66,7 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 
 import pytest
@@ -73,6 +81,7 @@ __all__ = [
     'test_init_allows_a_repo_under_a_worktrees_path',
     'test_init_inherits_parent_skills_on_request',
     'test_resume_reselects_the_recorded_backend',
+    'test_headless_relaunch_vets_the_recorded_group',
     'test_merge_preserves_a_target_edit_that_lands_during_the_merge',
     'test_merge_re_merges_an_iterating_child_without_conflict',
     'test_merge_re_merge_of_a_merged_node_is_a_no_op',
@@ -242,17 +251,25 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
 # ------ resume.sh: backend selection
 
 
-@pytest.mark.parametrize('headless', [False, True], ids=['tmux', 'headless'])
+@pytest.mark.parametrize(
+    ('headless', 'listed'),
+    [(False, False), (True, False), (False, True), (True, True)],
+    ids=['tmux', 'headless', 'tmux-parking', 'headless-collision'],
+)
 def test_resume_reselects_the_recorded_backend(
     tmp_path: pathlib.Path,
     headless: bool,
+    listed: bool,
 ) -> None:
     """A paused node resumes through the backend recorded by its marker.
 
     ``resume.sh`` delegates the actual relaunch to ``start.sh``. A headless
     marker must add ``--headless`` before ``--resume``; without the marker the
-    relaunch remains on tmux. A PATH shim records that final handoff without
-    starting either runtime.
+    relaunch remains on tmux. The still-parking tmux guard is per-backend:
+    without the marker a listed same-named session refuses the resume (retry,
+    never kill), while a marker'd node ignores it -- a headless node owns no
+    session, so the name belongs to another repo sharing the basename. A PATH
+    shim records the final handoff without starting either runtime.
     """
     repo = _init_tree(tmp_path / f'resumerepo-{headless}')
     node_dir = repo / '.fractal' / 'main'
@@ -269,7 +286,11 @@ def test_resume_reselects_the_recorded_backend(
     )
     bash.chmod(0o755)
     tmux = bindir / 'tmux'
-    tmux.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
+    if listed:
+        session = f'{repo.name} (main)'
+        tmux.write_text(f"#!/bin/sh\nprintf '%s\\n' '{session}'\n", encoding='utf-8')
+    else:
+        tmux.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
     tmux.chmod(0o755)
 
     env = _cli_env()
@@ -285,12 +306,85 @@ def test_resume_reselects_the_recorded_backend(
         env=env,
     )
 
+    if listed and not headless:
+        # the guard refused before any handoff, with the retry wording
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert 'still running or parking' in result.stderr, result.stderr
+        assert not capture.exists()
+        return
     assert result.returncode == 0, (result.stdout, result.stderr)
     expected = [f'{_scripts_dir() / "start.sh"}', f'{repo}']
     if headless:
         expected.append('--headless')
     expected.append('--resume')
     assert capture.read_text(encoding='utf-8').splitlines() == expected
+
+
+# ------ start.sh + resume.sh: the headless second-launch vet
+
+
+@pytest.mark.parametrize(
+    ('script', 'probe', 'message'),
+    [
+        ('start.sh', 'live', 'headless node process already exists'),
+        ('start.sh', 'unknown', 'process identity probe gave no answer'),
+        ('resume.sh', 'live', 'the loop is still running or parking'),
+    ],
+    ids=['start-live', 'start-unknown', 'resume-live'],
+)
+def test_headless_relaunch_vets_the_recorded_group(
+    tmp_path: pathlib.Path,
+    script: str,
+    probe: str,
+    message: str,
+) -> None:
+    """A headless relaunch refuses while the recorded group answers the law.
+
+    Both scripts hand their headless arm to ``node _launch``, which judges
+    the ``.pgid`` record with the identity-checked liveness law: a live
+    recorded group refuses the second launch (a resume with the
+    retry-never-kill wording), and an identity probe with no answer refuses
+    naming the ``ps`` check instead of reading ignorance as dead. The record
+    and the group both survive the refusal.
+    """
+    repo = _init_tree(tmp_path / 'guardrepo')
+    node_dir = repo / '.fractal' / 'main'
+    (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    bindir = tmp_path / 'guard-bin'
+    bindir.mkdir()
+    if probe == 'unknown':
+        # a ps that answers nothing leaves the group's identity unverifiable
+        ps = bindir / 'ps'
+        ps.write_text(
+            '#!/bin/sh\necho "ps: unavailable" >&2\nexit 1\n',
+            encoding='utf-8',
+        )
+        ps.chmod(0o755)
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    # a live group whose record postdates its leader, i.e. the node's own
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    pgid_file = node_dir / '.pgid'
+    try:
+        pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        args = ['--headless'] if script == 'start.sh' else []
+        result = subprocess.run(
+            ['bash', f'{_scripts_dir() / script}', f'{repo}', *args],
+            cwd=f'{repo}',
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert message in result.stderr, result.stderr
+        assert pgid_file.read_text(encoding='utf-8') == f'{leader.pid}\n'
+        assert leader.poll() is None
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 # ------ merge.sh: an edit landing in the target during the merge

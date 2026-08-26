@@ -41,6 +41,7 @@ __all__ = [
     'test_start_continue_from_terminal',
     'test_start_drain_reaches_the_launch_and_requires_continue',
     'test_start_headless_selects_detached_backend',
+    'test_start_refuses_a_live_recorded_group',
     'test_start_serializes_runtime_backends',
     'test_start_continue_re_arms_after_drained_run',
     'test_start_continue_refuses_after_budget_end',
@@ -262,6 +263,42 @@ def test_start_headless_selects_detached_backend(
     run_scripts = _stub_run_script(monkeypatch, node)
     node.start(headless=True)
     assert run_scripts == [('start.sh', f'{node._root}', '--headless')]
+
+
+@pytest.mark.parametrize('continue_run', [False, True])
+def test_start_refuses_a_live_recorded_group(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    continue_run: bool,
+) -> None:
+    """A start refuses while a recorded process group still runs.
+
+    The idle boot window (a headless handoff returned, the loop's preflight
+    has not stamped ``active`` yet) and the parking window (the loop stamped
+    its terminal status, its exit hook has not dropped the record yet) leave
+    the recorded group as the only evidence a loop exists -- judged by the
+    identity-checked law, the fresh and continue arms both refuse before
+    ``start.sh`` could boot a second loop over it.
+    """
+    node = node_with_db
+    node.config.set('max_cost', 1.0)
+    if continue_run:
+        node.status_set('stopped')
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    pgid_file = node.node_dir / PGID_FILE
+    try:
+        pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        run_scripts = _stub_run_script(monkeypatch, node)
+        with pytest.raises(RuntimeError, match='already exists'):
+            node.start(continue_run=continue_run)
+        assert run_scripts == []
+        assert leader.poll() is None
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 def test_start_serializes_runtime_backends(

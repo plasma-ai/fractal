@@ -417,8 +417,8 @@ the paused span between them is credited back to the run and
 iteration deadlines, so parking a node does not burn its timeouts.
 
 If the resume races a loop that is still parking, the relaunch refuses with
-"the loop is still running or parking … Retry once it exits" — retry, never
-kill.
+"the loop is still running or parking" and tells you to retry once it exits —
+retry, never kill.
 
 Retire and unretire
 -------------------
