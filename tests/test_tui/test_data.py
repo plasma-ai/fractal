@@ -129,8 +129,8 @@ def test_tree_shows_crashed_active_as_exited(
 
 
 @pytest.mark.parametrize(
-    ('backend', 'probe', 'recorded', 'expected'),
-    [
+    argnames=('backend', 'probe', 'recorded', 'expected'),
+    argvalues=[
         ('headless', 'live', True, 'active'),
         ('headless', 'permission', False, 'exited'),
         ('headless', 'permission', None, 'active'),

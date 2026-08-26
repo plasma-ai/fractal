@@ -76,11 +76,14 @@ booting spawn is reaped and a never-started one is stamped `killed` so it can
 never activate — reaps the loop runtime (the tmux session, or a headless or bare
 loop's recorded process group, when one lives), and closes open run and
 iteration rows as `killed`. It is pure bookkeeping plus process reaping — no
-graceful wind-down. It refuses only a status outside those three or a recorded
-process group whose identity `ps` cannot verify; that refusal names the `ps -p`
-check and the record to remove. The descendant sweep re-enumerates the subtree
-to a fixpoint so children registered mid-sweep are still caught, and proceeds
-best-effort per node.
+graceful wind-down. It refuses only a status outside those three, a recorded
+process group whose identity `ps` cannot verify — that refusal names the `ps -p`
+check and the record to remove — or a record still naming no pid (a launch
+claiming it), refused with retry-or-remove guidance rather than swept. The
+descendant sweep re-enumerates the subtree to a fixpoint so children registered
+mid-sweep are still caught, and proceeds best-effort per node; a descendant
+refused over a claim in flight is retried within a bounded budget once the claim
+resolves, rather than skipped.
 
 ## pause and resume
 
@@ -126,6 +129,11 @@ rather than blocking.
 
 All signal guards share one contract: reconcile crashed-but-active state first,
 check the guard, and on refusal write a `failed` event row stating the reason
-before raising. Inside a subtree fan-out the same refusal is recorded but
-skipped silently — attributed as coming *via* the originating verb and branch —
-so one ineligible node never aborts the sweep.
+before raising. The reconcile fences its own writes: it snapshots the group
+records before probing, acts only when the status and records are unchanged from
+the judged snapshot, reaps against that snapshot alone, and re-checks its
+license under the `.worktrees` flock before stamping `exited` — so a racing
+continue's fresh boot or a flock'd kill stands the heal down. Inside a subtree
+fan-out the same refusal is recorded but skipped silently — attributed as coming
+*via* the originating verb and branch — so one ineligible node never aborts the
+sweep.

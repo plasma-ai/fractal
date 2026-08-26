@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import functools
 import itertools
@@ -82,6 +83,18 @@ _CANNOT_EXEC_REASONS = ('agent launch failed', 'agent error (exit 127)')
 # so an empty claim aged past this bound belongs to a launcher that died
 # before recording, not to a launch still in flight
 _ABANDONED_CLAIM_SECONDS = 60.0
+
+# a fan-out kill refused over a launch claim in flight retries the
+# descendant: the claim resolves within the child wrapper's five-second
+# pid wait (the pid lands, giving a reapable live group, or the launch
+# dies, leaving a sweepable record), so the retry budget outlives that
+# window while an abandoned claim cannot loop the sweep past it
+_CLAIM_RETRY_LIMIT = 5
+_CLAIM_RETRY_SECONDS = 2.0
+
+# sentinel a fan-out _kill returns after refusing over a launch claim in
+# flight, so the sweep re-attempts the descendant instead of skipping it
+_CLAIM_IN_FLIGHT = 'claim in flight'
 
 
 class Node:
@@ -406,7 +419,7 @@ class Node:
                 return _group_alive(self.node_dir / PGID_FILE)
         return alive
 
-    def _reconcile_status(self: Node) -> None:
+    def _reconcile_status(self: Node, *, locked: bool = False) -> None:
         """Stamp a crashed-but-active node ``exited``.
 
         A loop that dies without ending (a hard kill, a direct
@@ -426,9 +439,14 @@ class Node:
         ``active``, so a settled node never pays the tmux probe. The heal
         re-verifies at act time -- status still ``active`` and the group
         records untouched since the probe -- and reaps on that snapshot (no
-        flock covers this path), so a continue's relaunch racing the probe
+        flock covers the probe), so a continue's relaunch racing the probe
         (its fresh boot rewrites ``.pgid`` before the active stamp) stands
-        the heal down instead of being reaped as the crash it replaced. A
+        the heal down instead of being reaped as the crash it replaced. The
+        terminal writes run under the ``.worktrees`` flock (``locked`` says
+        the caller already holds it -- the flock is not reentrant), where
+        the license is re-checked: a status no longer ``active`` or a group
+        record that moved since the judged snapshot marks a rival verb's
+        settle or a re-armed boot, either of which keeps its stamp. A
         ``paused`` node is never healed: no session is its *normal* parked
         state (the loop exits at pause; ``resume`` relaunches it), on this
         host or after a filesystem transplant to another. An inconclusive
@@ -461,8 +479,8 @@ class Node:
         snapshot = self._records_snapshot()
         if self._loop_alive() is not False:
             return
-        # re-verify before acting -- no flock covers this heal (signal verbs
-        # run it under theirs already): a continue that raced the probe
+        # re-verify before acting -- no flock covers this probe (signal verbs
+        # run the heal under theirs already): a continue that raced the probe
         # re-armed the status, and its fresh boot rewrites .pgid before the
         # active stamp, so either change means the dead verdict no longer
         # describes this node and the heal must stand down
@@ -471,18 +489,27 @@ class Node:
         self._reap_orphan(snapshot)
         # the reap can stall through its TERM grace while a rival verb
         # settles the node -- a flock'd kill stamping killed, a continue
-        # re-arming a fresh boot -- so the license is re-checked before the
-        # terminal writes: the reap itself acted only on the judged
-        # snapshot, which a relaunch's rewritten record already escapes
-        if self.status() != 'active':
-            return
-        self.record.close_open('exited')
-        self.status_set('exited')
-        self.config.reconcile()
-        # the heal is the record's catch -- the settled node keeps no
-        # socket handle (the next boot writes a fresh one); the .headless
-        # record stays, because it names the backend, not the run
-        (self.node_dir / SOCKET_FILE).unlink(missing_ok=True)
+        # re-arming a fresh boot -- so the license is re-checked under the
+        # .worktrees flock before the terminal writes, ordering them against
+        # a rival's flock'd stamp instead of racing it
+        guard = contextlib.nullcontext() if locked else worktree.lock(self.repo_dir)
+        with guard:
+            if self.status() != 'active':
+                return
+            # a record now on disk that differs from the judged snapshot is
+            # a re-armed boot the verdict never judged, so it keeps its
+            # record and its fresh rows; one the reap itself dropped reads
+            # as absent and keeps the heal licensed
+            for judged, found in zip(snapshot, self._records_snapshot()):
+                if found is not None and found != judged:
+                    return
+            self.record.close_open('exited')
+            self.status_set('exited')
+            self.config.reconcile()
+            # the heal is the record's catch -- the settled node keeps no
+            # socket handle (the next boot writes a fresh one); the .headless
+            # record stays, because it names the backend, not the run
+            (self.node_dir / SOCKET_FILE).unlink(missing_ok=True)
 
     def _records_snapshot(
         self: Node,
@@ -1473,7 +1500,7 @@ class Node:
                     # frozen node exactly as delete/merge/retire do -- a live
                     # loop's step files or a paused node's frozen run context
                     # would otherwise be wiped irrecoverably
-                    child._reconcile_status()
+                    child._reconcile_status(locked=True)
                     if child.status() == 'active':
                         raise RuntimeError(
                             'Cannot reinitialize an active node. Stop or kill it first.'
@@ -2129,8 +2156,8 @@ class Node:
                     )
                 # a first-start node has no tmux session of its own, so this
                 # exact name belongs to another fractal sharing the repo name;
-                # the check also stops a headless launch racing a tmux boot.
-                # A headless launch owns no session, so a provably foreign one
+                # the check also stops a headless launch racing a tmux boot --
+                # a headless launch owns no session, so a provably foreign one
                 # never blocks it (mirrors resume.sh); it still refuses its
                 # own tmux boot racing the .pgid record, or a pane the probe
                 # cannot attribute
@@ -2217,7 +2244,9 @@ class Node:
         before spawning -- no ``.worktrees`` flock covers this handoff
         (resume takes none, and a nested one would deadlock under start's),
         so a launch sidecar flock plus the claim arbitrate two launches
-        whose vets both read the same dead-or-absent record, and an empty
+        whose vets both read the same dead-or-absent record -- the flock'd
+        clear re-vets the record, so a rival winner's pid landed since a
+        loser's stale vet refuses rather than sweeps -- and an empty
         claim abandoned by a launcher that died before its pid write clears
         by age rather than wedging every relaunch. The child waits for the
         pid to land in the claimed record before exec'ing the loop, so no
@@ -2314,6 +2343,12 @@ class Node:
                     raise RuntimeError(claimed) from None
                 pgid_file.unlink(missing_ok=True)
             else:
+                # the pre-flock vet is stale by now: a record that parses
+                # here may be a rival winner's pid, landed after that vet
+                # and released with its flock, so only a group the
+                # identity-checked law judges dead clears for the claim
+                if _group_alive(pgid_file) is not False:
+                    raise RuntimeError(claimed)
                 pgid_file.unlink(missing_ok=True)
             try:
                 claim = os.open(
@@ -2407,6 +2442,7 @@ class Node:
         event: str,
         *,
         fan_out: bool = False,
+        locked: bool = False,
     ) -> Optional[int]:
         """Gate a graceful signal verb; return the run it signals.
 
@@ -2426,6 +2462,7 @@ class Node:
             event: Event type for the refusal record (e.g.
                 ``'finish_cancel'``).
             fan_out: Refusals return ``None`` instead of raising.
+            locked: The caller already holds the ``.worktrees`` flock.
 
         Returns:
             The current run's id, or ``None`` when a fan-out call is
@@ -2437,7 +2474,7 @@ class Node:
         """
         # reconcile a crashed-but-active node so it hits the clear
         # not-active guard below, not the misleading no-run error
-        self._reconcile_status()
+        self._reconcile_status(locked=locked)
         # validate status
         if self.status() != 'active':
             self._signal_refuse(verb, event, 'node is not active', fan_out=fan_out)
@@ -2631,7 +2668,10 @@ class Node:
         with worktree.lock(self.repo_dir):
             # re-read under the lock -- a rival verb or the settling loop
             # may have moved this node since the caller enumerated it
-            if self._signal_guard('finish', 'finish', fan_out=fan_out) is None:
+            if (
+                self._signal_guard('finish', 'finish', fan_out=fan_out, locked=True)
+                is None
+            ):
                 return
             event_id = self.record.event_start('finish', metadata=reason or '')
             self.record.signal_set('finish', reason or '')
@@ -2728,7 +2768,7 @@ class Node:
         with worktree.lock(self.repo_dir):
             # re-read under the lock -- a rival verb or the settling loop
             # may have moved this node since the caller enumerated it
-            if self._signal_guard('stop', 'stop', fan_out=fan_out) is None:
+            if self._signal_guard('stop', 'stop', fan_out=fan_out, locked=True) is None:
                 return
             event_id = self.record.event_start('stop', metadata=reason or '')
             self.record.signal_set('stop', reason or '')
@@ -2763,7 +2803,11 @@ class Node:
         open rows close ``killed``). Idle nodes are killable too
         (:meth:`_killable`) -- a spawn in flight when the kill lands is
         reaped, not skipped, and a never-started spawn is stamped
-        ``killed`` so it can never activate.
+        ``killed`` so it can never activate. A descendant refused over a
+        launch claim in flight (its record empty until the pid lands) is
+        retried within a bounded budget once the claim resolves, so a
+        resume racing the sweep cannot boot a survivor under a killed
+        parent.
 
         Args:
             reason: Optional reason for killing.
@@ -2790,11 +2834,14 @@ class Node:
         #   descendant appears; _killable also admits a booting descendant
         #   ('idle' until preflight stamps 'active'), which a status-only
         #   filter would exit over; seen bounds the loop (each branch is
-        #   reaped at most once and the subtree is finite), so it converges
-        #   even if a stuck child never settles; each helper guards its own
-        #   node under the flock, so a descendant that settled mid-sweep is
-        #   skipped (refusal recorded) while the self-act refusal raises
+        #   reaped at most once and the subtree is finite -- a claim-in-flight
+        #   refusal re-admits its branch, but only within its retry budget),
+        #   so it converges even if a stuck child never settles; each helper
+        #   guards its own node under the flock, so a descendant that
+        #   settled mid-sweep is skipped (refusal recorded) while the
+        #   self-act refusal raises
         seen: set[str] = set()
+        claims: dict[str, int] = {}
         while True:
             fresh = [
                 (row, descendant)
@@ -2803,10 +2850,11 @@ class Node:
             ]
             if not fresh:
                 break
+            retry = False
             for row, descendant in fresh:
                 seen.add(row['node'])
                 try:
-                    descendant._kill(propagated, fan_out=True)
+                    swept = descendant._kill(propagated, fan_out=True)
                 except Exception:
                     # best-effort: surface the failure but keep reaping the
                     # rest of the subtree -- a stuck child must not leave its
@@ -2815,6 +2863,20 @@ class Node:
                         message=f'Warning: failed to kill {descendant._root}',
                         level=logging.WARNING,
                     )
+                    continue
+                # a refusal over a launch claim in flight resolves within
+                # the claim's bound -- the pid lands, giving a reapable
+                # group, or the launch dies and its record ages out -- so
+                # the descendant is re-attempted rather than skipped for
+                # good; the budget stands the sweep down over an abandoned
+                # claim instead of looping on it
+                if swept is _CLAIM_IN_FLIGHT:
+                    claims[row['node']] = claims.get(row['node'], 0) + 1
+                    if claims[row['node']] <= _CLAIM_RETRY_LIMIT:
+                        seen.discard(row['node'])
+                        retry = True
+            if retry:
+                time.sleep(_CLAIM_RETRY_SECONDS)
         return self._kill(reason)
 
     def _kill(
@@ -2910,7 +2972,10 @@ class Node:
                             ),
                             fan_out=fan_out,
                         )
-                        return ''
+                        # the sentinel (never a message) tells the fan-out
+                        # sweep this refusal resolves shortly, so the
+                        # descendant is retried rather than skipped
+                        return _CLAIM_IN_FLIGHT
                     pgid_file.unlink(missing_ok=True)
             # set signal and log event; the reap runs outside the lock
             event_id = self.record.event_start('kill', metadata=label)
@@ -3031,7 +3096,10 @@ class Node:
         with worktree.lock(self.repo_dir):
             # re-read under the lock -- a rival verb or the settling loop
             # may have moved this node since the caller enumerated it
-            if self._signal_guard('pause', 'pause', fan_out=fan_out) is None:
+            if (
+                self._signal_guard('pause', 'pause', fan_out=fan_out, locked=True)
+                is None
+            ):
                 return False
             # the signal lands before the abort so the loop reclassifies
             # the killed step as paused, never as a failed step (a failure
@@ -4507,6 +4575,8 @@ class Node:
     def _heal_crashed(
         self: Node,
         pairs: list[tuple[dict, Optional[Node]]],
+        *,
+        locked: bool = False,
     ) -> list[tuple[dict, Optional[Node]]]:
         """Persist the reconcile for crashed-but-active rows (the shared pass).
 
@@ -4527,6 +4597,7 @@ class Node:
         Args:
             pairs: ``(row, node)`` per registry row -- ``node`` is ``None``
                 when the row's worktree is gone.
+            locked: The caller already holds the ``.worktrees`` flock.
 
         Returns:
             The pairs, each crashed-active row's status healed.
@@ -4554,7 +4625,7 @@ class Node:
                     )
                 )
                 if node.exists() and absent:
-                    node._reconcile_status()
+                    node._reconcile_status(locked=locked)
                     row = {**row, 'status': node.status()}
             healed.append((row, node))
         return healed
@@ -4582,8 +4653,9 @@ class Node:
 
         """
         live = self._live_descendants(max_depth=max_depth)
-        # heal crashed-but-active rows before counting (persisting the settle)
-        live = self._heal_crashed(live)
+        # heal crashed-but-active rows before counting (persisting the
+        # settle); the cap gates always run under the .worktrees flock
+        live = self._heal_crashed(live, locked=True)
         # statuses that hold a spawn slot: active, paused mid-work (it will
         # return), or idle awaiting start
         unsettled = ('active', 'paused', 'idle')

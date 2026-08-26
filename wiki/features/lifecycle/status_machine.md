@@ -52,10 +52,14 @@ reason before the operation raises.
 ## Legal signals per status
 
 - **`active`** accepts `finish`, `finish_cancel`, `stop`, and `pause` — each
-  guarded by the same preamble: heal any crashed-but-active state first, then
-  require status `active` and an open run. `kill` is also legal on an active
-  node, refusing only over a recorded process group whose identity cannot be
-  verified.
+  guarded by the same preamble: heal any crashed-but-active state first — the
+  heal re-verifies its license at act time and again after the reap, so a rival
+  verb settling the node mid-heal keeps its stamp (see
+  [[features/lifecycle/script_delegation|script_delegation]]) — then require
+  status `active` and an open run. `kill` is also legal on an active node,
+  refusing over a recorded process group whose identity cannot be verified, and
+  over a record naming no group yet (a launch's claim in flight) with guidance
+  to retry once its pid lands or remove an abandoned record.
 - **`paused`** accepts only `resume`, `kill`, and `chat`. Everything else
   refuses; a paused node holds its spawn slot and blocks ancestor finish-drains
   until resumed or killed.

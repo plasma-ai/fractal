@@ -20,7 +20,7 @@ from typing import NoReturn, Optional
 import pytest
 
 from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, LOCK_FILE, PGID_FILE
-from fractal.core.node import Node
+from fractal.core.node import Node, _group_alive
 from tests._helpers import _git, _stub_run_script
 
 from .conftest import (
@@ -48,6 +48,7 @@ __all__ = [
     'test_start_proceeds_over_a_vanished_record',
     'test_headless_start_vets_a_same_named_session',
     'test_launch_headless_refuses_a_rival_claim',
+    'test_launch_headless_re_vets_the_record_inside_the_lock',
     'test_launch_headless_clears_an_abandoned_claim',
     'test_launch_headless_refuses_while_a_rival_holds_the_launch_lock',
     'test_launch_headless_proceeds_over_a_vanished_record',
@@ -65,6 +66,7 @@ __all__ = [
     'test_kill_refuses_an_unknown_process_identity',
     'test_kill_reaps_over_a_vanished_record',
     'test_kill_refuses_an_in_flight_record_claim',
+    'test_kill_sweep_retries_a_descendant_claim_in_flight',
     'test_kill_drops_a_dead_group_without_identity_probe',
     'test_kill_drops_a_foreign_owned_recycled_group',
     'test_kill_sets_killed_status',
@@ -563,6 +565,49 @@ def test_launch_headless_refuses_a_rival_claim(
     # the rival's claim survives for its own pid write; no backend recorded
     assert pgid_file.exists()
     assert not (node.node_dir / HEADLESS_FILE).exists()
+
+
+def test_launch_headless_re_vets_the_record_inside_the_lock(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flock'd clear re-vets the record instead of trusting the stale vet.
+
+    A loser can win the launch flock just after a rival winner released it:
+    the loser's pre-flock vet judged the old dead record, but the record now
+    names the winner's live pid. Clearing on the parse alone would sweep the
+    winner's one reapable record and double-boot the loop, so the in-flock
+    clear re-vets and refuses like it does over a claim.
+    """
+    node = node_with_db
+    pgid_file = node.node_dir / PGID_FILE
+    # the winner's live group, its pid landed after the loser's vet
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    calls: list[pathlib.Path] = []
+
+    def stale_then_real(probed: pathlib.Path) -> Optional[bool]:
+        calls.append(probed)
+        # the first probe is the loser's pre-flock vet, judging the record
+        # the winner has since replaced
+        if len(calls) == 1:
+            return False
+        return _group_alive(probed)
+
+    monkeypatch.setattr('fractal.core.node._group_alive', stale_then_real)
+    pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+    try:
+        with pytest.raises(RuntimeError, match='rival launch claimed the record'):
+            node._launch_headless()
+        # the winner keeps its live group and its one reapable record
+        assert leader.poll() is None
+        assert pgid_file.read_text(encoding='utf-8') == f'{leader.pid}\n'
+        assert not (node.node_dir / HEADLESS_FILE).exists()
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 def test_launch_headless_clears_an_abandoned_claim(
@@ -1073,6 +1118,44 @@ def test_kill_refuses_an_in_flight_record_claim(
         node.kill()
     assert node.status() == 'active'
     assert pgid_file.exists()
+
+
+def test_kill_sweep_retries_a_descendant_claim_in_flight(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subtree kill re-attempts a descendant whose launch claim is in flight.
+
+    A resume racing the sweep holds ``.pgid`` as an empty claim until its
+    pid lands, and the descendant's own kill refuses over it. Skipping the
+    descendant for good would let its loop boot and burn under a killed
+    parent while the kill reports success -- so the sweep retries once the
+    claim resolves, and the descendant is reaped like any other in-flight
+    spawn.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    # the racing launch's claim: an empty record, its pid not yet landed
+    pgid_file = child.node_dir / PGID_FILE
+    pgid_file.write_text('', encoding='utf-8')
+    # the claim resolves during the retry pause -- the launch died and its
+    # exit hook dropped the record
+    monkeypatch.setattr('fractal.core.node._CLAIM_RETRY_SECONDS', 0.01)
+    real_sleep = time.sleep
+
+    def resolving_sleep(seconds: float) -> None:
+        real_sleep(seconds)
+        pgid_file.unlink(missing_ok=True)
+
+    monkeypatch.setattr('fractal.core.node.time.sleep', resolving_sleep)
+    _stub_run_script(monkeypatch, Node)
+    parent.kill()
+    # the retried descendant is reaped with the rest of the subtree
+    assert parent.status() == 'killed'
+    assert child.status() == 'killed'
+    # the first attempt's refusal left its evidence on the record
+    events = child.db.read('events', where={'event': 'kill'})
+    metadata = [event['metadata'] or '' for event in events]
+    assert any('names no process group yet' in entry for entry in metadata)
 
 
 def test_kill_drops_a_dead_group_without_identity_probe(

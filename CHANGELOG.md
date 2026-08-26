@@ -21,8 +21,10 @@ may include breaking changes, each listed under a Breaking heading.
   teardown, and the relaunch guards judge a headless or bare loop by its
   recorded `.pgid` group and verify the group's identity through `ps` (a group
   owned by another user is arbitrated the same way); kill vets
-  `.pgid`/`.step_pgid` under the flock and refuses only over a group whose
-  identity `ps` cannot verify, naming the check to run.
+  `.pgid`/`.step_pgid` under the `.worktrees` flock and refuses over a group
+  whose identity `ps` cannot verify (naming the check to run) or a record still
+  naming no pid — a launch's claim in flight — naming the record to clear; a
+  fan-out kill retries a descendant refused over such a claim once it resolves.
 
 ## [1.2.0] - 2026-08-24
 

@@ -31,6 +31,7 @@ __all__ = [
     'test_reconcile_closes_crashed_runs_open_rows',
     'test_reconcile_status_heals_caps_on_crashed_node',
     'test_reconcile_requires_a_definitive_tmux_answer',
+    'test_tmux_probe_falls_back_on_a_record_unlinked_mid_probe',
     'test_recorded_group_returns_unknown_on_failed_identity_probe',
     'test_recorded_group_accepts_a_confirmed_missing_leader',
     'test_foreign_owned_group_is_arbitrated_by_its_leader',
@@ -41,6 +42,7 @@ __all__ = [
     'test_blind_probe_spares_a_record_less_bare_loop',
     'test_reconcile_stands_down_for_a_relaunch_racing_the_probe',
     'test_reconcile_stands_down_for_a_kill_landing_during_the_reap',
+    'test_reconcile_stands_down_for_a_continue_re_armed_during_the_reap',
     'test_kill_unchanged_on_stale_active',
     'test_reap_orphan_reaps_only_the_recorded_group',
     'test_reap_orphan_spares_a_group_with_unknown_identity',
@@ -238,9 +240,54 @@ def test_reconcile_requires_a_definitive_tmux_answer(
     assert run_row['status'] == expected
 
 
+def test_tmux_probe_falls_back_on_a_record_unlinked_mid_probe(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``.socket`` record unlinked mid-probe falls back to the ambient socket.
+
+    The parking loop drops its socket record on exit, so the record can
+    vanish between the probe's existence check and its read. A vanished
+    record is the exit's own trace, not an error: the probe asks the
+    ambient server instead -- the same answer a never-recorded socket
+    gets -- rather than crashing the reconcile that asked.
+    """
+    node = node_with_db
+    # restore the real probe (the fixture shadows it as always-alive)
+    node._tmux_session_exists = Node._tmux_session_exists.__get__(node)
+    session = node.tmux_session
+    socket_file = node.node_dir / SOCKET_FILE
+    socket = '/tmp/fx-test/parked-socket'  # noqa: S108
+    socket_file.write_text(f'{socket}\n', encoding='utf-8')
+    real_read_text = pathlib.Path.read_text
+
+    def racing_read_text(
+        self: pathlib.Path,
+        *args: object,
+        **kwargs: object,
+    ) -> str:
+        # the parking loop unlinks the record between the existence check
+        # and this read
+        if self == socket_file:
+            raise FileNotFoundError(2, 'No such file or directory', f'{self}')
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, 'read_text', racing_read_text)
+    probes: list[dict] = []
+
+    def probe(**kwargs: object) -> list[str]:
+        probes.append(kwargs)
+        return [session]
+
+    monkeypatch.setattr('fractal.util.tmux.probe', probe)
+    assert node._tmux_session_exists() is True
+    # the fallback asked the ambient server, never the vanished record's
+    assert probes == [{}]
+
+
 @pytest.mark.parametrize(
-    'probe',
-    ['unavailable', 'unparseable', 'failed', 'empty'],
+    argnames='probe',
+    argvalues=['unavailable', 'unparseable', 'failed', 'empty'],
 )
 def test_recorded_group_returns_unknown_on_failed_identity_probe(
     monkeypatch: pytest.MonkeyPatch,
@@ -556,6 +603,61 @@ def test_reconcile_stands_down_for_a_kill_landing_during_the_reap(
     assert node.status() == 'killed'
     run = node.db.read('runs', where={'run_id': run_id})[0]
     assert run['status'] == 'active'
+
+
+def test_reconcile_stands_down_for_a_continue_re_armed_during_the_reap(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The heal never stamps over a continue that fully re-armed mid-reap.
+
+    A continue's flock'd heal-then-boot can complete inside the reap's TERM
+    grace: fresh ``.pgid``, fresh run row, status back to ``active``. A
+    re-armed node passes a status-only license, so the post-reap re-check
+    also compares the group records against the judged snapshot -- a record
+    now on disk that the verdict never judged stands the heal down, keeping
+    the fresh boot's group, its record, and its open run.
+    """
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    (node.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
+    # the crashed launch's record names a provably dead group
+    crashed = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    os.killpg(crashed.pid, signal.SIGKILL)
+    crashed.wait()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text(f'{crashed.pid}\n', encoding='utf-8')
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    real_reap = node._reap_orphan
+    fresh: dict[str, int] = {}
+
+    def stalled_reap(
+        snapshot: Optional[tuple[Optional[tuple[float, str]], ...]] = None,
+    ) -> None:
+        real_reap(snapshot)
+        # the rival continue completes while the reap TERM-polls: its
+        # fresh boot rewrites .pgid, opens a fresh run, and re-arms the
+        # status before the heal's terminal writes
+        pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        fresh['run_id'] = node.record.run_start()
+        node.status_set('active')
+
+    monkeypatch.setattr(node, '_reap_orphan', stalled_reap)
+    try:
+        node._reconcile_status()
+        # the fresh boot keeps its group, its record, and its open run
+        assert leader.poll() is None
+        assert pgid_file.read_text(encoding='utf-8') == f'{leader.pid}\n'
+        assert node.status() == 'active'
+        run = node.db.read('runs', where={'run_id': fresh['run_id']})[0]
+        assert run['status'] == 'active'
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 def test_kill_unchanged_on_stale_active(

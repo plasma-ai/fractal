@@ -264,8 +264,8 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ('headless', 'listed'),
-    [(False, False), (True, False), (False, True), (True, True)],
+    argnames=('headless', 'listed'),
+    argvalues=[(False, False), (True, False), (False, True), (True, True)],
     ids=['tmux', 'headless', 'tmux-parking', 'headless-collision'],
 )
 def test_resume_reselects_the_recorded_backend(
@@ -336,8 +336,8 @@ def test_resume_reselects_the_recorded_backend(
 
 
 @pytest.mark.parametrize(
-    ('script', 'probe', 'message'),
-    [
+    argnames=('script', 'probe', 'message'),
+    argvalues=[
         ('start.sh', 'live', 'headless node process already exists'),
         ('start.sh', 'unknown', 'process identity probe gave no answer'),
         ('resume.sh', 'live', 'the loop is still running or parking'),

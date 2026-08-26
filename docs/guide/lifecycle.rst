@@ -304,7 +304,7 @@ tree-wide broadcast on the user node, same ``active``-with-a-run
 requirement. There is no ``--cancel`` for stop.
 
 The signal is a queued row, not a process signal: a stop that lands while a
-step's agent is in flight waits for that seat to complete -- the step books
+step's agent is in flight waits for that seat to complete — the step books
 its real outcome and only the steps after it are forgone. A stop never
 TERMs the running agent; when an immediate end is genuinely needed, that is
 ``kill``.
@@ -357,11 +357,16 @@ Killable states:
   activate (an unwanted spawn is reapable before it starts burning).
 
 Anything else refuses (``Cannot kill: node is not active, paused, or
-idle``). The one other refusal is a recorded process group whose identity
-the ``ps`` probe cannot verify: the kill refuses before writing any kill
-state and names ``ps -p <pgid>`` and the record file to remove. The sweep
+idle``). Two other refusals guard the reap, each before any kill state is
+written: a recorded process group whose identity the ``ps`` probe cannot
+verify names ``ps -p <pgid>`` and the record file to remove, and a record
+naming no process group yet — a launch claiming it — asks for a retry once
+its pid lands (or the record's removal if no launch is running) instead of
+sweeping the claim. The sweep
 reaps descendants first and re-enumerates to a fixpoint, so a spawn already
-in flight when the kill lands is caught rather than escaping. The
+in flight when the kill lands is caught rather than escaping; a descendant
+refused over a claim in flight is retried within a bounded budget once the
+claim resolves, rather than skipped. The
 attribution — ``killed by <actor>``, with the reason appended — lands
 identically on the kill event, the signal, and the killed run row, and a
 later ``start --continue`` surfaces it as a notice.

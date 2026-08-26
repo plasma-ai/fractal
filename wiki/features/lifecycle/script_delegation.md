@@ -43,10 +43,12 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
   relaunch), then serializes the handoff under a launch flock and claims `.pgid`
   with an exclusive create before spawning — of two launches racing the same
   dead-or-absent record, exactly one boots and the loser refuses as it would
-  over a live record. It records the `.headless` marker and `.pgid` together
-  (rolled back together when the spawn fails, and a spawn that exits before the
-  loop boots is reported as a failed launch) and starts `_loop` in its own
-  session, appending one launch banner to `headless.log`.
+  over a live record (the flock'd clear re-vets the record, so a winner's pid
+  landed since a loser's stale vet refuses rather than sweeps). It records the
+  `.headless` marker and `.pgid` together (rolled back together when the spawn
+  fails, and a spawn that exits before the loop boots is reported as a failed
+  launch) and starts `_loop` in its own session, appending one launch banner to
+  `headless.log`.
 - `pause.sh` reaps the recorded step process group, aborting the in-flight agent
   so the loop can park.
 - `resume.sh` relaunches the loop through the backend the node's `.headless`
@@ -96,3 +98,11 @@ fence PID reuse, and arbitrates a group owned by another user the same way. Only
 a failed `ps` is inconclusive: reconciliation keeps the run active, teardown
 refuses, kill refuses and names the `ps -p` check and the record to clear, and
 reaping spares any group it cannot positively identify.
+
+The crashed-but-active heal holds no flock over its probe, so it fences its own
+writes instead: it fingerprints `.pgid`/`.step_pgid` before probing, re-verifies
+at act time that the status is still `active` and the records unchanged, reaps
+only that judged snapshot, and re-checks its license under the `.worktrees`
+flock after the reap — status still `active` and no record on disk the verdict
+never judged — before stamping `exited`. A kill or continue landing mid-heal
+keeps its stamp, and a relaunch racing the probe stands the heal down.
