@@ -17,11 +17,13 @@ Every command below follows the same shape:
 Target selection
    Most commands take an optional ``NODE`` argument naming the target node's
    branch. When omitted, the target is the node at ``--path`` (default ``.``),
-   resolved to its git-worktree toplevel. From the repo root, the caller's
-   own node is used when the ``_NODE`` environment variable is set (as it is
-   inside a node's loop); otherwise a single worktree under ``.worktrees/``
-   resolves implicitly (echoed on stderr), and multiple worktrees refuse with
-   a request to name one.
+   resolved to its git-worktree toplevel. From the repo root, the checkout's
+   own user node is the target whenever the checked-out branch carries one
+   (the normal case on the tree's root branch). On a checkout with no user
+   node, the caller's own node is used when the ``_NODE`` environment
+   variable is set (as it is inside a node's loop); otherwise a single
+   worktree under ``.worktrees/`` resolves implicitly (echoed on stderr), and
+   multiple worktrees refuse with a request to name one.
 
 Short names
    Wherever a branch is accepted, a unique trailing segment works: ``lexer``
@@ -41,10 +43,15 @@ Output
    prints a JSON array instead (``[]`` when empty, mutually exclusive with
    ``--csv``). Empty listings still emit the header row. stdout carries the
    parseable result; notices, warnings, and confirmations ride stderr. Core
-   refusals print ``Error: <message>`` on stderr and exit 1; argument errors
-   raised at the CLI boundary (bad values, unknown or ambiguous node names,
-   mutually exclusive flags) print a usage error
-   (``Invalid value: <message>``) and exit 2.
+   refusals print ``Error: <message>`` on stderr and exit 2, as do argument
+   errors raised at the CLI boundary (bad values, unknown or ambiguous node
+   names, mutually exclusive flags), which print a usage error
+   (``Invalid value: <message>``). Exit 1 is reserved for a command's own
+   nonzero outcome — ``fractal commit --check`` on a dirty tree — and for a
+   declined interactive confirmation (``delete`` without ``--force`` prints
+   ``Aborted.``). Whatever the cause, the last stderr line of every failed
+   command is ``FAILED (exit <code>)`` naming the exit code, so a ``tail -1``
+   can never mistake a failure for a success.
 
 Values
    Numeric caps must be non-negative; unlimited is expressed by omitting the
@@ -67,7 +74,7 @@ Creating nodes
 
 Create an agent node: a git worktree on branch ``<parent>.<name>`` under
 ``.worktrees/``, plus a node data directory ``.fractal/<branch>/`` seeded with
-steps, scripts, skills, modes, and ``config.json``. The node's task contract
+steps, scripts, skills, and ``config.json``. The node's task contract
 lives in ``<node_dir>/NODE.md`` — author its *Instructions* and *Completion
 Requirements* sections, then launch with ``fractal node start``.
 
@@ -115,6 +122,21 @@ node at ``--path``.
        instead of the package seed; must hold at least one, each carrying
        the loop's ``NN-`` digit prefix at one width.
        Mutually exclusive with ``--inherit=steps``.
+   * - ``--profile <name>``
+     - none
+     - Named seed bundle under ``.fractal/profiles/<name>/``: ``steps/``
+       seeds the step list (like ``--steps``), ``NODE.md`` a
+       deployment-ready charter. The charter's fill-sheet is validated at
+       init: its two authored sections must be present, every ``pin:``
+       line must resolve to a commit (and match ``--pin``, case-blind —
+       a spelling that is not a hex sha refuses outright), and every
+       ``docket: <path>`` line must resolve at the pin — a stale or
+       truncated seed dies at init, not at the commission's first seat.
+       Mutually exclusive with ``--steps``/``--inherit=steps``.
+   * - ``--pin <sha>``
+     - none
+     - Commission pin: must resolve to a commit; the profile charter's
+       ``pin:`` declarations must match it.
    * - ``--agent <command>``
      - nearest ancestor's
      - Agent command, validated against the agent registry (a typo refuses).
@@ -196,6 +218,11 @@ node at ``--path``.
      - disabled
      - Subscribe to no radio channels (the parent still reads this node). See
        :doc:`/guide/radio`.
+   * - ``--sealed``
+     - disabled
+     - Seal the node's mailbox: its own seat cannot read hosted messages until
+       an operator or the parent unseals it (``config set sealed=false``, which
+       the sealed seat itself may not run) — verifier isolation.
    * - ``--reset``
      - —
      - Delete node files and reinitialize.
@@ -224,11 +251,13 @@ Running nodes
 
 .. code-block:: console
 
-   $ fractal node start [NODE] [--continue] [--clean] [--max-cost <usd>]
+   $ fractal node start [NODE] [--continue] [--clean] [--drain]
+         [--max-cost <usd>] [--headless | --tmux]
 
 Launch the node's iteration loop in a tmux session (named
-``<repo> (<branch>)`` with dots flattened to dashes). Run parameters
-come from the node's ``config.json``; only the continue flags are set at
+``<repo> (<branch>)`` with dots flattened to dashes) or, with ``--headless``,
+in a detached process group. Run parameters come from the node's
+``config.json``; only the runtime choice and the continue flags are set at
 launch time.
 
 ``--continue``
@@ -241,18 +270,37 @@ launch time.
    With ``--continue``: acknowledge discarding uncommitted project files
    (node-directory files are exempt).
 
+``--drain``
+   With ``--continue``: run a drain — the harness forbids spawns and
+   re-arms from this run (``node init`` — a spawn or a whole new tree —
+   plus ``start``/``update``/``resume`` and the ``_loop`` entry they front
+   all refuse from its seats, enforced via the exported ``_DRAIN`` and the
+   run's own recorded drain) and injects the DRAIN mode doc so every seat
+   closes out instead of expanding. The drain's own relaunch after a park
+   is exempt.
+
 ``--max-cost <usd>``
    With ``--continue``: retune the cost cap before relaunch, echoed
    ``max_cost: old -> new``. **Required** when the last run ended on its cost
    budget — runs are isolated and each launch arms the cap anew, so a
    budget-ended run refuses a bare ``--continue``.
 
+``--headless`` / ``--tmux``
+   Select the runtime backend (envvar ``FRACTAL_HEADLESS``): ``--headless``
+   runs the loop in a detached process group and captures its output in the
+   node's ``headless.log``; ``--tmux`` is the default. Delegated child starts
+   inherit a headless parent's choice through the envvar, and ``--tmux`` opts
+   one child back into tmux. A ``--continue`` opens a new run and takes its
+   backend from the flag or ``FRACTAL_HEADLESS``; ``resume`` adopts the
+   paused run's recorded backend.
+
 A fresh start requires status exactly ``idle``. Starting refuses on: the user
 node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a
 paused ancestor or tree-wide pause latch; a foreign tmux session already
-holding the node's session name; and a stored config the launch re-validation
-rejects. Continuing from ``killed`` surfaces the recorded kill attribution as
-a notice. An uncapped start is allowed but warns loudly.
+holding the node's session name; a headless node whose recorded process group
+is still alive; and a stored config the launch re-validation rejects.
+Continuing from ``killed`` surfaces the recorded kill attribution as a
+notice. An uncapped start is allowed but warns loudly.
 
 .. code-block:: console
 
@@ -263,7 +311,8 @@ a notice. An uncapped start is allowed but warns loudly.
 ~~~~~~~~~~
 
 Attach the current terminal to the node's tmux session. Requires the node to
-be ``active``.
+be ``active``. A headless node refuses and names its ``headless.log`` to
+follow instead.
 
 .. code-block:: console
 
@@ -274,9 +323,11 @@ Signals
 
 Three graceful verbs and one immediate one end or suspend a running node. The
 graceful verbs — ``finish``, ``stop``, ``pause`` — require the target to be
-``active`` with a run; ``kill`` also accepts ``paused`` and a booting ``idle``
-node with a live session. Each accepts ``--reason <text>``, recorded with the
-signal. Refused signals are recorded as failed events in the activity log.
+``active`` with a run; ``kill`` also accepts ``paused`` and ``idle`` nodes —
+a booting node (live session, ``active`` not yet stamped) is reaped, and a
+never-started spawn is stamped ``killed``. Each accepts ``--reason <text>``,
+recorded with the signal. Refused signals are recorded as failed events in
+the activity log.
 
 ``finish`` and ``stop``
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -287,10 +338,18 @@ signal. Refused signals are recorded as failed events in the activity log.
    $ fractal node stop [NODE] [--reason <text>]
 
 ``finish`` ends the node gracefully after the current **iteration**; ``stop``
-ends it after the current **step**. Both fan out to active descendants
-children-first, so the subtree drains before the target settles. Invoked on
-the user node, ``finish``/``stop`` broadcast tree-wide (the user node itself
-carries no signal).
+ends it after the current **step**. Both are queued signals the loop polls at
+its boundaries: a stop that lands mid-step **waits for the in-flight agent to
+complete** -- however long that takes -- and never signals or tears it (the
+immediate path is ``kill``).
+
+.. warning::
+
+   Both verbs cascade to the node's **entire subtree** of active descendants
+   (children first, so the subtree drains before the target settles). There
+   is no single-node form: stopping a manager stops every lane under it, each
+   after its own current step. Invoked on the user node, ``finish``/``stop``
+   broadcast tree-wide (the user node itself carries no signal).
 
 ``--cancel`` (``finish`` only) withdraws this node's pending finish signal
 instead of sending one — it never fans out, and refuses when no finish signal
@@ -338,11 +397,16 @@ or when an ancestor is still paused.
 
 Kill the node immediately: descendant sessions and recorded process groups
 are reaped first (re-enumerated to a fixpoint, so mid-sweep spawns are
-caught), then the node's own, and open rows are marked ``killed``. Killable
-states are ``active``, ``paused``, and a booting ``idle`` node with a live
-session. The attribution ``killed by <actor>[: reason]`` lands on the event,
-the signal, and the run row, and is surfaced as a notice on a later
-``start --continue``.
+caught), then the node's own, and open rows are marked ``killed``. The reap
+covers the loop runtime (the tmux session, or a headless or bare loop's
+recorded process group) and any step group the loop recorded. Killable
+states are ``active``, ``paused``, and ``idle`` -- a booting node is reaped
+and a never-started spawn is stamped ``killed`` so it can never activate.
+The only other refusal is a recorded process group whose identity the ``ps``
+probe cannot verify: the kill refuses before writing any kill state and
+names ``ps -p <pgid>`` and the record file to remove. The attribution
+``killed by <actor>[: reason]`` lands on the event, the signal, and the run
+row, and is surfaced as a notice on a later ``start --continue``.
 
 .. code-block:: console
 
@@ -356,7 +420,7 @@ Integration and teardown
 
 .. code-block:: console
 
-   $ fractal node merge [NODE]
+   $ fractal node merge [NODE] [--continue] [--delete] [--force|-f]
 
 Squash-merge the node's branch into its merge target — the configured
 ``base`` when set, else the dotted parent. One squash commit lands on the
@@ -364,6 +428,21 @@ target; the node's full history stays on its own branch. Merging refuses on
 the user node, when the node itself is ``active`` or ``paused``, and when the
 *target* is ``active`` or ``paused`` (except from inside the target's own
 loop, its normal child-merge path). Non-fatal warnings ride stderr.
+
+``--continue``
+   Finish a hand-resolved squash after a conflicted merge: redo
+   ``git merge --squash`` in the target worktree, resolve and stage the
+   conflicts, then ``merge --continue`` runs the merge's own tail — seed
+   strip, index refresh, commit, merge-base advance.
+
+``--delete``
+   Delete the node (worktree, branch, and whole subtree) after a successful
+   merge. The teardown's refusals and its confirmation prompt (which names
+   the descendant count and suggests ``retire``) run **before** the squash,
+   so a refusal never lands after a merge that already committed.
+
+``--force`` / ``-f``
+   With ``--delete``: skip the confirmation prompt.
 
 .. code-block:: console
 
@@ -443,7 +522,7 @@ Print the node's current status, possibly decorated: ``active (pausing)``,
 ``active (stopping)``, or ``active (finishing)`` when a signal is pending,
 and ``exited (<reason>)`` when the latest run recorded why it ended. The read
 is self-reconciling — a crashed node (``active`` on record with provably no
-tmux session) is healed to ``exited`` first.
+tmux session or headless process group) is healed to ``exited`` first.
 
 .. code-block:: console
 
@@ -455,13 +534,32 @@ tmux session) is healed to ``exited`` first.
 
 .. code-block:: console
 
-   $ fractal node list [NODE] [--all] [--retired] [--max-depth <n>]
+   $ fractal node list [NODE] [--all] [--retired] [--max-depth <n>] [--json]
          [--status <s[,s...]>] [--live] [--count] [--csv]
 
 List a node's **descendants** — the listing never includes the target's own
-row (use ``status`` for that). Columns: ``status``, ``node``, ``title``,
-``max_cost``, ``max_depth``, ``max_children``, ``max_descendants``, ``last``.
-Blank limit columns mean unlimited. ``last`` is the age of each node's newest
+row (use ``status`` for that). Columns, in order: ``status``, ``detail``,
+``node``, ``title``, ``max_cost``, ``spend``, ``max_depth``, ``max_children``,
+``max_descendants``, ``last``, ``end_reason``.
+
+``status`` is always the bare lifecycle word; every qualifier rides
+``detail``, which composes (``;``-joined) any of: a pending signal
+(``pausing``/``stopping``/``finishing``), an ``exited`` run's recorded end
+reason, ``run exhausted: <reason>`` on a ``completed`` run that ended on its
+iteration cap and ``final iteration failed`` on a drained finish whose last
+iteration died (a clean drained finish stays bare), ``orphaned`` for a
+registered node whose worktree is gone, ``model drop`` for an unresolved
+served-model divergence, ``iteration gap <span>`` for numbers that advanced with
+no recorded row, and ``PAUSED: billing`` while the newest launches carry the
+dead-credits signature. ``end_reason`` is ``detail``'s typed counterpart, a
+closed vocabulary naming a settled row's landing: ``goal_met``,
+``run_exhausted``, or ``final_iteration_failed`` on a ``completed`` row;
+``cost_budget``, ``timeout``, ``setup_abort``, ``final_iteration_failed``, or
+``other`` (recorded but unmapped) on an ``exited`` row; null when no reason is
+recorded (e.g. a reconcile-healed crash) and on every other status. ``spend``
+is the current run's subtree cost at the
+scope ``max_cost`` is enforced at, blank for a node that has never run. Blank
+limit columns mean unlimited. ``last`` is the age of each node's newest
 activity, with a ``!`` suffix flagging an active node quiet past
 ``max(step_timeout, 5m)``. On a TTY, statuses render bracketed
 (``[active]``); machine output stays unbracketed.
@@ -484,21 +582,28 @@ activity, with a ``!`` suffix flagging an active node quiet past
 
 ``--live``
    Trust each child's real state: relabel a crashed active node (no tmux
-   session) as ``exited``, a booting idle node as ``active``, and drop nodes
-   whose worktree is gone. This view is read-only; the plain listing instead
-   persists the crash heal and flags worktree-less rows as ``orphan`` (or
-   ``<status> (orphaned)`` when settled).
+   session or headless process group) as ``exited``, a booting idle node as
+   ``active``, and drop nodes whose worktree is gone. This view is read-only;
+   the plain listing instead persists the crash heal and flags worktree-less
+   rows as ``orphan`` (or ``<status> (orphaned)`` when settled).
 
 ``--count``
-   Print only the number of matching nodes.
+   Print only the number of matching nodes (mutually exclusive with the
+   row formats: a bare number is a shape neither a CSV nor a JSON consumer
+   asked for).
 
 ``--csv``
    Force CSV output (already the default when piped).
+
+``--json``
+   Emit a JSON array of row objects with typed fields (mutually exclusive
+   with ``--csv``); scripted consumers should prefer it over CSV scraping.
 
 .. code-block:: console
 
    $ fractal node list --status active,paused
    $ fractal node list parser --max-depth 1 --count
+   $ fractal node list --json
 
 ``activity``
 ~~~~~~~~~~~~
@@ -523,9 +628,10 @@ bounds the rows returned; ``--json`` emits a JSON array of row objects
 Approvals
 ---------
 
-Steps whose frontmatter sets ``requires_approval: true`` gate on the direct
-parent before running. The waiting child polls in sync mode (paced by its
-``wait`` interval) until the approval lands.
+Steps whose frontmatter sets ``requires_approval: true`` run, then gate on
+the direct parent before the loop advances: once the step's agent invocation
+succeeds, the child waits for approval, polling (with sync passes paced by
+its ``wait`` interval) until the approval lands.
 
 ``approve``
 ~~~~~~~~~~~
@@ -730,8 +836,9 @@ in :doc:`/configuration`.
    $ fractal node config get KEY
 
 Print one config value. Unknown keys refuse with the valid-keys list.
-Booleans render as ``true``/``false``, list values (``scope``) one item per
-line, and an unset key prints nothing (exit 0).
+Booleans render as ``true``/``false``, list values (``scope`` and
+``clone_dirs``) one item per line, and an unset key prints nothing
+(exit 0).
 
 ``config set``
 ~~~~~~~~~~~~~~
@@ -747,7 +854,9 @@ Types are enforced at the boundary: boolean keys accept ``true``/``false``/
 than 0); cost keys a non-negative number — the ceilings (``max_cost``,
 ``max_iter_cost``, ``max_step_cost``) must additionally be positive, with
 ``0`` refused by the merged validation, while ``reserve_budget`` may be
-``0``; ``scope`` a comma- or space-joined list of roots; every other key
+``0``; the list keys ``scope`` and ``clone_dirs`` a comma- or space-joined
+list of repo-relative roots (stored in canonical form; ``.`` is a legal
+scope root but never a ``clone_dirs`` entry); every other key
 stores a literal string. The merged result is validated — cost positivity
 and ordering, reserve range, duration suffixes, pacing exclusivity — before
 anything is written; ``init``'s additional flag

@@ -127,11 +127,11 @@ fractal node start <name>
 By default the node launches in a tmux session named after the repository and
 branch (`repo (branch)`, dots dashed so tmux treats each as one name) and its
 status flips from `idle` to `active`. All run parameters come from `config.json`
-— start takes no tuning flags of its own (only the runtime choice and
-`--continue`/`--clean`/`--max-cost`, the relaunch path described in
-[[user_flow/continue_resume]]). The CLI prints the session name;
-`fractal node attach <name>` drops you into the live session, and detaching
-leaves the node running.
+— start takes no tuning flags of its own (only the runtime choice —
+`--headless`/`--tmux` — and `--continue`/`--clean`/`--drain`/`--max-cost`, the
+relaunch path described in [[user_flow/continue_resume]]). The CLI prints the
+session name; `fractal node attach <name>` drops you into the live session, and
+detaching leaves the node running.
 
 In a locked-down or non-interactive environment, use:
 

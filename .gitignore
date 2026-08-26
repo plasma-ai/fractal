@@ -16,7 +16,7 @@
 __MACOSX/
 .AppleDouble
 .LSOverride
-Icon[]
+Icon?
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -90,6 +90,8 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+docs/modules.rst
+docs/fractal*.rst
 
 # PyBuilder
 .pybuilder/

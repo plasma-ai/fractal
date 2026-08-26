@@ -17,6 +17,7 @@ BASE=""
 META=""
 INHERIT=""
 STEPS=""
+CHARTER=""
 AGENT=""
 PROVIDER=""
 MODEL=""
@@ -41,6 +42,7 @@ SYNC=""
 DETACHED=""
 LOCAL=false
 BLIND=false
+SEALED=false
 RESET=false
 
 usage() {
@@ -64,6 +66,8 @@ Options:
                                        scripts, skills, config, all
     --steps=<dir>                      Seed steps/ from the NN- prefixed step files
                                        (*.md) in <dir> instead of the package seed
+    --charter=<file>                   Seed NODE.md from a profile charter instead of
+                                       the package seed's placeholder
     --agent=<agent>                    Agent type
                                        (currently claude, codex, grok, opencode, or omp)
     --provider=<provider>              Provider route for the agent (e.g. openrouter)
@@ -96,6 +100,7 @@ Options:
     --local                            Skip pushing to remote after each commit
     --blind                            Subscribe to no channels
                                        (the parent still reads this node)
+    --sealed                           Seal the node's mailbox (verifier isolation)
     --reset                            Delete node files and reinitialize
     --help|-h                          Show this help message
 USAGE
@@ -234,12 +239,14 @@ for arg in "$@"; do
         --meta=*) META="${arg#*=}" ;;
         --inherit=*) INHERIT="${INHERIT:+$INHERIT,}${arg#*=}" ;;
         --steps=*) STEPS="${arg#*=}" ;;
+        --charter=*) CHARTER="${arg#*=}" ;;
         --sync) SYNC=true ;;
         --no-sync) SYNC=false ;;
         --detached) DETACHED=true ;;
         --no-detached) DETACHED=false ;;
         --local) LOCAL=true ;;
         --blind) BLIND=true ;;
+        --sealed) SEALED=true ;;
         --reset) RESET=true ;;
         *)
             if [[ -z "$NAME" ]]; then
@@ -528,8 +535,14 @@ MEMORY_DIR="$NODE_DIR/memory"
 if [[ "$RESET" == true ]]; then
     rm -f "$NODE_DIR/NODE.md"
 fi
+# a profile charter seeds a deployment-ready NODE.md; the package seed's
+# placeholder charter otherwise
 if [[ ! -f "$NODE_DIR/NODE.md" ]]; then
-    cp "$NODE_SEED_DIR/NODE.md" "$NODE_DIR/NODE.md"
+    if [[ -n "$CHARTER" ]]; then
+        cp "$CHARTER" "$NODE_DIR/NODE.md"
+    else
+        cp "$NODE_SEED_DIR/NODE.md" "$NODE_DIR/NODE.md"
+    fi
     echo "Created $NODE_DIR/NODE.md"
 fi
 
@@ -683,6 +696,7 @@ if [[ "$RESET" == true ]] || [[ ! -f "$NODE_DIR/config.json" ]]; then
         detached="${DETACHED:-null}" \
         local="$LOCAL" \
         blind="$BLIND" \
+        sealed="$SEALED" \
         --path="$WORKTREE_DIR"
     echo idle >"$NODE_DIR/.status"
 fi
@@ -711,8 +725,16 @@ fi
 echo ""
 echo "Initialized $WORKTREE_DIR"
 
-# surface the next steps: the task contract location and the start command
-echo ""
-echo "Next: author the node's task in $NODE_DIR/NODE.md"
-echo "(its Instructions and Completion Requirements sections start blank),"
-echo "then start the loop: fractal node start $BRANCH"
+# surface the next steps: a profile charter arrives deployment-ready, so
+# only the placeholder charter asks to be authored -- telling the operator
+# to fill in seeded sections invites overwriting a pinned commission
+if [[ -n "$CHARTER" ]]; then
+    echo ""
+    echo "Next: review the seeded task in $NODE_DIR/NODE.md,"
+    echo "then start the loop: fractal node start $BRANCH"
+else
+    echo ""
+    echo "Next: author the node's task in $NODE_DIR/NODE.md"
+    echo "(its Instructions and Completion Requirements sections start blank),"
+    echo "then start the loop: fractal node start $BRANCH"
+fi

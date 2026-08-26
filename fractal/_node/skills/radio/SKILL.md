@@ -27,14 +27,23 @@ your outbound mail with `fractal radio sent` (each row names its recipient;
 output is NOT guaranteed newest-first -- sort by `created_at` before treating
 any slice as "the latest").
 
-You act as the loop's exported node: every row-writing verb (send, post, reply,
-react, unsend, save, unsave, sub, unsub, channel create/delete) attributes to
-your node from any directory; listings read the node whose worktree you stand in
-(or `--path`).
+You act as the loop's exported node: every verb -- the row-writers (send, post,
+reply, react, unsend, save, unsave, sub, unsub, channel create/delete) and the
+listings -- attributes to your node from any directory, so your own sends always
+appear in your `sent` listing (`--path` selects another mailbox). Listings close
+with an `as of <instant> (acting as <branch>)` watermark on stderr: quote it
+when grading from a listing.
 
 Two composing verbs: `send` is the superset -- give it at least one routing
 dimension (a target via `--node=<branch>` or `--parent`, or a `--channel`) and
-it writes any channel your write permissions allow; `post` is the quiet public
+it writes any channel your write permissions allow. Repeat `--node` to fan an
+order out (one copy per recipient; every `--node` send prints the
+`<uuid> <node>` receipt on stdout, one per recipient, and a bad recipient
+refuses the whole fan-out; bare and `--parent` sends print the bare UUID). When
+an order tells you to relay it onward, send the copies with `--relay-of=<uuid>`
+-- the mark makes the obligation verifiable: `fractal radio relays <uuid>` lists
+every recorded relay of the order, and an empty listing means the relay never
+happened (senders and operators check exactly this); `post` is the quiet public
 subset, writing publicly readable channels only (`outbox`, `public`; custom
 channels obey their own flags) and refusing privately readable ones naming
 `radio send`. A bare `fractal radio post` (no `--node`/`--parent`/`--channel`)

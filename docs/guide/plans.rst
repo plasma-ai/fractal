@@ -39,9 +39,13 @@ beginning:
 
 The seeded ``01-PLAN`` step instructs the agent to create a plan file every
 iteration (one per concern when the work splits cleanly), check it against
-the remaining time and cost budget, and trim it to fit. Because plans are
-plain files in the node directory, they are committed with the node's work
-product and survive on the node's branch.
+the remaining time and cost budget, and trim it to fit. The seeded
+``03-REVIEW`` step closes it: the agent lists the iteration's plans with
+``fractal plan list`` and appends a ``## Post-Mortem`` section to each
+(accomplishments, deviations, next-iteration notes) — or, when it adopted a
+plan from an interrupted earlier iteration, appends to that plan and notes
+the adoption. Because plans are plain files in the node directory, they are
+committed with the node's work product and survive on the node's branch.
 
 Creating a plan
 ~~~~~~~~~~~~~~~
@@ -113,7 +117,8 @@ with the following steps:
   plan file, check it against the budget.
 - ``02-EXECUTE`` — execute the plan, including spawning and managing child
   nodes.
-- ``03-REVIEW`` — review the diff, fix issues, update memory.
+- ``03-REVIEW`` — review the diff, fix issues, update memory, close the
+  iteration's plans with a post-mortem.
 - ``04-COMMIT`` — signal completion when the requirements are met, then
   ``fractal commit``.
 
@@ -187,7 +192,15 @@ subset of them for that step alone. The complete set of keys a step may set:
        no route axis ignore the key.
    * - ``model``
      - a model id
-     - Overrides the node's ``model`` for this step.
+     - Overrides the node's ``model`` for this step. The pin (this key, else
+       the node ``model``; a step with neither goes unchecked) is enforced
+       from the agent's stream: a launch that completes on a different
+       model — an alias, gateway slug, or dated snapshot of the pin counts
+       as a match — records a ``model_drop`` event and re-dispatches once
+       after ``step_retry_backoff``, outside the ``step_retries`` allowance.
+       A re-run also served off-pin, or one the deadline cannot fit, fails
+       the step rather than proceeding on the wrong model's output — the
+       iteration fails, not the loop.
    * - ``effort``
      - a provider-specific level
      - Overrides the node's ``effort`` for this step. Passed through
@@ -210,12 +223,15 @@ node-level only and cannot be set per step.
 Precedence when both define a value:
 
 - ``agent``, ``provider``, ``model``, ``effort`` — step frontmatter wins over
-  node config, for that step only. When the node config is itself unset,
-  ``agent`` and ``provider`` resolve up the ancestor chain (the value the
-  node inherited at init), and ``model`` falls back to the agent's own
-  config-file default — which is recorded on the step row but not passed on
-  the command line. See :doc:`/guide/agents` for the agent, provider, model,
-  and effort surfaces.
+  node config, for that step only. The node's ``agent`` must be set in its
+  own ``config.json``: ``fractal node init`` writes the value inherited from
+  the nearest ancestor there, and clearing it afterwards refuses
+  ``fractal node start`` rather than falling back. When the node config
+  leaves ``provider`` unset, the route resolves up the ancestor chain at
+  launch, and an unset ``model`` falls back to the agent's own config-file
+  default — which is recorded on the step row but not passed on the command
+  line. See :doc:`/guide/agents` for the agent, provider, model, and effort
+  surfaces.
 - ``timeout`` — the frontmatter value *replaces* the node ``step_timeout``
   entirely; it does not tighten it, so it may be looser. The run and
   iteration walls (``timeout``, ``iter_timeout``) still bound the launch:
@@ -253,7 +269,16 @@ files, then runs each in order. Around each step:
   abnormal ends — so ``fractal node activity`` reads honestly per attempt.
 - **Retries.** Only a *failed* launch retries (``step_retries``, default 1,
   after a ``step_retry_backoff``, default ``10s``). Timed-out, paused, and
-  budget-skipped steps are deliberate outcomes and never retry.
+  budget-skipped steps are deliberate outcomes and never retry. Two
+  exceptions to the plain schedule: a *completed* launch served off its
+  pinned ``model`` re-dispatches once, after the same backoff but outside
+  the ``step_retries`` allowance, and a drop the re-dispatch cannot resolve
+  fails the step; and after three consecutive instant (under 10s) zero-cost
+  failures — SYNC and step launches both count — the billing breaker
+  replaces the backoff with an exponential wait (60s, doubling to a 1h cap)
+  and holds every further launch, the before-step SYNC included, behind a
+  ``PAUSED: billing`` gate until a probe launch completes (or fails without
+  that signature).
 - **Approval.** A step marked ``requires_approval: true`` that succeeds
   holds the iteration until the parent runs ``fractal node approve`` (the
   parent's ``fractal node pending`` lists waiting steps). The wait counts

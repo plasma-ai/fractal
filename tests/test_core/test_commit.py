@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+import sys
 from typing import Any
 
 import pytest
 
+import fractal.util
 from fractal.core import commit
 from fractal.core.node import Node
 
@@ -19,14 +21,31 @@ from .conftest import (
     _spawn_parent_child,
 )
 
+#: the console script beside the running interpreter -- a bare name would
+#: resolve through a shim to whatever install the ambient PATH front-runs
+_FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
+
 __all__ = [
     'test_user_node_commit_init_commits_baseline',
     'test_commit_pushes_unless_local',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
+    'test_commit_excludes_registry_sidecars',
+    'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_commit_stages_node_records_past_external_excludes',
+    'test_stage_records_tolerates_a_vanished_held_file',
+    'test_stage_records_survives_an_unreadable_held_file',
+    'test_skip_alarm_covers_foreign_info_exclude_lines',
+    'test_commit_excludes_registry_sidecars',
+    'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_record_force_add_refuses_non_record_files',
+    'test_estate_add_refuses_non_record_files_with_no_ignore_layer',
+    'test_estate_commits_its_own_tool_state',
+    'test_refused_estate_content_leaves_the_clean_check_quiet',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
     'test_commit_refreshes_wiki_indexes',
+    'test_commit_untracks_a_pretracked_wiki_cache',
     'test_commit_update_failure_blocks_commit_but_not_backstops',
     'test_force_commit_body_describes_the_sweep',
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
@@ -93,6 +112,11 @@ def test_user_node_commit_init_commits_baseline(
     system = git_repo / '.fractal' / 'main' / 'skills' / '.system' / 'imagegen'
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
+    # the wiki tool's self-ignored derived cache sits inside the staged wiki
+    cache = git_repo / 'wiki' / '.wiki' / 'cache'
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / '.gitignore').write_text('*\n', encoding='utf-8')
+    (cache / 'word_counts.json').write_text('{}\n', encoding='utf-8')
     # a fresh clone carries no info/exclude at all, so the baseline cannot
     # lean on a block written at init -- the runtime artifacts beside the
     # seed must stay out of the commit on their own
@@ -116,6 +140,8 @@ def test_user_node_commit_init_commits_baseline(
     assert '.db' not in tracked
     assert 'config.json.lock' not in tracked
     assert 'skills/.system' not in tracked
+    # the wiki's derived cache stays self-ignored past the force-add
+    assert '.wiki/cache' not in tracked
 
 
 def test_commit_pushes_unless_local(tmp_path: pathlib.Path) -> None:
@@ -316,6 +342,531 @@ def test_commit_excludes_write_atomic_temp_files(tmp_path: pathlib.Path) -> None
     assert '.work.txt-a1b2c3.tmp' not in tracked
 
 
+def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
+    """A legacy ``registry.db``'s SQLite sidecars never ride a work commit.
+
+    SQLite writes ``-wal``/``-shm`` (WAL mode) or ``-journal`` (rollback)
+    beside a live DB, so a swept sidecar is a torn point-in-time byte
+    capture of a database another process is mid-write on, plus perpetual
+    churn commits as it mutates -- the exact reason the modern spelling is
+    barred as a ``.db``/``.db-*`` pair. The legacy spelling gets the same
+    pair, in the stage excludes and the exclude template alike.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+
+    # a work file plus a legacy DB and a live writer's sidecars beside it
+    (project_dir / 'work.txt').write_text('real work\n', encoding='utf-8')
+    sidecars = ('registry.db-wal', 'registry.db-shm', 'registry.db-journal')
+    for name in ('registry.db', *sidecars):
+        (project_dir / name).write_text('', encoding='utf-8')
+    node.commit('do the work', force=True)
+
+    result = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = result.stdout
+    assert 'work.txt' in tracked
+    assert 'registry.db' not in tracked
+
+
+def test_commit_stages_node_records_past_external_excludes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Node records commit under a broad external ignore rule; runtime never.
+
+    One ``/.fractal/`` line in the shared ``.git/info/exclude`` broke every
+    node's commit fleet-wide: the plain add honors the rule and either
+    silently unstages the audit trail or hard-fails the whole add. The
+    record pass owns the node dir with ``git add -f``, so record custody
+    never depends on git ignore state -- while the runtime artifacts the
+    force pass could now drag in (the status marker, ``tmp/`` scratch, a
+    stray ``registry.db``) stay barred by the derived pathspec excludes.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+
+    # the incident's exclude: everything under .fractal ignored, appended
+    # OUTSIDE fractal's managed block (worktrees share info/exclude)
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+
+    # a record write plus runtime residue beside it
+    memory = node.node_dir / 'memory' / 'state.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    scratch = node.node_dir / 'tmp' / 'probe.txt'
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text('scratch\n', encoding='utf-8')
+    registry = node.node_dir.parent / 'registry.db'
+    registry.write_text('', encoding='utf-8')
+    # a live legacy writer leaves SQLite sidecars beside the DB -- a hot WAL
+    # is a torn mid-write byte capture, barred like its parent file
+    sidecar = node.node_dir.parent / 'registry.db-wal'
+    sidecar.write_text('', encoding='utf-8')
+    node.commit('record custody', force=True)
+
+    result = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = result.stdout
+    # the record landed despite the broad exclude ...
+    assert 'memory/state.md' in tracked
+    # ... and the runtime artifacts never ride, force pass or not
+    assert 'tmp/probe.txt' not in tracked
+    assert 'registry.db' not in tracked
+    assert 'registry.db-wal' not in tracked
+    assert '.status' not in tracked
+    # ... and an estate-internal ignore file keeps its own hold (the memory
+    # wiki's cache manages itself)
+    assert '.wiki/cache' not in tracked
+
+
+def test_stage_records_tolerates_a_vanished_held_file(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held estate file deleted mid-stage never aborts the commit.
+
+    The record pass force-adds externally-ignored estate files from an
+    ``ls-files`` snapshot -- and ignored-and-untracked files are exactly
+    what a user's ``git clean -X`` deletes, while estate contents churn
+    under the node's own housekeeping. A path that vanishes between the
+    snapshot and the ``git add -f`` must not fail the add and abort the
+    whole commit after the scope sweep already staged the iteration's
+    real work: the pass stages what still exists.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+
+    # the incident's exclude: everything under .fractal externally ignored,
+    # so the record pass owns both files below
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+    memory = node.node_dir / 'memory' / 'state.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    doomed = node.node_dir / 'memory' / 'scratchpad.md'
+    doomed.write_text('provisional\n', encoding='utf-8')
+
+    # the race, held deterministic: the file vanishes (a git clean -X, the
+    # estate's own housekeeping) right after the pass snapshots its listing
+    real_run_bytes = fractal.util.git.run_bytes
+
+    def racing_run_bytes(*args: Any, **kwargs: Any) -> Any:
+        raw = real_run_bytes(*args, **kwargs)
+        doomed.unlink(missing_ok=True)
+        return raw
+
+    monkeypatch.setattr('fractal.util.git.run_bytes', racing_run_bytes)
+    node.commit('record custody', force=True)
+
+    result = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = result.stdout
+    # the surviving record landed; the vanished one is simply absent
+    assert 'memory/state.md' in tracked
+    assert 'scratchpad.md' not in tracked
+
+
+def test_stage_records_survives_an_unreadable_held_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """One unreadable held record costs itself, never the whole backstop save.
+
+    git stages nothing when any one path in a batched ``add -f`` cannot be
+    indexed (exit 128), so a single permission-dead plan file would fail
+    the force-add and abort the very ``--force`` save that exists to
+    rescue work -- and break every ordinary commit beside it until a human
+    clears the path. The pass stages every record it can and names the
+    ones it could not.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # the incident's exclude: everything under .fractal externally ignored,
+    # so the record pass owns both files below
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+    memory = node.node_dir / 'memory' / 'irreplaceable.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    doomed = node.node_dir / 'plans' / '0099-doomed.md'
+    doomed.parent.mkdir(parents=True, exist_ok=True)
+    doomed.write_text('# doomed\n', encoding='utf-8')
+    doomed.chmod(0)
+    result = node.commit('backstop save', force=True)
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the healthy record landed; the unreadable one is named, never fatal
+    assert 'memory/irreplaceable.md' in tracked
+    assert 'plans/0099-doomed.md' not in tracked
+    assert 'could not be staged' in result
+    assert 'plans/0099-doomed.md' in result
+
+
+def test_skip_alarm_covers_foreign_info_exclude_lines(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A foreign ``info/exclude`` line alarms; fractal's own block stays silent.
+
+    ``info/exclude`` is a user surface first -- fractal manages only its
+    marker-delimited block -- so a user line there eats a deliverable
+    exactly like a tracked ``.gitignore`` pattern and must count into the
+    ignore-skip warning. The suppression keys on the block's line span,
+    never the whole file.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # a path held only by fractal's own block (the tmp/ scratch pattern)
+    # is an intentional runtime ignore -- no alarm
+    (project_dir / 'tmp').mkdir()
+    (project_dir / 'tmp' / 'probe.txt').write_text('scratch\n', encoding='utf-8')
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    result = node.commit('quiet block hold')
+    assert 'skipped by ignore rules' not in result
+    # the identical pattern as a user line in the shared info/exclude eats
+    # a deliverable -- the alarm must fire
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('src/generated.txt\n')
+    src = project_dir / 'src'
+    src.mkdir()
+    (src / 'generated.txt').write_text('deliverable\n', encoding='utf-8')
+    (src / 'other.txt').write_text('more work\n', encoding='utf-8')
+    result = node.commit('foreign line hold')
+    assert 'skipped by ignore rules' in result
+
+
+def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
+    """A registry database's SQLite sidecars never ride a commit.
+
+    ``registry.db-wal``/``-shm``/``-journal`` are mid-write runtime state:
+    committing one stages a torn snapshot of a database whose main file is
+    excluded, and the pair can never be read back consistently. The main
+    file was fenced already; the sidecars share its fate.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    folder = node.node_dir.parent
+    for name in ('registry.db', 'registry.db-wal', 'registry.db-shm'):
+        (folder / name).write_bytes(b'sqlite')
+    (project_dir / 'work.txt').write_text('real work\n', encoding='utf-8')
+    node.commit('sidecar sweep', force=True)
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert 'work.txt' in tracked
+    for name in ('registry.db', 'registry.db-wal', 'registry.db-shm'):
+        assert name not in tracked, name
+
+
+def test_record_force_add_refuses_non_record_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The force pass stages records only, and says what it did.
+
+    The layer this pass overrides -- a machine-local ignore -- is where a
+    host fences its secrets, so a general "stage what is ignored" verb
+    would silently commit a dotenv or a key a node parked in its estate.
+    Only the canon-required record surfaces at text suffixes qualify; a
+    non-record file is refused by name, and every force-add is reported
+    on the commit output.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # the incident's exclude: everything under .fractal ignored
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+    # a record, plus secret-shaped files a node parked beside it
+    memory = node.node_dir / 'memory' / 'state.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    (node.node_dir / '.env').write_text('TOKEN=hunter2\n', encoding='utf-8')
+    (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
+    (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
+    (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
+    result = node.commit('record custody', force=True)
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the record landed; nothing secret-shaped or binary did
+    assert 'memory/state.md' in tracked
+    for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
+        assert parked not in tracked, parked
+    # the pass reports both halves rather than leaving them to be inferred
+    assert 'Force-staged' in result
+    assert 'memory/state.md' in result
+    assert 'not node records and were NOT force-staged' in result
+    assert 'id_rsa' in result
+    # both halves name worktree-relative paths -- a force commit folds these
+    # bytes into git history, where machine-local paths do not belong
+    forced_line = next(
+        line for line in result.splitlines() if line.startswith('Force-staged')
+    )
+    assert '.fractal/main.task/memory/state.md' in forced_line
+    assert f'{project_dir}' not in forced_line
+
+
+def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The allowlist should bound the estate add, not just the ignore override.
+
+    Containment is inverted against risk: the same dotenv the force pass
+    refuses by name rides a commit silently the moment no host rule
+    happens to fence it -- the default state of a fresh clone. One law
+    should govern both paths, so a parked credential stays out of history
+    and is named either way, while the estate's records still commit.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # no hostile exclude this time: nothing fences the estate at all
+    memory = node.node_dir / 'memory' / 'state.md'
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text('finding of record\n', encoding='utf-8')
+    (node.node_dir / '.env').write_text(
+        'AWS_SECRET_ACCESS_KEY=hunter2\n', encoding='utf-8'
+    )
+    (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
+    (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
+    (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
+    result = node.commit('plain add path')
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the record landed; nothing secret-shaped or binary did
+    assert 'memory/state.md' in tracked
+    for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
+        assert parked not in tracked, parked
+    # the refusal is named, not inferred from an absent file
+    assert 'are not node records' in result
+    for parked in ('id_rsa', 'creds.pem', 'dump.tar'):
+        assert parked in result, parked
+    # a record edited after it is tracked still commits -- the allowlist
+    # gates what the estate adds new, never the upkeep of its own history
+    # (the memory wiki's index refresh owns the frontmatter around the body)
+    memory.write_text('finding of record, revised\n', encoding='utf-8')
+    node.commit('record upkeep')
+    committed = subprocess.run(
+        [
+            'git',
+            '-C',
+            f'{project_dir}',
+            'show',
+            'HEAD:.fractal/main.task/memory/state.md',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert 'finding of record, revised' in committed
+
+
+def test_estate_commits_its_own_tool_state(tmp_path: pathlib.Path) -> None:
+    """An ordinary node's estate tool state is content, and commits silently.
+
+    The content law bounds what an estate adds, so it must describe
+    everything an estate legitimately holds -- not only the records, but
+    the tool state a fresh clone needs to check the estate out as the
+    node left it: git's empty-directory placeholder under a bare record
+    dir, and the memory wiki's settings, whose declared-root marker the
+    wiki CLI reads the memory back through. Withholding those would
+    leave a normal node permanently untracked against the pipeline's own
+    clean check, with nothing able to clear it, so they must commit --
+    and, being ordinary content, must draw no refusal notice.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    result = node.commit('ordinary work')
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the estate's own tool state rides the commit beside the records
+    estate = '.fractal/main.task'
+    for state in (f'{estate}/plans/.gitkeep', f'{estate}/memory/.wiki/settings.json'):
+        assert state in tracked, state
+    assert f'{estate}/NODE.md' in tracked
+    # nothing was withheld, so the pass says nothing about refusals
+    assert 'NOT staged' not in result
+    assert 'are not node records' not in result
+    # and the tree reads back clean, so the loop's net never fires
+    node.commit(check=True)
+
+
+def test_refused_estate_content_leaves_the_clean_check_quiet(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A parked credential is withheld from history without reading as dirty.
+
+    The clean check counts only work the stage could commit, which is
+    why it already rides the stage's own excludes. Estate content the
+    content law refuses is exactly that kind of dirt: no pass may ever
+    stage it, so counting it would fire the loop's force-commit net
+    every iteration over a file that can never clear. The refusal is
+    reported through the commit output instead, where it names the file.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    node.commit('ordinary work')
+    # a node parks credentials in its estate, with nothing fencing them --
+    # one beside a tracked record, one in a directory of its own, which the
+    # default status listing would collapse to a single untracked entry
+    (node.node_dir / '.env').write_text('AWS_SECRET_ACCESS_KEY=x\n', encoding='utf-8')
+    keys = node.node_dir / 'memory' / '.ssh'
+    keys.mkdir(parents=True)
+    (keys / 'id_ed25519').write_text('PRIVATE KEY\n', encoding='utf-8')
+    result = node.commit('work beside parked credentials')
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for parked in ('.env', 'id_ed25519'):
+        assert parked not in tracked, parked
+        assert parked in result, parked
+    # the refused files are dirt no pass may stage, so the net stays parked
+    node.commit(check=True)
+
+
 def test_commit_stamps_iteration_from_args_or_open_row(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -499,6 +1050,71 @@ def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path) -> None:
     assert status == ''
 
 
+def test_commit_untracks_a_pretracked_wiki_cache(tmp_path: pathlib.Path) -> None:
+    """A work commit drops a tracked wiki cache and never re-tracks it.
+
+    The wiki tool derives ``.wiki/cache/`` and self-ignores it, but a tree
+    whose baseline once force-tracked it carries per-page mtimes that every
+    ``wiki update`` rewrites -- churn riding every commit and defeating the
+    byte-match parent and child copies need to merge cleanly. The stage
+    drops a tracked cache from the index (the on-disk copy stays), so the
+    next commit converges the tree and the cache's own ignore holds from
+    there: the refreshed cache reads back clean, never dirty.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    # a legacy baseline that force-tracked the derived cache past its ignore
+    wiki_dir = project_dir / 'wiki'
+    subprocess.run(
+        ['wiki', 'update', f'--path={wiki_dir}'],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ['git', 'add', '-A'],
+        cwd=project_dir,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ['git', 'add', '-f', '--', 'wiki/.wiki/cache'],
+        cwd=project_dir,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ['git', 'commit', '-m', 'legacy baseline tracks the cache'],
+        cwd=project_dir,
+        capture_output=True,
+        check=True,
+    )
+    # a work commit drops the cache from tracking and keeps the disk copy
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    node.commit('do the work')
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files', 'wiki'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert '.wiki/cache' not in tracked
+    assert (wiki_dir / '.wiki' / 'cache' / 'word_counts.json').is_file()
+    # untracked again, the refresh's rewrites stay invisible: the tree reads
+    # back clean and the loop's net never fires over the churn
+    node.commit(check=True)
+
+
 def test_commit_update_failure_blocks_commit_but_not_backstops(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -583,6 +1199,14 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     (project_dir / 'eaten.log').write_text('eaten\n', encoding='utf-8')
     (project_dir / 'blob.bin').write_bytes(b'\0' * (11 * 1024 * 1024))
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    # a hostile external ignore holds the estate out, so the record pass
+    # force-stages a fresh record and refuses the parked non-record --
+    # both notices belong in the body beside the warnings
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\n')
+    (node.node_dir / 'memory' / 'note.md').write_text('note\n', encoding='utf-8')
+    (node.node_dir / '.env').write_text('TOKEN=hunter2\n', encoding='utf-8')
     run_id = node.record.run_start()
     commit.commit(
         node=node,
@@ -604,11 +1228,16 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
 
     # the subject is the run-qualified backstop label
     assert _log('%s') == f'{branch}: iteration {run_id}.2 (failed on EXECUTE)'
-    # the body carries the caller's paragraph, both warnings, and a diffstat
-    # naming the swept files
+    # the body carries the caller's paragraph, the record pass's notices,
+    # both warnings, and a diffstat naming the swept files
     body = _log('%b')
     assert 'agent error (exit 2)' in body
     assert 'steps not run: REVIEW, COMMIT' in body
+    assert 'Force-staged' in body
+    assert 'memory/note.md' in body
+    assert 'NOT force-staged' in body
+    assert '.env' in body
+    assert f'{project_dir}' not in body
     assert 'skipped by ignore rules' in body
     assert 'blob.bin (11MB)' in body
     assert 'work.txt' in body
@@ -1177,3 +1806,54 @@ def test_lint_runs_standalone_without_node_dir(
         env=env,
     )
     assert 'unbound variable' not in result.stderr
+
+
+def test_user_init_baseline_survives_a_hostile_external_ignore(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The baseline commits its seed and wiki past a broad external ignore.
+
+    ``fractal init`` writes the user node's seed and the project wiki and
+    must land them as the tree's baseline; a machine-local ``/.fractal/``
+    line (or a host ``.gitignore``) would otherwise silently empty the
+    pathspec and leave a tree whose baseline never happened -- the
+    fleet-wide breakage this staging work exists to end.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=repo,
+            capture_output=True,
+            check=True,
+        )
+    # the hostile layer, in place BEFORE init writes anything
+    exclude = repo / '.git' / 'info' / 'exclude'
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\nwiki/\n')
+    Node(repo).init(agent='claude', user=True)
+    # opt the tree in, so the seed is committable at all (the self-ignore
+    # is fractal's own choice; the hostile layer above is the operator's)
+    subprocess.run(
+        [f'{_FRACTAL_BIN}', 'track'],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    node = Node(repo)
+    node.commit('configure', init=True)
+
+    tracked = subprocess.run(
+        ['git', '-C', f'{repo}', 'ls-files'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # the seed and the wiki are on the branch despite both ignore rules
+    assert '.fractal/main/config.json' in tracked
+    assert 'wiki/_index.md' in tracked
+    # runtime state still never rides the baseline
+    assert '.status' not in tracked
+    assert '.db' not in tracked

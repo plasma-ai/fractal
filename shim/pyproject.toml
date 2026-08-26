@@ -1,6 +1,6 @@
 [project]
 name = "fractal"
-version = "1.1.0"
+version = "1.2.0"
 description = "Hierarchical agent loops with recursive self-organization."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
@@ -16,7 +16,7 @@ classifiers = [
     "Operating System :: POSIX",
 ]
 dependencies = [
-    "plasma-fractal==1.1.0",
+    "plasma-fractal==1.2.0",
 ]
 
 [project.urls]

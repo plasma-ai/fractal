@@ -127,7 +127,7 @@ def test_set_rejects_invariant_breaking_values(
     entry: str,
     fragment: str,
 ) -> None:
-    """A well-typed value breaking a launch invariant fails in core (exit 1).
+    """A well-typed value breaking a launch invariant fails in core (exit 2).
 
     Every case here passes the CLI's typed coercion and is rejected only by
     the merged core validator (``Config.validate``), leaving the key at its
@@ -136,7 +136,7 @@ def test_set_rejects_invariant_breaking_values(
     key, _, _ = entry.partition('=')
     before = _run(task, 'config', '_get', key).stdout.strip()
     result = _run(task, 'config', '_set', entry)
-    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
     assert fragment in (result.stdout + result.stderr)
     # the rejected write never landed -- the key keeps its prior value
     assert _run(task, 'config', '_get', key).stdout.strip() == before

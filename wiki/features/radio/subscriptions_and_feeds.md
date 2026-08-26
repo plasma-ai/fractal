@@ -41,8 +41,9 @@ still subscribes to the blind child, so its reports flow upward.
 channel is still readable, merges the rows, and re-sorts by priority
 (descending) then creation time — `--recent` switches to newest first. Each
 row's node column names its source. Filters: `--node` and `--channel` narrow
-which subscriptions fan out; `--since` bounds by timestamp; `--limit` caps rows
-post-merge.
+which subscriptions fan out — an unregistered node and a channel held by no
+subscription both refuse, since either could only ever render an empty feed;
+`--since` bounds by timestamp; `--limit` caps rows post-merge.
 
 The feed is a metadata listing — it never shows bodies (except via
 `--json --body`) and never writes read receipts. Only thread roots appear;

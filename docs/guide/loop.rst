@@ -151,13 +151,25 @@ Every step launch assembles one prompt from three parts, joined in order:
 3. The active **mode documents** — packaged instruction files that join the
    prompt when their mode is on: ``CONTINUE.md`` on a ``--continue`` run,
    ``RESUME.md`` on the iteration a resume re-enters, ``RESERVE.md`` while
-   the budget is winding down, ``DETACHED.md`` in detached mode, and
-   ``META.md`` for a meta node. Mode documents always come from the installed
-   package, never a per-node copy.
+   the budget is winding down, ``DRAIN.md`` on a ``--continue --drain`` run
+   (a wind-down: the harness refuses ``fractal node init``, ``start``,
+   ``update``, and ``resume`` from that run's seats, and the drain is
+   recorded on the run so a pause and resume keep it), ``DETACHED.md`` in
+   detached mode, and ``META.md`` for a meta node. Mode documents always
+   come from the installed package, never a per-node copy.
 
 The joined text is rendered in one pass with ``$VAR`` / ``${VAR}``
 substitution matching GNU ``envsubst``: unknown placeholders and ``$$`` pass
 through verbatim, so ordinary shell text in a step file survives rendering.
+
+On the iteration a resume re-enters, the prompt also ends with an
+unread-inbox digest, appended after rendering (so it is never substituted):
+the twenty highest-priority unread ``inbox`` messages as metadata only —
+priority, uuid, sender, and subject, the text fields quoted and
+length-bounded — framed as untrusted data with the ``fractal radio read
+--channel=inbox --unread`` command spelled out. A sealed inbox stays sealed
+here too (the read runs as the node itself), and a failed read simply omits
+the digest.
 
 Template variables
 ~~~~~~~~~~~~~~~~~~
@@ -183,10 +195,17 @@ prompts they are re-derived per step from live config — only
    * - ``CURRENT_BRANCH``
      - The node's branch.
    * - ``MAX_DEPTH``, ``MAX_CHILDREN``, ``MAX_DESCENDANTS``
-     - The node's spawn limits (``-1`` when unlimited).
+     - The node's spawn limits. An unset cap renders as ``None`` on a node
+       seeded by ``fractal node init`` (the seed stores unset keys as
+       ``null``); ``-1`` appears only when the key is absent from
+       ``config.json``.
    * - ``DETACHED_MODE``, ``META_MODE``, ``META_TARGET``
      - The boot-pinned mode flags (``true``/``false``) and the meta
        target branch.
+   * - ``FRACTAL_HEADLESS``
+     - The run's launch backend (``true``/``false``), boot-pinned so a
+       seat's ``node start`` inherits the backend through the option's
+       envvar.
 
 Run-scoped variables are refreshed for every step:
 
@@ -212,7 +231,7 @@ Run-scoped variables are refreshed for every step:
      - Live remaining budget, recomputed before *every* step, e.g.
        ``$87.6543 remaining of $100 (max $10/iter) (warn $1/step)``, or
        ``no limit``.
-   * - ``CONTINUE_MODE``, ``RESUME_MODE``, ``RESERVE_MODE``
+   * - ``CONTINUE_MODE``, ``RESUME_MODE``, ``RESERVE_MODE``, ``DRAIN_MODE``
      - ``true``/``false`` flags for the corresponding modes
        (``RESERVE_MODE`` is per-iteration).
 
@@ -221,7 +240,8 @@ The agent's environment
 
 Separately from the prompt, each launch exports the loop's state into the
 agent's process environment: all of the variables above except
-``RESERVE_MODE`` (which appears only in the rendered prompt), plus ``RUN_ID``,
+``RESERVE_MODE`` and ``DRAIN_MODE`` (which appear only in the rendered
+prompt — a draining run exports ``_DRAIN=1`` instead), plus ``RUN_ID``,
 ``ITER``, ``ITER_ID``, and ``STEP_ID`` (the row lineage — always exported,
 blank when unset), ``NODE_BRANCH``, ``AGENT_COMMAND``, the cap values
 (``MAX_COST``, ``MAX_ITER_COST``, ``MAX_STEP_COST``, ``STEP_BUDGET``), the
@@ -285,7 +305,8 @@ Retries and backoff
 
 Only a **failed** launch retries — an agent error, a stream error, or a
 launch that could not start. Timed-out, paused, and budget-skipped steps are
-deliberate outcomes and never retry. These config keys control it:
+deliberate outcomes and never retry (a completed launch served off its pinned
+model re-dispatches once — see below). These config keys control it:
 
 .. list-table::
    :header-rows: 1
@@ -300,14 +321,60 @@ deliberate outcomes and never retry. These config keys control it:
    * - ``step_retry_backoff``
      - ``10s``
      - Delay before each retry. Slept in one-second increments, polling
-       pause (parks the run), stop, and the subtree cost ceiling — a
-       failed step never buys another attempt once the budget is spent.
+       pause (parks the run), stop, finish, and the subtree cost ceiling —
+       a failed step never buys another attempt once the budget is spent.
 
 Every attempt books its own step row, so cost and duration are attributed
 accurately per attempt; retry rows carry a ``retry`` marker in their
 metadata. Each attempt recomputes its time limit from the now-smaller
 remaining walls, and each attempt of an approval-gated step re-arms its own
 gate.
+
+One completed outcome also re-dispatches. When the stream reports that the
+launch was served by a model other than the step's pin (``model:``
+frontmatter, or the node ``model`` it fell back to; an alias, gateway slug,
+or dated snapshot of the pin still matches), that is a **model drop**: the
+attempt's row closes ``completed`` with metadata ``model drop (served
+<model>)``, a ``model_drop`` event is recorded, the pane prints a
+``WARNING: model drop on <step>`` line, and the step is re-dispatched once
+after ``step_retry_backoff`` — outside the ``step_retries`` allowance, so
+the re-dispatch row carries no ``retry`` marker, and a clean re-dispatch
+supersedes the mark. If the re-dispatch also serves off-pin, or cannot run
+(the deadline is spent, or a stop, finish, or the subtree ceiling lands
+during the backoff), the step fails rather than proceeding on wrong-model
+output: the dropped row keeps its mark, the steps after it are booked
+``stopped`` with ``failed on <step>``, and the iteration row records
+``model drop (served X, pinned Y)``. The node is never killed; the next
+iteration start warns while the drop stands unresolved.
+
+Billing breaker
+~~~~~~~~~~~~~~~
+
+A launch that fails in under 10 seconds with zero recorded cost never
+reached paid inference — the signature of an API billing or credit refusal.
+Three such failures in a row trip the loop's billing breaker. Every agent
+launch counts toward the streak, the before-step SYNC included; a
+cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, or
+one that spent real money is not billing-shaped and resets the streak to
+zero (which also disarms an armed breaker). Paused and budget-skipped steps
+bought no launch and leave the streak untouched.
+
+While the breaker is armed, every launch — the SYNC and the work step alike
+— is held behind a backoff that starts at 60 seconds and doubles per further
+failure to a one-hour cap, announced on the pane as ``=== PAUSED: billing —
+N instant zero-cost failure(s); probing again in Ns ===``. A failed step's
+retry under the breaker waits that clock instead of ``step_retry_backoff``
+(``retrying in 60s (billing breaker)``). The launch after each wait is the
+probe: a completed launch clears the breaker (``=== billing breaker cleared
+(a call succeeded) ===``). The wait polls the same signals as a retry
+backoff: a pause parks the run mid-wait; a stop, finish, or spent subtree
+ceiling ends the iteration, booking the gated step and the never-run tail as
+``stopped`` rows with ``billing gate interrupted`` in their metadata (a
+knowable-zero spend), and the iteration closes ``stopped``, never
+``completed``. The threshold, base, and cap are fixed — no config key tunes
+them. While an active node's newest launches carry this signature,
+``fractal node list`` shows ``PAUSED: billing`` in its ``detail`` column
+(see :doc:`/cli/node`).
 
 Time limits
 -----------
@@ -368,9 +435,10 @@ Cost ceilings
 Cost is **recorded, never estimated**: each agent backend's stream reports
 spend figures, which the loop flushes to the step row as they arrive. A step
 that recorded no cost counts as zero in every sum, though its ``NULL`` means
-"unknown", never "$0"; steps that plausibly burned spend without recording a
-figure are marked ``unpriced`` in their metadata. These config keys (all USD)
-bound spend:
+"unknown", never "$0"; a step that ended abnormally (any status other than
+``completed``) with a session on its row but no figure flushed is marked
+``unpriced`` in its metadata, and a figure that flushes later strips the
+marker. These config keys (all USD) bound spend:
 
 .. list-table::
    :header-rows: 1
@@ -481,11 +549,30 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``--ignore-scope`` or ``--force``.
 2. **Refreshes and lints.** ``wiki update`` runs on the project wiki and the
    node's memory wiki, then ``scripts/lint.sh`` runs; either failing fails
-   the commit with the tool's output. Skipped with ``--force``.
+   the commit with the tool's output. Skipped with ``--force`` or ``--init``
+   (the baseline wiki lints dirty by design).
 3. **Stages.** Scoped staging of the scope roots, node directory, and wiki
    (the whole worktree when unscoped), always excluding runtime artifacts
    (``**/.venv``, ``**/.db``, ``**/.db-*``, ``**/.status``, ``**/.paused``,
-   temp files).
+   temp files). New content under the node directory is admitted only by a
+   content allowlist: ``NODE.md`` and ``config.json`` at the node-directory
+   root, and under ``memory/``, ``plans/``, ``scripts/``, ``skills/``, and
+   ``steps/`` files with a text suffix (``.md``, ``.json``, ``.sh``,
+   ``.toml``, ``.yaml``/``.yml``, ``.csv``/``.tsv``, ``.txt``) plus, inside
+   those directories, the tool state ``.wiki/`` and ``.gitkeep``. Anything
+   else a node parks there — a key, a ``.env`` file, an archive, a
+   dot-directory, any other file at the root — is withheld by name and
+   reported (``Warning: N estate file(s) are not node records and were NOT
+   staged: ...``), on the plain add and the ignore-rule force-add alike;
+   what the node directory already tracks keeps committing. Node records
+   that only a machine-local ignore layer holds out (a foreign
+   ``.git/info/exclude`` line, ``core.excludesFile``) are force-added by
+   explicit path and reported (``Force-staged N node record(s) held out by
+   an ignore rule: ...``); fractal's own exclude block and repo
+   ``.gitignore`` files keep their hold, and records they hold surface
+   through step 4's ignore-rule warning instead. ``--check`` applies the
+   same law, so a refused untracked file under the node directory never
+   counts as uncommitted.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
    rules and staged files of 10 MB or more.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
@@ -505,10 +592,15 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    missing ``origin`` remote is a skipped-push notice, not an error.
 
 Options: ``--init`` labels the commit ``init`` instead of an iteration (the
-baseline commit), ``--check`` errors if uncommitted changes exist instead of
-committing, ``--ignore-scope`` commits out-of-scope changes but still lints,
-``--force`` bypasses scope, lint, and git hooks, and ``--path`` names the
-worktree (default ``.``). See :doc:`/cli/fractal` for the exact surface.
+baseline commit) and skips the message-shape check, the wiki refresh, lint,
+and the ``commit`` event; ``--check`` exits 1 if uncommitted changes exist
+instead of committing; ``--ignore-scope`` commits out-of-scope changes but
+still lints; ``--force`` bypasses scope, lint, and git hooks; and ``--path``
+names the worktree (default ``.``). A dirty tree under ``--check`` is the
+command's own outcome, not an error: it exits 1 with the notice on stderr,
+while a command error — a bad ``--path`` or flag combination, or a scope,
+lint, or message failure on a real commit — exits 2, so scripts gate on the
+tree state by exit code. See :doc:`/cli/fractal` for the exact surface.
 
 Backstop commits
 ~~~~~~~~~~~~~~~~
@@ -517,8 +609,8 @@ After each iteration, and again at run end, the loop checks the worktree and
 force-commits any leftovers (labeled ``auto`` and ``final``). A step failure
 or timeout force-commits with a body naming the failure and the steps that
 never ran. Backstop commits bypass hooks and lint by design (``--no-verify``)
-and fold a capped diffstat into the body, so the save describes itself in git
-history alone.
+and fold the staging notices and a capped diffstat into the body, so the save
+describes itself in git history alone.
 
 Pause is the one path that never commits: the dirty worktree *is* the frozen
 mid-step state that resume continues from. ``fractal node start --continue``
@@ -549,6 +641,9 @@ Step rows land with these statuses:
    * - completed
      - ``completed``
      - —
+   * - completed, but served off its pinned model
+     - ``completed``
+     - ``model drop (served <model>)``
    * - timed out
      - ``exited``
      - ``timed out``
@@ -675,14 +770,21 @@ Steering a running loop
 ``config.json`` is read from disk on every access, so it doubles as a live
 steering surface. Retunes land at boundaries, not instantly:
 
-- ``max_iters``, ``step_timeout``, ``wait``, and the cost caps are re-read at
-  each iteration top (the budget probes also read the caps live). A malformed
-  edit warns and keeps the previous value rather than crashing the run.
+- ``max_iters``, ``iter_timeout``, ``step_timeout``, ``wait``, and the cost
+  caps are re-read at each iteration top (the budget probes also read the
+  caps live); ``iter_timeout`` is read ahead of the deadline reset, so a
+  retune bounds the iteration just starting. A malformed edit warns and
+  keeps the previous value rather than crashing the run.
+- ``interval`` and ``sleep`` are re-read at the between-iteration sleep, so
+  a pacing retune takes effect without a restart. A malformed or conflicting
+  edit warns and keeps the prior pacing, as does an ``iter_timeout`` longer
+  than the interval; these ``iter_timeout`` and pacing rejections warn once
+  per distinct value, not once per iteration.
 - Step files are re-discovered and re-parsed every iteration, so editing a
   step's body or frontmatter steers the very next pass.
-- Boot-pinned for the run: the agent, ``detached``, ``meta``, ``sync``, the
-  run and iteration timeouts, the pacing keys (``interval``/``sleep``), and
-  the retry keys (``step_retries``/``step_retry_backoff``).
+- Boot-pinned for the run: the agent (and its provider, model, and effort),
+  ``detached``, ``meta``, ``sync``, the run ``timeout``, and the retry keys
+  (``step_retries``/``step_retry_backoff``).
 
 ``fractal node update`` is the supported retune path — it writes the config
 and the node registry together. A direct config edit still wins (the loop

@@ -222,6 +222,10 @@ Docs, commit messages, and code comments follow local conventions.
 - **No unexplained jargon.** Expand abbreviations on first use; define terms the
   reader may not know.
 - **No flourishes.** No metaphors, no rhetorical buildup, no cleverness.
+- **Cut content, not grammar.** Concision comes from dropping less-important
+  points, never from compressing sentences into jargon fragments. Every sentence
+  that survives stays a plain subject-verb sentence describing what actually
+  happens in clear, plain English.
 - **The two-read test.** If a sentence needs a second read, rewrite it.
 
 ## Pushing Back

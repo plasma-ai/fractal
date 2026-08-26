@@ -29,9 +29,13 @@ the dots are the hierarchy.
 Nodes spawn children for separable subtasks, so the tree grows to fit the
 problem rather than a fixed plan. Per-node caps — ``max_depth``,
 ``max_children``, ``max_descendants``, plus cost and time budgets — bound the
-growth; they are set at spawn and retuned later through
-``fractal node update``. See :doc:`/configuration` for the full key surface
-and :doc:`/guide/lifecycle` for how nodes start, settle, and are torn down.
+growth. All are set at spawn; the depth and width caps, the cost caps, and
+``step_timeout`` are retuned later through ``fractal node update``, while the
+run and iteration timeouts are changed with ``fractal node config set`` (the
+run ``timeout`` is pinned at loop boot, so a change reaches the next start or
+resume, not a run in flight). See :doc:`/configuration` for the full key
+surface and :doc:`/guide/lifecycle` for how nodes start, settle, and are torn
+down.
 
 Branches and worktrees
 ----------------------
@@ -80,7 +84,8 @@ tmux sessions
 session — this is what makes nodes autonomous and observable. The session is
 named ``<repo> (<branch>)`` with dots flattened to dashes: in a repository
 ``myproject``, the node ``main.parser`` runs in the session
-``myproject (main-parser)``. tmux must be installed to start nodes.
+``myproject (main-parser)``. tmux must be installed for the default backend;
+``--headless`` runs the loop in a detached process group instead.
 
 A node has at most one session. The user node never has one, and a paused
 node has none either — no session is a parked node's normal state, not a
@@ -105,6 +110,7 @@ For a repository ``myproject`` rooted on ``main`` with one node ``parser``:
        config.json                   tree defaults
        .db                           the central database
      wiki/                           project wiki, committed
+     .gitattributes                  wiki merge attribute, committed
      ...                             your project files
 
 In a monorepo, ``fractal init`` (and ``fractal node init --path``) can target
@@ -127,10 +133,23 @@ Fractal's footprint
    (:doc:`/guide/loop`), ``scripts/`` for setup and validation, ``skills/``,
    ``plans/`` (:doc:`/guide/plans`), a ``memory/`` wiki, a git-ignored
    ``tmp/`` scratch directory, and runtime markers such as the one-line
-   ``.status`` file. Agent-node data directories are tracked in git so a
-   node's configuration merges upward with its work; the root node's own
-   data directory is git-ignored by default (``fractal track`` and
-   ``fractal untrack`` toggle this).
+   ``.status`` file. Agent-node data directories are tracked in git on the
+   node's own branch but never merge upward: ``fractal node merge`` strips
+   the node's ``.fractal/<branch>/`` (and any descendant seeds the branch
+   carries) from the squash, so node machinery never lands in the parent.
+   The root node's own data directory is git-ignored by default
+   (``fractal track`` and ``fractal untrack`` toggle this).
+
+``.gitattributes``
+   ``fractal init`` writes the ``**/_index.md merge=wiki`` rule (under a
+   one-line comment) into the repo-root ``.gitattributes``, creating the file
+   when absent and appending to it otherwise (one with uncommitted edits is
+   left alone), so generated wiki indexes merge through the wiki merge
+   driver. It is ordinary committed content: the ``fractal commit --init``
+   baseline picks it up while it is still init's own uncommitted edit. The
+   driver itself is registered in repo-local git config
+   (``merge.wiki.driver``), which a clone does not carry — run
+   ``wiki config --path=wiki`` after cloning to register it again.
 
 ``.git/info/exclude``
    Fractal keeps its runtime artifacts — worktrees, the database, status
@@ -140,14 +159,23 @@ Fractal's footprint
 What stays yours
 ~~~~~~~~~~~~~~~~
 
-Your project files, your branches, and your staging area remain yours:
-fractal commits only inside node worktrees, on node branches. The project
-wiki at ``wiki/`` is created by ``fractal init`` but committed as ordinary
-project content for you and the nodes to grow. Teardown respects the same
-line — ``fractal node delete`` removes a subtree, ``fractal reset`` removes
-every node while keeping the database, and even ``fractal destroy`` leaves
-committed artifacts (the wiki and baseline commits) and remote branches in
-place. See :doc:`/guide/lifecycle` for the teardown tiers.
+Your project files and your branches remain yours: agent nodes commit only
+inside their own worktrees, on node branches. Fractal commits on your own
+branch only when you run a command that says so — ``fractal init`` outside a
+repository bootstraps one with an initial ``.gitignore`` commit,
+``fractal commit --init`` lands the baseline (the wiki, its
+``.gitattributes`` merge attribute, and the root node's data when tracked),
+and ``fractal node merge`` squash-merges a node and commits in the target's
+worktree. The bootstrap and baseline commit by pathspec, so other staged work
+stays staged; the merge refuses while the target worktree has uncommitted
+tracked changes and restores it if the squash conflicts. The project wiki at
+``wiki/`` and the ``.gitattributes`` merge rule are created by
+``fractal init`` but committed as ordinary project content for you and the
+nodes to grow. Teardown respects the same line — ``fractal node delete``
+removes a subtree, ``fractal reset`` removes every node while keeping the
+database, and even ``fractal destroy`` leaves committed artifacts (the wiki
+and baseline commits) and remote branches in place. See
+:doc:`/guide/lifecycle` for the teardown tiers.
 
 Package names
 -------------

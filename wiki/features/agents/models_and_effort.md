@@ -48,11 +48,13 @@ subprocesses and would override any nested claude run; ambient copies of the
 effort knobs are actively *unset* at invocation compose -- an operator shell's
 `CLAUDE_CODE_EFFORT_LEVEL` would override the step pin inside the session, and a
 stale `CLAUDE_EFFORT` (claude's own export to hook/Bash subprocesses) would
-masquerade as the child session's; node settings (permissions, model,
-environment) ride a CLI flag rather than a file merge. On the openrouter route a
-model-less claude invocation pins an explicit model slug, because the process
-environment beats the settings file and the route must not trust latest-model
-aliases.
+masquerade as the child session's -- and so is the model-forcing
+`CLAUDE_CODE_SUBAGENT_MODEL`, which would force every fan-out sub-agent onto one
+model, explicit per-agent pins included (the seeded node settings deliberately
+do not set it either); node settings (permissions, model, environment) ride a
+CLI flag rather than a file merge. On the openrouter route a model-less claude
+invocation pins an explicit model slug, because the process environment beats
+the settings file and the route must not trust latest-model aliases.
 
 ## The served-model record
 
@@ -86,6 +88,11 @@ an unreadable or malformed file simply names no model:
   than a top-level key.
 - opencode reads the top-level model from its JSON config file.
 - omp reads its `config.yml` default once a YAML parser is available.
+
+The iteration row records the served model too: when every step's
+stream-reported model agrees, it wins over the config-seeded pin at the
+iteration close, so divergence is visible on the row rather than laundered under
+the pin.
 
 ## Preflight
 

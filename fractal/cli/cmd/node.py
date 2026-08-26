@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pathlib
-import subprocess
 import sys
 from typing import Optional
 
@@ -20,7 +19,7 @@ from fractal.cli.utils import (
     resolve_node,
     resolve_target,
 )
-from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, PGID_FILE, STATUSES
+from fractal.constants import STATUSES
 from fractal.core.agent import seed_agents
 from fractal.core.loop import Loop
 from fractal.core.node import Node
@@ -63,6 +62,7 @@ _LIST_COLUMNS = [
     'max_children',
     'max_descendants',
     'last',
+    'end_reason',
 ]
 
 # consumers bind activity columns by header name, never by position
@@ -126,6 +126,19 @@ def node_init(app: typer.Typer) -> typer.Typer:
         ' instead of the package seed; mutually exclusive with --inherit=steps.'
     )
     steps = typer.Option(None, '--steps', help=steps_help)
+    # profile option
+    profile_help = (
+        'Named seed bundle under .fractal/profiles/<name>/: steps/ seeds the'
+        ' step list, NODE.md a deployment-ready charter (fill-sheet validated'
+        ' at init; mutex with --steps).'
+    )
+    profile = typer.Option(None, '--profile', help=profile_help)
+    # pin option
+    pin_help = (
+        'Commission pin (a commit sha): must resolve, and every pin:'
+        ' declaration in the profile charter must match it.'
+    )
+    pin = typer.Option(None, '--pin', help=pin_help)
     # agent option
     agent_help = 'Agent command (default: inherited from the nearest ancestor).'
     agent = typer.Option(None, '--agent', help=agent_help)
@@ -211,6 +224,12 @@ def node_init(app: typer.Typer) -> typer.Typer:
     # blind flag
     blind_help = 'Subscribe to no channels (the parent still reads this node).'
     blind = typer.Option(False, '--blind', help=blind_help)
+    # sealed flag
+    sealed_help = (
+        "Seal the node's mailbox: its own seat cannot read hosted messages"
+        ' until an operator or the parent unseals it (config sealed=false).'
+    )
+    sealed = typer.Option(False, '--sealed', help=sealed_help)
     # reset flag
     reset_help = 'Delete node files and reinitialize.'
     reset = typer.Option(False, '--reset', help=reset_help)
@@ -225,6 +244,8 @@ def node_init(app: typer.Typer) -> typer.Typer:
         meta: Optional[str] = meta,
         inherit: Optional[list[str]] = inherit,
         steps: Optional[str] = steps,
+        profile: Optional[str] = profile,
+        pin: Optional[str] = pin,
         agent: Optional[str] = agent,
         provider: Optional[str] = provider,
         model: Optional[str] = model,
@@ -249,6 +270,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
         detached: Optional[bool] = detached,
         local: Optional[bool] = local,
         blind: bool = blind,
+        sealed: bool = sealed,
         reset: bool = reset,
     ) -> None:
         """Create an agent node.
@@ -292,6 +314,8 @@ def node_init(app: typer.Typer) -> typer.Typer:
             meta=meta,
             inherit=inherit,
             steps=steps,
+            profile=profile,
+            pin=pin,
             agent=agent,
             provider=provider,
             model=model,
@@ -316,6 +340,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
             detached=detached,
             local=local,
             blind=blind,
+            sealed=sealed,
             reset=reset,
         )
         if output:
@@ -374,16 +399,24 @@ def node_start(app: typer.Typer) -> typer.Typer:
     # clean flag
     clean_help = 'With --continue: discard uncommitted project files.'
     clean = typer.Option(False, '--clean', help=clean_help)
+    # drain flag
+    drain_help = (
+        'With --continue: run a drain — the harness forbids spawns and'
+        ' re-arms from this run and tells every seat it is draining.'
+    )
+    drain = typer.Option(False, '--drain', help=drain_help)
     # max cost option
     max_cost_help = (
         'With --continue: retune the cost cap before relaunch, echoed'
         ' old -> new; required when the last run ended on its budget.'
     )
     max_cost = typer.Option(None, '--max-cost', help=max_cost_help)
-    # runtime option
+    # headless flag
     headless_help = (
         'Run without tmux in a detached process group; inherited by child'
-        ' starts. Use --tmux to override an inherited headless launch.'
+        ' starts, and --tmux overrides an inherited headless launch. A'
+        ' --continue takes its backend from this flag or FRACTAL_HEADLESS;'
+        ' resume adopts the backend recorded by the paused launch.'
     )
     headless = typer.Option(
         False,
@@ -400,6 +433,7 @@ def node_start(app: typer.Typer) -> typer.Typer:
         node: Optional[str] = node,
         continue_: bool = continue_,
         clean: bool = clean,
+        drain: bool = drain,
         max_cost: Optional[float] = max_cost,
         headless: bool = headless,
         path: str = path,
@@ -408,20 +442,25 @@ def node_start(app: typer.Typer) -> typer.Typer:
 
         Run parameters come from ``config.json`` (set at init or
         edited before launch); only ``--continue``/``--clean``/
-        ``--max-cost`` are set here. Runs are isolated -- each launch
-        arms the cap anew -- but a run that ended on its cost budget
-        refuses a bare ``--continue``: pass ``--max-cost`` to arm the
-        next run explicitly.
+        ``--drain``/``--max-cost``/``--headless`` are set here. With
+        ``--continue``, ``--drain`` runs the new run as a drain -- the
+        harness forbids spawns and re-arms from it. Runs are isolated --
+        each launch arms the cap anew -- but a run that ended on its cost
+        budget refuses a bare ``--continue``: pass ``--max-cost`` to arm
+        the next run explicitly.
         """
         require_non_negative(max_cost=max_cost)
         if clean and not continue_:
             raise typer.BadParameter('--clean requires --continue.')
+        if drain and not continue_:
+            raise typer.BadParameter('--drain requires --continue.')
         if max_cost is not None and not continue_:
             raise typer.BadParameter('--max-cost requires --continue.')
         node = resolve_target(path, node)
         output = node.start(
             continue_run=continue_,
             clean=clean,
+            drain=drain,
             max_cost=max_cost,
             headless=headless,
         )
@@ -869,6 +908,9 @@ def node_list(app: typer.Typer) -> typer.Typer:
     # csv flag
     csv_help = 'Force CSV output (already the default when piped / non-TTY).'
     csv = typer.Option(False, '--csv', help=csv_help)
+    # json flag
+    json_help = 'Output a JSON array of row objects (mutex with --csv).'
+    json = typer.Option(False, '--json', help=json_help)
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
@@ -883,6 +925,7 @@ def node_list(app: typer.Typer) -> typer.Typer:
         live: bool = live,
         count: bool = count,
         csv: bool = csv,
+        json: bool = json,
         path: str = path,
     ) -> None:
         """List a node's descendants with status (blank limit columns mean unlimited).
@@ -893,13 +936,26 @@ def node_list(app: typer.Typer) -> typer.Typer:
         to none of them, a bare ``list`` spans them all. ``status`` is
         always bare and ``detail`` carries any qualifier (a pending
         signal, an exited run's end reason, ``orphaned``, an unresolved
-        ``model drop``). ``spend`` is the current run's subtree cost, the
+        ``model drop``, an ``iteration gap``); ``end_reason`` types a
+        settled row's landing (``goal_met``, ``run_exhausted``,
+        ``final_iteration_failed``, ``cost_budget``, ``timeout``,
+        ``setup_abort``, ``other``), null when nothing is recorded.
+        ``spend`` is the current run's subtree cost, the
         scope ``max_cost`` beside it is enforced at, and is blank for a node
         that has never run. ``last`` is the age of each node's newest activity;
         ``!`` flags an active node quiet past ``max(step_timeout, 5m)``.
         """
         # validate arguments
         require_non_negative(max_depth=max_depth)
+        if json and csv:
+            raise typer.BadParameter('--json is mutually exclusive with --csv.')
+        # --count prints a bare number, so pairing it with a row format is a
+        # contradiction: silently honoring one would hand a machine consumer
+        # a shape it never asked for -- the rule covers both row formats
+        if json and count:
+            raise typer.BadParameter('--json is mutually exclusive with --count.')
+        if csv and count:
+            raise typer.BadParameter('--csv is mutually exclusive with --count.')
         if status == '':
             raise typer.BadParameter('--status cannot be empty.')
         # statuses are a closed set -- an unknown chunk would filter to an
@@ -937,6 +993,8 @@ def node_list(app: typer.Typer) -> typer.Typer:
                 if not targets:
                     if count:
                         typer.echo(0)
+                    elif json:
+                        print_json([], columns=_LIST_COLUMNS)
                     else:
                         print_rows([], csv=csv, columns=_LIST_COLUMNS)
                     return
@@ -962,6 +1020,9 @@ def node_list(app: typer.Typer) -> typer.Typer:
             typer.echo(len(rows))
             return
         rows = [{column: row.get(column) for column in _LIST_COLUMNS} for row in rows]
+        if json:
+            print_json(rows, columns=_LIST_COLUMNS)
+            return
         # bracket the status for terminal display only
         # (machine output stays unbracketed for clean parsing)
         if rows and not csv and sys.stdout.isatty():
@@ -1278,6 +1339,9 @@ def node_loop(app: typer.Typer) -> typer.Typer:
     # resume flag
     resume_help = 'Resume a paused node (adopt its open run where the pause left it).'
     resume = typer.Option(False, '--resume', help=resume_help)
+    # drain flag
+    drain_help = 'With --continue: forbid spawns and re-arms for this run.'
+    drain = typer.Option(False, '--drain', help=drain_help)
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
@@ -1287,6 +1351,7 @@ def node_loop(app: typer.Typer) -> typer.Typer:
         agent_command: Optional[str] = agent_command,
         continue_: bool = continue_,
         resume: bool = resume,
+        drain: bool = drain,
         path: str = path,
     ) -> None:
         """Run the node's iteration loop (invoked by the selected runtime)."""
@@ -1296,6 +1361,7 @@ def node_loop(app: typer.Typer) -> typer.Typer:
             agent_command=agent_command,
             continue_=continue_,
             resume=resume,
+            drain=drain,
             render=StreamRenderer(),
         )
         code = loop.run()
@@ -1306,13 +1372,19 @@ def node_loop(app: typer.Typer) -> typer.Typer:
 
 
 def node_launch(app: typer.Typer) -> typer.Typer:
-    """Register the private headless launcher command."""
+    """Register the ``_launch`` command."""
     # continue flag
-    continue_help = 'Continue a stopped/exited node.'
+    continue_help = (
+        'Continue a stopped/exited node (further iterations); the worktree'
+        ' restore discards uncommitted project files.'
+    )
     continue_ = typer.Option(False, '--continue', help=continue_help)
     # resume flag
-    resume_help = 'Resume a paused node.'
+    resume_help = 'Resume a paused node (adopt its open run where the pause left it).'
     resume = typer.Option(False, '--resume', help=resume_help)
+    # drain flag
+    drain_help = 'With --continue: forbid spawns and re-arms for this run.'
+    drain = typer.Option(False, '--drain', help=drain_help)
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
@@ -1321,44 +1393,17 @@ def node_launch(app: typer.Typer) -> typer.Typer:
     def _launch(
         continue_: bool = continue_,
         resume: bool = resume,
+        drain: bool = drain,
         path: str = path,
     ) -> None:
-        """Launch a node loop in an independent process group."""
+        """Launch a node loop in an independent process group (invoked by start.sh)."""
         node = resolve_node(path)
-        log_path = node.node_dir / HEADLESS_LOG
-        pgid_path = node.node_dir / PGID_FILE
-        loop_args = [
-            sys.executable,
-            '-m',
-            'fractal.cli.main',
-            'node',
-            '_loop',
-            f'--path={node._root}',
-        ]
-        if continue_:
-            loop_args.append('--continue')
-        if resume:
-            loop_args.append('--resume')
-        wrapper = (
-            'for _ in {1..100}; do [[ -f "$1" ]] && break; sleep 0.01; done; '
-            '[[ -f "$1" ]] || exit 1; shift; exec "$@"'
+        output = node._launch_headless(
+            continue_run=continue_,
+            resume=resume,
+            drain=drain,
         )
-        command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_path}', *loop_args]
-        try:
-            with log_path.open('w', encoding='utf-8') as stream:
-                process = subprocess.Popen(
-                    command_args,
-                    stdin=subprocess.DEVNULL,
-                    stdout=stream,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            pgid_path.write_text(f'{process.pid}\n', encoding='utf-8')
-        except Exception:
-            (node.node_dir / HEADLESS_FILE).unlink(missing_ok=True)
-            pgid_path.unlink(missing_ok=True)
-            raise
-        typer.echo(f'Started headless node: {process.pid} (log: {log_path})')
+        typer.echo(output)
 
     return app
 

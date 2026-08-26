@@ -20,6 +20,7 @@ from fractal.cli.utils import (
 )
 from fractal.constants import FRACTAL_FOLDER
 from fractal.core.node import Node
+from fractal.exceptions import DirtyWorktreeError
 
 __all__ = [
     'version',
@@ -234,7 +235,7 @@ def commit(app: typer.Typer) -> typer.Typer:
     init_help = 'Baseline commit ("init" instead of "iteration <run>.<iter>").'
     init = typer.Option(False, '--init', help=init_help)
     # check flag
-    check_help = 'Error if uncommitted changes exist instead of committing.'
+    check_help = 'Exit 1 if uncommitted changes exist instead of committing.'
     check = typer.Option(False, '--check', help=check_help)
     # ignore scope flag
     ignore_scope_help = 'Commit out-of-scope changes but still lint.'
@@ -255,7 +256,12 @@ def commit(app: typer.Typer) -> typer.Typer:
         force: bool = force,
         path: str = path,
     ) -> None:
-        """Commit the current iteration's work."""
+        """Commit the current iteration's work.
+
+        With ``--check``, a dirty tree is the command's own nonzero
+        outcome: it exits 1 with the notice on stderr, while command
+        errors exit 2, so scripts gate on the tree state by exit code.
+        """
         # validate arguments
         if init and check:
             raise typer.BadParameter('--init cannot be used with --check.')
@@ -272,10 +278,26 @@ def commit(app: typer.Typer) -> typer.Typer:
         if not message and not check:
             raise typer.BadParameter('Message is required unless --check is set.')
         node = resolve_node(path)
+        # check mode is the command's own nonzero outcome: only the typed
+        # dirty-tree signal converts to the reserved exit 1 -- every other
+        # failure rides through to the wrapper's Error: exit 2
+        if check:
+            try:
+                node.commit(
+                    message=message,
+                    init=init,
+                    check=True,
+                    ignore_scope=ignore_scope,
+                    force=force,
+                )
+            except DirtyWorktreeError as e:
+                typer.echo(f'{e}', err=True)
+                raise SystemExit(1) from e
+            return
         output = node.commit(
             message=message,
             init=init,
-            check=check,
+            check=False,
             ignore_scope=ignore_scope,
             force=force,
         )

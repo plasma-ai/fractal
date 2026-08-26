@@ -17,6 +17,7 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-merge-conflict
+        exclude: \.rst$
       - id: debug-statements
       - id: detect-private-key
   - repo: https://github.com/astral-sh/ruff-pre-commit

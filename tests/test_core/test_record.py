@@ -38,6 +38,7 @@ __all__ = [
     'test_activity_reconstructs_lifecycle',
     'test_activity_end_rows_carry_duration_and_cost',
     'test_session_transcript_reads_claude_and_codex',
+    'test_iteration_records_the_served_model_over_the_pin',
 ]
 
 
@@ -940,3 +941,43 @@ def test_session_transcript_reads_claude_and_codex(
         node.sessions.transcript('claude', '../escape')
     with pytest.raises(ValueError):
         node.sessions.transcript('gemini', session)
+
+
+def test_iteration_records_the_served_model_over_the_pin(
+    node_with_db: Node,
+) -> None:
+    """Divergence beats the seeded pin on the iteration row.
+
+    The row seeds from config at ``iter_start`` -- the model asked for --
+    so leaving it there would launder a whole iteration served off-pin
+    under the pin's name, the attribution failure the served-model work
+    exists to end. When every step agrees, the served model wins; when
+    the steps disagree (or report nothing), the seed stands rather than
+    inventing a consensus.
+    """
+    node = node_with_db
+    node.config.set('model', 'pinned-model')
+    run_id = node.record.run_start()
+
+    def _iteration(number: int, *served: str) -> dict:
+        iter_id = node.record.iter_start(run_id=run_id, iter=number)
+        for index, model in enumerate(served, start=1):
+            step_id = node.record.step_start(
+                iter_id=iter_id,
+                run_id=run_id,
+                step=index,
+                step_name='EXECUTE',
+            )
+            node.db.update({'model': model}, 'steps', where={'step_id': step_id})
+            node.record.step_end(step_id=step_id, status='completed', exit_code=0)
+        node.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
+        return node.db.read('iters', where={'iter_id': iter_id})[0]
+
+    # every step served the same off-pin model: the row records what served
+    assert _iteration(1, 'served-model', 'served-model')['model'] == 'served-model'
+    # every step served the pin: the row keeps it
+    assert _iteration(2, 'pinned-model')['model'] == 'pinned-model'
+    # the steps disagree -- no consensus to record, so the pin stands
+    assert _iteration(3, 'served-model', 'other-model')['model'] == 'pinned-model'
+    # no step reported a model at all: the seed stands
+    assert _iteration(4)['model'] == 'pinned-model'

@@ -24,10 +24,22 @@ __all__ = [
     'test_send_routes_to_target',
     'test_send_parent_lands_in_the_dotted_parents_inbox',
     'test_send_unknown_node',
+    'test_send_refuses_an_empty_node_target',
     'test_send_nonexistent_channel',
     'test_send_rejects_invalid_priority',
     'test_post_enforces_publicly_readable_class',
     'test_sent_lists_outbound_mail',
+    'test_sealed_inbox_holds_hosted_mail_from_its_own_seat',
+    'test_sealed_inbox_holds_the_archive_surface',
+    'test_sealed_seat_can_neither_adjudicate_a_held_row_nor_lift_the_seal',
+    'test_seal_survives_an_env_scrub_in_the_seats_own_worktree',
+    'test_send_many_delivers_per_recipient_with_receipts',
+    'test_send_many_is_all_or_nothing_for_the_write_only_class',
+    'test_sealed_hold_covers_the_thread_surface',
+    'test_relays_refuses_an_unknown_uuid',
+    'test_send_many_reports_each_landing_before_a_later_failure',
+    'test_relay_lineage_marks_copies_and_lists_them',
+    'test_relays_answers_for_a_withdrawn_original',
     'test_sent_includes_own_replies',
     'test_messages_order_by_priority_then_created_at',
     'test_messages_channel_filter',
@@ -310,6 +322,30 @@ def test_send_unknown_node(radio: Radio) -> None:
         radio.send('main.ghost', subject='s', data='d', priority=0)
 
 
+def test_send_refuses_an_empty_node_target(radio: Radio) -> None:
+    """An empty target refuses instead of self-delivering.
+
+    ``''`` is what an unset variable expands to in a fleet script's
+    ``--node "$PEER"`` -- resolving it to self would land an urgent order
+    in the sender's own inbox under a clean exit. Only ``None`` (the
+    target left unnamed) means self.
+    """
+    with pytest.raises(ValueError, match='Empty node target'):
+        radio.send('', subject='urgent', data='d', priority=9)
+    # the fan-out's dry pass refuses the whole roster on one empty entry
+    with pytest.raises(ValueError, match='Empty node target'):
+        radio.send_many(
+            ['', radio.node.branch],
+            subject='urgent',
+            data='d',
+            priority=9,
+        )
+    assert radio.messages(channel='inbox') == []
+    # an unnamed target still self-delivers by design
+    _, target, _ = radio.send(subject='note', data='d', priority=1)
+    assert target == radio.node.branch
+
+
 def test_send_nonexistent_channel(radio: Radio) -> None:
     """Sending to a nonexistent channel raises ValueError."""
     with pytest.raises(ValueError, match='specify a target node or create it'):
@@ -372,6 +408,435 @@ def test_sent_lists_outbound_mail(radio_pair: tuple[Radio, Radio]) -> None:
     # recent flips to newest-first
     recent = root.sent(recent=True)
     assert [r['message_uuid'] for r in recent] == [to_self, to_peer]
+
+
+def test_sealed_inbox_holds_hosted_mail_from_its_own_seat(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bound seal holds hosted mail out of the sealed seat's context.
+
+    The verifier-isolation hold: with ``sealed`` set, the node's OWN reads
+    (the loop-exported ``_NODE`` names the caller) see an empty mailbox and
+    ``read`` refuses outright -- adjudication traffic can no longer leak
+    into a sealed context through routine triage. The seal binds the seat
+    alone: the node's own writes stay visible, an operator shell (no
+    ``_NODE``) reads everything, and unsealing restores the view.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    uuid, _, _ = root.send(
+        peer_branch,
+        subject='adjudication',
+        data='sealed reply',
+        priority=9,
+    )
+    peer.node.config.set('sealed', True)
+    # the sealed seat's own reads: mailbox held, body surface refused
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    assert peer.messages(channel='inbox') == []
+    with pytest.raises(PermissionError, match='inbox sealed'):
+        peer.read(uuid)
+    # the refusal consumed nothing: no receipt landed for the held message
+    assert peer.db.read('reads', where={'node': peer_branch}) == []
+    # sending -- the verdict path -- is not sealed, and own writes list
+    out, _, _ = peer.send(parent=True, subject='verdict', data='v', priority=5)
+    assert out in [m['message_uuid'] for m in peer.sent()]
+    # a self-subscription to an own hosted channel cannot tunnel hosted
+    # mail into the sealed seat through the feed
+    root.send(peer_branch, channel='public', subject='board', data='b', priority=3)
+    peer.subscribe(peer_branch, channel='public')
+    assert [row for row in peer.feed() if row['node'] == peer_branch] == []
+    # nor does the relay-lineage listing surface a copy the seat hosts
+    relayed, _, _ = root.send(
+        peer_branch,
+        subject='relayed order',
+        data='r',
+        priority=5,
+        relay_of=uuid,
+    )
+    assert peer.relays(uuid) == []
+    monkeypatch.delenv('_NODE')
+    assert [row['message_uuid'] for row in peer.relays(uuid)] == [relayed]
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    # an operator shell (no _NODE) adjudicates freely
+    monkeypatch.delenv('_NODE')
+    assert uuid in [m['message_uuid'] for m in peer.messages(channel='inbox')]
+    # lawful unsealing restores the seat's own view
+    peer.node.config.set('sealed', False)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    assert uuid in [m['message_uuid'] for m in peer.messages(channel='inbox')]
+
+
+def test_sealed_inbox_holds_the_archive_surface(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seal covers save/unsave/--saved: the archive is a body surface too.
+
+    Archiving copies a message's full body into a table the seat reads
+    back, so an unsealed ``save`` would tunnel exactly what the seal
+    holds out of the sealed context. A hosted save refuses while the seal
+    binds, and an archive taken *before* the seal landed is held out of
+    ``saved`` too. Deletion is held by the same seal: the archive is the
+    record the adjudicator keeps, so the seat can neither read it nor
+    destroy it -- confidentiality and integrity, not one of the two.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    uuid, _, _ = root.send(
+        peer_branch,
+        subject='adjudication',
+        data='sealed body',
+        priority=9,
+    )
+    # an archive taken before the seal lands
+    peer.node.config.set('sealed', False)
+    peer.save(uuid)
+    assert [row['message_uuid'] for row in peer.saved()] == [uuid]
+    # once sealed, the seat's own archive read holds the hosted row ...
+    peer.node.config.set('sealed', True)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    assert peer.saved() == []
+    # ... and a fresh archive of a hosted message refuses outright
+    fresh, _, _ = root.send(
+        peer_branch,
+        subject='second',
+        data='also sealed',
+        priority=8,
+    )
+    with pytest.raises(PermissionError, match='cannot be archived'):
+        peer.save(fresh)
+    # ... and the pre-seal archive cannot be destroyed from inside either
+    with pytest.raises(PermissionError, match='cannot be unarchived'):
+        peer.unsave(uuid)
+    # the operator still adjudicates through the archive, deletion included
+    monkeypatch.delenv('_NODE')
+    assert [row['message_uuid'] for row in peer.saved()] == [uuid]
+    peer.unsave(uuid)
+    assert peer.saved() == []
+
+
+def test_sealed_seat_can_neither_adjudicate_a_held_row_nor_lift_the_seal(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seal holds the write surfaces too, and it is not the seat's to lift.
+
+    A seat that may not read a hosted message may not answer it either:
+    ``react`` moves counts its adjudicator will later read, and
+    ``reply``'s routing resolves -- and reports -- the held message's
+    sender. And the seal itself is the load-bearing guard: clearing
+    ``sealed`` from inside the sealed seat would hand it every held
+    message in one sanctioned call, leaving every other guard
+    decorative. The operator, acting from outside, does all three.
+    """
+    root, peer = radio_pair
+    uuid, _, _ = root.send(
+        peer.node.branch,
+        subject='adjudication',
+        data='held body',
+        priority=9,
+    )
+    peer.node.config.set('sealed', True)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    with pytest.raises(PermissionError, match='cannot be reacted to'):
+        peer.react(uuid, 1)
+    with pytest.raises(PermissionError, match='cannot be replied to'):
+        peer.reply(uuid, 'leaked?')
+    # the refusals consumed nothing: no react, no reply, no read receipt
+    assert peer.db.read('reacts', where={'node': peer.node.branch}) == []
+    assert peer.db.read('reads', where={'node': peer.node.branch}) == []
+    assert peer.sent() == []
+    # the seat cannot talk its own way out of the seal either
+    with pytest.raises(PermissionError, match='cannot lift its own seal'):
+        peer.node.config.set('sealed', False)
+    assert peer.node.config.get('sealed') is True
+    # an operator outside the seat unseals, and the held row opens up
+    monkeypatch.delenv('_NODE')
+    monkeypatch.chdir(root.node.worktree)
+    peer.node.config.set('sealed', False)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    peer.react(uuid, 1)
+    assert peer.read(uuid)[0]['message_uuid'] == uuid
+
+
+def test_seal_survives_an_env_scrub_in_the_seats_own_worktree(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsetting ``_NODE`` does not lift the seal off the seat that owns the cwd.
+
+    The seal keyed on the exported ``_NODE`` alone was advisory against
+    the one party it binds: a seat could scrub its own environment and
+    read. The actor resolves env-first and falls back to the node owning
+    the working directory, which for a step IS its own worktree.
+    """
+    root, peer = radio_pair
+    uuid, _, _ = root.send(
+        peer.node.branch,
+        subject='sealed order',
+        data='body',
+        priority=7,
+    )
+    peer.node.config.set('sealed', True)
+    monkeypatch.delenv('_NODE', raising=False)
+    monkeypatch.chdir(peer.node.worktree)
+    # the scrubbed seat is still held -- listings empty, body refused
+    assert peer.messages(channel='inbox') == []
+    with pytest.raises(PermissionError, match='inbox sealed'):
+        peer.read(uuid)
+    # an operator outside the worktree still adjudicates
+    monkeypatch.chdir(root.node.worktree)
+    assert uuid in [row['message_uuid'] for row in peer.messages(channel='inbox')]
+
+
+def test_send_many_delivers_per_recipient_with_receipts(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """A fan-out lands one copy per recipient and returns ordered receipts.
+
+    Each copy is its own message with its own UUID in its recipient's
+    channel-space -- the receipts are the per-recipient delivery record a
+    fleet order is verified against. A bad recipient refuses the whole
+    fan-out before any copy lands, so a partial delivery can never pass
+    silently as a full one.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    own_branch = root.node.branch
+    receipts = root.send_many(
+        [peer_branch, own_branch],
+        subject='fleet order',
+        data='wind down',
+        priority=8,
+    )
+    assert [(node, channel) for _, node, channel in receipts] == [
+        (peer_branch, 'inbox'),
+        (own_branch, 'inbox'),
+    ]
+    to_peer, to_self = (uuid for uuid, _, _ in receipts)
+    assert to_peer != to_self
+    assert to_peer in [m['message_uuid'] for m in peer.messages(channel='inbox')]
+    assert to_self in [m['message_uuid'] for m in root.messages(channel='inbox')]
+    # a bad recipient refuses the whole fan-out before any copy lands
+    before = len(root.sent())
+    with pytest.raises(ValueError, match='Node not found'):
+        root.send_many(
+            [peer_branch, 'main.ghost'],
+            subject='fleet order',
+            data='wind down',
+            priority=8,
+        )
+    assert len(root.sent()) == before
+
+
+def test_send_many_is_all_or_nothing_for_the_write_only_class(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """A write-only recipient refuses the whole fan-out before any copy lands.
+
+    The dry pass exists so a fleet order is never half-delivered: an
+    operator reading a permission error must know nothing went out.
+    A single unwritable recipient anywhere in the list is enough, and the
+    same list without it delivers to everyone.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    before = len(root.sent())
+    # peer's 'private' channel is write-only (owner only) -- a foreign
+    # write is refused, and the refusal precedes every delivery
+    with pytest.raises(PermissionError, match='write-only'):
+        root.send_many(
+            [root.node.branch, peer_branch],
+            'private',
+            subject='fleet order',
+            data='wind down',
+            priority=6,
+        )
+    assert len(root.sent()) == before
+    assert root.messages(channel='private') == []
+    # the same recipients on a writable channel all receive
+    receipts = root.send_many(
+        [root.node.branch, peer_branch],
+        subject='fleet order',
+        data='wind down',
+        priority=6,
+    )
+    assert len(receipts) == 2
+    assert len(root.sent()) == before + 2
+
+
+def test_sealed_hold_covers_the_thread_surface(
+    radio_pair: tuple[Radio, Radio],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread never surfaces the sealed seat's own hosted rows.
+
+    Threads walk to a root and collect every reply, so a reply rerouted
+    into a sealed inbox would hand the seat the body the seal holds --
+    the same tunnel as the archive, through the conversation view. The
+    seat sees the thread minus its hosted rows; the operator sees it all.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    # a thread rooted at a message peer HOSTS, with peer's own reply
+    # routed back to the sender -- so the tree spans both hosts
+    seed, _, _ = root.send(
+        peer_branch,
+        subject='thread root',
+        data='sealed body',
+        priority=5,
+    )
+    peer.reply(seed, 'acknowledged')
+    assert len(peer.thread(seed)) == 2
+    peer.node.config.set('sealed', True)
+    monkeypatch.setenv('_NODE', f'{peer.node.worktree}')
+    # the sealed seat sees the thread without the row it hosts
+    hosted = [row for row in peer.thread(seed) if row['node'] == peer_branch]
+    assert hosted == []
+    # the operator's view of the same thread still carries it
+    monkeypatch.delenv('_NODE')
+    hosted = [row for row in peer.thread(seed) if row['node'] == peer_branch]
+    assert len(hosted) == 1
+
+
+def test_relays_refuses_an_unknown_uuid(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """An unknown uuid is an error, not an empty relay listing.
+
+    The obligation check reads an empty listing as "the relay never
+    happened", so answering a typo'd or stale uuid with 0 relays would
+    indict a node that relayed faithfully -- the false-record class the
+    receipts exist to prevent. A known message with no relays still
+    answers empty; case is normalized like every other uuid verb.
+    """
+    root, peer = radio_pair
+    uuid, _, _ = root.send(
+        peer.node.branch,
+        subject='order',
+        data='d',
+        priority=5,
+    )
+    # a real message with no relays yet answers empty, either case
+    assert root.relays(uuid) == []
+    assert root.relays(uuid.lower()) == []
+    # an unknown uuid refuses instead of reading as "never relayed"
+    with pytest.raises(ValueError, match='not found'):
+        root.relays('ZZZZ9999')
+
+
+def test_send_many_reports_each_landing_before_a_later_failure(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """A copy already delivered is receipted even when a later one fails.
+
+    The dry pass cannot rule out a mid-fan-out failure (a channel deleted
+    between the passes), and a receipt discarded with the exception is
+    exactly the phantom delivery the receipts exist to prevent: the
+    operator sees silence, re-sends, and double-delivers.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    seen: list[tuple[str, str, str]] = []
+    # both recipients pass the dry pass; the second send fails underneath it
+    original = root.send
+    calls = {'n': 0}
+
+    def _flaky(*args: object, **kwargs: object) -> tuple[str, str, str]:
+        calls['n'] += 1
+        if calls['n'] == 2:
+            raise ValueError('channel vanished mid-fan-out')
+        return original(*args, **kwargs)
+
+    root.send = _flaky
+    with pytest.raises(ValueError, match='vanished'):
+        root.send_many(
+            [peer_branch, root.node.branch],
+            subject='fleet order',
+            data='wind down',
+            priority=7,
+            receipt=lambda *row: seen.append(row),
+        )
+    root.send = original
+    # the first copy really landed, and its receipt was reported
+    assert [target for _, target, _ in seen] == [peer_branch]
+    delivered = [row['message_uuid'] for row in peer.messages(channel='inbox')]
+    assert seen[0][0] in delivered
+
+
+def test_relay_lineage_marks_copies_and_lists_them(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """``relay_of`` stamps lineage; ``relays`` answers the obligation check.
+
+    A relayed copy carries ``relay:<uuid>`` metadata, so whether an order
+    was ever passed onward is answerable from the store: an empty lineage
+    means the obligation never executed. A relay naming an unknown message
+    refuses -- a typo'd mark would read as an unmet obligation forever.
+    """
+    root, peer = radio_pair
+    peer_branch = peer.node.branch
+    order, _, _ = root.send(
+        peer_branch,
+        subject='fleet order',
+        data='wind down',
+        priority=9,
+    )
+    # before any relay the lineage is empty -- the obligation reads unmet
+    assert root.relays(order) == []
+    relayed, _, _ = peer.send(
+        parent=True,
+        subject='fleet order (relayed)',
+        data='wind down',
+        priority=9,
+        relay_of=order,
+    )
+    [copy] = root.relays(order)
+    assert copy['message_uuid'] == relayed
+    assert copy['sender'] == peer_branch
+    assert copy['metadata'] == f'relay:{order}'
+    # an unknown reference refuses instead of recording a dangling mark
+    with pytest.raises(ValueError, match='Relay reference not found'):
+        peer.send(
+            parent=True,
+            subject='s',
+            data='d',
+            priority=5,
+            relay_of='ZZZZ9999',
+        )
+
+
+def test_relays_answers_for_a_withdrawn_original(
+    radio_pair: tuple[Radio, Radio],
+) -> None:
+    """A withdrawn original leaves its relay lineage queryable.
+
+    The lineage keys on the recorded ``relay:<uuid>`` marks, and an
+    unsend deletes the original while leaving the relay copies -- so a
+    discharged obligation must stay auditable after the order is
+    withdrawn, not vanish behind a not-found error blaming the wrong
+    object. The unknown-uuid refusal stands for an empty lineage only.
+    """
+    root, peer = radio_pair
+    order, _, _ = root.send(
+        peer.node.branch,
+        subject='fleet order',
+        data='wind down',
+        priority=9,
+    )
+    relayed, _, _ = peer.send(
+        parent=True,
+        subject='fleet order (relayed)',
+        data='wind down',
+        priority=9,
+        relay_of=order,
+    )
+    root.unsend(order)
+    [copy] = root.relays(order)
+    assert copy['message_uuid'] == relayed
+    assert copy['metadata'] == f'relay:{order}'
 
 
 def test_sent_includes_own_replies(radio_pair: tuple[Radio, Radio]) -> None:
@@ -961,7 +1426,11 @@ def test_channel_delete_refuses_messages_without_force(radio: Radio) -> None:
     # --force deletes the channel and cascades its messages
     radio.channel_delete('team', force=True)
     assert [c['channel'] for c in radio.channels() if c['channel'] == 'team'] == []
-    assert radio.messages(channel='team') == []
+    where = {'node': radio.node.branch, 'channel': 'team'}
+    assert radio.db.count('messages', where=where) == 0
+    # the channel is gone, so listing it refuses rather than reading empty
+    with pytest.raises(ValueError, match="No 'team' channel"):
+        radio.messages(channel='team')
 
 
 def test_subscribe_and_unsubscribe(radio: Radio) -> None:

@@ -16,8 +16,10 @@ from typing import Optional
 
 import fractal.util
 from fractal.constants import FRACTAL_FOLDER
+from fractal.exceptions import DirtyWorktreeError
 
 from . import worktree
+from .worktree import exclude_block_lines
 
 if typing.TYPE_CHECKING:
     from .node import Node
@@ -30,9 +32,12 @@ _STAGE_EXCLUDES = (
     # virtualenvs -- the dir entry and, for per-file listings, its contents
     ':!**/.venv',
     ':!**/.venv/**',
-    # the central DB and its sidecars
+    # the central DB and its sidecars (registry.db is the legacy spelling)
     ':!**/.db',
     ':!**/.db-*',
+    ':!**/registry.db',
+    ':!**/registry.db-*',
+    ':!**/registry.db-*',
     # the status and pause markers
     ':!**/.status',
     ':!**/.paused',
@@ -45,7 +50,12 @@ _STAGE_EXCLUDES = (
     ':!**/.*-*.tmp',
     # engine-materialized system skills
     ':!**/skills/.system/*',
+    # the wiki tool's self-ignored derived cache -- the dir entry and, for
+    # per-file listings, its contents
+    ':!**/.wiki/cache',
+    ':!**/.wiki/cache/**',
 )
+
 
 # advisory threshold for the staged-file size guard
 _LARGE_FILE_WARN_BYTES = 10 * 1024 * 1024
@@ -82,8 +92,9 @@ def commit(
         ignore_scope: Commit out-of-scope changes but still lint.
         force: Bypass scope and lint checks and git hooks.
         body: Optional paragraph below the subject; a ``force`` commit's
-            body also folds in the staged-sweep warnings and a capped
-            diffstat, so a backstop save describes itself.
+            body also folds in the record pass's notices, the staged-sweep
+            warnings, and a capped diffstat, so a backstop save describes
+            itself.
         iteration: Commit-message iteration number (the loop passes the
             live one); resolved from the node's open iteration row, else
             ``0``, when omitted.
@@ -96,10 +107,11 @@ def commit(
         Commit output and notices.
 
     Raises:
-        RuntimeError: On a dirty ``--check``, an out-of-scope change, a
-            failed wiki index refresh, a lint failure, a failed commit,
-            or a ``message`` carrying the subject's own labels (the
-            branch name or ``iteration``).
+        DirtyWorktreeError: On a dirty ``--check``.
+        RuntimeError: On an out-of-scope change, a failed wiki index
+            refresh, a lint failure, a failed commit, or a ``message``
+            carrying the subject's own labels (the branch name or
+            ``iteration``).
 
     """
     worktree = node.worktree
@@ -222,16 +234,25 @@ def commit(
                 output.append(stream.strip())
 
     # stage relevant paths; closure so the post-hook retry can re-use it
+    # the record pass's notices ride the commit output -- a force-add past
+    # a host ignore rule, and any non-record file it refused, must be said
+    # out loud rather than inferred from the diff; the hook retry re-stages
+    # through this same closure, so the latest pass's notices are the ones
+    # reported
+    record_notices: list[str] = []
+
     def _stage_changes() -> None:
-        _stage(
+        record_notices[:] = _stage(
             node,
             scoped=scoped,
             commit_scopes=commit_scopes,
             node_prefix=node_prefix,
             wiki_prefix=wiki_prefix,
+            fractal_prefix=fractal_prefix,
         )
 
     _stage_changes()
+    output.extend(record_notices)
     # count workspace files the staging expansion dropped solely because ignore
     # rules match them -- a tracked host ignore pattern can silently eat node
     # artifacts; fractal's own runtime ignores stay silent (the info/exclude
@@ -265,11 +286,18 @@ def commit(
             text=True,
         )
         managed: set[str] = set()
+        # fractal's own info/exclude holds are the managed block's lines
+        # only -- the file is a user surface too (its normal purpose), so a
+        # foreign line there eats paths like any tracked ignore rule
+        block_lines = exclude_block_lines(node.repo_dir)
         # -v -z emits <source> <linenum> <pattern> <pathname> quadruples,
         # the source already bare (no :line:pattern suffix to strip)
         fields = result.stdout.split('\0')
-        for source, path in zip(fields[::4], fields[3::4]):
-            if source == '.git/info/exclude' or source.endswith('/.git/info/exclude'):
+        for source, line, path in zip(fields[::4], fields[1::4], fields[3::4]):
+            in_exclude = source == '.git/info/exclude' or source.endswith(
+                '/.git/info/exclude'
+            )
+            if in_exclude and int(line) in block_lines:
                 continue
             path = path.rstrip('/')
             if source.startswith(f'{path}/'):
@@ -310,11 +338,13 @@ def commit(
     else:
         label = f'iteration {iteration}'
     subject = f'{node.branch}: {label} ({message})'
-    # compose the body: the caller's paragraph, and on force the staged
-    # warnings above plus a capped diffstat -- a backstop sweep must
-    # describe what it saved from git history alone
+    # compose the body: the caller's paragraph, and on force the record
+    # pass's notices and staged warnings above plus a capped diffstat -- a
+    # backstop sweep must describe what it saved (and what it deliberately
+    # overrode or refused) from git history alone
     paragraphs = [body] if body else []
     if force:
+        paragraphs.extend(record_notices)
         paragraphs.extend(
             warning for warning in (skip_warning, large_warning) if warning
         )
@@ -475,7 +505,10 @@ def commit_user_init(node: Node, message: str) -> str:
 
     # stage the pathspec; closure so the hook-rewrite recovery can re-use it
     def _stage_paths() -> None:
-        cmd = ['add', '--', *specs]
+        # -f mirrors the work commits' record pass: the baseline's paths are
+        # explicit and exclude-filtered, so an external ignore rule cannot
+        # silently eat the seed or the wiki
+        cmd = ['add', '-f', '--', *specs]
         fractal.util.git.run(cmd, cwd=node.worktree)
 
     _stage_paths()
@@ -519,8 +552,8 @@ def _check_clean(node: Node) -> None:
         node: The node whose worktree to check.
 
     Raises:
-        RuntimeError: When any tracked or untracked change the stage could
-            commit remains.
+        DirtyWorktreeError: When any tracked or untracked change the stage
+            could commit remains.
 
     """
     # porcelain, not "diff HEAD": diff lists only tracked changes, so a step
@@ -530,9 +563,24 @@ def _check_clean(node: Node) -> None:
     # (runtime artifacts in a worktree whose info/exclude has not refreshed)
     # would otherwise read as permanently dirty and fire the net every
     # iteration for nothing
-    cmd = ['status', '--porcelain', '--', *_STAGE_EXCLUDES]
-    if fractal.util.git.run(cmd, cwd=node.worktree, check=False):
-        raise RuntimeError('Uncommitted changes remain (agent should have committed).')
+    # the estate content law rides along for the same reason: a credential a
+    # node parked in its estate is dirt no pass may ever stage, so counting it
+    # would fire the net every iteration over a file that can never clear
+    # -uall so the law is asked the same question the stage answers, per file:
+    # the default listing collapses a wholly-untracked directory to one entry,
+    # and a parked .ssh/ would read as dirt no expansion could ever clear
+    project = node.project_path
+    prefix = FRACTAL_FOLDER if project == '.' else f'{project}/{FRACTAL_FOLDER}'
+    cmd = ['status', '--porcelain', '-uall', '-z', '--', *_STAGE_EXCLUDES]
+    raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+    for entry in filter(None, os.fsdecode(raw).split('\0')):
+        # -z drops the rename arrow, so a rename's source rides as its own
+        # bare field -- unprefixed, hence never read as an untracked path
+        if entry.startswith('?? ') and _is_refused_estate(entry[3:], prefix):
+            continue
+        raise DirtyWorktreeError(
+            'Uncommitted changes remain (agent should have committed).'
+        )
 
 
 def _scope_check(
@@ -622,6 +670,96 @@ def _attributes_is_init_edit(node: Node) -> bool:
     return attribute in text.splitlines() and attribute not in committed.splitlines()
 
 
+#: estate subdirectories whose contents are node records canon requires
+#: committed (the memory wiki, plans, and the seeded step/script/skill set)
+_RECORD_DIRS = ('memory', 'plans', 'scripts', 'skills', 'steps')
+#: estate root files that are records in their own right
+_RECORD_FILES = ('NODE.md', 'config.json')
+#: the suffixes a record carries -- text and structured text only, so the
+#: force pass can never stage a key, a certificate, an archive, or a binary
+_RECORD_SUFFIXES = (
+    '.csv',
+    '.json',
+    '.md',
+    '.sh',
+    '.toml',
+    '.tsv',
+    '.txt',
+    '.yaml',
+    '.yml',
+)
+#: dot-named directories a record dir may carry: the wiki tool's own
+#: settings directory, whose declared-root marker a fresh clone needs to
+#: read the memory wiki back (the tool's derived state self-ignores)
+_TOOL_STATE_DIRS = ('.wiki',)
+#: dot-named files a record dir may carry: git's empty-directory
+#: placeholder, whose only purpose is to check a bare record dir out
+_TOOL_STATE_FILES = ('.gitkeep',)
+
+
+def _is_committable(relpath: str, estate: str) -> bool:
+    """Whether an estate-relative path is content a node may commit.
+
+    One law governs both estate staging paths, because both decide what
+    a node's own directory folds into git history: anything a node
+    parked in its estate -- a dotenv, a key, a downloaded credential --
+    would otherwise ride a commit silently whenever no ignore rule
+    happens to fence it, and be refused only where a host rule already
+    protected it. So the allowlist describes everything an estate may
+    legitimately hold: the canon-required record surfaces at the text
+    suffixes a record is written in, plus the estate's own tool state,
+    which is committed content rather than machine state.
+
+    Args:
+        relpath: The file's worktree-relative path.
+        estate: The estate directory's worktree-relative path.
+
+    Returns:
+        Whether the path is inside the estate content allowlist.
+
+    """
+    inside = pathlib.PurePosixPath(relpath).relative_to(estate)
+    parts = inside.parts
+    if len(parts) == 1:
+        return parts[0] in _RECORD_FILES and inside.suffix in _RECORD_SUFFIXES
+    if parts[0] not in _RECORD_DIRS:
+        return False
+    # a dot-named directory is machine or agent state (an agent config dir,
+    # a parked .ssh/) unless it is the estate's own tool state
+    if any(
+        part.startswith('.') and part not in _TOOL_STATE_DIRS for part in parts[1:-1]
+    ):
+        return False
+    # the leaf is either named tool state or a record at a text suffix, so
+    # no pass can stage a key, a certificate, an archive, or a binary
+    if parts[-1].startswith('.'):
+        return parts[-1] in _TOOL_STATE_FILES
+    return inside.suffix in _RECORD_SUFFIXES
+
+
+def _is_refused_estate(relpath: str, fractal_prefix: str) -> bool:
+    """Whether a worktree path is estate content no staging pass may commit.
+
+    Args:
+        relpath: The file's worktree-relative path.
+        fractal_prefix: The fractal data folder prefix.
+
+    Returns:
+        Whether the path sits inside an estate and the content law
+        refuses it.
+
+    """
+    path = pathlib.PurePosixPath(relpath)
+    if not path.is_relative_to(fractal_prefix):
+        return False
+    parts = path.relative_to(fractal_prefix).parts
+    # <prefix>/<estate>/<path>: a file directly under the folder sits in no
+    # estate, so no estate's law governs it
+    if len(parts) < 2:
+        return False
+    return not _is_committable(relpath, f'{fractal_prefix}/{parts[0]}')
+
+
 def _stage(
     node: Node,
     *,
@@ -629,7 +767,8 @@ def _stage(
     commit_scopes: list[str],
     node_prefix: str,
     wiki_prefix: str,
-) -> None:
+    fractal_prefix: str,
+) -> list[str]:
     """Stage the node's committable paths.
 
     Args:
@@ -639,19 +778,42 @@ def _stage(
         commit_scopes: Scope roots (project-prefixed).
         node_prefix: The node data dir prefix, or ``''``.
         wiki_prefix: The shared project wiki prefix.
+        fractal_prefix: The fractal data folder prefix (node estates live
+            under it; the record pass owns them).
+
+    Returns:
+        The estate pass's notices (what it force-staged, what it refused).
 
     """
     worktree = node.worktree
+    # settle the estate content law before any sweep, and withhold what it
+    # refuses by name: what a node's own directory folds into history must
+    # not turn on whether a host rule happens to fence it. Naming refused
+    # paths (never a whole estate) keeps the sweeps whole -- an exclude
+    # matching an ignored path fails the add outright, and an ignored path
+    # is already outside the sweep anyway.
+    denied = _estate_denied(node, fractal_prefix)
+    withheld = [f':(exclude,literal){path}' for path in denied]
+    # heal a baseline that force-tracked the wiki tool's self-ignored derived
+    # cache: drop it from the index -- never the disk, the tool owns the bytes
+    # -- so this commit converges the tree and the cache's own ignore keeps it
+    # untracked from here on; unguarded, since upkeep must never block a save
+    cache = worktree / wiki_prefix / '.wiki' / 'cache'
+    cmd = ['rm', '-r', '--cached', '--quiet', '--ignore-unmatch']
+    cmd += ['--', f':(literal){cache}']
+    fractal.util.git.run(cmd, cwd=worktree, check=False)
     if scoped:
         # stage only paths that exist -- a scope dir that is planned
         # but not yet created would otherwise make `git add` fatal
-        # (exit 128) and abort every commit until the dir appears
+        # (exit 128) and abort every commit until the dir appears;
+        # the node data prefix is absent here by design: _stage_records
+        # owns the estates in its own commands (a broad external ignore
+        # rule covering .fractal would otherwise fail this whole add
+        # with 'paths are ignored by one of your .gitignore files')
         paths = []
         for scope in commit_scopes:
             if (worktree / scope).exists():
                 paths.append(f'{worktree / scope}')
-        if node_prefix and (worktree / node_prefix).exists():
-            paths.append(f'{worktree / node_prefix}')
         # the shared project wiki is committable regardless of scope
         if (worktree / wiki_prefix).is_dir():
             paths.append(f'{worktree / wiki_prefix}')
@@ -663,11 +825,192 @@ def _stage(
             # literal pathspec magic: a glob char in an on-disk path (e.g. a
             # bracketed project dir) must not widen or empty the match
             specs = [f':(literal){path}' for path in paths]
-            cmd = ['add', *specs, *_STAGE_EXCLUDES]
+            cmd = ['add', *specs, *_STAGE_EXCLUDES, *withheld]
             fractal.util.git.run(cmd, cwd=worktree)
+        # the estates ride their own plain add: it must be able to fail
+        # (everything under it ignored) without unstaging the scope sweep
+        folder = worktree / fractal_prefix
+        if folder.is_dir():
+            cmd = ['add', f':(literal){folder}', *_STAGE_EXCLUDES, *withheld]
+            fractal.util.git.run(cmd, cwd=worktree, check=False)
     else:
-        cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES]
+        cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
         fractal.util.git.run(cmd, cwd=worktree)
+    return _stage_records(node, fractal_prefix, denied)
+
+
+def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
+    """The estate directories the content law governs.
+
+    A self-ignored seed dir (the user node's untracked-by-design state)
+    is not an estate the law speaks for, so it is left alone.
+
+    Args:
+        node: The node whose worktree holds the estates.
+        fractal_prefix: The fractal data folder prefix.
+
+    Returns:
+        Each estate directory, sorted.
+
+    """
+    folder = node.worktree / fractal_prefix
+    if not folder.is_dir():
+        return []
+    return [
+        entry
+        for entry in sorted(folder.iterdir())
+        if entry.is_dir() and worktree.seed_tracked(entry)
+    ]
+
+
+def _estate_denied(node: Node, fractal_prefix: str) -> list[str]:
+    """Estate content the law refuses to let a plain add stage.
+
+    The plain adds would otherwise take anything a node parked in its
+    estate -- a dotenv, a key, a downloaded credential -- the moment no
+    ignore rule happened to fence it, which is the default state of a
+    fresh clone. Only new content is judged: what an estate already
+    tracks stays committable, so the law gates what enters history and
+    never the upkeep of the history a node already owns.
+
+    Args:
+        node: The node whose worktree to judge.
+        fractal_prefix: The fractal data folder prefix.
+
+    Returns:
+        Worktree-relative paths the sweeps must withhold.
+
+    """
+    estates = _estate_roots(node, fractal_prefix)
+    if not estates:
+        return []
+    specs = [f':(literal){entry}' for entry in estates]
+    cmd = ['ls-files', '--others', '--exclude-standard', '-z', '--', *specs]
+    raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+    fresh = [path for path in os.fsdecode(raw).split('\0') if path]
+    return [path for path in fresh if _is_refused_estate(path, fractal_prefix)]
+
+
+def _stage_records(node: Node, fractal_prefix: str, denied: list[str]) -> list[str]:
+    """Force-stage estate records an external ignore rule held out.
+
+    fractal owns its staging: the plain adds honor every ignore layer, so
+    one stray exclude line (worktrees share ``.git/info/exclude``) or a
+    host ``.gitignore`` pattern can silently unstage -- or hard-fail --
+    the audit trail canon requires nodes to commit. This pass attributes
+    every estate file an ignore rule held out (``check-ignore -v``) and
+    force-adds exactly the externally-ignored ones by explicit path:
+    fractal's own exclude block (the runtime artifacts) and ignore files
+    living inside an estate (a self-managed cache) keep their hold, and a
+    self-ignored seed dir (the user node's untracked-by-design state) is
+    left alone.
+
+    The override answers to the same content allowlist
+    (:func:`_is_committable`) that bounds the plain adds, so one law
+    decides what an estate folds into history on either path: a file
+    outside it is refused and named rather than staged, and every
+    force-add is reported. A record the add cannot stage -- vanished
+    after the snapshot, unreadable on disk -- is likewise reported by
+    name, never fatal.
+
+    Args:
+        node: The node whose worktree to stage.
+        fractal_prefix: The fractal data folder prefix.
+        denied: Estate content the law already withheld from the plain
+            adds, reported here so both refusals read together.
+
+    Returns:
+        Notices naming what was force-staged and what was refused.
+
+    """
+    estates = _estate_roots(node, fractal_prefix)
+    forced: list[str] = []
+    failed: list[str] = []
+    refused: list[str] = []
+    held: list[str] = []
+    if estates:
+        specs = [f':(literal){entry}' for entry in estates]
+        # collect the estate files ignore rules held out of the plain adds
+        cmd = ['ls-files', '--others', '-i', '--exclude-standard', '-z', '--', *specs]
+        raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+        held = [path for path in os.fsdecode(raw).split('\0') if path]
+    if held:
+        # the paths fractal-normal rules hold: the shipped template (runtime
+        # artifacts, evaluated directly -- rule attribution cannot answer this,
+        # a broad foreign line shadows the block while barring the very same
+        # artifact) plus the repo's committed per-directory .gitignore files
+        # (repo content a node can see and fix; an estate cache's self-ignore
+        # rides here). The machine-local layers -- info/exclude beyond the
+        # template's rules, core.excludesFile -- are deliberately absent:
+        # their holds are exactly what the force pass overrides.
+        assets = pathlib.Path(__file__).parent.parent / '_assets'
+        template = assets / 'git' / 'exclude'
+        cmd = [
+            'ls-files',
+            '--others',
+            '-i',
+            f'--exclude-from={template}',
+            '--exclude-per-directory=.gitignore',
+            '-z',
+            '--',
+            *specs,
+        ]
+        raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+        normal = set(filter(None, os.fsdecode(raw).split('\0')))
+        # a snapshot path can vanish before the add (ignored-and-untracked
+        # files are exactly what `git clean -X` deletes, and estates churn
+        # under the node's own housekeeping) -- stage what still exists rather
+        # than letting one dead pathspec fail the add and abort the commit
+        for path in held:
+            if path in normal or not os.path.lexists(node.worktree / path):
+                continue
+            if _is_refused_estate(path, fractal_prefix):
+                refused.append(path)
+                continue
+            forced.append(path)
+        if forced:
+            # batched add, retried per path on failure: git stages nothing on
+            # exit 128 (a record can vanish after the lexists probe or sit
+            # unreadable on disk), and one bad path must cost itself, never the
+            # healthy records queued beside it -- the backstop save this pass
+            # feeds exists precisely to rescue those
+            specs = [f':(literal){node.worktree / path}' for path in forced]
+            cmd = ['add', '-f', *specs]
+            if fractal.util.git.run(cmd, cwd=node.worktree, check=False) is None:
+                for path in forced:
+                    cmd = ['add', '-f', f':(literal){node.worktree / path}']
+                    result = fractal.util.git.run(cmd, cwd=node.worktree, check=False)
+                    if result is None:
+                        failed.append(path)
+                forced = [path for path in forced if path not in failed]
+    notices = []
+    if forced:
+        # worktree-relative paths in every notice: a force commit folds
+        # them into its body, where machine-local prefixes do not belong
+        listing = ', '.join(sorted(forced))
+        notices.append(
+            f'Force-staged {len(forced)} node record(s) held out by an'
+            f' ignore rule: {listing}'
+        )
+    if failed:
+        listing = ', '.join(sorted(failed))
+        notices.append(
+            f'Warning: {len(failed)} node record(s) could not be staged'
+            f' (vanished or unreadable): {listing}'
+        )
+    if refused:
+        listing = ', '.join(sorted(refused))
+        notices.append(
+            f'Warning: {len(refused)} ignored estate file(s) are not node'
+            f' records and were NOT force-staged: {listing}'
+        )
+    if denied:
+        listing = ', '.join(sorted(denied))
+        notices.append(
+            f'Warning: {len(denied)} estate file(s) are not node records and'
+            f' were NOT staged: {listing}'
+        )
+    return notices
 
 
 def _hook_retry(

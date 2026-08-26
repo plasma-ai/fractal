@@ -88,8 +88,9 @@ The directive is natural language. The agent distills the node's goal from it
 and maps every detail you pinned down — a name, a budget, a model, limits —
 onto the matching ``fractal node init`` flag. All configuration routes
 through ``fractal node init`` and lands in the node's ``config.json``;
-``fractal node start`` just launches, taking only ``--continue`` /
-``--clean`` (and ``--max-cost`` accompanying a continue) when resuming an
+``fractal node start`` just launches, taking only the runtime choice
+(``--headless`` / ``--tmux``) and ``--continue`` / ``--clean`` (and
+``--max-cost`` or ``--drain`` accompanying a continue) when resuming an
 existing node. A directive can be as thin or as thorough as you like:
 
 .. code-block:: text
@@ -281,11 +282,13 @@ The agent determines the node's state and proceeds accordingly:
 
 Along the way the skill teaches the repository facts that matter: the project
 ``wiki/`` is git-tracked and never belongs in ``.gitignore``; the root's
-``.fractal/`` is git-ignored on the top-level branch via the repo-local
-``.git/info/exclude`` (toggled by ``fractal track`` / ``fractal untrack``,
-which never touch the index); and the wiki merge driver lives in repo-local
-git config, which does not survive a clone — re-running ``fractal init``
-after cloning registers it again.
+``.fractal/<branch>/`` is git-ignored on the top-level branch by its own
+self-ignore ``.gitignore`` (toggled by ``fractal track`` /
+``fractal untrack``, which never touch the index), while fractal's runtime
+artifacts ride the repo-local ``.git/info/exclude``; and the wiki merge
+driver lives in repo-local git config, which does not survive a clone — run
+``wiki config --path=wiki`` after cloning to register it again
+(``fractal init`` re-registers it only when it creates the wiki).
 
 Define the node
 ~~~~~~~~~~~~~~~
@@ -339,8 +342,13 @@ node from its worktree:
    $ fractal node start
 
 All run parameters were set at init; ``start`` takes no configuration
-arguments. The node launches in a detached tmux session and runs
-autonomously from there.
+arguments — only the runtime choice (``--headless``/``--tmux``) and the
+continue flags. The node launches in a detached tmux session by default and
+runs autonomously from there; when tmux is unavailable, ``start --headless``
+runs it in a detached process group instead — child starts inherit headless
+mode and write their output to ``headless.log``. A ``--continue`` is a new
+run and takes its backend from the flag or ``FRACTAL_HEADLESS``; ``resume``
+adopts the paused run's recorded backend.
 
 Post-launch briefing
 ~~~~~~~~~~~~~~~~~~~~
@@ -351,7 +359,8 @@ a dedicated page:
 - **Steering**: edit ``<node_dir>/NODE.md`` directly (the node re-reads it at
   every step); retune caps with ``fractal node update``.
 - **Monitoring**: ``fractal node status``, ``fractal node cost spent``,
-  ``fractal node attach``, ``fractal node list``, and
+  ``fractal node attach`` (a headless node is followed with
+  ``tail -f <node_dir>/headless.log`` instead), ``fractal node list``, and
   ``fractal node activity`` (see :doc:`/cli/node`), or the live dashboard via
   ``fractal open`` (see :doc:`/tui`).
 - **Stopping**: three escalation levels — ``fractal node finish`` (after the

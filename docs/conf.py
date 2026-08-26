@@ -108,7 +108,7 @@ html_static_path = ['_static']
 html_theme = 'pydata_sphinx_theme'
 
 html_favicon = '_static/favicon.png'
-html_css_files = ['custom.css']
+html_css_files = ['https://use.typekit.net/zfv6aax.css', 'custom.css']
 html_title = 'Fractal Documentation'
 html_file_suffix = '.html'
 
@@ -138,7 +138,14 @@ html_theme_options = {
     # Enable 'Edit this Page' button (see configuration below)
     'use_edit_page_button': False,
     # Icons with links to show at top of page
-    'github_url': 'https://github.com/plasma-ai/fractal',
+    'icon_links': [
+        {
+            'name': 'GitHub',
+            'url': 'https://github.com/plasma-ai/fractal',
+            'icon': 'fa-brands fa-github',
+            'type': 'fontawesome',
+        },
+    ],
     # Other links without icons
     'external_links': [],
     # Keep the footer to the copyright line

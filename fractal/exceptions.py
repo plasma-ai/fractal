@@ -7,6 +7,7 @@ from typing import Union
 __all__ = [
     'AbstractMethodError',
     'AgentStreamError',
+    'DirtyWorktreeError',
 ]
 
 
@@ -47,6 +48,15 @@ class AgentStreamError(RuntimeError):
     Distinct from a fractal-side stream-consumer failure: the agent drained
     cleanly (exit 0) but its events named an error, so the loop books the
     step as an agent error, not a ``stream error``.
+    """
+
+
+class DirtyWorktreeError(RuntimeError):
+    """Raised by a ``--check`` commit when uncommitted changes remain.
+
+    Distinct from every other commit failure: a dirty tree is the check's
+    own nonzero outcome (the CLI's reserved exit 1), so only this type
+    converts there while the rest surface as ``Error:`` exit 2.
     """
 
 

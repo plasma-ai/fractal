@@ -19,7 +19,6 @@ import contextlib
 import datetime as dt
 import json
 import math
-import os
 import pathlib
 import sqlite3
 from collections.abc import Iterator
@@ -28,8 +27,14 @@ from typing import Any, Optional
 import fractal.core.agent
 import fractal.core.worktree
 import fractal.util
-from fractal.constants import CONFIG_FILE, HEADLESS_FILE, PGID_FILE, STATUS_FILE
-from fractal.core.node import Node, _recorded_group, node_dir, tmux_session_name
+from fractal.constants import (
+    CONFIG_FILE,
+    HEADLESS_FILE,
+    PGID_FILE,
+    SOCKET_FILE,
+    STATUS_FILE,
+)
+from fractal.core.node import Node, _group_alive, node_dir, tmux_session_name
 
 __all__ = [
     'leaf_of',
@@ -250,27 +255,24 @@ class TuiData:
         return fractal.util.tmux.sessions()
 
     def loop_alive(self: TuiData, branch: str, sessions: frozenset[str]) -> bool:
-        """Return whether the branch's selected loop runtime is alive.
+        """Return whether the branch's loop is alive, for display.
 
-        Headless loops are process-group supervised through their launch-time
-        PGID record. Tmux loops use the caller's one-per-refresh session set.
-        This is display-only: an existing group whose identity cannot be
-        verified stays active, while a definitively recycled group renders
-        settled. Neither result mutates lifecycle state.
+        The cockpit's copy of core's liveness law (``Node._loop_exists``) over
+        the caller's one-per-refresh session set instead of a per-node tmux
+        probe: a ``.headless`` node is judged by its recorded process group
+        alone; any other node by its listed session, except that a socket-less
+        loop (a bare launch) with no listed session is judged by its group. An
+        inconclusive group probe stays ``active`` -- display never settles a
+        loop core would spare -- and nothing here mutates lifecycle state.
         """
         node_dir = self.node_dir(branch)
-        if node_dir is not None and (node_dir / HEADLESS_FILE).is_file():
-            pgid_file = node_dir / PGID_FILE
-            try:
-                recorded_at = pgid_file.stat().st_mtime
-                pgid = int(pgid_file.read_text(encoding='utf-8').strip())
-                os.killpg(pgid, 0)
-            except PermissionError:
-                return True
-            except (FileNotFoundError, ProcessLookupError, ValueError):
-                return False
-            return _recorded_group(pgid, recorded_at) is not False
-        return self.tmux_session_name(branch) in sessions
+        alive = self.tmux_session_name(branch) in sessions
+        if node_dir is None:
+            return alive
+        headless = (node_dir / HEADLESS_FILE).is_file()
+        if headless or (not alive and not (node_dir / SOCKET_FILE).exists()):
+            return _group_alive(node_dir / PGID_FILE) is not False
+        return alive
 
     @staticmethod
     def rows(

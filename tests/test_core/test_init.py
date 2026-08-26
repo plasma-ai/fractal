@@ -55,6 +55,8 @@ __all__ = [
     'test_init_stores_unset_booleans_as_null',
     'test_child_inherits_steps_and_scripts_from_parent',
     'test_init_seeds_steps_from_directory',
+    'test_pin_without_a_profile_still_validates',
+    'test_init_profile_seeds_and_validates_the_fill_sheet',
     'test_child_inherits_skills_only_on_request',
     'test_child_inherits_config_preferences_not_caps',
     'test_init_requires_resolvable_agent',
@@ -1395,3 +1397,132 @@ def test_resolve_init_target_refuses_linked_worktree(
     )
     with pytest.raises(typer.BadParameter, match='main checkout'):
         resolve_init_target(f'{tmp_path / "feature"}')
+
+
+def test_pin_without_a_profile_still_validates(
+    git_repo: pathlib.Path,
+) -> None:
+    """``--pin`` alone runs the validation gate, not just alongside a profile.
+
+    A commission can pin a revision without carrying a profile bundle, and
+    a gate that only ran under ``--profile`` would wave those through --
+    a stale pin then dies at the node's first seat instead of at init. A
+    resolvable pin initializes normally.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    head = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    # a pin that resolves to no commit refuses before any worktree exists
+    with pytest.raises(ValueError, match='--pin does not resolve'):
+        Node(git_repo).init(name='v1', pin='0' * 40)
+    assert not (git_repo / '.worktrees' / 'main.v1').exists()
+    # a real pin passes the gate and the node initializes
+    Node(git_repo).init(name='v1', pin=head)
+    assert (git_repo / '.worktrees' / 'main.v1' / '.fractal' / 'main.v1').is_dir()
+
+
+def test_init_profile_seeds_and_validates_the_fill_sheet(
+    git_repo: pathlib.Path,
+) -> None:
+    """``--profile`` seeds steps and charter; stale seeds die at init.
+
+    A profile bundles a step list and a deployment-ready charter under
+    `.fractal/profiles/<name>/`. The fill-sheet gate runs pre-worktree:
+    a truncated charter (a lost tail section), a `pin:` that resolves to
+    no commit or disagrees with `--pin`, and a `docket:` row absent at
+    the pin each refuse -- the stale-seed class dies at init instead of
+    at the commission's first seat. A coherent seed deploys verbatim.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    head = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    profile_dir = git_repo / '.fractal' / 'profiles' / 'steward'
+    (profile_dir / 'steps').mkdir(parents=True)
+    (profile_dir / 'steps' / '00-VERIFY.md').write_text(
+        '# verify the docket\n',
+        encoding='utf-8',
+    )
+    charter = profile_dir / 'NODE.md'
+
+    def _write_charter(pin_line: str, docket: str) -> None:
+        charter.write_text(
+            f'## Instructions\n\nVerify the docket.\n{pin_line}\n'
+            f'docket: {docket}\n\n## Completion Requirements\n\nVerdict filed.\n',
+            encoding='utf-8',
+        )
+
+    # an unknown profile refuses by path
+    with pytest.raises(ValueError, match='No profile found'):
+        Node(git_repo).init(name='v1', profile='ghost')
+    # a stale pin (no such commit) refuses
+    _write_charter('pin: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef', 'README.md')
+    with pytest.raises(ValueError, match='pin does not resolve'):
+        Node(git_repo).init(name='v1', profile='steward')
+    # a pin disagreeing with the commission's --pin refuses
+    (git_repo / 'newer.md').write_text('newer\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'newer.md'], cwd=git_repo, check=True)
+    subprocess.run(
+        ['git', 'commit', '-q', '-m', 'newer'],
+        cwd=git_repo,
+        capture_output=True,
+        check=True,
+    )
+    newer = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    _write_charter(f'pin: {head}', 'README.md')
+    with pytest.raises(ValueError, match='does not match --pin'):
+        Node(git_repo).init(name='v1', profile='steward', pin=newer)
+    # a docket row absent at the pin refuses
+    _write_charter(f'pin: {head}', 'no/such/surface.md')
+    with pytest.raises(ValueError, match='Docket row does not resolve'):
+        Node(git_repo).init(name='v1', profile='steward')
+    # a truncated charter (lost tail section) refuses
+    charter.write_text('## Instructions\n\nVerify.\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='Completion Requirements'):
+        Node(git_repo).init(name='v1', profile='steward')
+    # a pin spelling git itself accepts is validated, never skipped:
+    # uppercase hex resolves (or refuses) like lowercase ...
+    _write_charter('pin: DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF', 'README.md')
+    with pytest.raises(ValueError, match='pin does not resolve'):
+        Node(git_repo).init(name='v1', profile='steward')
+    # ... a short abbreviation still gates against --pin ...
+    _write_charter(f'pin: {head[:5]}', 'README.md')
+    with pytest.raises(ValueError, match='does not match --pin'):
+        Node(git_repo).init(name='v1', profile='steward', pin=newer)
+    # ... and a spelling the gate cannot read as a sha refuses outright
+    _write_charter('pin: nosuchbranch', 'README.md')
+    with pytest.raises(ValueError, match='not a commit sha'):
+        Node(git_repo).init(name='v1', profile='steward')
+    # a coherent seed deploys: charter verbatim (case-blind pin match),
+    # profile steps in place, and the next-steps banner says the seeded
+    # task is ready to start rather than asking to author blank sections
+    _write_charter(f'pin: {head.upper()}', 'README.md')
+    output = Node(git_repo).init(name='v1', profile='steward', pin=head)
+    node_dir = git_repo / '.worktrees' / 'main.v1' / '.fractal' / 'main.v1'
+    assert (node_dir / 'NODE.md').read_text(encoding='utf-8') == charter.read_text(
+        encoding='utf-8'
+    )
+    assert [f.name for f in sorted((node_dir / 'steps').glob('*.md'))] == [
+        '00-VERIFY.md'
+    ]
+    assert 'start the loop' in output
+    assert 'sections start blank' not in output
+    # a charterless init keeps the author-your-task banner
+    output = Node(git_repo).init(name='v2')
+    assert 'author the node' in output
+    assert 'sections start blank' in output

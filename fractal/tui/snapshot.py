@@ -154,8 +154,8 @@ class SnapshotBuilder:
         self._feed_scope: Optional[str] = None
         self._sublog_scope: Optional[str] = None
         self._snapshot: Optional[Snapshot] = None
-        # live tmux sessions, refreshed once per build; headless liveness uses
-        # each node's process-group record (never persisted -- read-only)
+        # live tmux sessions, refreshed once per build; headless and socket-less loops
+        # are judged by their recorded process group (never persisted -- read-only)
         self._live_sessions: frozenset[str] = frozenset()
 
     def build(
@@ -195,7 +195,7 @@ class SnapshotBuilder:
             self._drop(branch)
         # reconcile crashed-but-active nodes for display only: a loop that died
         # leaves .status 'active' with no live runtime; fetch the live sessions
-        # once and drop any brief whose session is gone so it rebuilds as the
+        # once and drop any brief whose loop is gone so it rebuilds as the
         # honest 'exited'; a crash doesn't move the .status mtime, so the poller
         # can't catch it -- liveness is checked here EVERY build, ahead of the
         # short-circuit below, or a node that crashed since the last build would

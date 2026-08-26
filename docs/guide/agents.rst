@@ -81,12 +81,43 @@ the full key reference):
 ``model``
    Model id, passed to the agent CLI's model flag. Default: none — the
    agent then runs on its own config-file default (fractal records that
-   model on the step row but does not pass it on the command line).
+   model on the step row but does not pass it on the command line). A
+   routed ``claude`` is the exception: see the openrouter route below.
+
+   A pin is honored or the step fails loudly. The stream driver records
+   every model the agent's stream names; when a completed launch's record
+   does not carry the pin (a gateway slug such as ``anthropic/<id>``, a
+   bare-word alias such as ``opus``, and a dated snapshot all match the
+   id they resolve to — a truncation, variant suffix, or version bump
+   does not), the loop prints ``WARNING: model drop on <step> — pinned
+   <model> but <served> served the step``, records a ``model_drop`` event
+   with the step's lineage, marks the attempt's step row ``model drop
+   (served <served>)``, and re-dispatches the step once. If the
+   re-dispatch also serves off-pin, or cannot run (the deadline is spent,
+   or a stop or spend ceiling intervenes), the iteration fails with
+   ``model drop (served <served>, pinned <model>)`` — never a clean
+   completion over wrong-model output. The node is not killed: the loop
+   moves on and repeats a warning at the next iteration's start while the
+   drop stands unresolved. The iteration row records the model that
+   actually served when every step's recorded model agrees (otherwise it
+   keeps the pin), and ``fractal node list`` composes ``model drop`` into
+   the node's ``detail`` column while the newest iteration carries an
+   unresolved drop (see :doc:`/cli/node`). A step with no pin — no
+   ``model`` key and no ``model:`` frontmatter — is never flagged.
 
 ``effort``
    Reasoning-effort level, passed through unvalidated to the backend's
    effort flag — an unknown level surfaces as the agent's own error.
    Default: none.
+
+A pin reaches the agent only through its flag or the agent's own config
+file, never through the ambient environment: fractal unsets
+``CLAUDE_EFFORT``, ``CLAUDE_CODE_EFFORT_LEVEL``, and
+``CLAUDE_CODE_SUBAGENT_MODEL`` from the environment of every agent launch
+(loop steps and ``fractal node chat`` alike), so an effort or sub-agent
+model setting exported in the shell that runs ``fractal node start`` never
+overrides a node's or step's pin. The seeded node ``settings.json`` sets
+none of them either.
 
 Set them at init or retune them between runs:
 
@@ -202,6 +233,15 @@ missing key fails preflight and any later launch. Model ids on the route
 are OpenRouter slugs, author-prefixed: ``openai/gpt-5.3-codex``,
 ``anthropic/claude-sonnet-4.6``.
 
+A routed ``claude`` with no ``model`` set does not fall back to the model
+in its ``settings.json``: fractal pins ``anthropic/claude-sonnet-4.6``
+through ``ANTHROPIC_MODEL`` for that invocation (the process environment
+outranks the settings file), so set ``model`` explicitly to run anything
+else on the route. Every routed ``claude`` launch also points the
+opus/sonnet/haiku/fable default slots at OpenRouter's
+``~anthropic/claude-*-latest`` aliases, so ``best`` and subagent
+references keep resolving.
+
 Routed ``claude`` prices spend from the stream's token usage through the
 pricing cache instead of recording the CLI's own figure — a slug the cache
 cannot price records no cost at all, never a wrong figure.
@@ -218,8 +258,12 @@ possibly work:
 - a run whose agent prices from tokens needs the pricing cache — a stale
   cache warns and is used, a missing cache that cannot be fetched aborts.
 
-A failed preflight records the run as ``exited`` with the reason. Steps
-that override the agent or provider re-validate at their own launch.
+A failed preflight on a fresh or continued start records the run as
+``exited`` with the reason. On ``fractal node resume`` the paused run is
+preserved instead: the node stays ``paused``, the reason lands on a
+``pause`` event (``resume preflight failed: <reason>``), and a later
+resume in a fixed environment re-adopts the run. Steps that override the
+agent or provider re-validate at their own launch.
 
 Costs
 -----
@@ -239,8 +283,12 @@ From the user's point of view:
 
 - **Cost is recorded, never estimated.** A step whose backend reported no
   figure stores no cost, and readers treat that as *unknown* — never $0.
-  A step that plausibly burned spend without a figure is marked
-  ``unpriced`` in its row metadata.
+  A step that ended abnormally (any status other than ``completed``) with
+  a session on its row but no figure flushed is marked ``unpriced`` in
+  its row metadata; a figure that flushes later strips the marker. A step
+  that completed with no reported figure stores no cost and carries no
+  marker. ``cost spent`` and ``cost breakdown`` disclose on stderr how
+  many ended steps carry no recorded cost, marked or not.
 - **The figure's source varies by backend.** ``claude`` (native),
   ``grok``, ``opencode``, and ``omp`` report their own spend on the
   stream; ``codex`` — and ``claude`` behind ``openrouter`` — are priced

@@ -35,9 +35,12 @@ Static variables are derived from the node itself and shared by every renderer:
 the path set (`REPO_DIR`, `PROJECT_DIR`, `SCOPE_DIR`, `WORKTREE_DIR`,
 `NODE_DIR`, `PLANS_DIR`, `MEMORY_DIR`, `WIKI_DIR`), `CURRENT_BRANCH`, the config
 limits (`MAX_DEPTH`, `MAX_CHILDREN`, `MAX_DESCENDANTS`), and the config-derived
-mode flags (`DETACHED_MODE`, `META_MODE` with `META_TARGET`). `SCOPE_DIR`
-space-joins the scope roots when several are configured, and the project and
-wiki paths nest under the project prefix for a sub-project node.
+mode flags (`DETACHED_MODE`, `META_MODE` with `META_TARGET`); the boot-pinned
+copy the loop exports into every seat adds `FRACTAL_HEADLESS`, the run's launch
+backend (`true`/`false`), so a seat's `fractal node start` inherits the backend
+through the option's envvar. `SCOPE_DIR` space-joins the scope roots when
+several are configured, and the project and wiki paths nest under the project
+prefix for a sub-project node.
 
 Run-scoped variables have no static derivation -- the caller supplies them as
 overrides, and overrides always win over the derived map. The loop passes its

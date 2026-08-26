@@ -39,6 +39,7 @@ __all__ = [
     'test_start_rejects_non_positive_max_cost',
     'test_start_only_from_idle',
     'test_start_continue_from_terminal',
+    'test_start_drain_reaches_the_launch_and_requires_continue',
     'test_start_headless_selects_detached_backend',
     'test_start_serializes_runtime_backends',
     'test_start_continue_re_arms_after_drained_run',
@@ -46,7 +47,6 @@ __all__ = [
     'test_start_continue_rolls_back_retune_on_refusal_or_failed_launch',
     'test_start_without_max_cost_warns_and_runs',
     'test_start_continue_reconciles_crashed_active',
-    'test_headless_liveness_reconciles_a_dead_process_group',
     'test_finish_rejects_non_active',
     'test_stop_rejects_non_active',
     'test_signal_rejects_active_node_without_run',
@@ -54,7 +54,10 @@ __all__ = [
     'test_kill_vets_recorded_group_before_script',
     'test_kill_refuses_an_unknown_process_identity',
     'test_kill_drops_a_dead_group_without_identity_probe',
+    'test_kill_drops_a_foreign_owned_recycled_group',
     'test_kill_sets_killed_status',
+    'test_kill_reaps_idle_node_before_start',
+    'test_kill_stamps_idle_killed_before_the_reap',
     'test_kill_marks_all_active',
     'test_kill_keeps_loop_terminal_status_when_raced',
     'test_retire_sets_status',
@@ -71,6 +74,7 @@ __all__ = [
     'test_signals_reach_deep_through_inactive_intermediate',
     'test_kill_propagates_deep_status_and_keeps_worktrees',
     'test_kill_reaps_booting_descendant',
+    'test_graceful_sweep_reaches_a_descendant_that_appears_mid_sweep',
     'test_merge_lifecycle',
     'test_merge_no_op_when_nothing_to_merge',
     'test_merge_surfaces_script_notices',
@@ -215,6 +219,34 @@ def test_start_continue_from_terminal(
     assert run_scripts
 
 
+def test_start_drain_reaches_the_launch_and_requires_continue(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--drain`` rides the launch argv, and only alongside ``--continue``.
+
+    The flag is the whole wind-down contract: if it never reaches
+    ``start.sh`` (and through it the loop), a run the operator ordered to
+    drain quietly keeps its spawn and re-arm doors open. A plain start
+    carries no drain, and the CLI refuses the flag without ``--continue``
+    rather than accepting a no-op.
+    """
+    node = node_with_db
+    node.config.set('max_cost', 1.0)
+    node.status_set('stopped')
+    run_scripts = _stub_run_script(monkeypatch, node)
+    node.start(continue_run=True, drain=True)
+    launch = next(call for call in run_scripts if call[0] == 'start.sh')
+    assert '--continue' in launch
+    assert '--drain' in launch
+    # a plain continue carries no drain
+    run_scripts.clear()
+    node.status_set('stopped')
+    node.start(continue_run=True)
+    launch = next(call for call in run_scripts if call[0] == 'start.sh')
+    assert '--drain' not in launch
+
+
 def test_start_headless_selects_detached_backend(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -236,7 +268,13 @@ def test_start_serializes_runtime_backends(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tmux start cannot enter while a headless handoff is in progress."""
+    """A tmux start cannot enter while a headless handoff is in progress.
+
+    Both launch arms run ``start.sh`` under the ``.worktrees`` flock, so a
+    competing start blocks until the handoff lets go and then re-reads the
+    status under that same lock -- the loser refuses on ``active`` instead
+    of booting a second loop.
+    """
     node = node_with_db
     node.config.set('max_cost', 1.0)
     node.status_set('stopped')
@@ -244,6 +282,7 @@ def test_start_serializes_runtime_backends(
     raced = threading.Event()
     release = threading.Event()
 
+    # hold the headless handoff inside the lock until released
     def run_script(
         script: str,
         *args: str,
@@ -259,38 +298,18 @@ def test_start_serializes_runtime_backends(
 
     monkeypatch.setattr(node, '_run_script', run_script)
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        # race a tmux start against the held handoff: it blocks on the lock
         launch = pool.submit(node.start, continue_run=True, headless=True)
         assert entered.wait(timeout=5)
         competing = pool.submit(start_tmux)
         assert raced.wait(timeout=5)
         with pytest.raises(concurrent.futures.TimeoutError):
             competing.result(timeout=0.1)
+        # release the handoff: the loser re-reads status and refuses
         release.set()
         launch.result(timeout=5)
         with pytest.raises(RuntimeError, match="Cannot start from status: 'active'"):
             competing.result(timeout=5)
-
-
-def test_headless_liveness_reconciles_a_dead_process_group(
-    node_with_db: Node,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A dead headless group heals through the normal crashed-loop path."""
-    node = node_with_db
-    node.status_set('active')
-    run_id = node.record.run_start()
-    (node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
-    (node.node_dir / '.pgid').write_text('4242\n', encoding='utf-8')
-
-    def dead_group(pgid: int, sig: int) -> NoReturn:
-        raise ProcessLookupError
-
-    monkeypatch.setattr('fractal.core.node.os.killpg', dead_group)
-    node._reconcile_status()
-    assert node.status() == 'exited'
-    run = node.db.read('runs', where={'run_id': run_id})[0]
-    assert run['status'] == 'exited'
-    assert not (node.node_dir / '.pgid').exists()
 
 
 def test_start_continue_re_arms_after_drained_run(
@@ -581,23 +600,38 @@ def test_kill_vets_recorded_group_before_script(
         leader.wait()
 
 
+@pytest.mark.parametrize('probe', ['live', 'permission'])
 def test_kill_refuses_an_unknown_process_identity(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
+    probe: str,
 ) -> None:
-    """Kill leaves the loop active when its process identity is unknown."""
+    """Kill leaves the loop active when its process identity is unknown.
+
+    Alive is not identity: only ``ps`` can say a live group is this loop, so
+    an unanswered probe refuses rather than stamp ``killed`` over a running
+    loop.
+    """
     node = node_with_db
     node.status_set('active')
     node.record.run_start()
     pgid_file = node.node_dir / PGID_FILE
     pgid_file.write_text('4242\n', encoding='utf-8')
+
+    def live_group(pgid: int, sig: int) -> None:
+        if probe == 'permission':
+            raise PermissionError
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', live_group)
     monkeypatch.setattr(
         'fractal.core.node._recorded_group',
         lambda pgid, recorded_at: None,
     )
-    monkeypatch.setattr('fractal.core.node.os.killpg', lambda pgid, sig: None)
 
-    def run_script(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+    def run_script(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
         raise AssertionError('kill.sh must not run after an inconclusive probe')
 
     monkeypatch.setattr(node, '_run_script', run_script)
@@ -612,14 +646,18 @@ def test_kill_drops_a_dead_group_without_identity_probe(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A dead stale group cannot make kill depend on process identity."""
+    """A dead stale group cannot make kill depend on process identity.
+
+    ``ESRCH`` is definitive on its own: a gone group has no leader for ``ps``
+    to date, so the stale record drops without an identity probe.
+    """
     node = node_with_db
     node.status_set('active')
     node.record.run_start()
     pgid_file = node.node_dir / PGID_FILE
     pgid_file.write_text('4242\n', encoding='utf-8')
 
-    def dead_group(pgid: int, sig: int) -> None:
+    def dead_group(pgid: int, sig: int) -> NoReturn:
         raise ProcessLookupError
 
     def recorded_group(pgid: int, recorded_at: float) -> bool:
@@ -627,6 +665,36 @@ def test_kill_drops_a_dead_group_without_identity_probe(
 
     monkeypatch.setattr('fractal.core.node.os.killpg', dead_group)
     monkeypatch.setattr('fractal.core.node._recorded_group', recorded_group)
+    _stub_run_script(monkeypatch, node)
+    node.kill()
+    assert not pgid_file.exists()
+    assert node.status() == 'killed'
+
+
+def test_kill_drops_a_foreign_owned_recycled_group(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill drops a record whose id another user's younger group now holds.
+
+    ``EPERM`` proves a group exists, not that it is the loop; ``ps`` reads any
+    user's process, so a leader younger than the record marks a recycled id
+    and the record drops as it would for a same-user stranger.
+    """
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    pgid_file = node.node_dir / PGID_FILE
+    pgid_file.write_text('4242\n', encoding='utf-8')
+
+    def foreign_group(pgid: int, sig: int) -> NoReturn:
+        raise PermissionError
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', foreign_group)
+    monkeypatch.setattr(
+        'fractal.core.node._recorded_group',
+        lambda pgid, recorded_at: False,
+    )
     _stub_run_script(monkeypatch, node)
     node.kill()
     assert not pgid_file.exists()
@@ -647,6 +715,65 @@ def test_kill_sets_killed_status(
     node.kill()
     # verify status
     assert node.status() == 'killed'
+
+
+def test_kill_reaps_idle_node_before_start(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Kill lands on an idle, never-started node, and start then refuses.
+
+    An unwanted spawn is reapable the moment it registers -- without this,
+    a kill only lands once the node activates, so a breach spawn gets a
+    head start equal to whoever is watching. The kill needs no live
+    session and no run row: it stamps ``killed``, and a later plain
+    ``node start`` refuses, so the node can never activate. It is the
+    designed happy path, so it is also quiet -- the run-scoped signal it
+    has no run for is skipped, not warned about.
+    """
+    node = node_with_db
+    # a never-started node: idle, no run rows, no tmux session
+    monkeypatch.setattr(Node, '_tmux_session_exists', lambda self: False)
+    _stub_run_script(monkeypatch, node)
+    node.kill()
+    assert node.status() == 'killed'
+    assert 'no runs found' not in caplog.text
+    # the attribution still lands: the kill event carries it alone
+    events = node.db.read('events', where={'node': node.branch, 'event': 'kill'})
+    assert [row['metadata'] for row in events] == ['killed by operator']
+    # the killed stamp closes the start path -- the node never activates
+    with pytest.raises(RuntimeError, match='Cannot start from status'):
+        node.start()
+
+
+def test_kill_stamps_idle_killed_before_the_reap(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An idle kill stamps ``killed`` under the flock, before ``kill.sh``.
+
+    The boot window: a kill landing while a start is mid-validation finds
+    no session to reap, so a stamp that trailed the reap would let the
+    loop boot in between, flock-read ``idle``, stamp ``active``, and run
+    forever under a ``killed`` census row -- kill.sh already no-op'd and
+    the loop never polls the kill signal. The pre-reap stamp serializes
+    the outcomes: the loop's flock'd boot check sees ``killed`` and
+    stands down.
+    """
+    node = node_with_db
+    # a never-started node: idle, no run rows, no tmux session
+    monkeypatch.setattr(Node, '_tmux_session_exists', lambda self: False)
+    stamped: list[str] = []
+
+    def run_script(script: str, *args: str) -> subprocess.CompletedProcess[str]:
+        stamped.append(node.status())
+        return subprocess.CompletedProcess([script, *args], 0, '', '')
+
+    monkeypatch.setattr(node, '_run_script', run_script)
+    node.kill()
+    # kill.sh fired exactly once, with the killed stamp already down
+    assert stamped == ['killed']
 
 
 def test_kill_marks_all_active(
@@ -1022,6 +1149,58 @@ def test_kill_reaps_booting_descendant(
     assert ('kill.sh', f'{child.worktree}') in run_scripts
     run = child.record.runs(limit=1)[0]
     assert run['status'] == 'killed'
+
+
+@pytest.mark.parametrize('verb', ['stop', 'finish'])
+def test_graceful_sweep_reaches_a_descendant_that_appears_mid_sweep(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+) -> None:
+    """Stop and finish re-enumerate, so a start landing mid-sweep is signaled.
+
+    A single pass covers only the descendants live when it began, so a
+    child that stamped ``active`` while the sweep was signaling its
+    sibling escaped with no signal row at all -- running on unattended
+    under a stop, and blocking the parent's drain-wait under a finish.
+    The sweep re-reads until no fresh live descendant appears, the way
+    ``kill`` and ``pause`` already do.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    # a second child in its boot window: registered with a run open, its
+    # loop yet to stamp active
+    node_dir = parent.worktree / '.fractal' / 'main.parent'
+    monkeypatch.setenv('_NODE', f'{node_dir}')
+    Node(git_repo).init(name='late')
+    monkeypatch.delenv('_NODE')
+    late = Node(git_repo / '.worktrees' / 'main.parent.late')
+    late.record.run_start()
+    # present all three loops alive, so no enumeration reconciles one away
+    sessions = frozenset({parent.tmux_session, child.tmux_session, late.tmux_session})
+    monkeypatch.setattr('fractal.util.tmux.probe', lambda: sessions)
+    # the late child wins its boot race while the sweep signals its sibling
+    # -- the interleaving a single pass exited over
+    signal_one = getattr(Node, f'_{verb}')
+
+    def _signal_one(
+        self: Node,
+        reason: Optional[str] = None,
+        *,
+        fan_out: bool = False,
+    ) -> None:
+        if self.branch == child.branch:
+            late.status_set('active')
+        signal_one(self, reason, fan_out=fan_out)
+
+    monkeypatch.setattr(Node, f'_{verb}', _signal_one)
+    _stub_run_script(monkeypatch, Node)
+    getattr(parent, verb)()
+    # every descendant carries the signal, the late arrival included, and
+    # each names the parent that ordered it
+    for node in (child, late):
+        row = node.record.signal_get(verb)
+        assert row is not None, node.branch
+    assert parent.record.signal_get(verb) is not None
 
 
 # ------ merge

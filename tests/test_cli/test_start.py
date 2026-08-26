@@ -44,6 +44,7 @@ from .conftest import (
 __all__ = [
     'test_start_resolves_dirs_before_arg_check',
     'test_headless_start_runs_without_tmux',
+    'test_headless_continue_forwards_drain',
     'test_continue_only_flags_reject_a_bare_start',
     'test_start_revalidates_hand_edited_config',
     'test_continue_refuses_to_discard_dirty_project_files',
@@ -167,6 +168,20 @@ def test_headless_start_runs_without_tmux(repo: dict) -> None:
     assert _await_settled(inherited), inherited_result.stdout
     inherited_dir = inherited / '.fractal' / 'main.headlessenv'
     assert (inherited_dir / '.headless').is_file()
+
+
+def test_headless_continue_forwards_drain(repo: dict) -> None:
+    """``--drain`` rides a headless continue through to the detached loop.
+
+    The drain flag travels the same handoff as the backend flag: ``start.sh``
+    forwards it into the detached launch, so a drain run boots headless and
+    settles on a terminal status like any other continue.
+    """
+    worktree = _settled_node(repo, 'headlessdrain')
+    result = _start_continue(repo, worktree, '--drain', '--headless')
+    assert result.returncode == 0, result.stderr
+    assert 'Started headless node:' in result.stdout
+    assert _await_settled(worktree), result.stdout
 
 
 @pytest.mark.parametrize('flag', ['--clean', '--max-cost=0.5'])
@@ -375,7 +390,7 @@ def test_continue_from_killed_prints_the_countermand(repo: dict) -> None:
     assert killed.returncode == 0, killed.stderr
     # a trailing refused kill lands failed on the event stream
     refused = _run(worktree, 'node', 'kill')
-    assert refused.returncode == 1
+    assert refused.returncode == 2
     result = _start_continue(repo, worktree)
     assert result.returncode == 0, result.stderr
     assert 'Previous run killed by operator: wedged' in result.stdout

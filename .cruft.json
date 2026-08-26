@@ -1,6 +1,6 @@
 {
   "template": "https://github.com/plasma-ai/templates.git",
-  "commit": "0b817340c1f4c0c1f000604170b5aac9d1d86900",
+  "commit": "3e122fe5619de93a1c334d8ed416c4acaf912a19",
   "checkout": null,
   "context": {
     "cookiecutter": {
@@ -12,7 +12,7 @@
         "package": "plasma-fractal",
         "title": "Fractal",
         "description": "Hierarchical agent loops with recursive self-organization.",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "authors": [
           {
             "name": "Plasma AI",
@@ -39,7 +39,7 @@
         "docs": "docs.plasma.ai/fractal"
       },
       "_template": "https://github.com/plasma-ai/templates.git",
-      "_commit": "0b817340c1f4c0c1f000604170b5aac9d1d86900"
+      "_commit": "3e122fe5619de93a1c334d8ed416c4acaf912a19"
     }
   },
   "directory": "package"

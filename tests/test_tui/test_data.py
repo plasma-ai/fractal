@@ -129,22 +129,30 @@ def test_tree_shows_crashed_active_as_exited(
 
 
 @pytest.mark.parametrize(
-    ('probe', 'recorded', 'expected'),
+    ('backend', 'probe', 'recorded', 'expected'),
     [
-        ('live', True, 'active'),
-        ('permission', False, 'active'),
-        ('recycled', False, 'exited'),
-        ('unknown', None, 'active'),
+        ('headless', 'live', True, 'active'),
+        ('headless', 'permission', False, 'exited'),
+        ('headless', 'permission', None, 'active'),
+        ('headless', 'recycled', False, 'exited'),
+        ('headless', 'unknown', None, 'active'),
+        ('bare', 'live', True, 'active'),
+        ('bare', 'recycled', False, 'exited'),
     ],
 )
 def test_tree_reconciles_headless_process_identity(
     pair_tree: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    backend: str,
     probe: str,
     recorded: Optional[bool],
     expected: str,
 ) -> None:
-    """Headless display liveness is conservative and rejects PID reuse."""
+    """Process-group display liveness mirrors the lifecycle law.
+
+    EPERM arbitrates by identity, only a failed ``ps`` stays active, and a
+    bare loop renders as core judges it.
+    """
     branch = 'main.alpha'
     Node(pair_tree / '.worktrees' / branch).status_set('active')
     data = TuiData(resolve_node(pair_tree))
@@ -152,7 +160,8 @@ def test_tree_reconciles_headless_process_identity(
     builder.build('main')
     node_dir = data.node_dir(branch)
     assert node_dir is not None
-    (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    if backend == 'headless':
+        (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
     (node_dir / '.pgid').write_text('4242\n', encoding='utf-8')
     monkeypatch.setattr(data, 'live_sessions', frozenset)
     if probe == 'permission':
@@ -160,11 +169,11 @@ def test_tree_reconciles_headless_process_identity(
         def killpg(pgid: int, signal: int) -> None:
             raise PermissionError
 
-        monkeypatch.setattr('fractal.tui.data.os.killpg', killpg)
+        monkeypatch.setattr('fractal.core.node.os.killpg', killpg)
     else:
-        monkeypatch.setattr('fractal.tui.data.os.killpg', lambda pgid, signal: None)
+        monkeypatch.setattr('fractal.core.node.os.killpg', lambda pgid, signal: None)
     monkeypatch.setattr(
-        'fractal.tui.data._recorded_group',
+        'fractal.core.node._recorded_group',
         lambda pgid, recorded_at: recorded,
     )
     snap = builder.build('main')

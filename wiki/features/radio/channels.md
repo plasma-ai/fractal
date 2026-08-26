@@ -63,3 +63,36 @@ including replies authored by other nodes. The cascade is scoped to the owner's
 channel-space; another node's same-named channel is untouched. Cascades are
 best-effort, not atomic: a message arriving mid-delete can survive the channel
 row's removal.
+
+## Sealed mailboxes
+
+The `sealed` config key is the harness half of verifier isolation: while set,
+every message the node hosts is held out of its *own* seat's context —
+`Radio.messages` returns empty, `Radio.read` refuses with `PermissionError`, and
+`Radio.thread` drops hosted rows — keyed on the caller (`Radio.seal_binds`: the
+loop-exported `_NODE` names the sealed node itself, and an env scrub falls back
+to the node owning the cwd). The hold covers every verb that would curate or
+adjudicate a hosted row, not just the read surfaces: `Radio.save` and
+`Radio.unsave` (the archive is a body surface, and its integrity belongs to the
+adjudicator keeping it), `Radio.react` and `Radio.reply` (a seat that may not
+read a message may not answer it, and the reply's routing resolves and reports
+the held message's sender). Operator shells and other nodes are never held and
+the sealed node's own writes stay visible (verdicts still file).
+
+Because the seal is keyed on the caller, it alone cannot answer a seat that
+*moves*: unset `_NODE`, step into a sibling worktree, and the caller resolves to
+a real but wrong node the seal never binds. What closes that is the layer under
+it — the owner-only channel rule, applied to every surface that emits a body.
+`Radio.read` has always enforced it; `Radio.reject_foreign_bodies` extends the
+same rule to the listings that carry the `data` column
+(`messages --json --body`, `messages --saved`, `feed --saved`) and
+`radio thread` resolves its reader the way `read` does. So the mailbox selector
+(`--path`) picks *which* mailbox is viewed and never *who* is viewing it:
+whoever the mover resolves to, only the mailbox's owner may take its held bodies
+out — and for the owner the seal itself holds them.
+
+`config set sealed=false` is the unsealing act, and it is not the sealed seat's
+to perform — `Config.set` refuses a self-unseal, since one sanctioned call from
+inside would hand the seat every held message and leave every other guard
+decorative. The lawful unsealing path — which operator, on what finding — is
+deployment canon, not harness law.

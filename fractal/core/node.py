@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import functools
+import itertools
 import json
 import logging
 import os
 import pathlib
+import re
 import signal
 import subprocess
+import sys
 import time
 import typing
 from collections.abc import Callable, Iterator
@@ -65,6 +68,12 @@ _STALE_AGE_FLOOR_SECONDS = 300.0
 # the listing's spend column is a steering read, not an invoice, so it
 # rounds to cents -- the ledger commands report the full precision
 _SPEND_PRECISION = 2
+
+# recorded reason heads of a launch that could not exec: a spawn that never
+# started, and a wrapper that ran and exited 127 (the 'command not found'
+# convention). Both are the class the loop's billing breaker refuses to arm
+# on, so the census mirror must disqualify both too
+_CANNOT_EXEC_REASONS = ('agent launch failed', 'agent error (exit 127)')
 
 
 class Node:
@@ -305,32 +314,32 @@ class Node:
         """Return whether this node uses the detached process backend."""
         return (self.node_dir / HEADLESS_FILE).is_file()
 
-    def _headless_process_exists(self: Node) -> Optional[bool]:
-        """Return whether the node's recorded headless process group is alive.
-
-        The launcher records the group before it execs the loop, closing the
-        boot window where an ``idle`` node is already running. The record's
-        timestamp also fences PID reuse through :func:`_recorded_group`, so a
-        stale marker never makes an unrelated same-user process look like this
-        node's loop. ``None`` means the live group's identity could not be
-        verified.
-        """
-        pgid_file = self.node_dir / PGID_FILE
-        try:
-            recorded_at = pgid_file.stat().st_mtime
-            pgid = int(pgid_file.read_text(encoding='utf-8').strip())
-            os.killpg(pgid, 0)
-        except (FileNotFoundError, ValueError, ProcessLookupError):
-            return False
-        except PermissionError:
-            return None
-        return _recorded_group(pgid, recorded_at)
-
     def _loop_exists(self: Node) -> Optional[bool]:
-        """Return whether this node's selected runtime still hosts its loop."""
+        """Return whether a live loop still runs this node (``None`` unknown).
+
+        A ``.headless`` launch never joined a tmux server, so its recorded
+        process group (``.pgid``, written by :meth:`_launch_headless` before
+        the loop boots) is the whole answer and tmux is never asked -- a host
+        without tmux still heals it, and a ``.socket`` inherited from a tmux
+        shell cannot mislead it. Every other node asks tmux on the loop's
+        recorded socket (:meth:`_tmux_session_exists`). A definitive "no such
+        session" is proof only for a loop that recorded a socket: ``fractal
+        node _loop`` is a supported bare entry point (the harness, a cron
+        host) that joins no server, so a socket-less node's own live,
+        identity-checked group (:func:`_group_alive`) overrules the probe and
+        an unverified group leaves the answer unknown. A socket-recorded loop
+        gets no overrule: its group outliving the pane is the orphan the reap
+        exists for. ``None`` from either probe never reads as gone.
+        """
         if self.headless:
-            return self._headless_process_exists()
-        return self._tmux_session_exists()
+            return _group_alive(self.node_dir / PGID_FILE)
+        alive = self._tmux_session_exists()
+        # a bare launch is judged by its own group; an unknown group stays unknown
+        if alive is False and not (self.node_dir / SOCKET_FILE).exists():
+            group = _group_alive(self.node_dir / PGID_FILE)
+            if group is not False:
+                return group
+        return alive
 
     def _reconcile_status(self: Node) -> None:
         """Stamp a crashed-but-active node ``exited``.
@@ -340,13 +349,13 @@ class Node:
         the ``.status`` file ``active`` with no live runtime, wedging the
         reject-active guards. The one-loop-per-node invariant (``start.sh``
         refuses to launch while the runtime exists) makes a missing runtime
-        proof the loop is gone, so
-        stamp the same honest terminal :meth:`Record.run_start` uses for a
-        stranded run -- both the ``.status`` file and the crashed run's
-        still-open runs/iters/steps rows, so a later merge/delete/retire (none
-        of which start a loop) cannot leave the DB reading ``active`` while the
-        status reads ``exited``. The settle also heals any config/registry cap
-        drift (:meth:`Config.reconcile`): a loop that died before its next iteration
+        proof the loop is gone, so stamp the same honest terminal
+        :meth:`Record.run_start` uses for a stranded run -- both the
+        ``.status`` file and the crashed run's still-open runs/iters/steps
+        rows, so a later merge/delete/retire (none of which start a loop)
+        cannot leave the DB reading ``active`` while the status reads
+        ``exited``. The settle also heals any config/registry cap drift
+        (:meth:`Config.reconcile`): a loop that died before its next iteration
         boundary never ran the boundary reconcile, and the dead row would
         otherwise carry the drift forever. A no-op unless the status is
         ``active``, so a settled node never pays the tmux probe -- and a
@@ -358,6 +367,10 @@ class Node:
         ignorance -- a shell without runtime visibility must not kill a healthy
         loop's process groups, and a shell on a *different* tmux socket gets its
         proof from the loop's recorded one (see :meth:`_tmux_session_exists`).
+        A definitive "no such session" is proof only for a loop that recorded
+        a socket: a bare ``node _loop`` launch never joined a server, so its
+        own live, identity-checked process group overrules the probe, and a
+        ``.headless`` launch never asks tmux at all (:meth:`_loop_exists`).
 
         Never reconciles the node from inside its own running loop: the loop
         self-finishes (``send_budget_finish`` calls ``node finish``), and a
@@ -382,17 +395,16 @@ class Node:
         """Kill surviving process groups recorded by a dead loop.
 
         The loop records its process group at run start (``.pgid``) and
-        each agent invocation's own group
-        (``.step_pgid``); both are removed on any in-band exit, so a file
-        that outlives the loop runtime marks an out-of-band death (tmux
-        kill/crash, headless process death, host OOM) whose agent may still be
-        running -- and
-        spending -- headless. The reap follows ``kill.sh``'s TERM-grace-KILL
-        cadence and logs an ``orphan`` event naming each reaped pgid.
-        Best-effort: a dead, recycled, or foreign group reads as already
-        gone -- recycled meaning the OS re-issued a dead group's id to an
-        unrelated same-user group, which answers a liveness probe but is
-        younger than its record (:func:`_recorded_group`).
+        each agent invocation's own group (``.step_pgid``); both are removed
+        on any in-band exit, so a file that outlives the loop runtime marks
+        an out-of-band death (tmux kill/crash, headless process death, host
+        OOM) whose agent may still be running -- and spending -- unseen. The
+        reap follows ``kill.sh``'s TERM-grace-KILL cadence and logs an
+        ``orphan`` event naming each reaped pgid. Best-effort: a dead,
+        recycled, or foreign group reads as already gone -- recycled meaning
+        the OS re-issued a dead group's id to an unrelated same-user group,
+        which answers a liveness probe but is younger than its record
+        (:func:`_recorded_group`).
         """
         for name in (PGID_FILE, STEP_PGID_FILE):
             pgid_file = self.node_dir / name
@@ -461,6 +473,125 @@ class Node:
             if worktree:
                 return cls(worktree)
         return None
+
+    @classmethod
+    def resolve_actor(cls: type[Node]) -> Optional[Node]:
+        """Resolve the acting node from the environment, else the cwd.
+
+        The authoritative actor for the guards a seat must not talk its
+        way out of (the mailbox seal, the drain's spawn/re-arm refusals):
+        :meth:`resolve_caller` reads the loop-exported ``_NODE``, which a
+        seat can unset, so an unset env falls back to the node owning the
+        current directory -- a step runs in its own worktree, so the
+        fallback names the same node the export would have.
+
+        Both answers are the seat's to rewrite, so this resolution is
+        never the last word for a guard. A seat that unsets ``_NODE`` and
+        steps into a *sibling* worktree resolves to a real but wrong
+        node; one that steps outside every worktree resolves to no actor
+        and would fail open. Each guard closes that from its own side
+        rather than here: the drain adds process-lineage attribution
+        (:meth:`drain_lineage` -- the recorded agent process group, which
+        moving cannot rewrite), and the mailbox seal sits on the
+        owner-only channel rule, which asks what a caller may read rather
+        than who it claims to be.
+
+        Returns:
+            The acting node, or ``None`` outside any node context.
+
+        """
+        if caller := cls.resolve_caller():
+            return caller
+        # cwd fallback: resolve the directory's worktree root, then its node
+        try:
+            worktree = fractal.util.git.toplevel(pathlib.Path.cwd(), check=False)
+        except OSError:
+            return None
+        if worktree is None:
+            return None
+        node = cls(worktree)
+        return node if node.exists() else None
+
+    def drain_bound(self: Node) -> bool:
+        """Return whether a drain binds this node's own acting seat.
+
+        Drain-ness is recorded on the run (a ``drain`` signal row), not
+        just exported into the seat's environment, so the refusal stands
+        after an env scrub and survives a pause/resume of the drain run.
+        Binds only the draining node's own seat: an operator, or another
+        node, acts normally.
+
+        Returns:
+            Whether the acting node is this node and its open run drains.
+
+        """
+        actor = self.resolve_actor()
+        if actor is None or actor.branch != self.branch:
+            return False
+        try:
+            runs = self.record.runs(limit=1)
+            if not runs or runs[0]['ended_at'] is not None:
+                return False
+            return self.record.signal_get('drain', run_id=runs[0]['run_id']) is not None
+        except Exception:
+            return False
+
+    def drain_lineage(self: Node) -> bool:
+        """Return whether this process runs inside a draining seat of this tree.
+
+        :meth:`drain_bound` asks who the caller *says* it is, and both
+        answers -- the exported ``_NODE`` and the working directory -- are
+        the seat's to rewrite (:meth:`resolve_actor`). A seat that scrubs
+        the environment and steps into a sibling worktree resolves to a
+        real but WRONG node the drain never binds; one that steps outside
+        every worktree resolves to no node and fails open. Neither is a
+        lie the seat can tell about its *process group*: the loop spawns
+        each agent invocation as its own group leader and records the id
+        (``.step_pgid``), so every command that seat runs inherits it.
+        Ask the tree which of its open runs drain, then whether this
+        process sits in one of their seats -- attribution by lineage,
+        which no ``env -u`` or ``cd`` rewrites.
+
+        Identity-checked like the reap's (:func:`_recorded_group`), so a
+        stale handle naming a recycled id never refuses an unrelated
+        caller. Best-effort: an unreadable record or database answers no,
+        leaving the other two drain sources to speak.
+
+        Returns:
+            Whether this process is a seat of a draining run in this tree.
+
+        """
+        try:
+            pgid = os.getpgid(0)
+        except OSError:
+            return False
+        # the tree's open runs carrying a drain signal (the central DB is
+        # per-tree, so this is exactly the trees this caller could act on)
+        query = (
+            'SELECT DISTINCT r.node FROM runs r'
+            ' JOIN signals s ON s.run_id = r.run_id'
+            " WHERE s.signal = 'drain' AND r.ended_at IS NULL"
+        )
+        try:
+            rows = self.db.read(query=query)
+        except Exception:
+            return False
+        for row in rows:
+            worktree_dir = fractal.util.git.find_worktree(
+                repo_dir=self.repo_dir,
+                branch=row['node'],
+            )
+            if worktree_dir is None:
+                continue
+            pgid_file = self.__class__(worktree_dir).node_dir / STEP_PGID_FILE
+            try:
+                recorded_at = pgid_file.stat().st_mtime
+                recorded = int(pgid_file.read_text(encoding='utf-8').strip())
+            except (OSError, ValueError):
+                continue
+            if recorded == pgid and _recorded_group(pgid, recorded_at) is True:
+                return True
+        return False
 
     @classmethod
     def user_nodes(cls: type[Node], path: PathLike) -> list[Node]:
@@ -583,6 +714,87 @@ class Node:
         except RuntimeError:
             return False
 
+    def _validate_charter(
+        self: Node,
+        charter: Optional[pathlib.Path],
+        *,
+        pin: Optional[str],
+    ) -> None:
+        """Validate a profile charter's fill-sheet before any spend.
+
+        The stale-seed gate: four commissions once shipped with stale pins,
+        stale docket rows, or truncated charters, each costing the node's
+        opening seat plus an adjudication. Checks, all pre-worktree:
+
+        - ``--pin`` (when given) resolves to a commit;
+        - the charter carries its two authored sections (a truncated seed
+          dies here);
+        - every ``pin: <sha>`` line in the charter resolves to a commit and
+          matches ``--pin`` (prefix-wise, case-blind) when one is given --
+          a ``pin:`` spelling that is not a hex sha refuses outright;
+        - every ``docket: <path>`` line resolves at the pin (the charter's
+          own when ``--pin`` is absent, else ``HEAD``).
+
+        Args:
+            charter: The profile's ``NODE.md``, or ``None`` (pin-only).
+            pin: The commission pin from ``--pin``, or ``None``.
+
+        Raises:
+            ValueError: On the first fill-sheet violation.
+
+        """
+        repo_dir = self.repo_dir
+
+        def _commit(rev: str) -> bool:
+            cmd = ['rev-parse', '--verify', '--quiet', f'{rev}^{{commit}}']
+            return bool(fractal.util.git.run(cmd, cwd=repo_dir, check=False))
+
+        if pin is not None and not _commit(pin):
+            raise ValueError(f'--pin does not resolve to a commit: {pin!r}')
+        if charter is None:
+            return
+        text = charter.read_text(encoding='utf-8')
+        # the two authored sections bound the seed: a commission truncated
+        # in transit loses the tail first
+        for heading in ('## Instructions', '## Completion Requirements'):
+            if heading not in text:
+                raise ValueError(
+                    f'Profile charter {charter} is missing {heading!r}'
+                    ' (truncated or stale seed).'
+                )
+        # every pin: line is load-bearing -- a spelling the gate cannot read
+        # as a commit sha (symbolic, or truncated below git's four-hex
+        # abbreviation floor) refuses rather than deploying unvalidated
+        pins = []
+        for declared in re.findall(r'^pin:\s*(.*?)\s*$', text, flags=re.M):
+            if not re.fullmatch(r'[0-9a-fA-F]{4,40}', declared):
+                raise ValueError(
+                    f'Charter pin is not a commit sha: {declared!r} (stale seed).'
+                )
+            pins.append(declared.lower())
+        for declared in pins:
+            if not _commit(declared):
+                raise ValueError(
+                    f'Charter pin does not resolve to a commit: {declared!r}'
+                    ' (stale seed).'
+                )
+            if pin is not None and not (
+                pin.lower().startswith(declared) or declared.startswith(pin.lower())
+            ):
+                raise ValueError(
+                    f'Charter pin {declared!r} does not match --pin {pin!r}'
+                    ' (stale seed).'
+                )
+        # docket rows must exist at the pin -- an enumerated surface that
+        # moved or never existed is exactly the stale-docket class
+        anchor = pin or (pins[0] if pins else 'HEAD')
+        for row in re.findall(r'^docket:\s*(\S+)\s*$', text, flags=re.M):
+            cmd = ['cat-file', '-e', f'{anchor}:{row}']
+            if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is None:
+                raise ValueError(
+                    f'Docket row does not resolve at {anchor}: {row!r} (stale seed).'
+                )
+
     def init(
         self: Node,
         name: Optional[str] = None,
@@ -594,6 +806,8 @@ class Node:
         meta: Optional[str] = None,
         inherit: Optional[list[str]] = None,
         steps: Optional[PathLike] = None,
+        profile: Optional[str] = None,
+        pin: Optional[str] = None,
         agent: Optional[str] = None,
         provider: Optional[str] = None,
         model: Optional[str] = None,
@@ -618,6 +832,7 @@ class Node:
         detached: Optional[bool] = None,
         local: Optional[bool] = None,
         blind: bool = False,
+        sealed: bool = False,
         reset: bool = False,
         user: bool = False,
     ) -> str:
@@ -647,6 +862,14 @@ class Node:
                 loop's ``NN-`` digit prefix at one width) to seed the
                 node's ``steps/`` from instead of the package seed;
                 mutually exclusive with inheriting ``steps``.
+            profile: Named seed bundle under
+                ``.fractal/profiles/<name>/`` -- its ``steps/`` seeds the
+                step list (like ``steps``) and its ``NODE.md`` seeds a
+                deployment-ready charter, fill-sheet-validated at init;
+                mutually exclusive with ``steps`` and inheriting them.
+            pin: Commission pin (a commit sha): must resolve, and every
+                ``pin:`` declaration in the profile charter must match it
+                -- a stale seed dies at init, not at the first seat.
             agent: Agent type.
             provider: Provider route for the agent (e.g. ``openrouter``;
                 default: the vendor-native endpoint, inherited from the
@@ -677,6 +900,10 @@ class Node:
             detached: Separate agent invocation per step.
             local: Skip pushing to remote after each commit.
             blind: Subscribe to no channels (the parent still reads it).
+            sealed: Seal the node's mailbox -- its own seat cannot read
+                hosted messages until an operator or the parent unseals it
+                (``config sealed=false``, which the sealed seat itself may
+                not run); the hold mechanism for verifier isolation.
             reset: Delete all node files and reinitialize.
             user: Initialize as a user node (DB + radio only).
 
@@ -691,6 +918,17 @@ class Node:
         # caches expect the string form
         if path is not None:
             path = str(path)
+        # a draining seat spawns nothing: the export reaches the seat's
+        # subprocesses and the run's own drain signal backs it after an env
+        # scrub or a pause/resume, so a spawn from a draining run refuses
+        # harness-side (a resumed plan replaying a stale spawn wave was a
+        # whole damage class once); checked ahead of every branch below,
+        # user init included -- a whole new tree, with its own database,
+        # radio, and a root to spawn from, is the largest creation verb here
+        if _draining(self):
+            raise RuntimeError(
+                'Cannot init a node from a draining run (--drain forbids spawns).'
+            )
         # handle user node init (name derived from current branch)
         if user:
             if name:
@@ -741,6 +979,28 @@ class Node:
                     )
             if 'all' in inherit:
                 inherit = ['steps', 'scripts', 'skills', 'config']
+        # resolve a named profile: a repo-provided seed bundle under
+        # .fractal/profiles/<name>/ -- its steps/ seeds the step list
+        # exactly like --steps, and its NODE.md seeds a deployment-ready
+        # charter whose fill-sheet is validated below, so a stale or
+        # truncated seed dies at init instead of at the node's first seat
+        charter: Optional[pathlib.Path] = None
+        if profile is not None:
+            if steps is not None:
+                raise ValueError('--profile cannot be combined with --steps.')
+            if inherit and 'steps' in inherit:
+                raise ValueError('--profile cannot be combined with --inherit=steps.')
+            profile_dir = self.repo_dir / FRACTAL_FOLDER / 'profiles' / profile
+            if not profile_dir.is_dir():
+                raise ValueError(f'No profile found at {profile_dir}.')
+            if (profile_dir / 'steps').is_dir():
+                steps = profile_dir / 'steps'
+            if (profile_dir / 'NODE.md').is_file():
+                charter = profile_dir / 'NODE.md'
+        # the fill-sheet gate: a pinned commission must hold together before
+        # any spend (--pin alone still validates the pin itself)
+        if pin is not None or charter is not None:
+            self._validate_charter(charter, pin=pin)
         # an explicit steps dir is a rival step source to inheriting the
         # parent's -- refuse the combination rather than pick one silently --
         # and it must satisfy the loop's discovery contract, checked here so a
@@ -971,6 +1231,8 @@ class Node:
             args.append(f'--inherit={joined}')
         if steps is not None:
             args.append(f'--steps={steps}')
+        if charter is not None:
+            args.append(f'--charter={charter}')
         if agent:
             args.append(f'--agent={agent}')
         if provider:
@@ -1023,6 +1285,8 @@ class Node:
             args.append('--local')
         if blind:
             args.append('--blind')
+        if sealed:
+            args.append('--sealed')
         if reset:
             args.append('--reset')
         # ensure git excludes
@@ -1402,6 +1666,7 @@ class Node:
         *,
         continue_run: bool = False,
         clean: bool = False,
+        drain: bool = False,
         max_cost: Optional[float] = None,
         headless: bool = False,
     ) -> str:
@@ -1409,9 +1674,12 @@ class Node:
 
         Creates a tmux session, or an independent process group in headless
         mode, that runs the iteration loop. All run parameters are read from
-        ``config.json`` (set at init or edited
-        before launch); ``continue_run`` (with its optional ``max_cost``
-        retune) is the only launch-time action.
+        ``config.json`` (set at init or edited before launch); ``continue_run``
+        (with its optional ``max_cost`` retune) is the only launch-time action.
+
+        ``drain`` runs the continued run as a wind-down: the loop exports
+        ``_DRAIN`` into every seat's environment (init/start/update/resume
+        refuse under it) and injects the DRAIN mode doc into prompts.
 
         A continue re-enters the unsettled pool, so it re-checks the
         width/descendant gates (:meth:`_enforce_rearm_limits`) and re-arms to
@@ -1450,6 +1718,12 @@ class Node:
         # reject user nodes
         if self.is_user:
             raise RuntimeError('Cannot start a user node.')
+        # a draining seat re-arms nothing (the export plus the run's own
+        # durable drain signal, so an env scrub does not lift it)
+        if _draining(self):
+            raise RuntimeError(
+                'Cannot start a node from a draining run (--drain forbids re-arms).'
+            )
         # reconcile a crashed-but-active node so --continue isn't wedged
         self._reconcile_status()
         # validate status
@@ -1609,12 +1883,12 @@ class Node:
         # steering path edits config.json directly, bypassing the init/update
         # setters' checks; a bad duration or cost ordering would otherwise abort
         # the loop after start prints "Started", wedging the node idle with the
-        # only error on a dying tmux pane
+        # only error on a dying pane or in headless.log
         self.config.validate()
         # resolve the stored agent against the registry the way the loop's
         # boot does (the loop reads this node's own config key, never the
         # ancestor walk) -- the same steering path can typo or drop it, and
-        # the loop's registry error would land on the same dying pane
+        # the loop's registry error would land on the same dying pane or log
         agent = self.config.get('agent')
         if not agent:
             raise ValueError('No agent configured; set --agent at node init.')
@@ -1628,6 +1902,8 @@ class Node:
         args = [f'{self._root}']
         if continue_run:
             args.append('--continue')
+        if drain:
+            args.append('--drain')
         if headless:
             args.append('--headless')
         # ensure git excludes
@@ -1719,6 +1995,65 @@ class Node:
         if notices:
             output = '\n'.join([*notices, output])
         return output
+
+    def _launch_headless(
+        self: Node,
+        *,
+        continue_run: bool = False,
+        resume: bool = False,
+        drain: bool = False,
+    ) -> str:
+        """Start the loop in its own process group, recording it before it boots.
+
+        The ``start.sh`` headless arm's handoff (``node _launch``). The
+        interpreter-pinned argv (``sys.executable -m fractal.cli.main``) is
+        immune to PATH shims. The child waits for the ``.pgid`` record before
+        exec'ing the loop, so no probe ever sees a booted headless loop without
+        its record (:func:`_group_alive`); a failed spawn drops the marker and
+        record so ``--continue`` stays the retry path.
+
+        Returns:
+            Confirmation message naming the pid and the log.
+
+        """
+        log_path = self.node_dir / HEADLESS_LOG
+        pgid_file = self.node_dir / PGID_FILE
+        # build the loop argv
+        loop_args = [
+            sys.executable,
+            '-m',
+            'fractal.cli.main',
+            'node',
+            '_loop',
+            f'--path={self._root}',
+        ]
+        if continue_run:
+            loop_args.append('--continue')
+        if resume:
+            loop_args.append('--resume')
+        if drain:
+            loop_args.append('--drain')
+        # hold the exec until the record lands, so the group is probeable first
+        wrapper = (
+            'for _ in {1..100}; do [[ -f "$1" ]] && break; sleep 0.01; done; '
+            '[[ -f "$1" ]] || exit 1; shift; exec "$@"'
+        )
+        command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_file}', *loop_args]
+        try:
+            with log_path.open('w', encoding='utf-8') as stream:
+                process = subprocess.Popen(
+                    command_args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            pgid_file.write_text(f'{process.pid}\n', encoding='utf-8')
+        except Exception:
+            (self.node_dir / HEADLESS_FILE).unlink(missing_ok=True)
+            pgid_file.unlink(missing_ok=True)
+            raise
+        return f'Started headless node: {process.pid} (log: {log_path})'
 
     def attach(self: Node) -> None:
         """Attach to the node's tmux session."""
@@ -1835,6 +2170,81 @@ class Node:
             return f'{reason} (via {verb} of {self.branch})'
         return f'via {verb} of {self.branch}'
 
+    def _fan_out(self: Node, verb: str, reason: str) -> int:
+        """Signal every active descendant, re-enumerating to a fixpoint.
+
+        A single pass covers only the descendants live when it started, so
+        a child whose ``start`` was in flight -- ``idle`` for the moment
+        between ``node start`` returning and its loop's flock'd ``active``
+        stamp -- got no signal row at all and never learned: under ``stop``
+        it runs on unattended after its manager settles, and under
+        ``finish`` the parent's drain-wait then blocks on a child that was
+        never told to finish. Re-read until no fresh live descendant
+        appears, the way :meth:`kill` and :meth:`pause` already do; each
+        branch is attempted exactly once, so the sweep converges even when
+        a child never settles, and each helper guards its own node under
+        the flock (a descendant that settled mid-sweep is skipped, refusal
+        recorded). The rest of the window closes at the child's own end: a
+        loop booting under a pending ancestor signal adopts it
+        (:meth:`cascade_latched`).
+
+        Args:
+            verb: ``'stop'`` or ``'finish'``.
+            reason: The attributed reason for the descendants' signal rows.
+
+        Returns:
+            How many descendants the sweep signaled.
+
+        """
+        signaled = 0
+        attempted: set[str] = set()
+        while True:
+            fresh = [
+                (row['node'], descendant)
+                for row, descendant in self._live_descendants(status='active')
+                if row['node'] not in attempted
+            ]
+            if not fresh:
+                break
+            for branch, descendant in fresh:
+                attempted.add(branch)
+                if verb == 'stop':
+                    descendant._stop(reason, fan_out=True)
+                else:
+                    descendant._finish(reason, fan_out=True)
+                signaled += 1
+        return signaled
+
+    def cascade_latched(self: Node) -> Optional[tuple[str, str]]:
+        """Return the nearest ancestor winding this node's subtree down.
+
+        The graceful-signal twin of :meth:`pause_latched`: ``stop`` and
+        ``finish`` fan out over the descendants live when they sweep, so a
+        node whose own start was in flight is reachable only from its own
+        end -- at boot it asks whether an ancestor is still ``active``
+        carrying a pending ``stop`` or ``finish``, and adopts it
+        (:meth:`Loop._adopt_cascade`). Walks by name so a pruned
+        intermediate never hides a winding-down ancestor, nearest first,
+        and ``stop`` outranks ``finish`` on one node (it ends the run
+        sooner). The node itself is skipped -- a run this loop just opened
+        carries no signal of its own -- and so is the user node, which runs
+        no loop and records no signal for its tree-wide broadcast.
+
+        Returns:
+            The latching ancestor's branch and its pending signal, or
+            ``None`` when the path is clear.
+
+        """
+        for node in self._self_and_ancestors():
+            if node is self or node.is_user:
+                continue
+            if node.status() != 'active':
+                continue
+            for signal in ('stop', 'finish'):
+                if node.record.signal_get(signal) is not None:
+                    return node.branch, signal
+        return None
+
     def finish(self: Node, reason: Optional[str] = None) -> str:
         """Finish the node and its active descendants (children first).
 
@@ -1853,10 +2263,7 @@ class Node:
         # land here): no self guard or signal, just the descendant sweep
         if self.is_user:
             propagated = self._fan_out_reason('finish', reason)
-            finished_count = 0
-            for _, descendant in self._live_descendants(status='active'):
-                descendant._finish(propagated, fan_out=True)
-                finished_count += 1
+            finished_count = self._fan_out('finish', propagated)
             if finished_count == 0:
                 return 'No active nodes to finish.'
             suffix = 's' if finished_count != 1 else ''
@@ -1872,11 +2279,9 @@ class Node:
         # the flock for the race window
         self._signal_guard('finish', 'finish')
         propagated = self._fan_out_reason('finish', reason)
-        # finish descendants first, then self -- each helper guards its own
-        # node under the flock, so a descendant that settled mid-sweep is
-        # skipped (refusal recorded) while the self-act refusal raises
-        for _, descendant in self._live_descendants(status='active'):
-            descendant._finish(propagated, fan_out=True)
+        # finish descendants first, then self -- the sweep re-enumerates to a
+        # fixpoint so a descendant whose start was in flight is reached too
+        self._fan_out('finish', propagated)
         self._finish(reason)
         # build confirmation
         result = 'Finish signal sent (will stop after current iteration)'
@@ -1955,10 +2360,7 @@ class Node:
         # signal, just the descendant sweep
         if self.is_user:
             propagated = self._fan_out_reason('stop', reason)
-            stopped_count = 0
-            for _, descendant in self._live_descendants(status='active'):
-                descendant._stop(propagated, fan_out=True)
-                stopped_count += 1
+            stopped_count = self._fan_out('stop', propagated)
             if stopped_count == 0:
                 return 'No active nodes to stop.'
             suffix = 's' if stopped_count != 1 else ''
@@ -1974,11 +2376,9 @@ class Node:
         # the flock for the race window
         self._signal_guard('stop', 'stop')
         propagated = self._fan_out_reason('stop', reason)
-        # stop descendants first, then self -- each helper guards its own
-        # node under the flock, so a descendant that settled mid-sweep is
-        # skipped (refusal recorded) while the self-act refusal raises
-        for _, descendant in self._live_descendants(status='active'):
-            descendant._stop(propagated, fan_out=True)
+        # stop descendants first, then self -- the sweep re-enumerates to a
+        # fixpoint so a descendant whose start was in flight is reached too
+        self._fan_out('stop', propagated)
         self._stop(reason)
         # build confirmation
         result = 'Stop signal sent (will stop after current step)'
@@ -2010,12 +2410,12 @@ class Node:
     def _killable(self: Node, current: str) -> bool:
         """Return whether ``current`` admits a kill of this node.
 
-        ``active`` and ``paused`` always do. ``idle`` does only while the
-        node's loop runtime is live -- a boot in flight (``start.sh``
-        created the session, the loop's preflight has not stamped
-        ``active`` yet), which a status read alone cannot tell from a
-        never-started node. An inconclusive probe reads as no session:
-        the reap keys off proof a loop lives, never off ignorance.
+        ``active`` and ``paused`` always do, and so does ``idle`` -- it
+        covers both a boot in flight (``start.sh`` created the session,
+        the loop's preflight has not stamped ``active`` yet) and a
+        never-started spawn. Killing at idle stamps ``killed`` so the
+        node never activates: an unwanted spawn is reapable the moment
+        it registers, not only once it starts burning.
 
         Args:
             current: The node status the caller read.
@@ -2024,19 +2424,18 @@ class Node:
             Whether a kill may proceed.
 
         """
-        if current in ('active', 'paused'):
-            return True
-        return current == 'idle' and bool(self._loop_exists())
+        return current in ('active', 'paused', 'idle')
 
     def kill(self: Node, reason: Optional[str] = None) -> str:
-        """Kill the node and its active or paused descendants (children first).
+        """Kill the node and its unsettled descendants (children first).
 
         Reaps each loop runtime and marks its active rows ``killed``. Paused
         nodes are killable -- the escape hatch for a parked subtree; with no
         loop alive the kill is pure bookkeeping (``kill.sh`` no-ops and the
-        open rows close ``killed``). A booting node -- session up, ``active``
-        not yet stamped -- is killable too (:meth:`_killable`), so a spawn
-        in flight when the kill lands is reaped, not skipped.
+        open rows close ``killed``). Idle nodes are killable too
+        (:meth:`_killable`) -- a spawn in flight when the kill lands is
+        reaped, not skipped, and a never-started spawn is stamped
+        ``killed`` so it can never activate.
 
         Args:
             reason: Optional reason for killing.
@@ -2053,7 +2452,7 @@ class Node:
             self._signal_refuse(
                 verb='kill',
                 event='kill',
-                reason=f'node is not active or paused (status: {current})',
+                reason=f'node is not active, paused, or idle (status: {current})',
             )
         propagated = self._fan_out_reason('kill', reason)
         # reap descendants first (best-effort), then self
@@ -2100,10 +2499,18 @@ class Node:
 
         The status re-read, process-group vet, and kill's event/signal writes
         stay atomic under the ``.worktrees`` flock; ``kill.sh`` and the row
-        marking run outside the lock. The attribution -- ``killed by
-        <actor>``, with the reason appended when one is given -- lands
-        identically on the kill event, the ``kill`` signal, and the killed run
-        row, so every surface answers who ended the run.
+        marking run outside the lock. An idle target is also stamped ``killed``
+        under that flock: it has no terminal to clobber and possibly no session
+        yet, and only a stamp that precedes the reap lets the loop's flock'd
+        boot check stand a racing start down -- stamped after, the loop boots
+        in the window, kill.sh has already no-op'd, and nothing ever reaps it
+        (the loop never polls the kill signal). An unverifiable recorded group
+        refuses before any kill state is written, naming the ``ps`` check and
+        the record to clear. The attribution -- ``killed by <actor>``, with
+        the reason appended when one is given -- lands identically on the kill
+        event, the ``kill`` signal, and the killed run row, so every surface
+        answers who ended the run; a never-started spawn has none of the
+        latter two, and its event alone carries the attribution.
         """
         # compose the attribution: who killed, and why when a reason rides
         caller = self.resolve_caller()
@@ -2117,49 +2524,46 @@ class Node:
                 self._signal_refuse(
                     verb='kill',
                     event='kill',
-                    reason=f'node is not active or paused (status: {current})',
+                    reason=f'node is not active, paused, or idle (status: {current})',
                     fan_out=fan_out,
                 )
                 return ''
-            # vet the recorded process groups before writing kill state:
-            # kill.sh gates on liveness alone, and a recycled id (the OS
-            # re-issued a dead group's id to an unrelated same-user group)
-            # answers that probe; an unknown identity must refuse before the
-            # node can claim a still-running loop was killed
+            # vet the recorded process groups before writing kill state: kill.sh
+            # gates on liveness alone, and a recycled id (the OS re-issued a dead
+            # group's id to an unrelated same-user group) answers that probe --
+            # drop a record whose group is gone or not the one it named, and
+            # refuse on an unverifiable one before the node can claim a
+            # still-running loop was killed
             for name in (PGID_FILE, STEP_PGID_FILE):
                 pgid_file = self.node_dir / name
-                try:
-                    recorded_at = pgid_file.stat().st_mtime
-                    pgid = int(pgid_file.read_text(encoding='utf-8').strip())
-                except (FileNotFoundError, ValueError):
-                    continue
-                try:
-                    os.killpg(pgid, 0)
-                except ProcessLookupError:
-                    pgid_file.unlink(missing_ok=True)
-                    continue
-                except PermissionError:
+                alive = _group_alive(pgid_file)
+                if alive is None:
+                    pgid = pgid_file.read_text(encoding='utf-8').strip()
                     self._signal_refuse(
                         verb='kill',
                         event='kill',
-                        reason='the process identity probe gave no answer',
+                        reason=(
+                            'the process identity probe gave no answer for process'
+                            f' group {pgid}, so the loop may still be running; check'
+                            f' ps -p {pgid} and remove the {name} record from the node'
+                            ' directory if that group is not this node'
+                        ),
                         fan_out=fan_out,
                     )
                     return ''
-                recorded = _recorded_group(pgid, recorded_at)
-                if recorded is None:
-                    self._signal_refuse(
-                        verb='kill',
-                        event='kill',
-                        reason='the process identity probe gave no answer',
-                        fan_out=fan_out,
-                    )
-                    return ''
-                if not recorded:
+                if alive is False:
                     pgid_file.unlink(missing_ok=True)
-            # set signal and log event; the tmux kill runs outside the lock
+            # set signal and log event; the reap runs outside the lock
             event_id = self.record.event_start('kill', metadata=label)
-            self.record.signal_set('kill', label)
+            # a never-started spawn has no run for a signal to hang off -- the
+            # kill event and the killed stamp are its whole record, so skip
+            # the write rather than warn over a reap that worked
+            if self.record.runs(limit=1):
+                self.record.signal_set('kill', label)
+            # an idle target is stamped here, not after the reap -- see the
+            # docstring: the boot-window race is only closed flock-to-flock
+            if current == 'idle':
+                self.status_set('killed')
         try:
             result = self._run_script('kill.sh', f'{self._root}')
         except Exception:
@@ -2174,7 +2578,7 @@ class Node:
         # already fenced, so the status stamp must not overwrite either
         if self.exists():
             self._mark_active_killed(skip=event_id, metadata=label)
-            if self.status() in ('active', 'paused'):
+            if self.status() in ('active', 'paused', 'idle'):
                 self.status_set('killed')
         if event_id is not None:
             self.record.event_end(event_id=event_id, status='completed')
@@ -2301,6 +2705,13 @@ class Node:
             Confirmation message.
 
         """
+        # a draining seat re-arms nothing (export plus the run's durable
+        # drain signal) -- relaunching a parked subtree from inside a
+        # wind-down is the one expanding verb the other guards miss
+        if _draining(self):
+            raise RuntimeError(
+                'Cannot resume a node from a draining run (--drain forbids re-arms).'
+            )
         # a tree-wide resume releases the latch first -- new starts and
         # spawns are legal again the moment the release begins, even when
         # nothing is left parked to relaunch
@@ -3126,25 +3537,34 @@ class Node:
             # (the user node runs no loop, so only descendants can hold a
             # runtime): one pass per guard, mirroring the script's ordering
             descendants = tree._live_descendants()
-            # probe each node's recorded runtime: headless through its process
-            # group, tmux through the socket the loop recorded at boot (see
-            # _tmux_session_exists); an inconclusive runtime probe means the
-            # node may still be running, so the irreversible teardown refuses
-            # rather than tearing down blind
+            # probe each node through the one liveness law: a socket-recording
+            # loop through the server it recorded at boot, a headless or
+            # socket-less loop through its recorded process group (see
+            # _loop_exists); an inconclusive answer means the node may still be
+            # running, so the irreversible teardown refuses rather than tearing
+            # down blind
             for _, descendant in descendants:
                 alive = descendant._loop_exists()
+                pgid_file = descendant.node_dir / PGID_FILE
                 if alive is None:
                     raise RuntimeError(
-                        f'Cannot {verb}: the runtime probe gave no answer, so'
-                        ' nodes may still be running. Restore runtime'
-                        ' visibility and retry.'
+                        f'Cannot {verb}: the runtime probe gave no answer for'
+                        f' {descendant.branch}, so it may still be running. Check'
+                        ' tmux list-sessions (on the socket in .socket when one is'
+                        f' recorded) and ps -p against {pgid_file}, then retry.'
                     )
                 if alive:
-                    runtime = (
-                        f'headless (log: {descendant.node_dir / HEADLESS_LOG})'
-                        if descendant.headless
-                        else f'in tmux ({descendant.tmux_session})'
+                    group_backed = descendant.headless or (
+                        not (descendant.node_dir / SOCKET_FILE).exists()
+                        and pgid_file.exists()
                     )
+                    if group_backed:
+                        pgid = pgid_file.read_text(encoding='utf-8').strip()
+                        runtime = f'as process group {pgid}'
+                        if descendant.headless:
+                            runtime += f' (log: {descendant.node_dir / HEADLESS_LOG})'
+                    else:
+                        runtime = f'in tmux ({descendant.tmux_session})'
                     raise RuntimeError(
                         f'Cannot {verb}: node is still running {runtime}.'
                         f' Kill it first with: fractal node kill'
@@ -3235,11 +3655,158 @@ class Node:
             rows = self.record.runs(limit=1)
             if rows and rows[0]['status'] == 'exited' and rows[0]['metadata']:
                 detail = rows[0]['metadata']
+        if status == 'completed':
+            # the completed landings are different facts: an exhausted
+            # iteration budget records its cap, while a goal-met finish
+            # leaves the run reason-less (or carries a cap-overshoot note,
+            # which is still done-conditions-met) -- name the run-out and a
+            # dead final iteration so a census never reads either as a clean
+            # done-conditions-met end
+            rows = self.record.runs(limit=1)
+            if rows and rows[0]['status'] == 'completed':
+                reason = rows[0]['metadata'] or ''
+                if reason.startswith('Reached max iterations'):
+                    detail = f'run exhausted: {reason}'
+                elif reason.endswith('final iteration failed'):
+                    detail = reason
         # an unresolved model drop composes onto the qualifier (the metadata
         # append shape), so neither fact hides the other
         if self._model_dropped():
             detail = f'{detail}; model drop' if detail else 'model drop'
+        # an iteration-number gap composes the same way: numbers that
+        # advanced with no recorded row are iterations that never executed
+        if gap := self._iteration_gap():
+            detail = f'{detail}; {gap}' if detail else gap
+        # the billing breaker is the loudest fact on the row while it holds
+        if self._billing_backoff():
+            detail = f'{detail}; PAUSED: billing' if detail else 'PAUSED: billing'
         return detail
+
+    def end_reason(self: Node) -> Optional[str]:
+        """Return the typed token naming why a settled node's run ended.
+
+        The machine counterpart of :meth:`status_detail`'s prose: a
+        closed vocabulary read off the latest run row's typed facts and
+        the exact reason strings the loop itself records, never composed
+        prose split back apart. ``completed`` rows read ``goal_met`` (a
+        drained finish -- a cap-overshoot note is still
+        done-conditions-met), ``run_exhausted`` (the iteration cap), or
+        ``final_iteration_failed`` (a drained finish whose last
+        iteration died). ``exited`` rows read ``cost_budget`` --
+        exited/0 is the DB-level budget-landing discriminator, every
+        other exited path keeps 1 -- ``timeout``, ``setup_abort``, or
+        ``final_iteration_failed`` (the iteration cap landing on a dead
+        final iteration); any other recorded reason (an unexpected exit,
+        a kill/retire that beat the boot, a failed resume preflight)
+        maps ``other``, so ``None`` keeps meaning nothing recorded (a
+        reconcile-healed crash closes its rows reason-less). Every other
+        status reads ``None``. Reads the stored status without
+        reconciling: a crashed-but-active node's open run carries no
+        reason before the heal and none after it.
+
+        Returns:
+            The token, or ``None`` when no run reason is recorded.
+
+        """
+        status = self.status()
+        if status not in ('completed', 'exited'):
+            return None
+        rows = self.record.runs(limit=1)
+        if not rows or rows[0]['status'] != status:
+            return None
+        reason = rows[0]['metadata'] or ''
+        if status == 'exited':
+            # the budget landing is typed by its exit code alone -- the
+            # recorded reason quotes free-form figures
+            if rows[0]['exit_code'] == 0:
+                return 'cost_budget'
+            if reason.startswith('Timed out at iteration '):
+                return 'timeout'
+            if reason.startswith('setup failed x'):
+                return 'setup_abort'
+            if reason.startswith('Reached max iterations') and reason.endswith(
+                'final iteration failed'
+            ):
+                return 'final_iteration_failed'
+            return 'other' if reason else None
+        # completed: the run-out and the dead final iteration are named so
+        # neither reads as a clean done-conditions-met end (mirrors
+        # status_detail's discrimination)
+        if reason.startswith('Reached max iterations'):
+            return 'run_exhausted'
+        if reason.endswith('final iteration failed'):
+            return 'final_iteration_failed'
+        return 'goal_met'
+
+    def _billing_backoff(self: Node) -> bool:
+        """Return whether the newest launches carry the billing signature.
+
+        Three or more consecutive newest closed launches, each failed,
+        instant, and zero-cost -- the loop is backing off dead credits
+        (its own breaker uses the same signature), so the census must say
+        so loudly rather than render an idle-looking active row. A
+        cannot-exec launch is the class the loop's breaker refuses to arm
+        on, so it disqualifies the streak here too -- a broken agent
+        install must never steer the operator at a credit refill. Both of
+        its recorded shapes count: a spawn that never execs
+        (``agent launch failed``) and a wrapper that runs and exits 127,
+        the ``command not found`` convention (``agent error (exit 127)``
+        -- the step row's own exit code is the binary failure marker, so
+        the reason is where the code survives). Active nodes only: a
+        settled node's trailing failures are history.
+        """
+        if self.status() != 'active':
+            return False
+        runs = self.record.runs(limit=1)
+        if not runs:
+            return False
+        streak = 0
+        for row in self.record.steps(run_id=runs[0]['run_id']):
+            # bookkeeping rows are not launches: the never-run tail booked
+            # after a failure, and any still-open row
+            if row['ended_at'] is None or (
+                row['status'] == 'stopped' and row['metadata'].startswith('failed on')
+            ):
+                continue
+            # a cannot-exec launch books failed/instant with no cost, but is
+            # not billing-shaped -- either recorded reason (retry-marker safe:
+            # the marker is a suffix) breaks the streak like a paid failure
+            if row['metadata'].startswith(_CANNOT_EXEC_REASONS):
+                return False
+            if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
+                return False
+            elapsed = fractal.util.time.elapsed(row['started_at'])
+            elapsed -= fractal.util.time.elapsed(row['ended_at'])
+            if elapsed >= 10:
+                return False
+            streak += 1
+            if streak >= 3:
+                return True
+        return False
+
+    def _iteration_gap(self: Node) -> str:
+        """Return the latest run's iteration-gap label, or ``''``.
+
+        Recorded iteration rows are the execution trace: numbers that jump
+        (2.18 recorded, then 2.23) mean scheduled iterations were consumed
+        with zero execution -- cadence-keyed law and budget arithmetic skew
+        silently unless the gap is flagged. Reads the latest run alone and
+        names its newest gap.
+        """
+        runs = self.record.runs(limit=1)
+        if not runs:
+            return ''
+        run_id = runs[0]['run_id']
+        iters = self.record.iters(run_id=run_id)
+        numbers = sorted({row['iter'] for row in iters}, reverse=True)
+        for newer, older in itertools.pairwise(numbers):
+            if newer != older + 1:
+                first, last = older + 1, newer - 1
+                span = f'{run_id}.{first}'
+                if last != first:
+                    span += f'-{run_id}.{last}'
+                return f'iteration gap {span}'
+        return ''
 
     def _model_dropped(self: Node) -> bool:
         """Return whether the newest iteration carries an unresolved model drop.
@@ -3347,7 +3914,9 @@ class Node:
         enforced at -- the current run's subtree spend -- and is blank for
         a node with no recorded runs. ``status`` is always bare, with any
         qualifier (a pending signal, an ``exited`` run's end reason, an
-        ``orphaned`` flag, a ``model drop`` marker) in ``detail``. The
+        ``orphaned`` flag, a ``model drop`` marker, an ``iteration gap``)
+        in ``detail``; ``end_reason`` carries a settled row's typed end
+        token (:meth:`end_reason`), ``None`` when nothing is recorded. The
         ``last`` column renders each
         row's newest activity instant as a compact age, flagged (``12m!``)
         when an active node has sat quiet past ``max(step_timeout, 5m)``.
@@ -3366,7 +3935,8 @@ class Node:
                 view). Read-only -- it does not persist the relabel.
             decorated: Record each descendant's status qualifier (a
                 pending signal, an exited run's end reason, a model-drop
-                marker) in its ``detail``; display-only, gated off for hot
+                marker) in its ``detail`` and its typed end token in its
+                ``end_reason``; display-only, gated off for hot
                 paths such as ``--count``.
 
         Returns:
@@ -3381,33 +3951,38 @@ class Node:
             # node (live runtime) to 'active' -- display-only, mirroring the TUI
             # snapshot reconcile, so --live is the authoritative
             # settled-vs-crashed view; the batched probe only nominates
-            # candidates, and each relabel confirms on the node's recorded
-            # socket (a tmux answer is evidence about one server only -- see
-            # _tmux_session_exists); an inconclusive runtime probe proves
-            # nothing, so the stored status stands
+            # candidates, and each relabel confirms through the node's own
+            # liveness law (see _loop_exists); an inconclusive runtime probe
+            # proves nothing, so the stored status stands
             sessions = fractal.util.tmux.probe()
             rows = []
             for row, node in self._live_descendants(max_depth=max_depth):
                 current = _base_status(row.get('status'))
-                if node.headless:
-                    alive: Optional[bool] = node._headless_process_exists()
-                elif sessions is None:
-                    alive = None
-                elif node.tmux_session in sessions:
-                    alive = True
-                else:
-                    alive = node._tmux_session_exists()
-                if current == 'active':
-                    if alive is False:
-                        row = {**row, 'status': 'exited'}
-                    # a started child holds 'idle' until its loop stamps
-                    # 'active' after preflight, but its session is already
-                    # live -- read the boot window as 'active', so a finishing
-                    # ancestor's drain never completes over a child started
-                    # seconds earlier; a sessionless idle node (spawned, never
-                    # started) stays idle and never blocks a drain
-                elif current == 'idle' and alive:
-                    row = {**row, 'status': 'active'}
+                if current in ('active', 'idle'):
+                    # the batched listing settles a tmux loop it names; anything
+                    # else (unlisted, headless, or no tmux answer) confirms
+                    # through the node's own liveness law -- recorded socket or
+                    # process group
+                    if (
+                        sessions is not None
+                        and not node.headless
+                        and node.tmux_session in sessions
+                    ):
+                        alive: Optional[bool] = True
+                    else:
+                        alive = node._loop_exists()
+                    if current == 'active':
+                        if alive is False:
+                            row = {**row, 'status': 'exited'}
+                        # a started child holds 'idle' until its loop stamps
+                        # 'active' after preflight, but its session is already
+                        # live -- read the boot window as 'active', so a
+                        # finishing ancestor's drain never completes over a
+                        # child started seconds earlier; a sessionless idle node
+                        # (spawned, never started) stays idle and never blocks a
+                        # drain
+                    elif current == 'idle' and alive:
+                        row = {**row, 'status': 'active'}
                 rows.append(row)
         else:
             rows = self.child_list(max_depth=max_depth)
@@ -3496,13 +4071,21 @@ class Node:
                 if run_id is not None:
                     spend = round(node.cost.spent(run_id=run_id), _SPEND_PRECISION)
             # 'detail' leads the merge so an orphan flag set above wins it,
-            # and every row carries the key either way
-            row = {'detail': None, **row, **drifted, 'spend': spend, 'last': last}
+            # and every row carries both qualifier keys either way
+            row = {
+                'detail': None,
+                'end_reason': None,
+                **row,
+                **drifted,
+                'spend': spend,
+                'last': last,
+            }
             capped.append(row)
         rows = capped
         # record each active descendant's pending stop/finish signal (and each
-        # exited one's end reason) in 'detail'; 'status' stays bare, so the
-        # filters below select on the column itself
+        # exited one's end reason) in 'detail', and each settled one's typed
+        # end token in 'end_reason'; 'status' stays bare, so the filters
+        # below select on the column itself
         if decorated:
             worktrees = fractal.util.git.worktree_map(self.repo_dir)
             rows = [self._detail_status(row, worktrees) for row in rows]
@@ -3522,13 +4105,14 @@ class Node:
         row: dict,
         worktrees: dict[str, pathlib.Path],
     ) -> dict:
-        """Fill a descendant's ``detail`` with its status qualifier.
+        """Fill a descendant's ``detail`` and ``end_reason`` qualifiers.
 
         Display helper for ``list``: for a descendant whose own stored
         status still matches the row's, records its :meth:`status_detail`
         (``pausing`` / ``stopping`` / ``finishing`` / the run's end reason
         / the ``model drop`` marker -- which any status can carry, so no
-        stored-status gate scopes the consult) in the row's ``detail``.
+        stored-status gate scopes the consult) in the row's ``detail``,
+        and its :meth:`end_reason` token in the row's ``end_reason``.
         The row's ``status`` stays bare. A diverged row (a stale registry
         value, or ``--live``'s display-only relabel of a crashed ``active``
         node) is left alone without consulting ``status_detail``, whose
@@ -3546,8 +4130,11 @@ class Node:
             node = self.__class__(worktree_dir)
             if node.exists() and node.status() == stored:
                 detail = node.status_detail()
-                if detail and node.status() == stored:
-                    return {**row, 'detail': detail}
+                if node.status() == stored:
+                    decorated = {**row, 'end_reason': node.end_reason()}
+                    if detail:
+                        decorated['detail'] = detail
+                    return decorated
         return row
 
     def _heal_crashed(
@@ -3559,8 +4146,11 @@ class Node:
         Reads are where staleness is observed: a row still ``active`` with no
         live runtime is healed through the child's own
         :meth:`_reconcile_status` (persisted, not just relabeled) and re-read.
-        Tmux nodes share one batched probe; headless nodes use their recorded
-        process groups. A row without a live node (worktree gone) passes
+        One batched tmux probe nominates tmux rows whose session it does not
+        list; a headless row is nominated on every pass, since its recorded
+        group is its only witness and a host without tmux must still heal it.
+        :meth:`_reconcile_status` is the one confirming probe, so no row is
+        probed twice. A row without a live node (worktree gone) passes
         through untouched. An inconclusive runtime probe heals nothing --
         stamping live loops ``exited`` on a blind host would reap them.
 
@@ -3578,9 +4168,12 @@ class Node:
         healed = []
         for row, node in pairs:
             if _base_status(row.get('status')) == 'active' and node is not None:
-                absent = node.headless and node._headless_process_exists() is False
-                if sessions is not None and not node.headless:
-                    absent = node.tmux_session not in sessions
+                # nominate only -- the reconcile confirms on the node's own
+                # record: a headless row always (the listing says nothing about
+                # it), a tmux row when a definitive listing misses it
+                absent = node.headless or (
+                    sessions is not None and node.tmux_session not in sessions
+                )
                 if node.exists() and absent:
                     node._reconcile_status()
                     row = {**row, 'status': node.status()}
@@ -3857,6 +4450,12 @@ class Node:
             max_descendants: New maximum total descendant nodes.
 
         """
+        # a draining seat re-arms nothing: cap raises from a --drain run
+        # refuse harness-side, mirroring the init and start guards
+        if _draining(self):
+            raise RuntimeError(
+                'Cannot update a node from a draining run (--drain forbids re-arms).'
+            )
         # initialize updates -- the iter/step caps, the reserve, and the
         # step timeout are config-only
         data = {}
@@ -4214,6 +4813,8 @@ class Node:
             Commit output and notices.
 
         Raises:
+            DirtyWorktreeError: If ``check`` is set and uncommitted changes
+                remain.
             RuntimeError: If called on a user node without ``init``.
             ValueError: If flags conflict or ``message`` is missing without ``check``.
 
@@ -4791,6 +5392,72 @@ def _base_status(status: Optional[str]) -> str:
     """
     result, *_ = (status or '').partition(' ')
     return result
+
+
+def _draining(node: Node) -> bool:
+    """Return whether the acting seat runs under a drain.
+
+    Three sources, any sufficient. The loop-exported ``_DRAIN`` rides
+    every seat subprocess of a ``--continue --drain`` run. The acting
+    node's own run carrying the durable ``drain`` signal
+    (:meth:`Node.drain_bound`) stands after an environment scrub and
+    across a pause/resume, which the export alone does not survive. Both
+    of those still ask the seat who it is, and a seat that moves can
+    answer wrongly -- so the last source asks the operating system
+    instead: whether this process sits in a draining seat's recorded
+    process group (:meth:`Node.drain_lineage`).
+
+    Args:
+        node: Any node of the tree the verb acts on -- the drain that
+            binds is one of that tree's own runs, and the lineage check
+            reads its central database.
+
+    Returns:
+        Whether the guarded verb must refuse.
+
+    """
+    if os.environ.get('_DRAIN'):
+        return True
+    actor = Node.resolve_actor()
+    if actor is not None and actor.drain_bound():
+        return True
+    return node.drain_lineage()
+
+
+def _group_alive(pgid_file: pathlib.Path) -> Optional[bool]:
+    """Return whether the process group a record names is alive and is that group.
+
+    A ``.pgid``/``.step_pgid`` record names a group by its leader's pid and
+    dates it by its mtime. Alive is not identity: a recycled id answers
+    ``killpg`` from an unrelated group, so a live group counts only when
+    :func:`_recorded_group` dates its leader no later than the record.
+    ``EPERM`` proves the group exists but belongs to another user; the loop
+    runs as the operator, so ``ps`` -- which reads any user's process --
+    arbitrates that group the same way. Only a failed ``ps`` leaves the
+    answer open.
+
+    Args:
+        pgid_file: The record to probe.
+
+    Returns:
+        ``True`` for the recorded group alive; ``False`` for no record, an
+        unparseable one, a gone group, or a recycled id; ``None`` when the
+        live group's identity cannot be verified.
+
+    """
+    try:
+        recorded_at = pgid_file.stat().st_mtime
+        pgid = int(pgid_file.read_text(encoding='utf-8').strip())
+    except (FileNotFoundError, ValueError):
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # alive but foreign-owned: the leader's start instant arbitrates below
+        pass
+    return _recorded_group(pgid, recorded_at)
 
 
 def _recorded_group(pgid: int, recorded_at: float) -> Optional[bool]:

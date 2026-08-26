@@ -38,7 +38,8 @@ registry, and every history row (runs, iterations, steps, events):
      - The loop honored a ``stop`` signal and ended after its current step.
    * - ``exited``
      - The loop ended without completing: a budget landing, a timeout, a
-       setup abort, or a crash healed by reconciliation.
+       setup abort, a ``max_iters`` run whose final iteration failed, a
+       failed boot preflight, or a crash healed by reconciliation.
    * - ``killed``
      - Ended immediately by ``kill``.
    * - ``failed``
@@ -78,29 +79,59 @@ flag.
 Display decorations
 ~~~~~~~~~~~~~~~~~~~
 
-``fractal node status`` and ``fractal node list`` decorate the bare status in
-some situations. The decorations are display-only — the stored status stays
-bare, and ``list --status`` filters match on the first space-delimited token:
+``fractal node status`` composes the bare status with a qualifier in
+parentheses — ``active (pausing)``, ``exited (<reason>)`` — while
+``fractal node list`` keeps its ``status`` column bare and carries the same
+qualifier in a separate ``detail`` column, with a typed ``end_reason`` column
+(``goal_met``, ``run_exhausted``, ``final_iteration_failed``, ``cost_budget``,
+``timeout``, ``setup_abort``, ``other``, or empty — ``null`` in ``--json``
+— when nothing is recorded) beside it. Both are display-only — the stored
+status stays bare, and ``list --status`` filters match the bare ``status``
+column. Several qualifiers can stand at once, ``;``-joined:
 
 - ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)`` — a
   pause, stop, or finish signal is pending on an active node.
 - ``exited (<reason>)`` — the latest run row recorded why it ended (a
   reconciliation-healed crash records no reason and stays bare).
-- ``orphan`` / ``<status> (orphaned)`` — a registry row whose worktree was
-  removed out of band (listings only; never stored).
+- ``completed (run exhausted: Reached max iterations (N))`` — the run landed
+  ``completed`` by running out its iteration cap with a clean final
+  iteration, not by a goal-met finish.
+- ``completed (final iteration failed)`` — a drained (goal-met) finish whose
+  last iteration died; a cap-overshoot note may precede it. A drained finish
+  whose last iteration succeeded stays bare. (A cap landing on a dead final
+  iteration is ``exited`` and reads through the ``exited (<reason>)`` bullet
+  above.)
+- ``orphan`` / ``orphaned`` — a registry row whose worktree was removed out
+  of band (listings only; never stored): a settled or ``retired`` row keeps
+  its bare status and reads ``orphaned`` in the ``detail`` column, while a
+  row that was still ``active``, ``paused``, or ``idle`` shows ``orphan`` as
+  its status.
+- ``model drop`` and ``iteration gap <run>.<n>`` /
+  ``iteration gap <run>.<a>-<run>.<b>`` compose onto whatever qualifier
+  stands, on any status — the newest iteration carries a step served off its
+  pinned model that a re-dispatch never resolved, or iteration numbers in
+  the latest run advanced with no recorded row.
+- ``PAUSED: billing`` composes the same way, on ``active`` nodes only — the
+  newest launches carry the dead-credits signature (three or more instant,
+  zero-cost failures) and the loop's billing breaker is backing off.
 
 Transitions at a glance
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 - ``idle`` → ``active``: ``node start`` (the loop stamps ``active`` at boot,
   after its preflight).
+- ``idle`` → ``exited``: a failed boot preflight. The abort records a closed
+  ``exited``/1 run row naming the reason and stamps ``exited`` without the
+  node ever going ``active``; a failed *resume* preflight instead leaves the
+  node ``paused`` with its run still open for ``resume`` to adopt.
 - ``active`` → ``completed`` / ``stopped`` / ``exited``: the loop's own
   landing — a drained finish or clean ``max_iters`` run, a stop signal, or a
-  timeout / budget end / setup abort / healed crash.
+  timeout / budget end / setup abort / failed final iteration / healed crash.
 - ``active`` → ``paused``: ``node pause`` (the loop parks).
 - ``paused`` → ``active``: ``node resume`` (the relaunch adopts the open
   run).
-- ``active`` | ``paused`` | booting ``idle`` → ``killed``: ``node kill``.
+- ``active`` | ``paused`` | ``idle`` (booting or never started) → ``killed``:
+  ``node kill``.
 - settled → ``idle`` → ``active``: ``node start --continue``.
 - any non-``active``/``paused`` status → ``retired``: ``node retire``;
   ``retired`` → the pre-retire status (else ``idle``): ``node unretire``.
@@ -122,10 +153,13 @@ init
 branch: its data directory with ``config.json``, the central database, the
 radio, and the project wiki. The user node has no lifecycle status and cannot
 be started, merged, deleted, or retired. Init refuses a detached ``HEAD``, a
-branch containing ``/``, a path under ``.worktrees/``, a branch already
-mapped to a different project, and a live tmux session belonging to another
-fractal that shares the repository's directory basename. See
-:doc:`/guide/getting-started` for the full setup flow.
+branch containing ``/``, a branch that dot-nests with an existing tree root
+(``v1.0`` beside a tree rooted at ``v1`` — ``.`` is the node hierarchy
+separator, so one would read as a node inside the other), a path under
+``.worktrees/``, a branch already mapped to a different project, and a live
+tmux session belonging to another fractal that shares the repository's
+directory basename. See :doc:`/guide/getting-started` for the full setup
+flow.
 
 ``fractal node init <name>`` creates an agent node: a git branch
 ``<parent>.<name>``, a worktree under ``.worktrees/``, and a seeded data
@@ -168,15 +202,25 @@ detached tmux session, or in an independent process group with
        restore discards uncommitted project files; without it a dirty
        worktree refuses and lists the doomed paths (node-dir files are
        exempt).
+   * - ``--drain``
+     - Requires ``--continue``. Runs the continued run as a wind-down: the
+       loop exports ``_DRAIN`` into every seat's environment and records a
+       durable ``drain`` signal on the run, so the harness refuses spawns
+       and re-arms from the run's seats, and the DRAIN mode doc tells each
+       seat to close out instead of expanding.
    * - ``--max-cost <usd>``
      - Requires ``--continue``. Retunes the per-run cost cap before the
        relaunch — applied through the parent's retune and echoed
        ``max_cost: old -> new``. **Required** when the last run ended on
        its cost budget.
    * - ``--headless`` / ``--tmux``
-     - Select the detached process-group backend or tmux. Headless mode captures
-       output in ``headless.log`` and is inherited by delegated child starts;
-       ``--tmux`` overrides that inherited choice.
+     - Select the detached process-group backend or tmux (envvar
+       ``FRACTAL_HEADLESS``). Headless mode captures output in
+       ``headless.log`` and is inherited by delegated child starts;
+       ``--tmux`` overrides that inherited choice. A ``--continue`` opens a
+       new run and takes its backend from ``--headless``/``--tmux`` or
+       ``FRACTAL_HEADLESS``; ``resume`` adopts the paused run's recorded
+       backend.
 
 A fresh start requires the status to be exactly ``idle``; anything else
 refuses with a pointer to ``--continue``. Both forms re-validate the stored
@@ -187,6 +231,14 @@ the command line instead of inside a dying tmux pane. Start also refuses:
   node ("Resume it first");
 - any launch under the pause latch (a paused or pausing ancestor, or the
   tree-wide latch);
+- a launch from inside a draining run — a seat of a ``--continue --drain``
+  run, detected by the ``_DRAIN`` export, the run's durable ``drain``
+  signal, or the seat's recorded process group ("Cannot start a node from
+  a draining run (--drain forbids re-arms)"); ``node init`` (a spawn, or a
+  whole new tree via ``fractal init``), ``node update``, and
+  ``node resume`` refuse the same way. The guard binds the acting seat, not
+  the target — an operator's ``node resume`` of a parked drain run
+  relaunches it, and the relaunch keeps draining;
 - a fresh start when a foreign tmux session already holds this node's
   session name (another fractal sharing the repository basename — rename a
   repository directory, never kill the foreign session);
@@ -201,8 +253,9 @@ from ``killed`` surfaces the recorded kill attribution as a notice. Every
 successful launch logs a completed ``start`` event (metadata ``continue`` on
 continues), so the event log carries the node's restart chain.
 
-While a tmux node is ``active``, ``fractal node attach [node]`` attaches to its
-session. A headless node instead reports the ``headless.log`` path.
+While a node is ``active``, ``fractal node attach [node]`` attaches to its
+tmux session (it refuses any other status). A headless node refuses too,
+naming its ``headless.log`` to follow instead.
 
 finish
 ~~~~~~
@@ -222,14 +275,29 @@ event, and the propagated fan-out attribution.
 The target must be ``active`` and have a run; a settled target refuses
 before any descendant is signaled.
 
+The sweep re-enumerates until no fresh live descendant appears, so a child
+whose ``start`` was still in flight when it began is signaled too rather
+than escaping the pass. What the re-read cannot catch, the child does from
+its own end: a loop that boots while an ancestor still carries a pending
+``finish`` or ``stop`` adopts that signal onto its own fresh run and honors
+it at its first boundary, announcing it on the pane. (A tree-wide broadcast
+from the user node records no signal of its own, so a child booting after
+that sweep has no ancestor row to adopt — re-enumeration alone covers it.)
+
 stop
 ~~~~
 
 ``fractal node stop [node] [--reason <text>]`` is the same shape as
 ``finish`` but ends the loop **after its current step**, landing the node
-``stopped``. Same children-first fan-out, same tree-wide broadcast on the
-user node, same ``active``-with-a-run requirement. There is no
-``--cancel`` for stop.
+``stopped``. Same children-first fan-out over the entire subtree, same
+tree-wide broadcast on the user node, same ``active``-with-a-run
+requirement. There is no ``--cancel`` for stop.
+
+The signal is a queued row, not a process signal: a stop that lands while a
+step's agent is in flight waits for that seat to complete -- the step books
+its real outcome and only the steps after it are forgone. A stop never
+TERMs the running agent; when an immediate end is genuinely needed, that is
+``kill``.
 
 pause
 ~~~~~
@@ -241,8 +309,10 @@ signal, the fan-out is **parent-first**, so a parent parked before its
 children can never drain-complete over them. The target must be ``active``
 with a run.
 
-``fractal pause [path] [--reason <text>]`` is the tree-wide brake: it
-latches the root first, then pauses every active node in the tree.
+``fractal pause [name] [--reason <text>] [--path <dir>]`` is the tree-wide
+brake — ``name`` is the tree root branch (default: the tree this checkout
+belongs to): it latches the root first, then pauses every active node in the
+tree.
 
 resume
 ~~~~~~
@@ -256,27 +326,32 @@ refuses a target that is not paused (and not parking), and a target under a
 still-paused ancestor or the tree-wide latch — resume the latching node
 instead, which relaunches the subtree with it.
 
-``fractal resume [path]`` is the tree-wide release: it lifts the root latch
-first (new starts and spawns become legal immediately), withdraws pending
-pauses, and relaunches every parked loop leaf-first.
+``fractal resume [name] [--path <dir>]`` is the tree-wide release: it lifts
+the root latch first (new starts and spawns become legal immediately),
+withdraws pending pauses, and relaunches every parked loop leaf-first.
 
 kill
 ~~~~
 
 ``fractal node kill [node] [--reason <text>]`` ends a node immediately: it
-reaps the tmux session and the recorded process groups (TERM, a five-second
-grace, then KILL) and closes the node's open rows as ``killed``. Killable
-states:
+reaps the loop runtime — the tmux session, or a headless or bare loop's
+recorded process group — and any step group the loop recorded (TERM, a
+five-second grace, then KILL) and closes the node's open rows as ``killed``.
+Killable states:
 
 - ``active`` — the normal case;
 - ``paused`` — the escape hatch for a parked subtree; with no loop alive the
   kill is pure bookkeeping (the open rows close ``killed``);
-- ``idle`` with a live tmux session — a boot in flight that has not stamped
-  ``active`` yet.
+- ``idle`` — a boot in flight that has not stamped ``active`` yet, or a
+  never-started spawn: the kill stamps ``killed`` so the node can never
+  activate (an unwanted spawn is reapable before it starts burning).
 
-Anything else refuses (``Cannot kill: node is not active or paused``). The
-sweep reaps descendants first and re-enumerates to a fixpoint, so a spawn
-already in flight when the kill lands is caught rather than escaping. The
+Anything else refuses (``Cannot kill: node is not active, paused, or
+idle``). The one other refusal is a recorded process group whose identity
+the ``ps`` probe cannot verify: the kill refuses before writing any kill
+state and names ``ps -p <pgid>`` and the record file to remove. The sweep
+reaps descendants first and re-enumerates to a fixpoint, so a spawn already
+in flight when the kill lands is caught rather than escaping. The
 attribution — ``killed by <actor>``, with the reason appended — lands
 identically on the kill event, the signal, and the killed run row, and a
 later ``start --continue`` surfaces it as a notice.
@@ -372,23 +447,31 @@ A loop that dies without settling — a hard kill, a direct
 ``tmux kill-session``, a headless process death, or a host crash — leaves
 ``.status`` reading ``active`` with no live runtime. Because ``start.sh``
 enforces one loop per node, a *provably* missing runtime is proof the loop is
-gone, and fractal heals the node on the
-next read or verb: the status is stamped ``exited``, the still-open run,
-iteration, and step rows are closed, any surviving process groups the loop
-recorded are reaped with an ``orphan`` event (a headless agent would
-otherwise keep spending unseen), and config/registry cap drift is healed.
-This runs automatically before every signal verb, ``merge``, ``delete``,
-``retire``, ``start --continue``, and on listings — there is no command to
-run.
+gone. The proof is per backend: a tmux node's recorded session, or a headless
+node's recorded ``.pgid`` process group — alive, and the group the record
+named rather than a recycled id. The same process-group proof spares a loop
+launched bare (``fractal node _loop`` under neither backend, which records no
+``.socket``): while its group lives, it is left alone. Otherwise fractal heals
+the node on the next read or verb: the status is stamped ``exited``, the
+still-open run, iteration, and step rows are closed, any surviving process
+groups the loop recorded are reaped with an ``orphan`` event (an orphaned
+agent would otherwise keep spending unseen), and config/registry cap drift is
+healed. This runs automatically before every signal verb, ``merge``,
+``delete``, ``retire``, ``start --continue``, and on listings — there is no
+command to run.
 
 Two deliberate limits:
 
 - **A ``paused`` node is never healed.** No session is its normal parked
   state, on this host or after a filesystem transplant.
-- **An inconclusive tmux probe heals nothing.** The probe asks the server
-  the loop recorded at boot; when tmux gives no answer (binary absent, no
-  visibility from a cron/CI shell), the heal keys off proof, never
-  ignorance, so a blind host cannot kill a healthy loop.
+- **An inconclusive runtime probe heals nothing.** A tmux node's probe asks
+  the server the loop recorded at boot; when tmux gives no answer (binary
+  absent, no visibility from a cron/CI shell), the heal keys off proof,
+  never ignorance, so a blind host cannot kill a healthy loop. A headless or
+  bare loop's probe is inconclusive only when ``ps`` cannot date the live
+  group's leader; that too heals nothing, and teardown and kill refuse,
+  naming the check to run. A group owned by another user is not
+  inconclusive: its leader's start instant decides.
 
 Separate from crash healing, ``fractal node reconcile [node]`` is the audit
 step after out-of-band cleanup: for each registered descendant whose
@@ -416,17 +499,18 @@ Three tiers of removal, from one subtree to the whole fractal:
      - Everything else — all other nodes, the user node's data, and every
        history row the subtree wrote (runs, steps, events, messages).
    * - ``fractal reset``
-     - Every node worktree, local branch, and registration; a stale
-       tree-wide pause latch.
-     - The user node's data — config, memory, and the central database with
-       all history — plus the wiki, baseline commits, remote branches, and
-       ``.worktrees/`` itself.
+     - One tree's node worktrees, local branches, and registrations; a
+       stale tree-wide pause latch.
+     - Sibling trees, the user node's data — config, memory, and the central
+       database with all history — plus the wiki, baseline commits, remote
+       branches, and ``.worktrees/`` itself.
    * - ``fractal destroy``
-     - Everything ``reset`` removes, plus the user node's data directory
-       (central database included), ``.worktrees/``, and fractal's
-       ``info/exclude`` block.
-     - Committed artifacts — the project wiki and baseline commits — and
-       remote branches.
+     - Everything ``reset`` removes for one tree, plus its user node's data
+       directory (central database included); with ``--all``, every tree,
+       ``.worktrees/``, and fractal's ``info/exclude`` block.
+     - Committed artifacts — the project wiki and baseline commits — each
+       tree's root branch, and remote branches; sibling trees and the shared
+       ``.worktrees/`` plumbing unless the destroyed tree was the last.
 
 All three refuse over running nodes, and their ``--force`` flags only skip
 the confirmation prompt (plus, for ``delete``, unlock the orphan path) —
@@ -473,20 +557,24 @@ hints at ``git worktree prune`` when stale worktree metadata lingers.
 fractal reset
 ~~~~~~~~~~~~~
 
-``fractal reset [path] [--force]`` is the middle rung: it removes **every**
-node worktree and local branch and clears the node registry (rows and
+``fractal reset [name] [--force] [--path <dir>]`` is the middle rung —
+``name`` is the tree root branch (default: the tree this checkout belongs
+to) and ``--path`` the repository path: it removes **every** node worktree
+and local branch of that tree and clears its node registry (rows and
 subscriptions, grouped into maximal subtrees so a ``delete`` event lands per
-subtree), while the user node's data — config, memory, and the central
-database with every history row — plus the wiki and baseline commits
-survive. Fresh nodes spawn immediately after. It also prunes phantom
+subtree), while sibling trees, the user node's data — config, memory, and
+the central database with every history row — plus the wiki and baseline
+commits survive. Fresh nodes spawn immediately after. It also prunes phantom
 branches left by out-of-band worktree removals and clears a stale tree-wide
 pause latch.
 
 Reset refuses when the caller stands inside a node worktree, while any
-node's tmux session is alive (probed per node on its recorded socket), when
-the tmux probe is **inconclusive** ("Restore tmux visibility and retry" —
-an irreversible teardown never proceeds blind), and over any locked
-worktree. Paused nodes are killed as part of the confirmed teardown.
+node's loop runtime is alive (a tmux session probed per node on its recorded
+socket, or a headless or bare loop's recorded process group), when that
+runtime probe is **inconclusive** (the refusal names the
+``tmux list-sessions`` and ``ps`` checks to run before retrying — an
+irreversible teardown never proceeds blind), and over any locked worktree.
+Paused nodes are killed as part of the confirmed teardown.
 ``.worktrees/`` itself stays (it keeps the root's project-cache entry and
 the lock), remote branches are left on origin and listed in the output, and
 a repo with no worktrees at all is a clean no-op.
@@ -494,20 +582,27 @@ a repo with no worktrees at all is a clean no-op.
 fractal destroy
 ~~~~~~~~~~~~~~~
 
-``fractal destroy [path] [--force]`` is the full inverse of
-``fractal init``, **database included**. On top of everything ``reset`` does,
-it
-removes the user node's data directory (config and the central database),
-un-stages a tracked seed directory from git's index, removes ``.worktrees/``
-entirely, strips fractal's block from the repo's ``info/exclude``, and
-prunes every branch the registry listed. Left in place: committed artifacts
-— the project wiki and baseline commits — and remote branches. The refusals
-and the paused-node kill policy are the same as ``reset``, and a repo with
-nothing fractal present is a clean no-op.
+``fractal destroy <name> | --all [--force] [--path <dir>]`` takes exactly
+one scope — a bare ``destroy`` is refused (``Name a tree or pass --all
+(exactly one).``). ``fractal destroy --all`` is the full inverse of
+``fractal init``, **database included**. On top of everything ``reset``
+does, it removes every user node's data directory (config and the central
+database), un-stages a tracked seed directory from git's index, removes
+``.worktrees/`` entirely, strips fractal's block from the repo's
+``info/exclude``, and prunes every branch the registry listed.
+``fractal destroy <name>`` is the same teardown scoped to one tree: its
+node worktrees, branches, and user-node data directory go, while sibling
+trees and the shared ``.worktrees/`` plumbing survive — the last tree takes
+``.worktrees/`` and the exclude block with it. Left in place either way:
+committed artifacts — the project wiki and baseline commits — each tree's
+own root branch, and remote branches. The refusals and the paused-node kill
+policy are the same as ``reset``. ``destroy --all`` on a repo with nothing
+fractal present is a clean no-op; ``destroy <name>`` for a tree that does
+not exist is refused, with or without ``--force``.
 
 .. code-block:: console
 
-   $ fractal destroy
+   $ fractal destroy --all
    Destroy the fractal at /home/user/myproject (5 nodes)? [y/N]: y
    Destroyed fractal: /home/user/myproject
    Left in place: wiki/ (committed project memory)

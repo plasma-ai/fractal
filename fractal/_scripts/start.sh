@@ -13,8 +13,9 @@ Launch a node loop.
 Options:
     --continue    Continue a stopped/exited node (clean worktree, further iterations;
                   a budget-ended run relaunches only with an explicit new --max-cost)
-    --headless    Run without tmux in a detached process group
     --resume      Resume a paused node (adopt its open run where the pause left it)
+    --drain       With --continue: forbid spawns and re-arms for the run (a wind-down)
+    --headless    Run without tmux in a detached process group
     --help|-h     Show this help message
 
 Run parameters come from the node's config.json (set at init, editable before start).

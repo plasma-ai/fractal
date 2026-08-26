@@ -3,8 +3,10 @@
 Covers default vs ``--all`` filtering, the live view (trusting real
 state and relabeling crashed-active rows), config-cap overlays over
 stale registry rows, orphan flagging, and the ``last`` activity-age
-column with its staleness flag, plus the spend reading and the split of
-the status qualifier into its own column.
+column with its staleness flag, plus the spend reading, the split of
+the status qualifier into its own column, the typed ``end_reason``
+token beside it, and the pinned qualifier vocabulary external
+consumers literal-match.
 """
 
 from __future__ import annotations
@@ -30,10 +32,18 @@ __all__ = [
     'test_list_live_confirms_relabels_on_recorded_socket',
     'test_list_renders_config_caps_over_stale_registry',
     'test_list_decorates_exited_with_run_reason',
+    'test_end_reason_types_each_recorded_landing',
+    'test_end_reason_null_when_nothing_recorded',
     'test_list_reports_run_scoped_subtree_spend',
     'test_list_flags_orphan_rows',
     'test_list_renders_last_activity_age',
     'test_list_flags_stale_active_rows',
+    'test_list_flags_iteration_gaps',
+    'test_billing_detector_reads_realistic_step_sequences',
+    'test_list_flags_billing_backoff',
+    'test_pending_signal_literals_are_pinned',
+    'test_qualifier_composition_literals_are_pinned',
+    'test_run_exhausted_prefix_is_pinned',
 ]
 
 
@@ -254,9 +264,119 @@ def test_list_decorates_exited_with_run_reason(
     plain = {row['node']: row for row in parent.list()}
     assert plain[child.branch]['status'] == 'exited'
     assert not plain[child.branch]['detail']
+    # the typed end token rides beside the prose -- exited/0 is the budget
+    # discriminator -- while the undecorated listing stays cheap, and the
+    # active parent has no landing to type
+    assert decorated[child.branch]['end_reason'] == 'cost_budget'
+    assert plain[child.branch]['end_reason'] is None
+    rows = {row['node']: row for row in Node(git_repo).list(decorated=True)}
+    assert rows[parent.branch]['end_reason'] is None
     # the filter selects on the status column itself
     filtered = parent.list(status='exited', decorated=True)
     assert [row['node'] for row in filtered] == [child.branch]
+
+
+@pytest.mark.parametrize(
+    ('status', 'exit_code', 'reason', 'expected'),
+    [
+        # a budget landing is typed by exited/0 alone, whatever the figures
+        (
+            'exited',
+            0,
+            'subtree cost budget reached (spent $6.0000 >= $5.0 max)',
+            'cost_budget',
+        ),
+        ('exited', 1, 'Timed out at iteration 3.2 (2h)', 'timeout'),
+        ('exited', 1, 'setup failed x3', 'setup_abort'),
+        (
+            'exited',
+            1,
+            'Reached max iterations (5); final iteration failed',
+            'final_iteration_failed',
+        ),
+        # recorded-but-unmapped reasons read 'other', never None: an
+        # unexpected exit, a kill/retire that beat the boot, and a failed
+        # resume preflight are landings with a story, not silent crashes
+        ('exited', 1, 'Exited at iteration 3.2', 'other'),
+        ('exited', 1, 'killed before boot', 'other'),
+        (
+            'exited',
+            1,
+            'Could not fetch pricing and no cached pricing.json exists.',
+            'other',
+        ),
+        # a reason-less exited row (the reconcile-healed crash's shape)
+        ('exited', 1, '', None),
+        ('completed', 0, '', 'goal_met'),
+        # a cap-overshoot note is still done-conditions-met
+        (
+            'completed',
+            0,
+            'cost budget exceeded in finish wind-down (spent $6.0000 >= $5.0 max)',
+            'goal_met',
+        ),
+        ('completed', 0, 'Reached max iterations (3)', 'run_exhausted'),
+        ('completed', 0, 'final iteration failed', 'final_iteration_failed'),
+        (
+            'completed',
+            0,
+            'cost budget exceeded in finish wind-down (spent $6.0000 >= $5.0 max)'
+            '; final iteration failed',
+            'final_iteration_failed',
+        ),
+    ],
+)
+def test_end_reason_types_each_recorded_landing(
+    node_with_db: Node,
+    status: str,
+    exit_code: int,
+    reason: str,
+    expected: Optional[str],
+) -> None:
+    """``end_reason`` maps every recorded landing to its typed token.
+
+    The token derives from the run row's typed facts (status, exit code)
+    plus the exact reason strings the loop itself records -- pinned
+    verbatim here, so a reworded landing fails fractal's own suite
+    before a consumer reads it as ``other`` -- and a recorded reason the
+    vocabulary does not name reads ``other``, never ``None``: null keeps
+    meaning nothing recorded.
+    """
+    node = node_with_db
+    run_id = node.record.run_start()
+    node.record.run_end(
+        run_id=run_id, status=status, exit_code=exit_code, metadata=reason
+    )
+    node.status_set(status)
+    assert node.end_reason() == expected
+
+
+def test_end_reason_null_when_nothing_recorded(node_with_db: Node) -> None:
+    """``end_reason`` is null wherever no run landing stands recorded.
+
+    A node that never ran, a live run, and a reconcile-healed crash
+    (rows closed reason-less) all read ``None`` -- and a requested stop
+    does too: the vocabulary types the completed/exited landings, not
+    every lifecycle terminal.
+    """
+    node = node_with_db
+    # never ran: no run row to read
+    assert node.end_reason() is None
+    # a live run: nothing has landed yet
+    node.status_set('active')
+    node.record.run_start()
+    assert node.end_reason() is None
+    # a reconcile-healed crash closes its rows reason-less
+    node.record.close_open('exited')
+    node.status_set('exited')
+    assert node.end_reason() is None
+    # a requested stop is outside the vocabulary, reason recorded or not
+    run_id = node.record.run_start()
+    node.record.run_end(
+        run_id=run_id, status='stopped', exit_code=0, metadata='Stopped by request'
+    )
+    node.status_set('stopped')
+    assert node.end_reason() is None
 
 
 def test_list_reports_run_scoped_subtree_spend(
@@ -357,3 +477,233 @@ def test_list_flags_stale_active_rows(
     child.status_set('completed')
     rows = {row['node']: row['last'] for row in parent.list()}
     assert rows[child.branch] == '20m'
+
+
+def test_list_flags_iteration_gaps(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Iteration numbers that jump with no recorded row flag the listing.
+
+    Recorded iteration rows are the execution trace: a run whose numbers
+    jump (2 recorded, then 5) consumed iterations that never executed --
+    the class a fleet transient once produced fleet-wide with zero trace.
+    Contiguous rows never flag; the gap names the missing span.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    run_id = child.record.runs(limit=1)[0]['run_id']
+    for number in (1, 2):
+        iter_id = child.record.iter_start(run_id=run_id, iter=number)
+        child.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
+    # contiguous iterations: no gap flag
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'iteration gap' not in (rows[child.branch] or '')
+    # a jump to 5 leaves 3-4 unexecuted -- the detail names the span
+    iter_id = child.record.iter_start(run_id=run_id, iter=5)
+    child.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert f'iteration gap {run_id}.3-{run_id}.4' in rows[child.branch]
+
+
+def test_billing_detector_reads_realistic_step_sequences(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The census billing detector holds against the shapes a real run books.
+
+    A detector that fires on any trailing failure would flag every
+    ordinary bad patch as an outage; one that the loop's own bookkeeping
+    rows break can never fire at all. The never-run tail the failure path
+    books (``stopped``/``failed on <step>``) and open rows are skipped as
+    bookkeeping, a completed step earlier in the run does not lift a live
+    streak, and a paid or slow failure breaks it.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    run_id = child.record.runs(limit=1)[0]['run_id']
+    iter_id = child.record.iter_start(run_id=run_id, iter=1)
+    number = iter(range(1, 99))
+
+    def _step(status: str, *, cost: Optional[float], metadata: str = '') -> None:
+        step_id = child.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=next(number),
+            step_name='EXECUTE',
+        )
+        child.record.step_end(
+            step_id=step_id,
+            status=status,
+            exit_code=1 if status == 'failed' else 0,
+            metadata=metadata,
+        )
+        if cost is not None:
+            child.record.step_cost(step_id=step_id, cost=cost)
+
+    def _detail() -> str:
+        rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+        return rows[child.branch] or ''
+
+    # a healthy lap, then two instant $0 failures: not yet an outage
+    _step('completed', cost=0.30)
+    _step('failed', cost=0.0)
+    _step('failed', cost=0.0)
+    assert 'PAUSED: billing' not in _detail()
+    # the third arms it -- and the never-run tail the failure path books
+    # must not break the streak it sits on top of
+    _step('failed', cost=0.0)
+    _step('stopped', cost=0.0, metadata='failed on EXECUTE')
+    assert 'PAUSED: billing' in _detail()
+    # an open row (a step in flight) is bookkeeping, not a launch
+    child.record.step_start(
+        iter_id=iter_id,
+        run_id=run_id,
+        step=next(number),
+        step_name='EXECUTE',
+    )
+    assert 'PAUSED: billing' in _detail()
+    # a paid failure on top breaks the streak -- an expensive genuine
+    # failure is not an outage
+    _step('failed', cost=0.90)
+    assert 'PAUSED: billing' not in _detail()
+
+
+def test_list_flags_billing_backoff(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three instant zero-cost failures flag the census PAUSED: billing.
+
+    The credit-crash signature: consecutive newest launches failed
+    instantly at $0, so the loop is backing off dead credits and the
+    listing must say so loudly. A launch that spent real money breaks the
+    streak -- an expensive genuine failure never reads as an outage --
+    and so does either shape of cannot-exec launch, the class the loop's
+    breaker excludes (a broken agent install is hot-retrying, not backing
+    off): a spawn that never execs, and a wrapper that runs and exits 127.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    run_id = child.record.runs(limit=1)[0]['run_id']
+    iter_id = child.record.iter_start(run_id=run_id, iter=1)
+
+    def _failed_step(number: int, cost: Optional[float], metadata: str = '') -> None:
+        step_id = child.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=number,
+            step_name='EXECUTE',
+        )
+        child.record.step_end(
+            step_id=step_id, status='failed', exit_code=1, metadata=metadata
+        )
+        if cost is not None:
+            child.record.step_cost(step_id=step_id, cost=cost)
+
+    for number in (1, 2, 3):
+        _failed_step(number, 0.0)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'PAUSED: billing' in rows[child.branch]
+    # a paid failure on top breaks the streak -- not an outage
+    _failed_step(4, 0.75)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'PAUSED: billing' not in (rows[child.branch] or '')
+    # cannot-exec launches book failed/instant with no cost, but the loop's
+    # breaker excludes their class -- the census must too, retry marker and
+    # all, or a broken agent install reads as a credit outage
+    reason = 'agent launch failed: [Errno 2] No such file or directory'
+    for number, metadata in ((5, reason), (6, reason), (7, f'{reason}; retry')):
+        _failed_step(number, None, metadata=metadata)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'PAUSED: billing' not in (rows[child.branch] or '')
+    # the other cannot-exec shape: the wrapper runs and exits 127 itself, so
+    # the step row books a plain failed/1 and only the reason carries the code
+    exec_127 = 'agent error (exit 127): claude: command not found'
+    for number, metadata in ((8, exec_127), (9, exec_127), (10, f'{exec_127}; retry')):
+        _failed_step(number, 0.0, metadata=metadata)
+    rows = {row['node']: row['detail'] for row in parent.list(decorated=True)}
+    assert 'PAUSED: billing' not in (rows[child.branch] or '')
+
+
+# ------ the qualifier vocabulary
+#
+# External consumers literal-match the census qualifier strings asserted
+# below, so any rewording must fail fractal's own suite first.
+
+
+@pytest.mark.parametrize(
+    ('signal', 'expected'),
+    [('pause', 'pausing'), ('stop', 'stopping'), ('finish', 'finishing')],
+)
+def test_pending_signal_literals_are_pinned(
+    node_with_db: Node,
+    signal: str,
+    expected: str,
+) -> None:
+    """The pending-signal qualifiers are exact, load-bearing literals.
+
+    External consumers literal-match ``pausing`` / ``stopping`` /
+    ``finishing``, so any rewording must fail fractal's own suite before
+    it reaches them.
+    """
+    node = node_with_db
+    node.status_set('active')
+    node.record.run_start()
+    node.record.signal_set(signal, 'operator request')
+    assert node.status_detail() == expected
+
+
+def test_qualifier_composition_literals_are_pinned(node_with_db: Node) -> None:
+    """The composed qualifier's literals and its join are exact and load-bearing.
+
+    External consumers literal-match ``model drop`` and
+    ``PAUSED: billing`` and split the composed detail on ``; ``, so any
+    rewording -- of either literal or of the join shape -- must fail
+    fractal's own suite before it reaches them.
+    """
+    node = node_with_db
+    node.status_set('active')
+    run_id = node.record.run_start()
+    node.record.signal_set('pause', 'operator request')
+    iter_id = node.record.iter_start(run_id=run_id, iter=1)
+    # the newest completed attempt carries the drop marker
+    step_id = node.record.step_start(
+        iter_id=iter_id,
+        run_id=run_id,
+        step=1,
+        step_name='EXECUTE',
+    )
+    node.record.step_end(
+        step_id=step_id,
+        status='completed',
+        exit_code=0,
+        metadata='model drop (served other-model)',
+    )
+    node.record.step_cost(step_id=step_id, cost=0.30)
+    # three newer instant zero-cost failures: the billing signature
+    for step in (2, 3, 4):
+        step_id = node.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=step,
+            step_name='EXECUTE',
+        )
+        node.record.step_end(step_id=step_id, status='failed', exit_code=1)
+        node.record.step_cost(step_id=step_id, cost=0.0)
+    assert node.status_detail() == 'pausing; model drop; PAUSED: billing'
+
+
+def test_run_exhausted_prefix_is_pinned(node_with_db: Node) -> None:
+    """The ``run exhausted: `` prefix on a completed cap landing is exact.
+
+    External consumers literal-match the prefix, so any rewording must
+    fail fractal's own suite before it reaches them.
+    """
+    node = node_with_db
+    run_id = node.record.run_start()
+    node.record.run_end(
+        run_id=run_id,
+        status='completed',
+        exit_code=0,
+        metadata='Reached max iterations (3)',
+    )
+    node.status_set('completed')
+    assert node.status_detail() == 'run exhausted: Reached max iterations (3)'

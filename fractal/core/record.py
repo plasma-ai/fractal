@@ -560,14 +560,16 @@ class Record:
         # record a reason only when given (don't clobber existing metadata)
         if metadata is not None:
             data['metadata'] = metadata
-        # backfill an unset iteration model from the steps' recorded
-        # (stream-reported) one when every step agrees
+        # the iteration records the SERVED model: when every step's recorded
+        # (stream-reported) model agrees, it wins over the config-seeded pin
+        # -- divergence must be visible on the row, not laundered under the
+        # pin -- while disagreeing or unreporting steps keep the seed
         iter_rows = self.db.read('iters', where={'iter_id': iter_id}, limit=1)
-        if iter_rows and not iter_rows[0]['model']:
+        if iter_rows:
             steps = self.db.read('steps', where={'iter_id': iter_id})
             models = {row['model'] for row in steps if row['model']}
-            if len(models) == 1:
-                data['model'] = models.pop()
+            if len(models) == 1 and (model := models.pop()) != iter_rows[0]['model']:
+                data['model'] = model
         return self._fenced(
             data=data,
             table='iters',

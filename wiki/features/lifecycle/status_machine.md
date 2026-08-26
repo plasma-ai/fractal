@@ -53,14 +53,15 @@ reason before the operation raises.
 
 - **`active`** accepts `finish`, `finish_cancel`, `stop`, and `pause` — each
   guarded by the same preamble: heal any crashed-but-active state first, then
-  require status `active` and an open run. `kill` is also always legal on an
-  active node.
+  require status `active` and an open run. `kill` is also legal on an active
+  node, refusing only over a recorded process group whose identity cannot be
+  verified.
 - **`paused`** accepts only `resume`, `kill`, and `chat`. Everything else
   refuses; a paused node holds its spawn slot and blocks ancestor finish-drains
   until resumed or killed.
 - **`idle`** is the parked, startable state: `start` runs it, `retire` hides it,
-  `delete` removes it. An `idle` node whose tmux session is live (a spawn still
-  booting) is additionally killable.
+  `delete` removes it, and `kill` stamps it `killed` — a booting spawn is
+  reaped, a never-started one can never activate.
 - **Settled** nodes (`completed`/`stopped`/`exited`/`killed`) accept
   `start --continue` to re-arm, `retire`, and `delete`.
 - **`retired`** accepts only `unretire` and `delete`; a retired node is hidden

@@ -29,12 +29,12 @@ capped node must set its own ``--max-cost``, which may not exceed the
 parent's remaining run budget.
 
 ``--reserve-budget`` takes a USD amount or ``N%`` of ``--max-cost`` (default
-``10%``; it must stay below 99% of the cap, and is only meaningful when
-``--max-cost`` is set). The reserve is not a hard floor: when the run's
-remaining budget falls to the reserve, the node enters reserve mode —
-wind-down instructions join each prompt, telling the agent to commit open
-work, settle its children, and report out — and the run ends at the next
-iteration boundary.
+``10%``; it must stay below 99% of the cap, and an explicit value is refused
+unless ``--max-cost`` is set — with no cap there is no reserve). The reserve
+is not a hard floor: when the run's remaining budget falls to the reserve,
+the node enters reserve mode — wind-down instructions join each prompt,
+telling the agent to commit open work, settle its children, and report out —
+and the run ends at the next iteration boundary.
 
 Two finer caps exist, both requiring ``--max-cost`` and ordered
 ``step <= iter <= run``: ``--max-iter-cost`` caps each iteration, and
@@ -54,10 +54,15 @@ parent:
    max_cost: 10.0 -> 100.0
    reserve_budget: 1.0 -> 10.0
 
-A running loop picks up a retune at its next iteration boundary. A run that
-ends on its budget lands as ``exited`` with exit code ``0`` — an honest
-budget landing, neither a failure nor a completion — and refuses a bare
-continue; arm the next run explicitly:
+A running loop picks up a cost-cap retune at its next budget probe, not just
+the iteration boundary: the caps are re-read at each iteration top, by the
+hard-ceiling check before every later step of the iteration, and by the
+reserve check at the iteration boundary, so the new ceiling — and the next
+step's per-step budget — apply mid-iteration. (Other ``node update`` keys,
+such as ``--step-timeout``, land at the next iteration.) A run that ends on
+its budget lands as ``exited`` with exit code ``0`` — an honest budget
+landing, neither a failure nor a completion — and refuses a bare continue;
+arm the next run explicitly:
 
 .. code-block:: console
 
@@ -217,7 +222,7 @@ Recover after a crash
 
 Crash healing is read-driven — there is no separate repair command to run
 first. A loop that dies without settling leaves its node ``active`` with no
-live tmux session; the next read or lifecycle verb that touches it
+live runtime; the next read or lifecycle verb that touches it
 (``fractal node status``, ``fractal node list``, ``fractal node start``, and
 the teardown verbs) detects that state, stamps the node ``exited``, closes
 its open run, iteration, and step rows, and reaps any recorded leftover
@@ -230,8 +235,14 @@ process groups:
    $ fractal node start parser --continue
 
 ``fractal node list --live`` gives the same authoritative view read-only,
-relabeling without persisting. A ``paused`` node is never healed: no tmux
-session is its normal parked state.
+relabeling without persisting. A ``paused`` node is never healed: no live
+runtime is its normal parked state. Neither is a loop whose recorded process
+group is still alive: a ``--headless`` node (what a tmux-less host uses) is
+judged by that group alone, and a loop launched bare (``fractal node _loop``,
+what ``start.sh`` execs — the harness launches it directly) never joined a
+tmux server, so the probe's "no such session" says nothing about it, and its
+own recorded group keeps the heal — and the reap that comes with it — off a
+running loop.
 
 ``--continue`` restores the worktree before relaunching: uncommitted project
 files refuse without ``--clean`` (which acknowledges discarding them), and a
@@ -247,10 +258,13 @@ instead of ``fractal node delete`` — reconcile the registry afterwards:
 
 ``reconcile`` records one ``orphan`` event per registry row whose worktree is
 gone (already-recorded branches are skipped) and keeps the rows. Orphaned
-rows show in listings as ``orphan`` (or ``<status> (orphaned)`` once settled)
-and can be filtered with ``fractal node list --status orphan``. To drop an
-orphaned registration entirely, ``fractal node delete <branch> --force``
-deregisters it, refusing while any live worktree remains in its subtree.
+rows show in listings with status ``orphan`` (or, once settled, their own
+status with ``orphaned`` in the ``detail`` column);
+``fractal node list --status orphan`` selects the unsettled ones, while a
+settled orphan stays under its own status filter (``--status completed``,
+for example) and is told apart by its ``detail``. To drop an orphaned
+registration entirely, ``fractal node delete <branch> --force`` deregisters
+it, refusing while any live worktree remains in its subtree.
 
 Clean up: delete, reset, or destroy
 -----------------------------------
@@ -271,16 +285,22 @@ refusals.
    Removes every node worktree, local branch, and registration in the tree.
    The user node's data — config and the central database with all history
    — plus the wiki and baseline commits survive, and fresh nodes can spawn
-   immediately afterwards. Refuses while any node's tmux session is alive;
-   paused nodes are killed as part of the confirmed teardown. Also clears a
+   immediately afterwards. Refuses while any node's loop runtime — a tmux
+   session or a recorded process group — is alive; paused nodes are killed
+   as part of the confirmed teardown. Also clears a
    stale tree-wide pause latch. Remote branches are left in place and
    listed.
 
-``fractal destroy``
-   The full inverse of ``fractal init``: everything ``reset`` removes plus
-   the user node's data directory (central database included) and fractal's
-   ``info/exclude`` block. Committed artifacts — the project wiki and
-   baseline commits — and remote branches remain.
+``fractal destroy <name>`` / ``fractal destroy --all``
+   Exactly one scope is required — a bare ``destroy`` is refused. ``--all``
+   is the full inverse of ``fractal init``: everything ``reset`` removes,
+   across every tree, plus every user node's data directory (central
+   databases included), ``.worktrees/``, and fractal's ``info/exclude``
+   block. ``destroy <name>`` scopes the same teardown to one tree — its node
+   worktrees, branches, and data directory — leaving sibling trees and the
+   shared ``.worktrees/`` plumbing in place (the exclude block goes only when
+   no tree remains). Committed artifacts — the project wiki and baseline
+   commits — and remote branches remain.
 
 For a non-destructive alternative to ``delete``, retire the node instead:
 ``fractal node retire <node>`` hides it from listings and makes it

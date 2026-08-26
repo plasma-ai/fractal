@@ -74,6 +74,10 @@ Boolean keys (must be JSON `true`/`false`/`null`):
 - `local` -- skip pushing after commits. Latched at the init surface: a re-init
   cannot clear it, and children of a local parent spawn local.
 - `blind` -- subscribe to no radio channels. Default: false.
+- `sealed` -- hold the node's hosted mail out of its own seat's reads (empty
+  listings, refused `radio read`/`save`/`unsave`/`react`/`reply`) until an
+  operator or the parent unseals it; the sealed seat cannot clear the key
+  itself. Default: false.
 
 Integer cap keys (non-negative; `max_iters` strictly positive):
 
@@ -153,3 +157,14 @@ mode-composition and agent-preference keys (`sync`, `detached`, `meta`, `agent`,
 (`timeout`, `iter_timeout`, `interval`, `sleep`), and the retry knobs
 (`step_retries`, `step_retry_backoff`) -- and applies from the next
 `fractal node start`.
+
+## When edits take effect
+
+Config is a live steering surface with per-key boundaries: `max_iters` at the
+next iteration's stop gate; `iter_timeout`/`step_timeout`/`wait` at the next
+iteration; `interval`/`sleep` at the next between-iterations sleep call; the
+cost caps at the next iteration's pricing (and live at every budget probe);
+`scope`/`local` per commit; `sealed` at the next radio read. The boot-pinned set
+— `timeout`, `agent`, `provider`, `model`, `effort`, `detached`, `sync`, `meta`,
+`step_retries`, `step_retry_backoff` — reaches the next start/resume, never a
+run in flight. Malformed mid-run edits warn and keep the prior value.

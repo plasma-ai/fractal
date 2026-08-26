@@ -105,16 +105,19 @@ An explicit ``--channel`` always wins. Writing into another node's
 ``write_only`` channel is refused (owner only), and the target must be the
 tree root or a registered node — a deleted node is no longer addressable.
 
-Both verbs print the new message's UUID on stdout (for scripts) and echo the
-resolved routing on stderr; ``send`` additionally names each dimension it
-defaulted. Here the first command runs at the tree root and the second inside
-the ``main.parser`` worktree, whose bare ``post`` reports to its own outbox:
+Both verbs echo the resolved routing on stderr, and a single-target ``send``
+additionally names each dimension it defaulted. On stdout, ``post`` and a
+bare or ``--parent`` ``send`` print the new message's UUID (for scripts),
+while any ``--node`` send prints a ``<uuid> <node>`` receipt instead — a
+roster of one included, so a script parses one shape. Here the first command
+runs at the tree root and the second inside the ``main.parser`` worktree,
+whose bare ``post`` reports to its own outbox:
 
 .. code-block:: console
 
    $ fractal radio send "focus on error recovery next" --node=main.parser \
          --subject="direction" --priority=6
-   <uuid>
+   <uuid> main.parser
    Channel unspecified: sending to main.parser's 'inbox' channel.
    sent to main.parser's 'inbox' channel
 
@@ -122,6 +125,16 @@ the ``main.parser`` worktree, whose bare ``post`` reports to its own outbox:
          --subject="progress" --priority=3
    <uuid>
    sent to main.parser's 'outbox' channel
+
+``--node`` repeats for a fan-out: every recipient is validated before any
+copy lands (a bad recipient refuses the whole fan-out, and nothing is
+delivered), each copy is its own message with its own UUID, and stdout
+carries one ``<uuid> <node>`` receipt per recipient, printed as each copy
+lands. A send with ``--relay-of=<uuid>`` marks each copy as a relay of that
+message, and ``fractal radio relays <uuid>`` lists every recorded relay with
+its sender and recipient — an empty listing (``0 relays recorded`` on
+stderr, exit 0) means the order was never relayed, and an unknown UUID is
+refused rather than reported as unrelayed.
 
 Every message carries an 8-character uppercase hex UUID, unique across the
 whole tree; commands that take a UUID accept it case-insensitively. Messages
@@ -174,12 +187,12 @@ semantics: your receipts never change another node's unread view.
 Listings are passive
 ~~~~~~~~~~~~~~~~~~~~
 
-``fractal radio messages`` lists the cwd (or ``--path``) node's mailbox;
-``fractal radio feed`` merges the mailboxes it is subscribed to (each row's
-``node`` column names its source); ``fractal radio sent`` lists outbound mail
-across every recipient (each row's ``node`` column names the recipient, and
-replies list first-class). ``messages`` and ``feed`` show metadata only —
-sender, channel, subject, priority, UUID, and live
+``fractal radio messages`` lists the acting node's mailbox (``--path`` selects
+another); ``fractal radio feed`` merges the mailboxes it is subscribed to
+(each row's ``node`` column names its source); ``fractal radio sent`` lists
+outbound mail across every recipient (each row's ``node`` column names the
+recipient, and replies list first-class). ``messages`` and ``feed`` show
+metadata only — sender, channel, subject, priority, UUID, and live
 ``replies``/``pos_reacts``/``neg_reacts`` counts — never the body;
 ``sent``, your own outbound mail, includes the body column in its rows. None
 of them ever changes read state, so the unread view is stable across calls.
@@ -197,7 +210,14 @@ Mailbox listings show thread roots plus replies that arrived from another
 channel-space; a reply that threaded in place hides behind its parent's
 ``replies`` count and is found with ``thread`` (see below). In ``messages``
 and ``feed``, bodies appear only with ``--json --body`` — still passive, no
-receipts.
+receipts. Widening a listing into a body surface answers to ``read``'s
+owner-only rule, resolved against the node actually running the command (see
+`Sender identity`_) and never ``--path``: ``messages --json --body`` over
+another node's ``inbox`` (or any privately readable channel) is refused, as
+is ``--saved`` — on ``messages`` or ``feed`` — over another node's archive.
+``feed --json --body`` needs no gate of its own, since the feed only ever
+carries publicly readable channels. The plain metadata listing is
+untouched — there ``--path`` acts as the node named.
 
 Reading writes receipts
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -224,6 +244,33 @@ One subtlety on ``read``: ``--path`` selects only the *mailbox viewed*, never
 who is reading. The reader is always the node the command runs as (see
 `Sender identity`_), and receipts attribute to that reader even when browsing
 another node's mailbox. Naming a mailbox in a different tree is refused.
+
+Sealed mailboxes
+~~~~~~~~~~~~~~~~
+
+A node created with the ``sealed`` configuration key (the
+``fractal node init --sealed`` flag; see :doc:`/configuration`) has every
+message it hosts held out of its own seat's view — the hold mechanism for
+verifier isolation. For the sealed seat, ``messages`` comes back empty
+(every channel, its own ``outbox`` included) with an ``inbox sealed`` notice
+on stderr; ``read`` refuses outright whatever it selects (``--feed``
+included); and ``save``, ``unsave``, ``react``, and ``reply`` refuse over a
+hosted message — a seat that may not read a message may not archive, curate,
+or answer it. ``thread``, ``feed``, ``relays``, and the archive (``--saved``)
+drop only the rows the node hosts and show the rest, so the seat's feed still
+carries its parent's and children's channels. Sending is not sealed, and the
+seat's own outbound mail still lists in ``sent``.
+
+The seal binds only the sealed node itself — the calling node the loop
+exported ``_NODE`` for, else the node owning the working directory, so
+unsetting ``_NODE`` inside the seat's own worktree does not lift it. It does
+not hold the parent or an operator shell: they list the sealed mailbox's
+metadata (``fractal radio messages --all --path=<worktree>``) as usual, but
+the ordinary owner-only rule still applies, so they read the sealed
+``inbox``'s bodies no more than any other node's. The seal lifts with
+``fractal node config set sealed=false --path=<worktree>``, run by the
+parent or an operator from outside the node — the sealed seat may not lift
+its own seal.
 
 Threads and replies
 -------------------
@@ -271,7 +318,8 @@ Read state tracks what a node has *seen*; saving tracks what is still *open*.
 ``fractal radio save <uuid>`` copies a message into the node's archive — an
 owned snapshot that survives a later unsend; re-saving is idempotent.
 ``fractal radio unsave <uuid>`` removes your copy when the work is done, and
-``fractal radio messages --saved`` (or ``feed --saved``) lists the open set.
+``fractal radio messages --saved`` (or ``feed --saved``) lists the open set —
+the archive is owner-only, so ``--path`` to another node's archive is refused.
 Agents run this as a todo loop: read new mail, save the actionable items,
 unsave each when handled, and review the saved set every iteration.
 
@@ -284,7 +332,9 @@ channels, a parent subscribes to each new child's readable channels, and on
 re-init a node also picks up its existing direct children. The result is that
 a node's feed spans exactly one hop — its parent and its direct children —
 so information crosses more levels by relaying: each tier posts to its own
-``outbox`` and its parent carries the news upward.
+``outbox`` and its parent carries the news upward, and a directive bound for
+a deeper tier is re-sent with ``--relay-of`` so the relay is verifiable (see
+`Send and post`_).
 
 A node created with the ``blind`` configuration key (the
 ``fractal node init --blind`` flag; see :doc:`/configuration`) subscribes to
@@ -298,8 +348,8 @@ without it to every channel readable *at that moment* (a channel created
 later is not added automatically). ``fractal radio unsub --node=<branch>``
 removes the matching subscriptions (all of them without ``--channel``) and
 reports the true count — ``Removed 0 subscriptions.`` still exits 0, and
-means nothing matched. ``fractal radio subs`` lists the cwd (or ``--path``)
-node's subscriptions.
+means nothing matched. ``fractal radio subs`` lists the acting node's
+subscriptions (``--path`` selects another).
 
 ``fractal radio feed`` fans one query out per subscription, merges the rows,
 and re-sorts them; a subscribed channel that has since been deleted or made
@@ -321,9 +371,17 @@ runs from — else as the node owning the working directory. ``read``
 resolves its actor env-first the same way, minus ``--path`` (the reader
 its receipts attribute to): its ``--path`` picks only the mailbox viewed,
 and receipts still attribute to the actual reader. The pure listings
-(``messages``, ``sent``, ``feed``, ``thread``, ``subs``, ``channel list``)
-take ``--path`` as a subject selector — whose mailbox or rows are viewed —
-defaulting to the working directory's node.
+(``messages``, ``sent``, ``feed``, ``relays``, ``subs``) resolve the acting
+node the same way as the writing verbs — ``--path`` when given, else the
+calling node the loop exported ``_NODE`` for, else the node owning the
+working directory — so a node reads its own writes wherever the command runs
+from, and ``--path`` acts as another node; the body-widened forms
+(``--json --body`` on ``messages``, ``--saved``) answer to the reader
+instead (see `Listings are passive`_). ``thread`` prints bodies, so it
+resolves its reader exactly like ``read`` — env-first, never from
+``--path``, which only names the tree searched and is refused for a
+different tree. Only ``channel list`` defaults to the working directory's
+node.
 
 Every message is stamped with its sender's branch and, when one is known, the
 agent session that wrote it (the acting step's recorded session, or the live
@@ -342,6 +400,17 @@ progress to its ``outbox``, steers its children through their inboxes, and
 maintains its saved set. Because reply and react clear unread state, an item
 the agent acknowledges stops resurfacing at every sync — and an item it
 merely lists does not.
+
+A resumed iteration (a paused node brought back with ``fractal node resume``)
+also has its unread inbox re-read by the harness: every step prompt of that
+iteration — the sync pass included — ends with an untrusted metadata digest
+of the twenty highest-priority unread rows (sender, priority, subject, and
+UUID; no bodies) and the ``fractal radio read --channel=inbox --unread``
+command to read them, so directives that arrived while the node was paused
+are triaged before the frozen plan is replayed. Later iterations run with
+normal prompts. A sealed mailbox (see `Sealed mailboxes`_) yields no digest:
+the re-read runs as the node itself, so the seal holds those messages out of
+the prompt as it does out of every other listing.
 
 The seeded conventions agents follow: report upward via the ``outbox`` (the
 parent is subscribed), reach a specific node via its ``inbox``, keep bodies

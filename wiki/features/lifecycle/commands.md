@@ -49,18 +49,36 @@ children-first — descendants are swept before the node itself, so a parent nev
 completes over live children — and both let work land cleanly. They differ only
 in granularity: after `finish` the loop stops at the end of the current
 *iteration* (booking `completed`); after `stop` it stops at the end of the
-current *step* (booking `stopped`). `finish_cancel` withdraws a pending finish
+current *step* (booking `stopped`). Both are queued rows the loop polls at its
+boundaries — a stop landing mid-step waits for the in-flight seat to complete
+and never tears it (`kill` is the immediate path), and both sweep the *entire*
+subtree, not just the named node. `finish_cancel` withdraws a pending finish
 before the loop honors it. Signaled from the user (root) node, finish is a
 tree-wide broadcast with no self-signal, since the root runs no loop of its own.
 
+Both sweeps re-enumerate to a fixpoint, the way `kill` and `pause` do: a single
+pass covers only the descendants live when it began, so a child that stamped
+`active` while the sweep signaled its sibling escaped with no signal row at all.
+The remaining sliver — a child that boots after the last pass — closes at the
+child's own end, mirroring how a booting loop parks itself under a pause latch:
+`Node.cascade_latched` walks the ancestors for one still `active` with a pending
+`stop` or `finish` (nearest first, `stop` outranking `finish`), and
+`Loop._adopt_cascade` records it on the fresh run so the ordinary boundary check
+honors it. The user node is skipped in that walk — its tree-wide broadcast
+records no signal there is anything to adopt.
+
 ## kill
 
-`kill` is the escape hatch: it targets `active` *or* `paused` nodes (and an
-`idle` node whose tmux session is live — a spawn still booting), reaps the tmux
-session, and closes open run and iteration rows as `killed`. It is pure
-bookkeeping plus process reaping — no graceful wind-down. The descendant sweep
-re-enumerates the subtree to a fixpoint so children registered mid-sweep are
-still caught, and proceeds best-effort per node.
+`kill` is the escape hatch: it targets `active`, `paused`, and `idle` nodes — a
+booting spawn is reaped and a never-started one is stamped `killed` so it can
+never activate — reaps the loop runtime (the tmux session, or a headless or bare
+loop's recorded process group, when one lives), and closes open run and
+iteration rows as `killed`. It is pure bookkeeping plus process reaping — no
+graceful wind-down. It refuses only a status outside those three or a recorded
+process group whose identity `ps` cannot verify; that refusal names the `ps -p`
+check and the record to remove. The descendant sweep re-enumerates the subtree
+to a fixpoint so children registered mid-sweep are still caught, and proceeds
+best-effort per node.
 
 ## pause and resume
 

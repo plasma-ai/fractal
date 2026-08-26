@@ -18,11 +18,16 @@ import csv
 import io
 import json
 import pathlib
+import re
 import subprocess
-from typing import Optional
+import time
+from typing import Any, Optional
 
 import pytest
+import typer
 
+from fractal.cli.cmd import radio as radio_cmd
+from fractal.core.radio import Radio
 from tests._helpers import _git
 
 from .conftest import _run
@@ -30,6 +35,7 @@ from .conftest import _run
 __all__ = [
     'test_send_and_post_route_across_nodes_by_channel',
     'test_send_and_post_reject_write_only_and_out_of_range_priority',
+    'test_failed_commands_end_with_an_unmistakable_failed_line',
     'test_node_and_parent_are_mutually_exclusive',
     'test_bare_post_lands_in_outbox',
     'test_named_target_channel_defaults',
@@ -45,8 +51,14 @@ __all__ = [
     'test_read_reader_follows_node_env',
     'test_read_refuses_cross_tree_mailbox',
     'test_read_without_reader_names_the_remedy',
+    'test_body_listings_answer_to_the_reader_never_to_path',
+    'test_sealed_bodies_hold_against_an_actor_spoof',
     'test_listings_are_passive_and_metadata_only',
     'test_send_sender_follows_node_env',
+    'test_sealed_inbox_holds_the_seat_but_not_the_operator',
+    'test_send_fans_out_with_receipts_and_relays_lists_lineage',
+    'test_listings_read_your_writes_and_close_with_a_watermark',
+    'test_watermark_stamps_the_pre_query_cut',
     'test_post_and_reply_follow_node_env',
     'test_write_verbs_follow_node_env',
     'test_stale_node_env_refused_cleanly',
@@ -64,6 +76,7 @@ __all__ = [
     'test_channel_create_and_delete_lifecycle',
     'test_cross_node_read_emits_receipt_without_mutating_sender',
     'test_empty_messages_query_emits_a_header',
+    'test_listing_filters_that_can_only_be_empty_refuse',
     'test_empty_and_populated_headers_match',
     'test_json_listings_mirror_csv_shape',
     'test_body_column_is_json_only',
@@ -177,7 +190,7 @@ def test_send_and_post_reject_write_only_and_out_of_range_priority(
     (owner only), so a foreign write is a permission error; a priority
     outside 0-10 is a value error. Both are domain errors raised in the
     core, so they must surface through the ``@command`` wrapper as a clean
-    ``Error: <message>`` (exit 1) -- never the raw
+    ``Error: <message>`` (exit 2) -- never the raw
     ``PermissionError:``/``ValueError:`` class name that reads like an
     uncaught crash.
     """
@@ -196,7 +209,7 @@ def test_send_and_post_reject_write_only_and_out_of_range_priority(
         '--priority',
         '5',
     )
-    assert blocked.returncode == 1
+    assert blocked.returncode == 2
     assert blocked.stderr.startswith('Error:')
     assert 'PermissionError' not in blocked.stderr
     assert 'write-only' in blocked.stderr.lower()
@@ -212,10 +225,62 @@ def test_send_and_post_reject_write_only_and_out_of_range_priority(
         '--priority',
         '11',
     )
-    assert too_high.returncode == 1
+    assert too_high.returncode == 2
     assert too_high.stderr.startswith('Error:')
     assert 'ValueError' not in too_high.stderr
     assert 'priority' in too_high.stderr.lower()
+
+
+def test_failed_commands_end_with_an_unmistakable_failed_line(repo: dict) -> None:
+    """A failed command's LAST line is ``FAILED (exit N)``; success has none.
+
+    The phantom-send class: an unknown-option error frame read through
+    ``tail -1`` looked identical to a success frame, so a night of failed
+    sends passed as delivered. Every failure now closes with a line naming
+    the failure and the exit code -- parse errors (exit 2, with the correct
+    usage named) and domain errors (exit 2) alike -- and a successful send
+    never carries it.
+    """
+    alpha = repo['alpha']
+    # unknown option: rejected at parse time, naming the correct usage
+    unknown = _radio(alpha, 'send', 'hi', '--body', 'x')
+    assert unknown.returncode == 2
+    assert 'No such option' in unknown.stderr
+    assert 'Usage:' in unknown.stderr
+    assert unknown.stderr.rstrip().splitlines()[-1] == 'FAILED (exit 2)'
+    assert unknown.stdout.strip() == ''
+    # domain error: exit 2 through the command wrapper, same closing line
+    missing = _radio(
+        alpha,
+        'send',
+        'hi',
+        '--node',
+        'main.ghost',
+        '--subject',
+        's',
+        '--priority',
+        '5',
+    )
+    assert missing.returncode == 2
+    assert missing.stderr.startswith('Error:')
+    assert missing.stderr.rstrip().splitlines()[-1] == 'FAILED (exit 2)'
+    # a successful send never carries the failure line
+    sent = _radio(
+        alpha,
+        'send',
+        'hi',
+        '--node',
+        'main.beta',
+        '--subject',
+        's',
+        '--priority',
+        '5',
+    )
+    assert sent.returncode == 0
+    assert 'FAILED' not in sent.stderr
+    # round-trip: withdraw the probe message so the shared mailbox stays clean
+    result = _radio(alpha, 'unsend', sent.stdout.split()[0])
+    assert result.returncode == 0
 
 
 def test_node_and_parent_are_mutually_exclusive(repo: dict) -> None:
@@ -324,7 +389,7 @@ def test_named_target_channel_defaults(
         '5',
     )
     assert written.returncode == 0, written.stderr
-    uuid = written.stdout.strip()
+    uuid = written.stdout.split()[0]
     assert f"'{channel}' channel" in written.stderr
     listing = _radio(repo[host], 'messages', '--all', '--channel', channel).stdout
     assert uuid in listing
@@ -402,7 +467,7 @@ def test_send_crosses_classes_and_post_refuses_private(repo: dict) -> None:
         '5',
     )
     assert crossed.returncode == 0, crossed.stderr
-    uuid = crossed.stdout.strip()
+    uuid = crossed.stdout.split()[0]
     assert crossed.stderr.strip() == "sent to main.beta's 'public' channel"
     assert uuid in _radio(beta, 'messages', '--all', '--channel', 'public').stdout
     # a post into a privately readable channel is send's job
@@ -419,7 +484,7 @@ def test_send_crosses_classes_and_post_refuses_private(repo: dict) -> None:
         '--priority',
         '5',
     )
-    assert wrong_post.returncode == 1
+    assert wrong_post.returncode == 2
     assert 'fractal radio send' in wrong_post.stderr
 
 
@@ -466,7 +531,7 @@ def test_channel_not_found_names_the_remedy(
         '--priority',
         '5',
     )
-    assert missing.returncode == 1
+    assert missing.returncode == 2
     assert message in missing.stderr
     assert 'unspecified' not in missing.stderr
 
@@ -569,7 +634,8 @@ def test_send_and_post_echo_resolved_channel(
     extra stderr line naming the resolution; a fully explicit ``send``
     and every ``post`` (self-defaulting silently -- it is the quiet
     reporting verb) add nothing beyond the echo. Stdout stays exactly
-    the message UUID so scripts capturing it keep working.
+    the receipt: ``<uuid> <node>`` for a ``--node`` send, the bare UUID
+    otherwise, so scripts capturing it keep one contract per form.
     """
     alpha = repo['alpha']
     sent = _radio(
@@ -587,9 +653,15 @@ def test_send_and_post_echo_resolved_channel(
     expected = [notice] if notice else []
     expected.append(f"sent to {target}'s '{channel}' channel")
     assert sent.stderr.strip().splitlines() == expected
-    # stdout is the bare UUID, nothing else
-    assert sent.stdout.strip() == sent.stdout.strip().splitlines()[0]
-    assert len(sent.stdout.strip()) == 8
+    # stdout is the one-line receipt: uuid plus the recipient on a --node
+    # send, the bare uuid on every other form
+    [receipt] = sent.stdout.strip().splitlines()
+    if verb == 'send' and '--node' in target_args:
+        uuid, receipt_target = receipt.split()
+        assert receipt_target == target
+    else:
+        uuid = receipt
+    assert len(uuid) == 8
 
 
 def test_bare_messages_defaults_to_inbox(repo: dict) -> None:
@@ -694,7 +766,7 @@ def test_read_path_selects_mailbox_never_reader(repo: dict) -> None:
     # a read-only channel never impersonates: the root cannot read alpha's inbox
     _send(alpha, 'owner only', channel='inbox', subject='own')
     denied = _run(root, 'radio', 'read', '--channel', 'inbox', '--path', f'{alpha}')
-    assert denied.returncode == 1
+    assert denied.returncode == 2
     assert 'read-only' in denied.stderr
 
 
@@ -797,6 +869,144 @@ def test_read_without_reader_names_the_remedy(
     assert 'fractal init' not in lost.stderr
 
 
+def test_body_listings_answer_to_the_reader_never_to_path(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """``--path`` picks the mailbox listed; its bodies still answer to the reader.
+
+    The metadata listing is an operator surface -- ``--path`` acts as the
+    node named -- but ``--json --body`` and the archive carry ``data``, so
+    they are body surfaces and obey the same owner-only rule ``read``
+    does, resolved against the caller that actually runs the command.
+    Without the split, a refusal on one surface is a permission on
+    another: the bodies ``read --path`` denies ride out through the
+    listing, receipt-free.
+    """
+    alpha, beta = repo['alpha'], repo['beta']
+    uuid = _send(beta, 'listed body', node='main.alpha', subject='lb')
+    # the control: read already refuses beta the owner-only inbox
+    denied = _run(alpha.parent.parent, 'radio', 'read', uuid, _NODE=f'{beta}')
+    assert denied.returncode == 2
+    assert 'read-only' in denied.stderr
+    # the widened listing refuses identically, whoever --path names
+    peeked = _run(
+        beta,
+        'radio',
+        'messages',
+        '--all',
+        '--json',
+        '--body',
+        '--path',
+        f'{alpha}',
+    )
+    assert peeked.returncode == 2
+    assert 'read-only' in peeked.stderr
+    assert 'listed body' not in peeked.stdout
+    # the metadata listing is untouched -- the row is visible, the body is not
+    listed = _run(beta, 'radio', 'messages', '--all', '--path', f'{alpha}')
+    assert listed.returncode == 0, listed.stderr
+    assert uuid in listed.stdout
+    assert 'listed body' not in listed.stdout
+    # the owner's own widened listing still carries the body
+    own = _radio(alpha, 'messages', '--all', '--json', '--body')
+    assert own.returncode == 0, own.stderr
+    assert 'listed body' in own.stdout
+    # the archive is a body surface too: its rows always carry data
+    assert _radio(alpha, 'save', uuid).returncode == 0
+    archived = _run(
+        beta, 'radio', 'messages', '--saved', '--json', '--path', f'{alpha}'
+    )
+    assert archived.returncode == 2
+    assert 'read-only' in archived.stderr
+    assert 'listed body' not in archived.stdout
+    assert uuid in _radio(alpha, 'messages', '--saved').stdout
+    # a caller with no reader identity at all fails closed, naming the remedy
+    lost = _run(
+        tmp_path,
+        'radio',
+        'messages',
+        '--all',
+        '--json',
+        '--body',
+        '--path',
+        f'{alpha}',
+    )
+    assert lost.returncode != 0
+    assert 'No reader node' in lost.stderr
+    assert 'listed body' not in lost.stdout
+    # round-trip the shared mailbox
+    assert _radio(alpha, 'unsave', uuid).returncode == 0
+    assert _radio(beta, 'unsend', uuid).returncode == 0
+
+
+def test_sealed_bodies_hold_against_an_actor_spoof(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """No seat talks its way into a sealed mailbox's bodies by moving.
+
+    The seal binds the caller acting AS the sealed node, so a seat that
+    unsets ``_NODE`` and works from a sibling worktree resolves to a real
+    but WRONG actor and lifts it. The body surfaces close that: whoever
+    the caller resolves to, only the mailbox's owner may take its
+    owner-only bodies out -- and for the owner the seal itself holds them.
+    Unsealing from outside stays the lawful remedy.
+    """
+    alpha, beta, root = repo['alpha'], repo['beta'], repo['root']
+    uuid = _send(beta, 'sealed spoof body', node='main.alpha', subject='ss')
+    assert _radio(alpha, 'save', uuid).returncode == 0
+    assert _run(alpha, 'node', 'config', 'set', 'sealed=true').returncode == 0
+    # every spoof of the acting seat -- a sibling worktree, no node at all,
+    # a forged _NODE at a sibling's data dir -- is refused
+    spoofs = [
+        _run(
+            beta, 'radio', 'messages', '--all', '--json', '--body', '--path', f'{alpha}'
+        ),
+        _run(
+            tmp_path,
+            'radio',
+            'messages',
+            '--all',
+            '--json',
+            '--body',
+            '--path',
+            f'{alpha}',
+        ),
+        _run(
+            tmp_path,
+            'radio',
+            'messages',
+            '--all',
+            '--json',
+            '--body',
+            '--path',
+            f'{alpha}',
+            _NODE=f'{beta / ".fractal" / "main.beta"}',
+        ),
+        _run(beta, 'radio', 'messages', '--saved', '--json', '--path', f'{alpha}'),
+        _run(root, 'radio', 'thread', uuid, '--json', '--path', f'{alpha}'),
+    ]
+    for spoof in spoofs:
+        assert spoof.returncode != 0, spoof.stdout
+        assert 'sealed spoof body' not in spoof.stdout
+    # the honest seat still gets the annotated empty listing, not a refusal
+    honest = _run(
+        root, 'radio', 'messages', '--all', '--path', f'{alpha}', _NODE=f'{alpha}'
+    )
+    assert honest.returncode == 0, honest.stderr
+    assert 'inbox sealed' in honest.stderr
+    assert uuid not in honest.stdout
+    # unsealing from outside is the lawful remedy, and it restores the bodies
+    lawful = _run(root, 'node', 'config', 'set', 'sealed=false', '--path', f'{alpha}')
+    assert lawful.returncode == 0, lawful.stderr
+    restored = _radio(alpha, 'messages', '--all', '--json', '--body')
+    assert 'sealed spoof body' in restored.stdout
+    # round-trip the shared mailbox
+    assert _radio(alpha, 'unsave', uuid).returncode == 0
+    assert _radio(beta, 'unsend', uuid).returncode == 0
+
+
 def test_listings_are_passive_and_metadata_only(repo: dict) -> None:
     """``messages`` never writes receipts and never prints bodies.
 
@@ -862,7 +1072,7 @@ def test_send_sender_follows_node_env(repo: dict) -> None:
         _NODE=f'{alpha}',
     )
     assert sent.returncode == 0, sent.stderr
-    uuid = sent.stdout.strip()
+    uuid = sent.stdout.split()[0]
     # the send attributes to alpha: alpha's sent listing carries it ...
     assert uuid in _radio(alpha, 'sent').stdout
     # ... and the root's does not
@@ -886,7 +1096,232 @@ def test_send_sender_follows_node_env(repo: dict) -> None:
         _NODE=f'{alpha}',
     )
     assert explicit.returncode == 0, explicit.stderr
-    assert explicit.stdout.strip() in _radio(beta, 'sent').stdout
+    assert explicit.stdout.split()[0] in _radio(beta, 'sent').stdout
+
+
+def test_sealed_inbox_holds_the_seat_but_not_the_operator(repo: dict) -> None:
+    """With ``sealed`` set, the seat's own reads hold; the operator's do not.
+
+    The seat -- the caller acting as the sealed node, by the exported
+    ``_NODE`` or by owning the working directory -- gets an empty,
+    loudly-annotated listing and a refused ``read``; an operator working
+    from outside the node still reads everything, so adjudication stays
+    possible. The seat cannot lift the seal itself -- that one call would
+    hand it every held message -- so unsealing
+    (``config set sealed=false``) is the operator's, and it restores the
+    view.
+    """
+    alpha, beta, root = repo['alpha'], repo['beta'], repo['root']
+    uuid = _send(beta, 'sealed adjudication', node='main.alpha', priority=9)
+    assert _run(alpha, 'node', 'config', 'set', 'sealed=true').returncode == 0
+    # the sealed seat: empty annotated listing, refused body surface
+    held = _run(root, 'radio', 'messages', '--all', _NODE=f'{alpha}')
+    assert held.returncode == 0
+    assert uuid not in held.stdout
+    assert 'inbox sealed' in held.stderr
+    refused = _run(root, 'radio', 'read', uuid, _NODE=f'{alpha}')
+    assert refused.returncode == 2
+    assert 'inbox sealed' in refused.stderr
+    # the operator adjudicates freely -- from outside the sealed node, since
+    # the seal binds any caller acting AS that node (its own worktree
+    # included, so an env scrub inside the seat cannot lift it)
+    visible = _run(root, 'radio', 'messages', '--all', '--path', f'{alpha}')
+    assert uuid in visible.stdout
+    # the seat's own unseal refuses; the operator's, from outside, lands
+    self_unseal = _run(alpha, 'node', 'config', 'set', 'sealed=false')
+    assert self_unseal.returncode == 2
+    assert 'cannot lift its own seal' in self_unseal.stderr
+    lawful = _run(root, 'node', 'config', 'set', 'sealed=false', '--path', f'{alpha}')
+    assert lawful.returncode == 0, lawful.stderr
+    unsealed = _run(root, 'radio', 'messages', '--all', _NODE=f'{alpha}')
+    assert uuid in unsealed.stdout
+    # round-trip: withdraw the probe message so the shared mailbox stays clean
+    assert _radio(beta, 'unsend', uuid).returncode == 0
+
+
+def test_send_fans_out_with_receipts_and_relays_lists_lineage(repo: dict) -> None:
+    """Any ``--node`` send returns per-recipient receipts; relays verify.
+
+    A ``--node`` roster prints one ``<uuid> <node>`` receipt per recipient
+    (each copy its own message) whatever its length -- a fleet driver
+    building the roster never special-cases a roster of one -- and
+    ``radio relays <uuid>`` answers whether an order was ever relayed
+    onward: empty lineage before, the marked copy after.
+    """
+    alpha, beta = repo['alpha'], repo['beta']
+    fan = _radio(
+        alpha,
+        'send',
+        'fleet order',
+        '--node',
+        'main.beta',
+        '--node',
+        'main',
+        '--subject',
+        'fo',
+        '--priority',
+        '8',
+    )
+    assert fan.returncode == 0, fan.stderr
+    lines = fan.stdout.strip().splitlines()
+    uuids = []
+    for line, expected in zip(lines, ['main.beta', 'main']):
+        uuid, target = line.split()
+        assert target == expected
+        uuids.append(uuid)
+    assert len(set(uuids)) == 2
+    # a roster of one keeps the receipt shape
+    single = _radio(
+        alpha,
+        'send',
+        'fleet order',
+        '--node',
+        'main.beta',
+        '--subject',
+        'fo',
+        '--priority',
+        '8',
+    )
+    assert single.returncode == 0, single.stderr
+    single_uuid, single_target = single.stdout.split()
+    assert single_target == 'main.beta'
+    uuids.append(single_uuid)
+    order = uuids[0]
+    # before any relay the lineage is empty -- the obligation reads unmet
+    empty = _radio(beta, 'relays', order)
+    assert empty.returncode == 0
+    assert f'0 relays recorded for {order}' in empty.stderr
+    # beta relays the order onward; the lineage now names the copy
+    relayed = _radio(
+        beta,
+        'send',
+        'fleet order (relayed)',
+        '--node',
+        'main',
+        '--subject',
+        'fo',
+        '--priority',
+        '8',
+        '--relay-of',
+        order,
+    )
+    assert relayed.returncode == 0, relayed.stderr
+    rows = json.loads(_radio(beta, 'relays', order, '--json').stdout)
+    assert [(row['sender'], row['node'], row['metadata']) for row in rows] == [
+        ('main.beta', 'main', f'relay:{order}')
+    ]
+    # round-trip: withdraw the probe messages so the shared mailboxes stay clean
+    for uuid in (*uuids, relayed.stdout.split()[0]):
+        sender = alpha if uuid in uuids else beta
+        assert _radio(sender, 'unsend', uuid).returncode == 0
+
+
+def test_listings_read_your_writes_and_close_with_a_watermark(repo: dict) -> None:
+    """Listings act as the exported node and stamp their cut on stderr.
+
+    The false-record class: a send attributed to the exported ``_NODE``
+    was graded against a listing that read the cwd's node, so a delivered
+    send read as missing from its own sender's outbox. Listings resolve
+    the acting node exactly like the writing verbs -- a send is visible in
+    the sender's next ``sent`` listing and a delivered directive in the
+    recipient's next inbox read, from any cwd -- and each listing closes
+    with an ``as of <instant> (acting as <branch>)`` stderr watermark
+    naming the cut it took.
+    """
+    alpha, beta, root = repo['alpha'], repo['beta'], repo['root']
+    # send as alpha from the ROOT worktree (a detached step's cwd)
+    sent = _run(
+        root,
+        'radio',
+        'send',
+        'ryw body',
+        '--node',
+        'main.beta',
+        '--channel',
+        'inbox',
+        '--subject',
+        'ryw',
+        '--priority',
+        '5',
+        _NODE=f'{alpha}',
+    )
+    assert sent.returncode == 0, sent.stderr
+    uuid = sent.stdout.split()[0]
+    # the very next listing from the same foreign cwd shows the send ...
+    listing = _run(root, 'radio', 'sent', _NODE=f'{alpha}')
+    assert uuid in listing.stdout
+    # ... and the recipient's next inbox listing shows the directive
+    inbox = _run(root, 'radio', 'messages', '--all', _NODE=f'{beta}')
+    assert uuid in inbox.stdout
+    # each listing closes with the freshness watermark naming its actor
+    watermark = r'as of \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \(acting as main\.alpha\)'
+    assert re.search(watermark, listing.stderr)
+    assert 'acting as main.beta' in inbox.stderr
+    # round-trip: withdraw the probe message so the shared mailbox stays clean
+    assert _run(root, 'radio', 'unsend', uuid, _NODE=f'{alpha}').returncode == 0
+
+
+def test_watermark_stamps_the_pre_query_cut(
+    repo: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The watermark instant is the clock read before the query, not render.
+
+    A row a concurrent sender lands between the query and the stamp has
+    ``created_at`` before the watermark yet is absent from the listing, so
+    a render-time stamp endorses a false 'never sent' verdict -- the exact
+    error the watermark exists to prevent; the pre-query cut only ever
+    under-claims. Driven in-process (the interleaving is unreachable from
+    a subprocess) with a stepped clock the query advances two minutes,
+    modeling a slow render or pipe consumer: the stamp must still say the
+    instant from before the query. ``thread`` and ``subs`` -- the surfaces
+    a reply obligation grades from -- close with the watermark too;
+    ``thread`` prints bodies, so its acting node is the exported reader
+    rather than ``--path``.
+    """
+
+    class _SteppedClock:
+        """Module-shaped time double whose queries advance the clock."""
+
+        strftime = staticmethod(time.strftime)
+
+        def __init__(self) -> None:
+            self.now = 1_000_000_000.0
+
+        def time(self) -> float:
+            return self.now
+
+        def gmtime(self, secs: Optional[float] = None) -> time.struct_time:
+            return time.gmtime(self.now if secs is None else secs)
+
+    clock = _SteppedClock()
+    monkeypatch.setattr(radio_cmd, 'time', clock)
+    monkeypatch.setenv('_NODE', f'{repo["alpha"]}')
+
+    def slow_query(self: Radio, *args: Any, **kwargs: Any) -> list:
+        clock.now += 120
+        return []
+
+    def invoke(register: Any, query: str, **kwargs: Any) -> str:
+        clock.now = 1_000_000_000.0
+        monkeypatch.setattr(Radio, query, slow_query)
+        app = typer.Typer()
+        register(app)
+        [entry] = app.registered_commands
+        entry.callback(csv=True, json=False, path=f'{repo["alpha"]}', **kwargs)
+        return capsys.readouterr().err
+
+    pre_query = 'as of 2001-09-09T01:46:40Z (acting as main.alpha)'
+    listing = invoke(
+        radio_cmd.radio_sent, 'sent', channel=None, limit=None, since=None, recent=False
+    )
+    assert pre_query in listing
+    assert 'as of 2001-09-09T01:48:40Z' not in listing
+    assert pre_query in invoke(
+        radio_cmd.radio_thread, 'thread', message_uuid='a1b2c3d4'
+    )
+    assert pre_query in invoke(radio_cmd.radio_subs, 'subs')
 
 
 def test_post_and_reply_follow_node_env(repo: dict) -> None:
@@ -1468,6 +1903,47 @@ def test_empty_messages_query_emits_a_header(repo: dict) -> None:
     assert _radio(beta, 'read', unread).returncode == 0
 
 
+def test_listing_filters_that_can_only_be_empty_refuse(repo: dict) -> None:
+    """A filter matching nothing refuses instead of narrating an empty view.
+
+    An empty listing is a record: consumers grade verdicts off it, and the
+    ``0 unread (0 total)`` notice states affirmatively that the mailbox
+    holds nothing. A typo'd channel, an unknown feed target, and a
+    ``--since`` that is not a timestamp all render exactly that view over
+    a full mailbox -- and ``--since`` is worse than empty in the other
+    direction, since a value sorting below the rows filters nothing at all
+    while looking like it filtered. Each refuses at the boundary; a real
+    channel that happens to be empty still lists quietly.
+    """
+    beta, alpha = repo['beta'], repo['alpha']
+    # a real channel with no mail is a true empty view, not a refusal
+    populated = _radio(beta, 'messages', '--channel', 'outbox', '--all')
+    assert populated.returncode == 0, populated.stderr
+    # a typo'd channel names what the mailbox actually has
+    typo = _radio(beta, 'messages', '--channel', 'inbx')
+    assert typo.returncode == 2
+    assert "No 'inbx' channel on main.beta" in typo.stderr
+    assert '0 unread' not in typo.stderr
+    # so does a feed filter matching no subscription, and an unknown target
+    unsubscribed = _radio(beta, 'feed', '--channel', 'inbx')
+    assert unsubscribed.returncode == 2
+    assert "No 'inbx' subscription" in unsubscribed.stderr
+    unknown = _radio(beta, 'feed', '--node', 'main.nope')
+    assert unknown.returncode == 2
+    assert "Node not found: 'main.nope'" in unknown.stderr
+    # --since is compared lexicographically against ISO 8601 instants, so a
+    # non-timestamp is refused as a usage error on every listing that takes it
+    for verb in ('messages', 'sent', 'feed'):
+        for value in ('NOPE', '05/08/2026', '1785902960'):
+            refused = _radio(alpha, verb, '--since', value)
+            assert refused.returncode == 2, (verb, value, refused.stderr)
+            assert 'ISO 8601' in refused.stderr
+    # a bare date and a full instant both stand: they sort as real cuts
+    for value in ('2026-01-31', '2026-01-31T14:00:00Z'):
+        accepted = _radio(alpha, 'messages', '--all', '--since', value)
+        assert accepted.returncode == 0, accepted.stderr
+
+
 def test_empty_and_populated_headers_match(repo: dict) -> None:
     """Empty and populated listings emit the identical header shape.
 
@@ -1661,7 +2137,9 @@ def _send(
 
     An omitted ``node`` self-targets the sending node explicitly (its
     worktree directory is named after its branch), keeping every helper
-    send fully explicit and its stderr free of defaulting notices.
+    send fully explicit and its stderr free of defaulting notices. A
+    ``--node`` send prints the ``<uuid> <node>`` receipt shape, so the
+    UUID is the receipt's first field.
     """
     args = [
         'send',
@@ -1677,7 +2155,7 @@ def _send(
     ]
     result = _radio(path, *args)
     assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
+    return result.stdout.split()[0]
 
 
 def _post(

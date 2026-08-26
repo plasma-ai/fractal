@@ -432,6 +432,42 @@ def exclude_strip(repo_dir: pathlib.Path) -> None:
     fractal.util.filesystem.write_atomic(exclude, f'{body}\n' if body else '')
 
 
+def exclude_block_lines(repo_dir: pathlib.Path) -> set[int]:
+    """Return the 1-based ``info/exclude`` line numbers of fractal's blocks.
+
+    Markers included, spanning the same whole-line-delimited blocks
+    :func:`exclude_update` writes and :func:`exclude_strip` removes. A
+    ``git check-ignore -v`` attribution keyed on these lines separates
+    fractal's own holds from user lines sharing the file (its normal
+    purpose), so a foreign pattern eating a deliverable is never mistaken
+    for an intentional runtime ignore.
+
+    Args:
+        repo_dir: Main git repo root.
+
+    Returns:
+        Line numbers inside fractal's marker-delimited blocks.
+
+    """
+    exclude = _exclude_file(repo_dir)
+    if not exclude.exists():
+        return set()
+    lines = exclude.read_text(encoding='utf-8').splitlines()
+    block: set[int] = set()
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() == _EXCLUDE_BEGIN:
+            close = index + 1
+            while close < len(lines) and lines[close].strip() != _EXCLUDE_END:
+                close += 1
+            if close < len(lines):
+                block.update(range(index + 1, close + 2))
+                index = close + 1
+                continue
+        index += 1
+    return block
+
+
 def ensure_project_wiki(
     worktree: pathlib.Path,
     repo_dir: pathlib.Path,

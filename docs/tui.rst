@@ -29,8 +29,10 @@ repository root is the usual habit. The command surface:
 
    * - Argument / option
      - Meaning
-   * - ``node``
-     - Branch to focus initially (default: the node at ``--path``).
+   * - ``name``
+     - Tree root branch, or a node branch to focus initially (default: the
+       caller's own tree, opened at its root). A node branch opens the tree
+       that owns it, focused on that node.
    * - ``--path <dir>``
      - Worktree directory (default ``.``).
    * - ``--light``
@@ -82,9 +84,10 @@ Every node in the tree, as box-drawing rows, each with a status dot; the
 root row is tagged ``(user)``. A filled dot means the node is live (active,
 or paused mid-work); a hollow dot means it is not running — settled, ``idle``
 awaiting a start, or retired. The dot's color carries the specific lifecycle
-status (see :doc:`/guide/lifecycle`), and a pending signal overrides it. A node whose ``.status`` says ``active`` but whose tmux
-session has vanished displays as ``exited`` — a display-only reconciliation;
-nothing is written back.
+status (see :doc:`/guide/lifecycle`), and a pending signal overrides it. A
+node whose ``.status`` says ``active`` but whose tmux session or headless
+process group has vanished displays as ``exited`` — a display-only
+reconciliation; nothing is written back.
 
 ``up``/``down`` select a row, ``right``/``left`` unfold and fold a subtree,
 and ``enter`` re-scopes the whole cockpit to the selected branch — the pane's
@@ -152,7 +155,8 @@ Between the explorer and the log sits the **log-scope toggle**, a
 log between the focused node's own activity and its whole subtree's, merged.
 (``t`` also works directly from the log rows.) The user node opens on the
 descendants view — the whole tree's timeline — and every other node on its
-own.
+own; a toggled choice sticks per node for the session, so re-scoping back to
+a node restores its last setting.
 
 The radio pane
 --------------
@@ -176,8 +180,8 @@ On the tabs, ``left``/``right`` cycle the source. On the filter chips,
 ``outbox`` / ``public`` / ``private`` (the four default channels only —
 custom channels are not filterable here), and the show filter ``all`` /
 ``unread`` / ``read``. Rows show an unread dot, the sender's leaf name, the
-channel, the subject, and the timestamp; the unread dot reflects the mailbox
-*owner's* read state, not yours.
+channel, the priority, the subject, and the timestamp; the unread dot
+reflects the mailbox *owner's* read state, not yours.
 
 ``enter`` on a row opens the **detail view**: sender (and the session that
 wrote it), channel, timestamp, UUID, priority, subject, and the full body.
@@ -211,8 +215,9 @@ reachable here), and the priority combo ``10`` down to ``1``.
 
 Slash commands typed in the body set fields directly: ``/node``,
 ``/channel``, ``/thread``, ``/priority``, and ``/subject <value>`` (a
-recognized command highlights coral). ``/node`` accepts a full branch or a
-unique leaf name.
+recognized command highlights coral). The four radio-field commands also
+flip the composer to the radio kind. ``/node`` accepts a full branch or a
+unique leaf name and toasts ``no node '<name>'`` when neither matches.
 
 **Send keys**: ``ctrl+s`` always sends. On terminals speaking the kitty
 keyboard protocol — such as kitty, ghostty, WezTerm, and iTerm2 — ``enter``
@@ -228,9 +233,15 @@ the focused node, channel ``public``, priority ``10`` — note these differ
 from the CLI's ``fractal radio send`` defaults. An empty subject falls back
 to a short prefix of the body. With a message UUID in the thread field
 the send becomes a threaded reply (as **Reply** pre-fills it); otherwise it
-is a plain send to the node and channel. Every message is sent **as the user
-(root) node**. Success toasts ``radio send → <node> · <channel>``; failures
-toast the error. See :doc:`/guide/radio` for the messaging model.
+is a plain send to the node and channel. A landed message consumes its
+subject and thread — after a successful send or reply the subject clears and
+the thread field resets to ``—``, so the next message is a plain send unless
+you set the thread again; node, channel, and priority keep their values. A
+failed send keeps node, channel, thread, priority, and subject for a
+re-send; the body clears either way. Every message is sent **as the user
+(root) node**. Success toasts ``radio send → <node> · <channel>``
+(``radio reply → ...`` for a threaded reply); failures toast the error. See
+:doc:`/guide/radio` for the messaging model.
 
 Chat kind
 ~~~~~~~~~
@@ -242,6 +253,15 @@ spinner while the agent works; a turn that goes silent for too long (about
 two minutes) is cancelled. The transcript is kept per branch — re-scoping
 swaps it — and ``enter`` on the transcript switches to a scroll mode
 (``up``/``down`` scroll, ``esc`` back). Chat never writes radio messages.
+
+A prompt sent while a turn is still streaming queues behind it: it appears
+at once as a pending ``you`` line and dispatches when that turn finishes,
+against the branch and session it was typed on even if you have since
+re-scoped. ``ctrl+g``, from anywhere — the body included — interrupts the
+in-flight turn and the transcript notes ``cancelled``; a single queued
+prompt is handed back into the body for editing, while several queued
+prompts on that branch are combined, oldest first, into one turn and sent at
+once (prompts queued against another branch stay queued).
 
 How a turn reaches the node depends on its state:
 
@@ -267,11 +287,12 @@ Attaching to a session
 node's tmux session **read-only**: every key is ignored except ``esc``,
 which detaches (the session's status line advertises ``esc detach`` for the
 duration). If the node has no live session, a ``no running session`` toast
-appears instead. When the cockpit itself runs inside tmux, ``ctrl+a``
-switches your tmux client to the node's session instead — without the
-read-only guard. For attaching outside the TUI, prefer ``fractal node
-attach`` over raw ``tmux attach -t``: tmux prefix-matches session names and
-can attach the wrong one.
+appears instead; a headless node, which has no session to attach, gets a
+``headless output: <log>`` toast naming its ``headless.log``. When the
+cockpit itself runs inside tmux, ``ctrl+a`` switches your tmux client to the
+node's session instead — without the read-only guard. For attaching outside
+the TUI, prefer ``fractal node attach`` over raw ``tmux attach -t``: tmux
+prefix-matches session names and can attach the wrong one.
 
 Keybindings
 -----------
@@ -286,6 +307,10 @@ Keybindings
    * - Anywhere
      - ``ctrl+a``
      - Attach the focused node's tmux session (read-only).
+   * - Anywhere
+     - ``ctrl+g``
+     - Interrupt the in-flight chat turn (a lone queued prompt returns to
+       the body; several queued prompts fire as one turn).
    * - Anywhere
      - ``ctrl+q``
      - Quit.

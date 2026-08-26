@@ -1,10 +1,440 @@
 # Changelog
 
 All notable changes to this project are documented in this file. The format is
-based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions
+follow a `major.minor.patch` scheme: while the project is young, minor releases
+may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
+
+### Added
+
+- `node start --headless` / `--tmux` (envvar `FRACTAL_HEADLESS`): the loop runs
+  in a detached process group instead of a tmux session, its output captured in
+  the node's `headless.log` and the backend recorded in a `.headless` marker, so
+  a tree runs on a host without tmux — child starts inherit the backend through
+  the seat environment (`--tmux` overrides it for one child), `resume` reselects
+  the recorded backend, and `attach` refuses on a headless node and names the
+  log to follow. Liveness, crash healing, kill, and teardown judge a headless or
+  bare loop by its recorded `.pgid` group and verify the group's identity
+  through `ps` (a group owned by another user is arbitrated the same way); kill
+  vets `.pgid`/`.step_pgid` under the flock and refuses only over a group whose
+  identity `ps` cannot verify, naming the check to run.
+
+## [1.2.0] - 2026-08-24
+
+### Breaking
+
+- Every command reserves exit 1 for its own nonzero outcome — a dirty
+  `commit --check`: a command error (an unresolvable node, a refused lifecycle
+  signal, a rejected commit message) exits 2 with an `Error:` line on stderr,
+  beside typer's usage errors — a script gating on exit codes must branch
+  accordingly, never reading a failed run as a command's own nonzero outcome.
+
+### Added
+
+- `node init --profile=<name>` + init-time fill-sheet validation: a profile is a
+  repo-provided seed bundle under `.fractal/profiles/<name>/` (`steps/` seeds
+  the step list, `NODE.md` a deployment-ready charter), and the charter's
+  fill-sheet is validated before any worktree exists — its two authored sections
+  must be present, every `pin:` line must resolve to a commit and match `--pin`,
+  and every `docket: <path>` line must resolve at the pin — so stale pins, stale
+  docket rows, and truncated seeds die at init instead of costing the
+  commission's opening seat. (Profile config presets are a follow-up; caps and
+  modes stay flags.)
+- Resumed iterations are no longer context-blind: the harness re-reads the
+  node's unread inbox and appends the digest (metadata, priority first; sealed
+  mailboxes stay sealed) to every seat of a resumed iteration, so directives
+  that arrived after the plan froze are in context before any replayed decision
+  executes.
+- `node start --continue --drain`: the harness runs the continued run as a drain
+  — `_DRAIN` rides every seat's environment,
+  `node init`/`node start`/`node update`/`node resume` refuse under it (spawns,
+  re-arms, and subtree wake-ups are blocked, not just discouraged), and the
+  DRAIN mode doc directs every seat to close out.
+- Billing-class breaker: three consecutive instant zero-cost step failures (the
+  dead-credits signature) back the loop off exponentially (60s doubling to 1h)
+  instead of redispatching hot, announce themselves as `PAUSED: billing` on the
+  pane and in the `node list` detail column, and self-clear on the first
+  completed launch — the probe; a failure that spent real money never reads as
+  an outage.
+- Iteration-gap alarms: iteration numbers that advance with no recorded row
+  (iterations consumed but never executed — a fleet-wide transient once ate four
+  in eleven minutes with zero trace) flag the `node list`/`node status` detail
+  column with the missing span (`iteration gap 2.19-2.22`), and the loop warns
+  on stderr the moment a fresh row lands past a gap.
+- Sealed mailboxes (`sealed` config key; `node init --sealed`): while sealed,
+  every message a node hosts is held out of its own seat's context — empty
+  listings with an `inbox sealed` notice, a refused `radio read`, hosted rows
+  dropped from threads — keyed on the loop-exported `_NODE`, so operator shells
+  adjudicate freely and the node's own writes (verdicts) still file;
+  `config set sealed=false` unseals. The enforcement half of verifier isolation:
+  sealed traffic can no longer leak into a verifier's context through routine
+  triage.
+- Radio fan-out with per-recipient receipts and relay lineage: `radio send`
+  takes a repeated `--node` (every recipient validated before any copy lands),
+  and every `--node` send prints one `<uuid> <node>` receipt per recipient on
+  stdout — one contract whatever the roster's length, while bare and `--parent`
+  sends keep the bare UUID. `--relay-of <uuid>` marks a copy as the relay of an
+  order, and the new `radio relays <uuid>` lists every recorded relay — the
+  check that a descendant-relay obligation actually executed — keyed on the
+  recorded marks alone, so a withdrawn original (`unsend` deletes the original,
+  never the copies) stays auditable.
+- `node list --json`: a JSON array of typed row objects (mutually exclusive with
+  `--csv`), completing the machine-readable trio with `node activity --json` and
+  the radio listings' `--json` — operator instruments no longer need comma-split
+  CSV scraping that an odd title can corrupt.
+- Unmistakable failure frames: every failed `fractal` command closes with a
+  `FAILED (exit N)` line as the LAST line of output (bold red on a tty, bare
+  text in pipes), so an error frame read through `tail -1` can never pass as
+  success; unknown options keep the usage line naming the correct invocation.
+- `node list` gains a typed `end_reason` column (riding `--json` and CSV alike):
+  a closed vocabulary naming a settled row's landing — `goal_met`,
+  `run_exhausted`, or `final_iteration_failed` on a completed row;
+  `cost_budget`, `timeout`, `setup_abort`, `final_iteration_failed`, or `other`
+  (recorded but unmapped) on an exited one — derived from the run row's typed
+  facts and the loop's own recorded reason strings, null when nothing is
+  recorded (a reconcile-healed crash) and on every other status, so machine
+  consumers stop literal-matching the `detail` prose to tell landings apart.
+
+### Fixed
+
+- A credential parked in a node's estate no longer rides a commit silently.
+  Containment was inverted against risk: the record allowlist bounded only the
+  force-add that overrides a host's ignore rules, so the same dotenv, private
+  key, or downloaded token was loudly refused where a host rule already fenced
+  it — and swept into history by the plain add wherever nothing did, which is
+  the default state of a fresh clone. One content law now bounds both paths, so
+  what a node's own directory folds into history never turns on whether an
+  ignore rule happens to cover it, and a refusal is named in the commit output
+  either way rather than inferred from an absent file. Because the law must hold
+  for a normal node, it describes everything an estate legitimately holds — the
+  canon-required records at their text suffixes, plus the estate's own tool
+  state: git's empty-directory placeholder (`plans/.gitkeep`) and the memory
+  wiki's settings directory (`memory/.wiki/`), whose declared-root marker the
+  wiki CLI reads the memory back through. Both already committed and still do;
+  no file class is newly admitted to history, and the classes now withheld are
+  exactly those outside the law (keys, certificates, archives, binaries, and
+  anything a node parks at the estate root). The clean check learns the same law
+  for untracked estate paths, for the reason it already rides the stage's own
+  excludes: content no pass may ever stage would otherwise read as permanently
+  dirty and fire the loop's force-commit net every iteration over a file that
+  can never clear.
+- A draining seat can no longer spawn its way out by moving. The drain's
+  spawn/re-arm refusals resolved the acting node from `_NODE`, else the working
+  directory — both the seat's to rewrite — so
+  `env -u _DRAIN -u _NODE -C <sibling worktree> fractal node init …` resolved to
+  a real but *wrong* node the drain never binds, and the same command from
+  outside every worktree resolved to no node at all and failed open. Two nodes
+  were spawned from a live drain that way. The guard now also asks the operating
+  system: the loop makes each agent invocation its own process group leader and
+  records the id, so the tree can ask which of its open draining runs owns the
+  calling process — attribution no `env -u` or `cd` rewrites. An operator's own
+  shell is in another group and acts normally, as before.
+- A child in its boot window no longer escapes a `stop`/`finish` cascade
+  permanently. Both verbs made a single pass over the descendants live at that
+  instant, so a child still `idle` for the moment between `node start` returning
+  and its loop's `active` stamp got no signal row at all — while the operator's
+  command reported success. It then ran on unattended after its manager settled,
+  and under `finish` blocked the manager's drain-wait until its own `max_iters`
+  ran out. The sweeps now re-enumerate to a fixpoint (as `kill` and `pause`
+  already did), and a loop that boots while an ancestor still carries a pending
+  stop or finish adopts that signal onto its own run and honors it at the first
+  boundary — the graceful-signal twin of the pause latch a booting loop parks
+  itself against.
+- A read-only census no longer SIGKILLs a healthy loop that has no tmux session.
+  `fractal node _loop` is a supported bare entry point (`start.sh` execs it, and
+  a tmux-less host has no other), but crash reconciliation read the tmux probe's
+  "no such session" as proof the loop had died — so any command reaching
+  `Node.status_detail`, `fractal node list` included, stamped the node `exited`
+  and TERM/KILLed the running loop's whole process group, in-flight agent and
+  all, leaving one `orphan` event as the only trace. A bare launch records no
+  socket, so that answer is about a server the loop never joined; its own
+  recorded process group now overrules the probe.
+- A mailbox selector no longer selects who is reading.
+  `radio messages --json --body`, `radio messages --saved`,
+  `radio feed --saved`, and `radio thread` all emit message bodies, but resolved
+  their acting node from `--path` — so the owner-only rule `radio read` enforces
+  was decorative for anyone who could pass the flag, and the same bodies rode
+  out through a listing with no read receipt. Worse, it broke the mailbox seal
+  outright: a sealed seat that unset `_NODE` and stepped into a sibling worktree
+  resolved to a real but wrong actor the seal never binds, and got every held
+  message and the pre-seal archive. Those four surfaces now resolve the reader
+  the way `read` does (never from `--path`) and refuse a foreign mailbox's
+  read-only channels and its archive; a caller with no resolvable identity is
+  refused too, instead of failing open. Plain metadata listings are unchanged —
+  they name rows, not contents, and acting as another node through `--path` is
+  the operator surface they exist for.
+- The estate-record force-add survives a record it cannot stage: git stages
+  nothing when any one path in a batched `git add -f` is dead or unindexable
+  (exit 128), so a single vanished or permission-dead estate file aborted the
+  whole commit — the `--force` backstop save included, leaving the node unable
+  to commit at all until a human cleared the path. The pass now retries per
+  path, stages every record it can, and names the ones it could not.
+- A force commit's body folds in the record pass's notices — the force-staged
+  list and the non-record refusals — beside the staged-sweep warnings: the
+  console notice dies with the run's pane, so the one durable record that a
+  backstop save overrode a host ignore layer (and that credential-shaped files
+  sat in the estate) is now in git history.
+- The "skipped by ignore rules" alarm covers user lines in `.git/info/exclude`:
+  the suppression keys on fractal's managed block by its line span, never the
+  whole file, so a foreign pattern in the file's user territory no longer eats a
+  deliverable in silence.
+- The force-add notice names worktree-relative paths, matching the refusal
+  notice beside it — absolute machine-local paths no longer print, nor land in a
+  force commit's body.
+- An empty `--node` value refuses instead of resolving to self: `--node "$PEER"`
+  with an unset variable landed an urgent fleet order in the sender's own inbox
+  under a clean exit 0.
+- The fill-sheet pin gate reads every `pin:` spelling git accepts: uppercase hex
+  and short (4+ hex) abbreviations validate and gate against `--pin` case-blind,
+  and a spelling the gate cannot read as a sha (symbolic, or below the four-hex
+  floor) refuses outright — any such line was silently invisible to the gate,
+  deploying unvalidated and anchoring the charter's docket rows at HEAD instead
+  of the declared commission pin.
+- A profile-seeded node's init banner says the seeded task is ready to review
+  and start, instead of instructing the operator to author the charter the
+  profile already authored (following that instruction invited overwriting a
+  pinned commission).
+- `node list --csv --count` refuses like `--json --count` already did: `--count`
+  silently won and handed a CSV consumer a bare number — a shape it never asked
+  for, with no error.
+- Seal enforcement closes its archive and environment bypasses: a sealed seat
+  can no longer `radio save` a hosted message and read the body back through
+  `messages --saved` (the archive is a body surface; pre-seal archives are held
+  too), and the seal resolves its actor env-first *then* by the working
+  directory, so scrubbing `_NODE` inside the seat's own worktree no longer lifts
+  it.
+- Drain enforcement is durable, not advisory: `--continue --drain` records the
+  drain on the run itself, so the spawn/re-arm refusals survive an environment
+  scrub and a pause/resume of the drain run (a resumed drain silently became an
+  ordinary run before).
+- The resumed-iteration inbox digest renders sender-controlled headers as
+  quoted, single-line, length-bounded data with block-opening markup stripped,
+  under a banner naming it untrusted and non-authoritative — a crafted subject
+  can no longer read as an instruction in another node's context.
+- The estate force-add is bounded to the node-record allowlist (known record
+  dirs and files at text suffixes, no dotfiles): the pass overrides the ignore
+  layer a host fences secrets in, so a parked `.env`, key, or archive is refused
+  by name instead of staged, and every force-add is reported on the commit
+  output.
+- Every alarm this wave added is now proved in both directions — the billing
+  breaker's non-arming guards (exit 127, slow, and paid failures), the loop-side
+  iteration-gap alarm, the census billing detector against the step sequences a
+  real run books (never-run tails and open rows are bookkeeping, a paid failure
+  breaks the streak), the seal's hold on the resumed-iteration digest and on
+  threads, served-model recording when divergence beats the seeded pin, the
+  `--drain` launch wiring, the killed-before-boot stand-down, the live
+  `iter_timeout` re-read, `send_many`'s all-or-nothing dry pass, the baseline
+  force-add under a hostile external ignore, and `--pin` without a profile.
+- An iteration whose step sequence a budget ceiling cut short books `stopped`,
+  not `completed`: a gate interrupt could book a goal-met lap whose steps all
+  read `stopped` and whose launches never happened.
+- The registry database's SQLite sidecars (`registry.db-wal`/`-shm`/ `-journal`)
+  are excluded from every stage, so a mid-write snapshot can never be committed
+  beside an excluded main file.
+- A live retune the loop cannot honor (an `interval` under the live
+  `iter_timeout`) warns once per distinct value instead of once per iteration,
+  so the rejection no longer buries every later warning.
+- The force-commit backstop survives a non-UTF-8 plan file: the plan title is a
+  cosmetic context line and now degrades instead of raising out of the save that
+  exists to rescue the work.
+- `radio relays` refuses an unknown UUID instead of answering "0 relays
+  recorded" — an empty listing means the relay never happened, so a typo'd UUID
+  would indict a node that relayed faithfully.
+- Fan-out receipts print as each copy lands, so a mid-fan-out failure no longer
+  discards the record of deliveries already made (silence there invites a
+  re-send that double-delivers).
+- `node list --json --count` refuses instead of silently printing the bare count
+  a JSON consumer never asked for.
+- The estate-record force-add stages what still exists: a held file deleted
+  between the pass's `ls-files` snapshot and its `git add -f`
+  (ignored-and-untracked estate files are exactly what a user's `git clean -X`
+  removes, and estates churn under the node's own housekeeping) no longer fails
+  the add and aborts the whole commit after the scope sweep already staged the
+  iteration's real work.
+- An interrupted billing-gate wait books the gated step and the never-run tail
+  as `stopped` rows (`billing gate interrupted`, knowable-zero spend), so the
+  one path to a zero-row completed iteration — the gate guards step 1 too — now
+  leaves `node activity` a trace of which steps the outage plus interrupt
+  consumed; the iteration and run labels are unchanged.
+- The retry/breaker backoff polls `finish` alongside pause, stop, and the
+  subtree ceiling, so a cascaded budget finish — the very signal a billing
+  outage produces — lands within seconds instead of sleeping out a breaker wait
+  of up to an hour and buying one more dead probe launch (a pending finish
+  silences the ceiling poll, so nothing else could fire).
+- The census `PAUSED: billing` mirror excludes cannot-exec launches (recorded
+  `agent launch failed`) exactly like the loop's breaker, so a broken agent
+  install — whose loop is hot-retrying with no breaker armed — renders as the
+  fault it is instead of steering the operator at a credit refill.
+- An idle-target kill stamps `killed` under the `.worktrees` flock before the
+  reap, so a kill racing a mid-validation `start` is fully serialized against
+  the loop's flock'd boot check: kill-first stands the boot down, loop-first
+  keeps the reap a live target — a post-reap stamp let the reap no-op on the
+  not-yet-booted session, the loop boot in the window, and a live loop burn
+  spend indefinitely under a `killed` census row with nothing left to reap it.
+- Adversarial-review hardening of this wave's own changes: the resumed-seat
+  digest reads the inbox channel only; relay UUIDs normalize case like every
+  other verb; a kill that wins the boot window stands the loop down instead of
+  being overwritten `active`; the seal also covers `feed` self-subscriptions and
+  `radio relays`, and the seat-facing refusals stop naming the unseal command; a
+  non-billing failure breaks the breaker's streak and an interrupted breaker
+  wait never buys a hot launch; a goal-met finish with a cap-overshoot note no
+  longer renders as `run exhausted`.
+- The repo-hygiene version-agreement test pins the `.cruft.json` project version
+  too (mutation-checked), so a bump that misses the cruft context fails on the
+  PR instead of at the tag-time build gate.
+- The finish ceremony is idempotent across a swallowed commit: a deliberate
+  `node finish` whose run died before the terminal cascade consumed it (a torn
+  seat, a stop interrupting the drain, the force-commit backstop racing the
+  wind-down) carries onto the next `--continue` run and books immediately — a
+  docket-met node can no longer keep iterating and burning budget;
+  budget-stemmed finishes stay with their run. A timed-out step whose backstop
+  finds nothing to stage is named loudly (`timed out with no committed output`)
+  instead of silently voiding the pass.
+- A deliberate finish whose final iteration died no longer lands byte-identical
+  to a clean one: the run row records `final iteration failed` and the census
+  detail column names it, the same honesty the max-iters leg already enforced —
+  the dead tail was visible only in `node activity` before.
+- Killing an idle node is quiet: a never-started spawn has no run for the
+  run-scoped kill signal to hang off, so the write is skipped instead of warning
+  `no runs found; signal not set` on every successful reap (the kill event still
+  carries the attribution).
+- A sealed seat can no longer unseal itself: `config set sealed=false` refuses
+  from inside the node the seal binds, so the one call that would hand the seat
+  every held message — and render every other seal guard decorative — is now the
+  operator's or the parent's alone.
+- The seal covers the verbs that curate or adjudicate a held row, not only the
+  ones that read it: `radio unsave` no longer lets a sealed seat destroy an
+  archive it cannot read (the seal protects the archive's integrity, not just
+  its confidentiality), and `radio react`/`radio reply` refuse over a hosted
+  message instead of moving counts the adjudicator will later read and, in
+  reply's case, disclosing the held message's sender in the confirmation.
+- The drain's re-arm refusal reaches the loop entry the guarded verbs front:
+  `node _loop` is what `start.sh` execs, so a draining seat could re-arm any
+  node in the tree by calling it directly — the front doors locked over an open
+  back one, and the re-armed run was invisible to the one-loop-per-node
+  invariant. The drain run's own relaunch after a park stays exempt.
+- `fractal init` refuses under a drain like every other creation verb: the
+  user-node branch returned before the guard, so a draining seat could stand up
+  a whole new tree — its own database, radio, and a root to spawn from.
+- The census `PAUSED: billing` mirror also excludes the other cannot-exec shape:
+  an agent or wrapper that runs and exits 127 books `agent error (exit 127)`,
+  and only the spawn-level `agent launch failed` was disqualifying the streak —
+  so a broken install had the census screaming credit outage at an operator
+  while the loop burned launches at full speed, the exact misdirection the guard
+  exists to prevent.
+- `--since` refuses anything that is not an ISO 8601 date or timestamp on every
+  listing that takes it (`radio messages`, `sent`, `feed`, `--saved`). The value
+  went straight into a lexicographic comparison, so a mistyped or wrongly
+  formatted cut (a US-style date, a Unix epoch) either emptied the whole mailbox
+  under an affirmative `0 unread (0 total)` or filtered nothing at all while
+  looking like it had.
+- A listing filter that could only ever be empty refuses instead of narrating a
+  false record: `radio messages --channel` over a channel the mailbox does not
+  host, and `radio feed --node`/`--channel` over an unregistered node or a
+  channel held by no subscription. The write side already refused the identical
+  typo loudly; a real-but-empty channel still lists quietly.
+- The billing breaker gates every agent launch, not just the work step: the
+  before-step SYNC fired ahead of the gate, so an armed breaker on a sync-mode
+  node (the shipped default) still bought one hot invocation per gated iteration
+  — one per hour even at the backoff cap. SYNC outcomes now arm and clear the
+  streak too, so an outage trips the breaker after three dead launches instead
+  of six.
+- The wiki tool's self-ignored derived cache (`<wiki>/.wiki/cache/`) stays out
+  of git history on every commit path. The baseline's force-add overrode the
+  cache's own ignore, and the cache embeds per-page mtimes that every
+  `wiki update` rewrites — so once tracked it churned in every node commit,
+  sibling copies never byte-matched (a guaranteed merge conflict on otherwise
+  disjoint wiki work), and a re-merge whose only surviving offering was that
+  churn died at the squash commit as a false hard failure. The stage excludes
+  now bar the cache from the baseline and every work commit alike, a work commit
+  that finds the cache tracked drops it from the index (the tool keeps the
+  on-disk copy), and the merge re-checks the staged squash after the parent's
+  wiki refresh — a squash the refresh fully reverts lands on the designed
+  "Nothing to merge" no-op instead of dying on the empty index.
+
+### Changed
+
+- `node list`'s documented schema matches what it prints: the `detail` and
+  `spend` columns are listed, and the `detail` vocabulary is enumerated (pending
+  signals, exit reasons, `run exhausted:`, `orphaned`, `model drop`,
+  `iteration gap`, `PAUSED: billing`).
+
+- The wiki contract tests pin plasma-wiki's new merge and lint contracts (the
+  union merge driver — both sides' link rows survive an `_index.md` merge,
+  deduplicated, with `wiki update` re-sorting and pruning stale rows — and typed
+  lint issues with exit 0 clean / 1 issues / 2 command error). The suite now
+  requires a plasma-wiki carrying those contracts (newer than 1.2.0); no fractal
+  runtime code needed changes — it consumes lint by boolean exit code only,
+  which is unchanged.
+
+- The census distinguishes the two `completed` landings: a run that ended on its
+  iteration cap surfaces as `run exhausted: Reached max iterations (N)` in the
+  `node list`/`node status` detail column, while a drained finish stays bare — a
+  run-out lane (usually a re-continue candidate) can no longer pass as
+  done-conditions-met; `--continue` keeps looping per its per-run `max_iters`,
+  pinned by test.
+
+- The seeded COMMIT step's sign-off is unconditional: the parent-is-root
+  conditional is gone, so a finishing node posts its sign-off (and any
+  operator-ordered signal with it) whatever its position in the tree — the
+  mechanical cause of silently dropped ordered signals at closeout. Existing
+  nodes keep their seeded step copies; re-seed (`node init --reset`/`--steps`)
+  to pick the new text up.
+
+- Model pins are honored or the step fails loudly: the ambient
+  `CLAUDE_CODE_SUBAGENT_MODEL` forcing var is unset at invocation compose (like
+  the effort knobs) and removed from the seeded node settings — it silently
+  rerouted every pinned fan-out sub-agent onto the session model once — and a
+  model drop the one re-dispatch cannot resolve now books the step and iteration
+  failed with the drop named, never a clean completion over wrong-model output
+  (the node is never killed: the loop warns at the next iteration start and
+  moves on). The iteration row records the model that actually served when its
+  steps agree, so divergence from the pin is visible in the row and the
+  `node list` detail column.
+
+- Config edits take effect live at each key's natural boundary — pacing
+  (`interval`/`sleep`) now re-reads at the next sleep call and `iter_timeout` at
+  the next iteration, joining the already-live
+  `max_iters`/`step_timeout`/`wait`/cost caps — and the per-key boundary table
+  is documented, so a mid-run edit can never silently no-op.
+
+- Seat-death backstop commits carry their context: the auto force-commit's
+  subject names the step it follows (`auto after EXECUTE`) and its body the step
+  and the newest plan's title — buried real work no longer costs archaeology at
+  forensics and merge screens.
+
+- fractal owns its estate staging: any estate file an ignore rule held out of a
+  commit is re-evaluated against fractal-normal rules alone (the shipped exclude
+  template plus committed per-directory `.gitignore` files) and force-added when
+  only a machine-local layer — a foreign `info/exclude` line,
+  `core.excludesFile` — held it, so one stray broad exclude can no longer
+  silently unstage (or hard-fail) the records canon requires nodes to commit;
+  the generated exclude block and the stage excludes also cover the legacy
+  `registry.db` spelling and its SQLite sidecars (`registry.db-*`), mirroring
+  the modern `.db`/`.db-*` pair — a hot WAL or journal swept into a commit is a
+  torn byte capture of a database another process is mid-write on.
+
+- Radio listings are read-your-writes and watermarked: `messages`, `sent`,
+  `feed`, `thread`, and `subs` resolve the acting node exactly like the writing
+  verbs (loop-exported `_NODE` first, else the cwd; `--path` still selects
+  another mailbox), so a delivered send is visible in its sender's own next
+  outbox listing; every listing closes with an
+  `as of <instant> (acting as <branch>)` freshness watermark on stderr — the
+  recorded cut to quote when grading from a listing, read before the query so a
+  row a concurrent sender lands mid-render is never endorsed as absent.
+
+- `node stop`'s wait-for-the-seat contract is pinned by test and documented: a
+  stop landing mid-step waits for the in-flight agent to complete — it never
+  signals or tears the running seat (`node kill` remains the immediate path) —
+  and the docs now state prominently that stop cascades over the target's entire
+  subtree, children first.
+
+- `node kill` lands on `idle` nodes: a booting spawn is reaped and a
+  never-started spawn is stamped `killed` so it can never activate — an unwanted
+  spawn no longer gets a head start while an operator poll-watches for its
+  activation.
 
 ## [1.1.0] - 2026-07-28
 
@@ -70,4 +500,5 @@ pinning it in lockstep.
 
 [1.0.0]: https://github.com/plasma-ai/fractal/releases/tag/v1.0.0
 [1.1.0]: https://github.com/plasma-ai/fractal/compare/v1.0.0...v1.1.0
-[unreleased]: https://github.com/plasma-ai/fractal/compare/v1.1.0...HEAD
+[1.2.0]: https://github.com/plasma-ai/fractal/compare/v1.1.0...v1.2.0
+[unreleased]: https://github.com/plasma-ai/fractal/compare/v1.2.0...HEAD

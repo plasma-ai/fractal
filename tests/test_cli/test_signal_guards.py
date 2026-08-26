@@ -64,6 +64,7 @@ __all__ = [
     'test_kill_marks_node_and_active_rows_killed',
     'test_kill_mid_step_lands_killed_on_every_surface',
     'test_step_timeout_kills_a_term_trapping_survivor',
+    'test_boot_adopts_a_wind_down_that_swept_past_it',
     'test_stop_after_finish_records_both_and_keeps_active',
     'test_kill_is_terminal_for_further_signals',
     'test_step_approval_tristate_drives_approved_and_pending',
@@ -74,12 +75,13 @@ __all__ = [
 
 
 # (finish, stop, pause, kill, finish --cancel) all require active (kill also
-# accepts paused, covered separately); the kill message names the status
+# accepts paused and idle, covered separately); the kill message names the
+# status
 _REJECT_MESSAGES = {
     'finish': 'Cannot finish: node is not active.',
     'stop': 'Cannot stop: node is not active.',
     'pause': 'Cannot pause: node is not active.',
-    'kill': 'Cannot kill: node is not active or paused (status: {status}).',
+    'kill': 'Cannot kill: node is not active, paused, or idle (status: {status}).',
     'finish --cancel': 'Cannot cancel finish: node is not active.',
 }
 
@@ -113,6 +115,15 @@ SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
 bash -c 'trap "" TERM; while true; do sleep 1; done' &
 exit 0
+"""
+
+# a claude stand-in that completes instantly: the boot-window cascade pin needs
+# a launch that reaches its first boundary check, not one that parks mid-step
+_QUICK_STUB = """#!/usr/bin/env bash
+SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
+printf '{"type":"result","session_id":"%s","total_cost_usd":0,"num_turns":1,"duration_ms":1}\\n' \\
+    "$SID"
 """
 
 
@@ -193,7 +204,7 @@ def test_signal_rejected_from_non_active_status(
 
     A finished, stopped, exited, killed, or retired node is not running, so
     ``finish``/``stop``/``pause``/``kill``/``finish --cancel`` must each fail
-    with a clear ``RuntimeError`` (exit 1, message on stderr, no stdout) and
+    with a clear ``RuntimeError`` (exit 2, message on stderr, no stdout) and
     must not mutate the node's status. The refusal itself is durable
     evidence: a ``failed`` event row naming the reason and the actor who
     tried, so a raced sweep's skipped node is never a silent mystery.
@@ -201,7 +212,7 @@ def test_signal_rejected_from_non_active_status(
     guard = repo['guard']
     Node(guard).status_set(status)
     result = _run(guard, 'node', *command.split())
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert _REJECT_MESSAGES[command].format(status=status) in result.stderr
     assert result.stdout.strip() == ''
     # the rejected signal leaves the lifecycle state untouched
@@ -326,7 +337,7 @@ def test_tree_pause_latches_and_resume_releases(
     assert _run(wt, 'node', 'status').stdout.strip() == 'active (pausing)'
     # the latch refuses new work, even at depth 1
     refused = _run(root, 'node', 'init', 'latched_out', '--agent', 'claude')
-    assert refused.returncode == 1
+    assert refused.returncode == 2
     assert 'Cannot spawn under a paused node' in refused.stderr
     # re-braking an already-signaled tree is a clean no-op
     again = _run(root, 'pause')
@@ -376,7 +387,7 @@ def test_finish_cancel_withdraws_the_pending_signal(
     assert _cell(wt, events) == '1'
     # a second cancel has nothing to withdraw and refuses without mutating
     empty = _run(wt, 'node', 'finish', '--cancel')
-    assert empty.returncode == 1
+    assert empty.returncode == 2
     assert 'no finish signal' in empty.stderr
     assert _run(wt, 'node', 'status').stdout.strip() == 'active'
 
@@ -626,6 +637,94 @@ def test_step_timeout_kills_a_term_trapping_survivor(
 # ------ double-signal sequencing
 
 
+@pytest.mark.parametrize('signal', ['stop', 'finish'])
+def test_boot_adopts_a_wind_down_that_swept_past_it(
+    repo: dict,
+    tmp_path: pathlib.Path,
+    live_loop: Callable[[pathlib.Path], None],
+    signal: str,
+) -> None:
+    """A child whose start was in flight when the sweep ran still winds down.
+
+    ``stop``/``finish`` fan out over the descendants live at the moment
+    they sweep, so a child still ``idle`` between ``node start`` returning
+    and its loop's ``active`` stamp gets no signal row -- while the
+    operator's command reports success. It then runs on unattended after
+    its manager settles, and under ``finish`` it blocks the manager's
+    drain-wait until its own caps run out. The child closes the window
+    from its own end, the way a booting loop already parks itself under a
+    pause latch: an ancestor still carrying a pending wind-down is one
+    this node was meant to be part of, so the boot adopts the signal and
+    the ordinary boundary checks honor it.
+    """
+    root = repo['root']
+    name = f'boot{signal}'
+    mgr, _ = _arm(root, name)
+    live_loop(mgr)
+    # a child registered under the manager but not yet started: the state a
+    # start in flight leaves behind, which the sweep's active filter skips
+    init = _run(
+        mgr,
+        'node',
+        'init',
+        'kid',
+        '--agent',
+        'claude',
+        '--max-iters',
+        '3',
+        '--no-sync',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    kid = root / '.worktrees' / f'main.{name}.kid'
+    node_dir = kid / '.fractal' / f'main.{name}.kid'
+    # one trivial step, so an iteration is one quick agent call
+    steps_dir = node_dir / 'steps'
+    for step in steps_dir.glob('*.md'):
+        step.unlink()
+    (steps_dir / '01-work.md').write_text('# Work\n\nOne step.\n', encoding='utf-8')
+    # the sweep runs while the child is idle: it is skipped, and says so by
+    # leaving no signal row behind
+    swept = _run(mgr, 'node', signal)
+    assert swept.returncode == 0, swept.stderr
+    rows = f"SELECT COUNT(*) FROM signals WHERE node='{kid.name}' AND signal='{signal}'"
+    assert _cell(kid, rows) == '0'
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    agent = bindir / 'claude'
+    agent.write_text(_QUICK_STUB, encoding='utf-8')
+    agent.chmod(0o755)
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    log = tmp_path / 'loop.log'
+    with open(log, 'w', encoding='utf-8') as handle:
+        proc = subprocess.Popen(
+            [_fractal_bin(), 'node', '_loop', f'--path={kid}'],
+            cwd=f'{kid}',
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+    try:
+        proc.wait(timeout=120)
+    finally:
+        _reap_group(proc)
+    transcript = log.read_text()
+    # the boot adopted the manager's order, attributed to it rather than
+    # reading as the child's own boundary mis-fire
+    metadata = (
+        f"SELECT metadata FROM signals WHERE node='{kid.name}' AND signal='{signal}'"
+    )
+    assert _cell(kid, metadata) == f'via {signal} of main.{name}', transcript
+    # ...and the first boundary check honored it, so the run settled without
+    # booking a single iteration of the three it was capped at
+    iters = f"SELECT COUNT(*) FROM iters WHERE node='{kid.name}'"
+    assert _cell(kid, iters) == '0', transcript
+    assert _run(kid, 'node', 'status').stdout.strip() != 'active', transcript
+
+
 def test_stop_after_finish_records_both_and_keeps_active(
     repo: dict,
     live_loop: Callable[[pathlib.Path], None],
@@ -657,10 +756,10 @@ def test_kill_is_terminal_for_further_signals(repo: dict) -> None:
     wt, _ = _arm(repo['root'], 'terminal')
     assert _run(wt, 'node', 'kill').returncode == 0
     second = _run(wt, 'node', 'kill')
-    assert second.returncode == 1
+    assert second.returncode == 2
     assert 'status: killed' in second.stderr
     after_finish = _run(wt, 'node', 'finish')
-    assert after_finish.returncode == 1
+    assert after_finish.returncode == 2
     assert 'Cannot finish' in after_finish.stderr
 
 
@@ -714,7 +813,7 @@ def test_step_approve_is_parent_only_and_validates_the_step(repo: dict) -> None:
     record.step_pending(step_id=step_id)
     # a node approving its own step (not its parent) is rejected; stays pending
     denied = _run(wt, 'node', 'approve', 'main.approveperm', f'{step_id}')
-    assert denied.returncode == 1
+    assert denied.returncode == 2
     assert denied.stderr.startswith('Error:')
     assert 'parent' in denied.stderr
     assert not record.step_approved(step_id=step_id)
@@ -744,11 +843,11 @@ def test_step_approve_is_parent_only_and_validates_the_step(repo: dict) -> None:
         'main.approvenull',
         f'{step_id2}',
     )
-    assert no_req.returncode == 1
+    assert no_req.returncode == 2
     assert 'does not require approval' in no_req.stderr
     # approving a non-existent step is a ValueError
     missing = _run(repo['root'], 'node', 'approve', 'main.approvenull', '999999')
-    assert missing.returncode == 1
+    assert missing.returncode == 2
     assert 'not found' in missing.stderr
     # a doomed approval logs nothing -- both guards fire before event_start, so
     # neither rejection left an approve event on the parent's feed

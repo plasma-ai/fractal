@@ -220,12 +220,16 @@ pool a cheaper token rate buys more steps, not a lower bill.
    parent running with `FRACTAL_HEADLESS=true` automatically launches the child
    in a detached process group, so the command returns immediately and the tree
    does not require tmux. Use `--tmux` only to override that inherited backend
-   for this child; headless output lives in its `headless.log`. Starting is its
-   own turn: when a spawn gate (child/descendant census, budget arithmetic)
-   decides the launch, read it in one command and start in a separate one -- a
-   chained start commits before you can see the read's output. The init gate
-   re-checks census and budget at start, so treat a rejected start as the gate
-   working; re-read before retrying.
+   for this child. A headless child has no tmux session:
+   `fractal node attach <branch>` refuses and names its log, so follow its
+   output with `tail -f <child_node_dir>/headless.log` instead. A `--continue`
+   is a new run and takes its backend from the flag or `FRACTAL_HEADLESS`;
+   `resume` adopts the paused run's recorded backend. Starting is its own turn:
+   when a spawn gate (child/descendant census, budget arithmetic) decides the
+   launch, read it in one command and start in a separate one -- a chained start
+   commits before you can see the read's output. The init gate re-checks census
+   and budget at start, so treat a rejected start as the gate working; re-read
+   before retrying.
 
 ### Configure
 
@@ -316,8 +320,9 @@ seed; once done, merge it and launch the target.
   path-relative state pass in-place and fail everywhere else. (Textual claims
   need only `git show <branch>:<path>`.)
 - **Stop:** `fractal node finish <branch>` (after iteration),
-  `fractal node stop <branch>` (after step), `fractal node kill <branch>`
-  (immediately).
+  `fractal node stop <branch>` (after step; waits for the in-flight step to
+  complete), `fractal node kill <branch>` (immediately). All three cascade over
+  the target's entire subtree, children first.
 - **Pause:** `fractal node pause <branch>` freezes the child's subtree in place
   (aborts in-flight agent turns; loops park with their runs open),
   `fractal node resume <branch>` relaunches it exactly there -- same budgets,
@@ -374,11 +379,11 @@ priority (0-10, higher = more urgent). Run `fractal radio --help` (and
 messaging conventions.
 
 Commands act on the current directory's node, so run them from your worktree --
-you never pass a path for yourself. Radio verbs that write rows (send, post,
-reply, react, unsend, save, unsave, sub, unsub, channel create/delete) act as
-the loop's exported node even from another directory, so they attribute
-correctly wherever they run; radio listings still read the cwd's node. Name
-another node's branch positionally to act on it (e.g.
-`fractal node status <branch>`); `--path` is only for running from outside a
-worktree. `fractal node init` is the exception: `<name>` plus the project root
-via `--path` (e.g. `$PROJECT_DIR`).
+you never pass a path for yourself. Radio verbs -- row-writing (send, post,
+reply, react, unsend, save, unsave, sub, unsub, channel create/delete) and
+listings alike -- act as the loop's exported node even from another directory,
+so a send and the `sent` listing that checks it always agree (read-your-writes);
+`--path` selects another mailbox. Name another node's branch positionally to act
+on it (e.g. `fractal node status <branch>`); `--path` is only for running from
+outside a worktree. `fractal node init` is the exception: `<name>` plus the
+project root via `--path` (e.g. `$PROJECT_DIR`).

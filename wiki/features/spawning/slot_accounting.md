@@ -25,8 +25,8 @@ still claimed capacity.
 
 Before counting, crashed-but-active nodes are healed to their real status (and
 the healed status persisted), so a dead loop does not pin a slot forever. The
-tmux liveness probe behind that healing is batched and paid only when something
-actually reads active state.
+runtime liveness probe behind that healing is batched and paid only when
+something actually reads active state.
 
 ## Race-free checks
 

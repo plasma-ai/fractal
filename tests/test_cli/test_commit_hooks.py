@@ -489,6 +489,14 @@ def test_commit_restores_single_invariant_violations(
     repo = _hooked_repo(tmp_path / name, hook)
     assert _run(repo, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
     task = repo / '.worktrees' / 'main.task'
+    # the wikilink's target must exist: update prunes rows whose targets
+    # vanished, and a pruned row would no-op the opener-dropping hook
+    linked = task / 'wiki' / 'a'
+    linked.mkdir()
+    (linked / '_index.md').write_text(
+        '---\nname: a\n---\n# a\n\n***\n',
+        encoding='utf-8',
+    )
     page = task / 'wiki' / '_index.md'
     page.write_text(_AUTHORED_PAGE.replace('unformatted ', ''), encoding='utf-8')
     subprocess.run(
@@ -608,8 +616,6 @@ def test_commit_tolerates_pre_existing_lint_failures(
     repo = _hooked_repo(tmp_path / 'predirty', _REWRAP_FORMATTER_HOOK)
     assert _run(repo, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
     task = repo / '.worktrees' / 'main.task'
-    # build a resolved link row, then break its target -- damage the wiki
-    # tooling cannot heal, so the root is lint-dirty before the hook runs
     linked = task / 'wiki' / 'a'
     linked.mkdir()
     (linked / '_index.md').write_text(
@@ -623,9 +629,13 @@ def test_commit_tolerates_pre_existing_lint_failures(
         capture_output=True,
         check=True,
     )
+    # append formatter damage the tooling cannot heal -- an escaped wikilink
+    # opener is a lint ISSUE that update tolerates and never repairs (a
+    # broken row would just be pruned) -- so the root is lint-dirty before
+    # the hook runs
     updated = page.read_text(encoding='utf-8')
     page.write_text(
-        updated.replace('[[a/_index|a/]]', '[[missing/_index|a/]]'),
+        updated + '\nEscaped \\[[a/_index|a]] link.\n',
         encoding='utf-8',
     )
     result = _run(task, 'commit', 'wiki work')

@@ -26,10 +26,11 @@ tree, steer it, and relay between it and the user on their behalf. See
 do. Interpret it: distill the node's goal, and map anything the user pinned down
 (a name, a budget, a model, limits, ...) onto the parameters below, each of
 which becomes the matching `fractal node init` flag. The `/fractal` skill routes
-all the configuration to `fractal node init` and passes only
-`--continue`/`--clean` (when the directive asks to continue an existing node) to
-`fractal node start` — plus `--max-cost` when it accompanies a continue (a
-continue re-arms the cap at start, not init).
+all the configuration to `fractal node init` and passes only `--headless` (when
+tmux is unavailable or the directive asks for it) and
+`--continue`/`--clean`/`--drain` (when the directive asks to continue an
+existing node) to `fractal node start` — plus `--max-cost` when it accompanies a
+continue (a continue re-arms the cap at start, not init).
 
 **Parameters** — all configuration. Set by `fractal node init`, written to
 `config.json`, and editable there before launch:
@@ -46,6 +47,14 @@ continue re-arms the cap at start, not init).
   config always inherits. A top-level spawn's parent is the user node, which
   carries no steps, scripts, or skills — the parameter is for configured nodes
   spawning children
+- **`steps`**: directory of `NN-` prefixed step files (`*.md`) to seed `steps/`
+  from instead of the package seed; mutually exclusive with `inherit=steps`
+- **`profile`**: named seed bundle under `.fractal/profiles/<name>/` — its
+  `steps/` seeds the step list and its `NODE.md` a deployment-ready charter
+  (fill-sheet validated at init); mutually exclusive with `steps` and
+  `inherit=steps`
+- **`pin`**: commission pin (a commit sha): must resolve, and every `pin:` line
+  in the profile charter must match it
 - **`agent`**: agent command; inherits the user node's default when omitted
 - **`provider`**: provider route for the agent (e.g. `openrouter`); inherits the
   user node's default when omitted
@@ -60,6 +69,8 @@ continue re-arms the cap at start, not init).
 - **`timeout`**: per-run time limit (e.g. `30m`, `1.5h`)
 - **`iter-timeout`**: per-iteration time limit (e.g. `30m`, `1.5h`)
 - **`step-timeout`**: per-step time limit (e.g. `30s`, `10m`); caps each step
+- **`step-retries`**: retries per failed step (default: `1`; `0` disables)
+- **`step-retry-backoff`**: delay before each step retry (default: `10s`)
 - **`interval`**: fixed iteration schedule (e.g. `1h`)
 - **`sleep`**: delay between iterations (e.g. `10s`)
 - **`wait`**: sleep between approval-wait sync invocations (default: `1m`)
@@ -75,14 +86,25 @@ continue re-arms the cap at start, not init).
 - **`detached`**: run each step as a separate agent session (default: one
   continuous session)
 - **`local`**: skip pushing to remote after each commit
+- **`blind`**: subscribe to no radio channels (the parent still reads this node)
+- **`sealed`**: seal the node's mailbox — its own seat cannot read hosted
+  messages until an operator or the parent unseals it with
+  `config set sealed=false` (the sealed seat cannot lift its own seal)
 
 **Start** — `fractal node start` just launches; all run parameters come from
 `config.json`. A `max_cost` in `config.json` must be positive if set; a missing
 `max_cost` launches uncapped with a loud warning. Its only arguments:
 
+- **`--headless`/`--tmux`**: run the loop in a detached process group instead of
+  a tmux session — child starts inherit the choice (envvar `FRACTAL_HEADLESS`)
+  and write their output to `<node_dir>/headless.log`; `--tmux` overrides an
+  inherited headless launch
 - **`--continue`**: continue a stopped/exited node — the launch restores the
   worktree, so uncommitted project files refuse without `--clean`
 - **`--clean`**: with `--continue`, discard uncommitted project files
+- **`--drain`**: with `--continue`, run the new run as a drain — the harness
+  forbids spawns and re-arms from it and tells every seat it is draining
+  (`_DRAIN`)
 - **`--max-cost`**: with `--continue`, re-arm the cost cap for the new run;
   required when the last run ended on its budget
 
@@ -232,8 +254,9 @@ itself lives in repo-local git config, so merges of branches carrying wiki pages
 auto-resolve the generated index sections. Local config does not survive a clone
 — on a fresh clone the attribute is present but the driver is not, and
 `_index.md` merges fall back to git's default and may conflict on generated
-content; re-running `fractal init` registers it (verify with
-`git config --get merge.wiki.driver`).
+content; run `wiki config --path=wiki` (or `--path=<path>/wiki` for a
+sub-project) to register it (verify with `git config --get merge.wiki.driver`) —
+`fractal init` only wires it when it creates the wiki.
 
 The output includes the project directory (worktree root) and the node data
 directory. Read these from the output to use in later steps (e.g.
@@ -393,12 +416,15 @@ seed files yourself: step frontmatter (`requires_approval:`, `agent:`,
 them.
 
 All run parameters were set at init (in `config.json`); `start` takes no config
-arguments — only `--continue` (plus `--clean` to discard uncommitted project
-files, and `--max-cost` to re-arm the cap after a budget-ended run) when
-continuing a stopped/exited node. If the user wants to tweak a setting first,
-edit `<node_dir>/config.json`, then start. The node launches in a detached tmux
-session by default. When tmux is unavailable, use `start --headless`; child
-starts inherit headless mode and write their output to `headless.log`.
+arguments — only the runtime choice (`--headless`/`--tmux`) and `--continue`
+(plus `--clean` to discard uncommitted project files, `--drain` to run the new
+run as a drain, and `--max-cost` to re-arm the cap after a budget-ended run)
+when continuing a stopped/exited node. If the user wants to tweak a setting
+first, edit `<node_dir>/config.json`, then start. The node launches in a
+detached tmux session by default; when tmux is unavailable, use
+`start --headless` — child starts inherit headless mode and write their output
+to `headless.log`. A `--continue` is a new run and takes its backend from the
+flag or `FRACTAL_HEADLESS`; `resume` adopts the paused run's recorded backend.
 
 ### Step 4: Post-launch briefing
 
@@ -410,27 +436,43 @@ Once the node is running, briefly explain how to interact with it:
   `config.json` together, and a running loop picks the change up at its next
   iteration boundary (a direct config edit is honored at the same boundary but
   leaves the registry stale until the loop heals it).
+
 - **Monitoring:** From the node's worktree (`cd <worktree>`), commands act on it
   directly — `fractal node status`, `fractal node cost spent`, and
   `fractal node attach` (watch live output — use this, not raw `tmux -t`, whose
-  prefix matching can attach the wrong session). `fractal node list` shows this
+  prefix matching can attach the wrong session; a headless node has no session,
+  so `attach` refuses and names its log — follow it with
+  `tail -f <node_dir>/headless.log` instead). `fractal node list` shows this
   node's subtree (from a leaf worktree, just its own descendants) — run it from
   the repo root to see the whole tree; it lists live nodes only (`--all`
   includes retired ones, `--retired` only those). Read `<node_dir>/memory/`
   (knowledge) or `<node_dir>/plans/` (plans). A run that ends `completed` after
   `--max-iters` only means the iteration budget was exhausted, not that the goal
-  was met — check `fractal node activity` for the per-iteration outcomes. Figure
-  scopes differ by design: `cost spent` reads the run's full subtree (children
-  included), while `activity`'s `cost` column sums only the node's own steps —
-  and both are per-run, with no lifetime rollup.
+  was met — `fractal node status` says which: it prints
+  `completed (run exhausted: Reached max iterations (N))` for a cap landing,
+  while a goal-met finish stays bare (`fractal node list`, from a parent or the
+  repo root, carries the same qualifier in its `detail` column and types it in
+  `end_reason` as `run_exhausted` rather than `goal_met`); check
+  `fractal node activity` for the per-iteration outcomes. Figure scopes differ
+  by design: `cost spent` reads the run's full subtree (children included),
+  while `activity`'s `cost` column sums only the node's own steps — and both are
+  per-run, with no lifetime rollup.
+
 - **TUI:** For a live view of the whole tree — nodes, runs, costs, and output —
   suggest the user open the dashboard with `fractal open` (from anywhere in the
   repo; add a node branch to open focused on it, or a tree's root branch to open
   at the root).
+
 - **Stopping:** From the worktree, three escalation levels:
+
   - `fractal node finish` — stop after current iteration
-  - `fractal node stop` — stop after current step
+  - `fractal node stop` — stop after current step (waits for the in-flight step
+    to complete; never tears it)
   - `fractal node kill` — kill immediately
+
+  All three cascade over the node's entire subtree of active descendants,
+  children first — stopping a manager stops every lane under it.
+
 - **Pausing:** `fractal node pause` freezes the subtree in place — it aborts
   each in-flight agent turn and parks every loop with its run open — and
   `fractal node resume` relaunches it exactly there (same budgets, same
@@ -449,6 +491,7 @@ Once the node is running, briefly explain how to interact with it:
   `start --continue` opens a *fresh* run (worktree restored — uncommitted
   project files need `--clean`, and a budget-ended run refuses without an
   explicit `--max-cost`) on a stopped/exited node.
+
 - **Worktree:** The node runs in a git worktree at
   `<repo>/.worktrees/<branch>/`. The user's repo is untouched. When done, from
   the repo root, merge with `fractal node merge <branch>`. A conflicted merge
@@ -472,12 +515,14 @@ Once the node is running, briefly explain how to interact with it:
   node's branch while hiding it, retire it instead. Delete prompts for
   confirmation `[y/N]`, chained or standalone; pass `--force`/`-f` to skip the
   prompt.
+
 - **Reset:** `fractal reset` (from anywhere in the repo) tears down every node
   worktree, branch, and registration in the tree in one sweep; the project,
   wiki, and all history in the central database survive, so fresh nodes spawn
   immediately after. It refuses while any node is running; a paused node is
   killed as part of the teardown, which the confirmation `[y/N]` authorizes
   (`--force`/`-f` skips it).
+
 - **Tree scope:** one repository can carry several trees — one per branch you
   ran `fractal init` on, each with its own user node, database, and history. The
   tree-scoped verbs (`pause`, `resume`, `reset`, `track`, `untrack`, `open`)
@@ -489,6 +534,7 @@ Once the node is running, briefly explain how to interact with it:
   tree. `destroy` takes the same name but never infers it: a bare
   `fractal destroy` is ambiguous between this tree and everything, so name a
   tree or pass `--all`, the one repo-wide verb.
+
 - **Radio:** nodes communicate via `fractal radio` commands. `radio send` writes
   any channel permissions allow, given at least one routing dimension
   (`--node`/`--parent` or `--channel`) — a fully bare send refuses; `radio post`
@@ -564,10 +610,13 @@ into a worktree to operate on it; to act on another node from elsewhere in the
 repo, name its branch positionally (e.g. `fractal node status <branch>`). Radio
 verbs that write rows (send, post, reply, react, unsend, save, unsave, sub,
 unsub, channel create/delete) act as the loop-exported `_NODE` before the cwd,
-so a node's writes attribute to it from any directory; radio listings stay
-cwd-scoped. `--path` is an escape hatch for running from outside a worktree.
-`fractal node init` is the exception: `<name>` plus the project root via
-`--path`.
+so a node's writes attribute to it from any directory; the listings (messages,
+sent, relays, feed, thread, subs) resolve the same acting node (`_NODE` first,
+else the cwd) so a node reads its own writes, and each closes with an
+`as of <instant> (acting as <branch>)` watermark on stderr naming who it read
+as; only `radio channel list` stays cwd-scoped. `--path` is an escape hatch for
+running from outside a worktree. `fractal node init` is the exception: `<name>`
+plus the project root via `--path`.
 
 Nodes spawn their own children — the running loop sets the `_NODE` environment
 that makes `fractal node init` nest the child under the calling node (the same

@@ -91,8 +91,12 @@ Prerequisites
   ``PATH``: ``claude`` (Claude Code), ``codex`` (Codex), ``grok`` (Grok
   Build), ``opencode`` (OpenCode), or ``omp`` (Oh My Pi). See
   :doc:`/guide/agents`.
-- **The ``wiki`` CLI** — from ``plasma-wiki``, used during the commit
-  pipeline; a plain ``pip`` install provides it (see above for ``pipx`` and
+- **The ``wiki`` CLI** — from ``plasma-wiki``; ``fractal init`` shells out to
+  it to scaffold the project wiki (and refuses when it cannot find it),
+  ``fractal node init`` uses it to seed each node's memory wiki, and the
+  commit pipeline runs ``wiki update`` and ``wiki lint``; fractal looks for
+  it beside its own interpreter first, so any install of ``plasma-fractal``
+  provides it (see above for putting it on your ``PATH`` with ``pipx`` and
   ``uv tool`` installs).
 - **``OPENROUTER_API_KEY``** — only when routing an agent through
   ``--provider=openrouter``; the key is read from the launching shell and
@@ -215,8 +219,10 @@ with dots flattened to dashes. Anywhere a
 command takes a node branch, a unique trailing segment works — ``parser``
 resolves to ``main.parser``. Run parameters come from ``config.json``; the
 only launch-time flags are for re-arming a settled node (``--continue``, with
-``--clean`` to discard uncommitted project files and ``--max-cost`` to retune
-the budget) — see :doc:`/guide/lifecycle`.
+``--clean`` to discard uncommitted project files, ``--max-cost`` to retune
+the budget, and ``--drain`` to run a wind-down that forbids further spawns
+and re-arms) — see :doc:`/guide/lifecycle`, and :doc:`/cli/node` for the
+flag details.
 
 On a locked-down or non-interactive host, pass ``--headless``. The command
 still returns immediately, the loop runs in an independent process group, and
@@ -245,8 +251,8 @@ From cheapest to richest:
 - ``fractal node attach parser`` attaches your terminal to the node's live
   tmux session (the node must be ``active``); detach with the standard tmux
   detach.
-- For a headless node, follow ``<node_dir>/headless.log`` instead; ``attach``
-  reports that path rather than attempting a tmux connection.
+- For a headless node, ``attach`` refuses and names
+  ``<node_dir>/headless.log``; follow that file instead.
 - ``fractal open`` launches the TUI cockpit — the whole tree, radio traffic,
   budgets, and event logs on one live screen; see :doc:`/tui`.
 

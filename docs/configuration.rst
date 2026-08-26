@@ -5,8 +5,10 @@ Every node in a fractal tree carries a ``config.json`` — a flat JSON file in
 the node's data directory that holds the node's entire run configuration:
 agent selection, budgets, timeouts, pacing, and mode flags. The file is the
 live source of truth: the loop reads it from disk at every access, so the
-re-read keys — the cost caps, ``max_iters``, ``step_timeout``, and ``wait`` —
-can be retuned while a node runs. This page is the complete key
+re-read keys — the cost caps, ``max_iters``, ``iter_timeout``,
+``step_timeout``, ``wait``, ``interval``, ``sleep``, ``scope``, ``local``, and
+``sealed`` — can be changed while a node runs (see `When edits take effect`_
+for each key's boundary). This page is the complete key
 reference; :doc:`/guide/loop` describes how the loop enforces the budget and
 timeout keys, and :doc:`/guide/plans` covers the per-step override surface.
 
@@ -21,8 +23,9 @@ Each node's config sits inside its data directory:
   (with the same monorepo project prefix), beside the tree's central
   database.
 
-``fractal node init`` writes every key in the schema, storing unset keys as
-JSON ``null``. A freshly created node titled "Build the parser" looks like:
+``fractal node init`` writes every key in the schema except ``user`` and
+``clone_dirs``, storing unset keys as JSON ``null``. A freshly created node
+titled "Build the parser" looks like:
 
 .. code-block:: json
 
@@ -56,7 +59,8 @@ JSON ``null``. A freshly created node titled "Build the parser" looks like:
      "sync": null,
      "detached": null,
      "local": false,
-     "blind": false
+     "blind": false,
+     "sealed": false
    }
 
 The user node's config is minimal — ``{"user": true, "project": ".",
@@ -96,8 +100,10 @@ directory; pass ``--path <dir>`` to target another worktree.
 - Number and boolean keys are parsed as JSON and type-checked (``sync=maybe``
   and ``max_cost=abc`` are refused with the expected type named); every other
   key is stored as a literal string, so a numeric-looking branch name is never
-  silently turned into a number. ``scope`` accepts its directories comma- or
-  space-joined and stores a JSON list.
+  silently turned into a number. The list keys ``scope`` and ``clone_dirs``
+  accept their directories comma- or space-joined and store a JSON list, each
+  entry in canonical form (``./src``, ``src/``, ``a//b`` land as ``src``,
+  ``a/b``).
 - The merged result is checked by the validator (see `Validation`_) before
   anything is written, so ``set`` cannot store a value the validator rejects.
   ``node init``'s additional flag checks — the agent registry,
@@ -131,7 +137,10 @@ Direct file edits
 
 Editing ``config.json`` by hand (or having an agent edit it) is a supported
 steering path — the loop re-reads the cost caps, ``max_iters``,
-``step_timeout``, and ``wait`` at the top of each iteration. Two consequences:
+``iter_timeout``, ``step_timeout``, and ``wait`` at the top of each iteration,
+``interval``/``sleep`` at the between-iterations sleep call, and every other
+live key at its own boundary (see `When edits take effect`_). Two
+consequences:
 
 - Config is enforcement truth. When an edited cap drifts from the registry
   snapshot, the drift is healed *from config to registry* with a per-key
@@ -150,6 +159,51 @@ decimal and the unit is one of ``s`` (seconds), ``m`` (minutes), ``h``
 rejected ("must be a duration with a unit suffix"), and the value must come to
 at least one whole second after truncation to integral seconds — ``0s`` and
 ``0.5s`` are refused at init, ``config set``, and ``start``.
+
+When edits take effect
+----------------------
+
+Config is a live-edited steering surface: a running loop re-reads each key at
+that key's natural boundary, so an edit lands without a restart — and no key
+silently no-ops. Per key:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Keys
+     - Boundary
+   * - ``max_iters``
+     - The next iteration's stop gate.
+   * - ``iter_timeout``, ``step_timeout``, ``wait``
+     - The next iteration (the fresh deadline/poll windows it arms).
+   * - ``interval``, ``sleep``
+     - The next between-iterations sleep call.
+   * - ``max_cost``, ``max_iter_cost``, ``max_step_cost``, ``reserve_budget``
+     - The next iteration's pricing, and live at every budget boundary
+       probe.
+   * - ``scope``, ``local``
+     - The next commit (read per commit).
+   * - ``clone_dirs``
+     - The next child spawn (read from the user node's file per spawn).
+   * - ``sealed``
+     - The next radio read.
+   * - ``blind``
+     - Setting it lands at the next ``start`` (which sweeps a blind node's
+       subscriptions — a ``resume`` relaunch does not) and at the next child
+       spawn (a blind parent does not subscribe to the child). Clearing it
+       restores no subscriptions by itself; re-subscribe with ``radio sub``.
+   * - ``timeout`` (run wall), ``agent``, ``provider``, ``model``, ``effort``,
+       ``detached``, ``sync``, ``meta``, ``step_retries``,
+       ``step_retry_backoff``
+     - Pinned at loop boot — the edit reaches the next ``start``/``resume``,
+       never a run already in flight (a mid-run edit cannot flip a run's
+       mode composition).
+   * - ``root``, ``user``, ``project``
+     - Immutable.
+
+A malformed mid-run edit warns on the loop's stderr and keeps the prior
+value; it never crashes the run.
 
 Key reference
 -------------
@@ -185,6 +239,15 @@ Plain values
      - JSON list of repo-relative directories the node's commits are
        restricted to. Absolute paths and ``..`` components are rejected
        everywhere — they would break every scoped commit.
+   * - ``clone_dirs``
+     - absent (no cloning)
+     - JSON list of git-ignored build-cache directories copy-on-write cloned
+       from the main checkout into each freshly spawned worktree so a node
+       starts warm. Read from the tree's user node only; no ``node init``
+       flag — set it on the user node after init (from the main checkout)
+       with ``fractal node config set clone_dirs=<dir>,<dir>``. Entries are
+       repo-relative and canonical; ``.`` is refused (it would clone the
+       whole checkout).
    * - ``base``
      - ``null`` (the parent's tip)
      - Branch the node forks from at init. When set, it is also the node's
@@ -245,6 +308,15 @@ Booleans
      - ``false``
      - The node subscribes to no radio channels (its parent still reads its
        outbox). See :doc:`/guide/radio`.
+   * - ``sealed``
+     - ``false``
+     - Seal the node's mailbox: its own seat (identified by the
+       loop-exported ``_NODE``) sees empty hosted listings and refused
+       ``radio read``/``save``/``unsave``/``react``/``reply`` until an
+       operator or the parent unseals it (``config set sealed=false``,
+       which the sealed seat itself may not run) — the hold mechanism for
+       verifier isolation. Takes effect at the next radio read; an
+       operator shell is never held.
 
 Integer caps
 ~~~~~~~~~~~~
@@ -449,7 +521,8 @@ It rejects:
 - bare-number durations and durations under one whole second;
 - ``interval`` and ``sleep`` both set, or ``iter_timeout`` exceeding
   ``interval``;
-- absolute paths or ``..`` components in ``scope``.
+- absolute paths, ``..`` components, or non-canonical spellings (``./src``,
+  ``src/``) in ``scope`` or ``clone_dirs``, and ``.`` in ``clone_dirs``.
 
 Per-step overrides
 ------------------

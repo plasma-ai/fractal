@@ -30,6 +30,7 @@ __all__ = [
     'test_install_home_targets_the_home_skill_trees',
     'test_commit_records_the_iteration_and_clears_the_check',
     'test_commit_check_fails_on_a_dirty_worker',
+    'test_commit_check_on_a_user_node_is_an_error',
     'test_reset_force_tears_worktrees_and_keeps_history',
     'test_destroy_all_force_tears_the_fractal_down',
     'test_destroy_aborts_when_the_prompt_is_declined',
@@ -161,12 +162,12 @@ def test_commit_records_the_iteration_and_clears_the_check(
     assert _run(repo, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
     task = repo / '.worktrees' / 'main.task'
     # a fresh worker is dirty (its node seed is uncommitted)
-    assert _run(task, 'commit', '--check').returncode != 0
+    assert _run(task, 'commit', '--check').returncode == 1
     # a real commit stages the work + seed and lands a commit on the branch
     (task / 'feature.txt').write_text('the work\n', encoding='utf-8')
-    # a message repeating the composed labels is rejected, exit 1
+    # a message repeating the composed labels is rejected, exit 2
     rejected = _run(task, 'commit', 'main.task: iteration 3 fix')
-    assert rejected.returncode == 1
+    assert rejected.returncode == 2
     assert 'bare lowercase summary' in rejected.stderr
     committed = _run(task, 'commit', 'add feature')
     assert committed.returncode == 0, committed.stderr
@@ -177,15 +178,35 @@ def test_commit_records_the_iteration_and_clears_the_check(
 
 
 def test_commit_check_fails_on_a_dirty_worker(fractal_repo: dict) -> None:
-    """``commit --check`` errors (non-zero) when the worktree has changes."""
+    """``commit --check`` exits 1 when the worktree has changes.
+
+    A dirty tree is the check's own nonzero outcome, not a command error,
+    so it lands on the reserved exit 1 with the bare notice -- never the
+    ``Error:`` exit 2 shape.
+    """
     task = fractal_repo['task']
     (task / 'scratch.txt').write_text('uncommitted\n', encoding='utf-8')
     try:
         result = _run(task, 'commit', '--check')
-        assert result.returncode != 0
+        assert result.returncode == 1
         assert 'Uncommitted changes' in result.stderr
+        assert 'Error:' not in result.stderr
     finally:
         (task / 'scratch.txt').unlink()
+
+
+def test_commit_check_on_a_user_node_is_an_error(fractal_repo: dict) -> None:
+    """``commit --check`` from the user node is a command error, exit 2.
+
+    Commit never applies to a user node (only ``--init`` does), so the check
+    cannot answer clean-or-dirty there -- the refusal surfaces as ``Error:``
+    exit 2, never as the reserved dirty exit 1 a gating script reads as
+    "uncommitted changes exist".
+    """
+    root = fractal_repo['root']
+    result = _run(root, 'commit', '--check')
+    assert result.returncode == 2
+    assert 'Error: Cannot commit from a user node' in result.stderr
 
 
 def test_reset_force_tears_worktrees_and_keeps_history(

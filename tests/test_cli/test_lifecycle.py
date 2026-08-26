@@ -147,7 +147,7 @@ def test_full_node_lifecycle_round_trip(repo: dict) -> None:
         '--priority',
         '5',
     )
-    down_uuid = down.stdout.strip()
+    down_uuid = down.stdout.split()[0]
     assert down_uuid in _run(task, 'radio', 'read', down_uuid).stdout
     # cost round-trip: parent sets a budget, child reads it back
     assert (

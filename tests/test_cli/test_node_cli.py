@@ -59,6 +59,8 @@ __all__ = [
     'test_init_blind_seeds_no_subs_and_start_sweeps',
     'test_merge_delete_reaps_the_merged_child',
     'test_list_filters_by_retired_and_depth',
+    'test_start_drain_requires_continue',
+    'test_list_json_mirrors_csv_shape',
     'test_list_status_count_and_live',
     'test_list_rejects_invalid_filters',
     'test_list_rejects_unknown_status',
@@ -976,6 +978,65 @@ def test_list_filters_by_retired_and_depth(repo: dict) -> None:
     assert _run(docs, 'node', 'unretire').returncode == 0
 
 
+def test_start_drain_requires_continue(repo: dict) -> None:
+    """The CLI refuses ``--drain`` without ``--continue`` rather than no-op.
+
+    ``--drain`` only means anything on a continued run; accepting it on a
+    fresh start would let an operator believe a wind-down was armed while
+    the node spawns freely.
+    """
+    task = repo['task']
+    refused = _run(task, 'node', 'start', '--drain')
+    assert refused.returncode != 0
+    assert '--drain requires --continue' in refused.stderr
+
+
+def test_list_json_mirrors_csv_shape(repo: dict) -> None:
+    """``list --json`` emits typed row objects with the CSV's column set.
+
+    One object per node, keys in the CSV header's order, so a scripted
+    consumer never rebuilds accounting from comma-split text (a comma in
+    one node's title corrupted a whole census once). ``--json`` and
+    ``--csv`` are mutually exclusive.
+    """
+    root = repo['root']
+    header = _run(root, 'node', 'list', '--csv').stdout.splitlines()[0]
+    result = _run(root, 'node', 'list', '--json')
+    assert result.returncode == 0
+    rows = json.loads(result.stdout)
+    assert rows, 'fixture lists at least the two worker nodes'
+    assert list(rows[0].keys()) == header.split(',')
+    branches = {row['node'] for row in rows}
+    assert {'main.task', 'main.docs'} <= branches
+    # fields are typed, never re-stringified: numeric caps stay numbers (or
+    # null), so a comma or quote in a text field can never shift a column
+    for row in rows:
+        assert isinstance(row['node'], str)
+        for cap in ('max_cost', 'max_depth', 'max_children', 'max_descendants'):
+            assert row[cap] is None or isinstance(row[cap], (int, float))
+        # end_reason is a closed vocabulary or null, never composed prose
+        assert row['end_reason'] in {
+            None,
+            'goal_met',
+            'run_exhausted',
+            'final_iteration_failed',
+            'cost_budget',
+            'timeout',
+            'setup_abort',
+            'other',
+        }
+    # the two machine formats cannot be combined ...
+    clash = _run(root, 'node', 'list', '--json', '--csv')
+    assert clash.returncode != 0
+    # ... and neither can a row format and the bare count: honoring one
+    # silently would hand a machine consumer a shape it never asked for --
+    # the rule covers both row formats, not just JSON
+    for row_format in ('--json', '--csv'):
+        counted = _run(root, 'node', 'list', row_format, '--count')
+        assert counted.returncode != 0, row_format
+        assert 'mutually exclusive' in counted.stderr
+
+
 def test_list_status_count_and_live(repo: dict) -> None:
     """``list`` honours ``--status``, ``--count``, and ``--live``.
 
@@ -1219,9 +1280,10 @@ def test_reconcile_records_orphan_event_once(repo: dict) -> None:
 @pytest.mark.parametrize(
     argnames=('command', 'message'),
     argvalues=[
+        # kill is absent by design: an idle node is killable (a spawn is
+        # reapable before it activates), covered in test_core/test_lifecycle
         ('finish', 'Cannot finish: node is not active.'),
         ('stop', 'Cannot stop: node is not active.'),
-        ('kill', 'Cannot kill: node is not active or paused (status: idle).'),
         ('attach', 'Cannot attach: node is not active.'),
         ('unretire', 'Cannot unretire: node is not retired.'),
     ],
@@ -1238,7 +1300,7 @@ def test_lifecycle_guard_rejects_idle_node(
     can surface it.
     """
     result = _run(repo['task'], 'node', command)
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert message in result.stderr
     assert result.stdout.strip() == ''
 
@@ -1432,22 +1494,22 @@ def test_update_validates_config_like_init(repo: dict) -> None:
     assert spawn.returncode == 0, spawn.stderr
     capped = root / '.worktrees' / 'main.capped'
     # max_cost=0 is rejected (a $0 ceiling degenerates the subtree check);
-    # the invariant layer lives in core (exit 1), not the CLI boundary
+    # the invariant layer lives in core (exit 2), not the CLI boundary
     zero = _run(root, 'node', 'update', 'main.capped', '--max-cost', '0')
-    assert zero.returncode == 1
+    assert zero.returncode == 2
     assert 'max_cost' in (zero.stdout + zero.stderr)
     # lowering max_cost below the stored max_iter_cost inverts the ordering
     inverted = _run(root, 'node', 'update', 'main.capped', '--max-cost', '5')
-    assert inverted.returncode == 1
+    assert inverted.returncode == 2
     assert 'max_iter_cost' in (inverted.stdout + inverted.stderr)
     # raising a per-iter cap above the effective max_cost is the same
     # inversion from the other side
     iter_over = _run(root, 'node', 'update', 'main.capped', '--max-iter-cost', '15')
-    assert iter_over.returncode == 1
+    assert iter_over.returncode == 2
     assert 'max_iter_cost' in (iter_over.stdout + iter_over.stderr)
     # a step cap above the stored max_iter_cost breaks step <= iter
     step_over = _run(root, 'node', 'update', 'main.capped', '--max-step-cost', '9')
-    assert step_over.returncode == 1
+    assert step_over.returncode == 2
     assert 'max_step_cost' in (step_over.stdout + step_over.stderr)
     # the rejected updates never touched the stored config
     assert _config(capped, 'max_cost') == '10.0'
@@ -1524,12 +1586,12 @@ def test_update_rejects_iter_cost_on_uncapped_child(
 
     Mirrors init's guard: ``docs`` carries no ``max_cost``, so granting it a
     per-iter/step cap alone would be unenforceable once the per-iter budget
-    drains. The rejection comes from core's retune policy (exit 1), names
+    drains. The rejection comes from core's retune policy (exit 2), names
     ``--max-cost``, and writes nothing.
     """
     root, docs = repo['root'], repo['docs']
     rejected = _run(root, 'node', 'update', 'main.docs', flag, '5')
-    assert rejected.returncode == 1, rejected.stderr
+    assert rejected.returncode == 2, rejected.stderr
     assert '--max-cost' in (rejected.stdout + rejected.stderr)
     assert _config(docs, key) == ''
 
