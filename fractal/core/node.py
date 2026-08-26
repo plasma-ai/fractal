@@ -2331,7 +2331,8 @@ class Node:
             # than swept -- unless the claim is provably abandoned by its
             # age, in which case it clears like a dead group
             try:
-                int(pgid_file.read_text(encoding='utf-8').strip())
+                pgid = pgid_file.read_text(encoding='utf-8').strip()
+                int(pgid)
             except FileNotFoundError:
                 pass
             except ValueError:
@@ -2346,8 +2347,18 @@ class Node:
                 # the pre-flock vet is stale by now: a record that parses
                 # here may be a rival winner's pid, landed after that vet
                 # and released with its flock, so only a group the
-                # identity-checked law judges dead clears for the claim
-                if _group_alive(pgid_file) is not False:
+                # identity-checked law judges dead clears for the claim; an
+                # unverifiable group names the ps check -- a retry cannot
+                # arbitrate an identity ps gave no answer for
+                revetted = _group_alive(pgid_file)
+                if revetted is None:
+                    raise RuntimeError(
+                        'the process identity probe gave no answer for process'
+                        f' group {pgid}, so the loop may still be running; check'
+                        f' ps -p {pgid} and remove the {PGID_FILE} record from the'
+                        ' node directory if that group is not this node'
+                    )
+                if revetted:
                     raise RuntimeError(claimed)
                 pgid_file.unlink(missing_ok=True)
             try:
@@ -2807,7 +2818,8 @@ class Node:
         launch claim in flight (its record empty until the pid lands) is
         retried within a bounded budget once the claim resolves, so a
         resume racing the sweep cannot boot a survivor under a killed
-        parent.
+        parent; a claim that outlives the budget stands the sweep down
+        with a warning naming the survivor and the manual follow-up.
 
         Args:
             reason: Optional reason for killing.
@@ -2875,6 +2887,19 @@ class Node:
                     if claims[row['node']] <= _CLAIM_RETRY_LIMIT:
                         seen.discard(row['node'])
                         retry = True
+                    else:
+                        # the budget is spent and the sweep stands down --
+                        # the survivor must surface, never ride the kill's
+                        # success confirmation invisibly
+                        self.log(
+                            message=(
+                                f'Warning: failed to kill {descendant._root}:'
+                                f' its launch claim ({PGID_FILE}) is still in'
+                                ' flight; retry fractal node kill once the'
+                                ' pid lands'
+                            ),
+                            level=logging.WARNING,
+                        )
             if retry:
                 time.sleep(_CLAIM_RETRY_SECONDS)
         return self._kill(reason)
@@ -3935,6 +3960,9 @@ class Node:
         node is killed -- pure bookkeeping with no loop alive: the open
         rows close ``killed`` and the attribution names the verb --
         rather than bouncing the operator through a manual kill sweep.
+        A parked node refused over a resume's launch claim in flight is
+        retried within kill's claim budget; an exhausted claim warns, so
+        the script's paused re-check refusal is attributable.
         Then runs the script under the ``.worktrees`` flock so its
         worktree remove/prune does not race a concurrent init/delete (the
         same lock ``child_add`` takes) -- but only when ``.worktrees``
@@ -4019,19 +4047,54 @@ class Node:
                     )
         # settle frozen work once every tree passed its pre-flight: kill each
         # parked node so its open rows close -- before the lock (each kill
-        # takes the same flock); best-effort per node (mirrors kill's sweep),
-        # the script's paused re-check backstops
+        # takes the same flock); best-effort per node (mirrors kill's sweep,
+        # claim retry included -- a resume's launch claim in flight resolves
+        # within the budget, and an exhausted one warns so the script's
+        # paused re-check abort is attributable), the script's paused
+        # re-check backstops
         for tree in trees:
             if not tree.exists():
                 continue
-            for _, descendant in tree._live_descendants(status='paused'):
-                try:
-                    descendant._kill(f'{verb} teardown', fan_out=True)
-                except Exception:
-                    tree.log(
-                        message=f'Warning: failed to kill {descendant._root}',
-                        level=logging.WARNING,
-                    )
+            seen: set[str] = set()
+            claims: dict[str, int] = {}
+            while True:
+                fresh = [
+                    (row, descendant)
+                    for row, descendant in tree._live_descendants(status='paused')
+                    if row['node'] not in seen
+                ]
+                if not fresh:
+                    break
+                retry = False
+                for row, descendant in fresh:
+                    seen.add(row['node'])
+                    try:
+                        settled = descendant._kill(f'{verb} teardown', fan_out=True)
+                    except Exception:
+                        tree.log(
+                            message=f'Warning: failed to kill {descendant._root}',
+                            level=logging.WARNING,
+                        )
+                        continue
+                    if settled is _CLAIM_IN_FLIGHT:
+                        claims[row['node']] = claims.get(row['node'], 0) + 1
+                        if claims[row['node']] <= _CLAIM_RETRY_LIMIT:
+                            seen.discard(row['node'])
+                            retry = True
+                        else:
+                            tree.log(
+                                message=(
+                                    'Warning: failed to kill'
+                                    f' {descendant._root}: its launch claim'
+                                    f' ({PGID_FILE}) is still in flight, so'
+                                    f' the {verb} will refuse over the'
+                                    ' paused node; retry once the claim'
+                                    ' resolves'
+                                ),
+                                level=logging.WARNING,
+                            )
+                if retry:
+                    time.sleep(_CLAIM_RETRY_SECONDS)
         # run the script under the flock, only when .worktrees exists
         worktrees = node.repo_dir / WORKTREES_FOLDER
         if worktrees.is_dir():

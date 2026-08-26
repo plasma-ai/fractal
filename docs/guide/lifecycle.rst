@@ -362,11 +362,10 @@ written: a recorded process group whose identity the ``ps`` probe cannot
 verify names ``ps -p <pgid>`` and the record file to remove, and a record
 naming no process group yet — a launch claiming it — asks for a retry once
 its pid lands (or the record's removal if no launch is running) instead of
-sweeping the claim. The sweep
-reaps descendants first and re-enumerates to a fixpoint, so a spawn already
-in flight when the kill lands is caught rather than escaping; a descendant
-refused over a claim in flight is retried within a bounded budget once the
-claim resolves, rather than skipped. The
+sweeping the claim. The sweep reaps descendants first and re-enumerates to a
+fixpoint, so a spawn already in flight when the kill lands is caught rather
+than escaping; a descendant refused over a claim in flight is retried within
+a bounded budget once the claim resolves, rather than skipped. The
 attribution — ``killed by <actor>``, with the reason appended — lands
 identically on the kill event, the signal, and the killed run row, and a
 later ``start --continue`` surfaces it as a notice.

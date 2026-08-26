@@ -43,6 +43,7 @@ __all__ = [
     'test_init_allows_a_second_tree_while_a_sibling_node_runs',
     'test_start_refuses_a_foreign_session_name_collision',
     'test_reset_refuses_a_running_or_frozen_node',
+    'test_reset_heals_a_crashed_node_under_inits_flock',
     'test_init_refuses_case_variant_of_existing_sibling',
     'test_root_anchors_central_db',
     'test_user_init_on_a_dotted_branch',
@@ -427,6 +428,28 @@ def test_reset_refuses_a_running_or_frozen_node(
         Node(git_repo).init(name='task', reset=True)
     # the node survived: reset never ran
     assert node.exists()
+
+
+def test_reset_heals_a_crashed_node_under_inits_flock(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``init --reset`` heals a crashed-but-active target instead of refusing.
+
+    Init holds the ``.worktrees`` flock across the reset, so the pre-reset
+    heal's terminal writes must reuse that flock rather than re-acquire it:
+    the crashed node stamps ``exited`` under init's lock and the reset
+    proceeds instead of refusing over a loop that no longer runs.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    Node(git_repo).init(name='task')
+    node = Node(git_repo / '.worktrees' / 'main.task')
+    node.status_set('active')
+    # the loop died out of band: no session backs the active status
+    monkeypatch.setattr('fractal.util.tmux.probe', lambda *, socket=None: frozenset())
+    output = Node(git_repo).init(name='task', reset=True)
+    assert 'Initialized' in output
+    assert node.status() == 'idle'
 
 
 def test_init_refuses_case_variant_of_existing_sibling(

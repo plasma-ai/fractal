@@ -406,17 +406,16 @@ Kill the node immediately: descendant sessions and recorded process groups
 are reaped first (re-enumerated to a fixpoint, so mid-sweep spawns are
 caught; a descendant refused over a launch claim in flight is retried within
 a bounded budget once the claim resolves), then the node's own, and open
-rows are marked ``killed``. The reap
-covers the loop runtime (the tmux session, or a headless or bare loop's
-recorded process group) and any step group the loop recorded. Killable
-states are ``active``, ``paused``, and ``idle`` — a booting node is reaped
-and a never-started spawn is stamped ``killed`` so it can never activate.
-Two other refusals guard the reap, each before any kill state is written: a
-recorded process group whose identity the ``ps`` probe cannot verify names
-``ps -p <pgid>`` and the record file to remove, and a record naming no
-process group yet — a launch claiming it — asks for a retry once its pid
-lands (or the record's removal if no launch is running) instead of sweeping
-the claim. The attribution
+rows are marked ``killed``. The reap covers the loop runtime (the tmux
+session, or a headless or bare loop's recorded process group) and any step
+group the loop recorded. Killable states are ``active``, ``paused``, and
+``idle`` — a booting node is reaped and a never-started spawn is stamped
+``killed`` so it can never activate. Two other refusals guard the reap, each
+before any kill state is written: a recorded process group whose identity
+the ``ps`` probe cannot verify names ``ps -p <pgid>`` and the record file to
+remove, and a record naming no process group yet — a launch claiming it —
+asks for a retry once its pid lands (or the record's removal if no launch is
+running) instead of sweeping the claim. The attribution
 ``killed by <actor>[: reason]`` lands on the event, the signal, and the run
 row, and is surfaced as a notice on a later ``start --continue``.
 

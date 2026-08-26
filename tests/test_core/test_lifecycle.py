@@ -67,6 +67,7 @@ __all__ = [
     'test_kill_reaps_over_a_vanished_record',
     'test_kill_refuses_an_in_flight_record_claim',
     'test_kill_sweep_retries_a_descendant_claim_in_flight',
+    'test_kill_sweep_stands_down_over_an_exhausted_claim',
     'test_kill_drops_a_dead_group_without_identity_probe',
     'test_kill_drops_a_foreign_owned_recycled_group',
     'test_kill_sets_killed_status',
@@ -81,6 +82,7 @@ __all__ = [
     'test_unretire_restores_the_latest_prior_when_raced',
     'test_retire_rejects_user',
     'test_signals_recurse_to_active_descendants',
+    'test_signals_heal_a_crashed_descendant_under_the_flock',
     'test_recursive_signals_attribute_the_propagating_node',
     'test_recursion_skips_inactive_descendants',
     'test_signals_refuse_settled_target_before_the_sweep',
@@ -1158,6 +1160,36 @@ def test_kill_sweep_retries_a_descendant_claim_in_flight(
     assert any('names no process group yet' in entry for entry in metadata)
 
 
+def test_kill_sweep_stands_down_over_an_exhausted_claim(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweep's claim retry is bounded: an unresolved claim survives it.
+
+    A launch claim that never resolves (its launcher died leaving the empty
+    record behind) must not loop the sweep forever: the budget stands the
+    sweep down, the kill still completes on the target, and the refused
+    descendant keeps its record and its status, with each attempt's refusal
+    on the record.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    # a claim that never resolves: the empty record stays in place
+    pgid_file = child.node_dir / PGID_FILE
+    pgid_file.write_text('', encoding='utf-8')
+    monkeypatch.setattr('fractal.core.node._CLAIM_RETRY_SECONDS', 0.01)
+    _stub_run_script(monkeypatch, Node)
+    parent.kill()
+    # the sweep stood down: the parent is reaped, the survivor is not
+    assert parent.status() == 'killed'
+    assert child.status() == 'active'
+    assert pgid_file.exists()
+    # each attempt's refusal left its evidence on the record
+    events = child.db.read('events', where={'event': 'kill'})
+    metadata = [event['metadata'] or '' for event in events]
+    refused = [entry for entry in metadata if 'names no process group yet' in entry]
+    assert len(refused) > 1
+
+
 def test_kill_drops_a_dead_group_without_identity_probe(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -1524,6 +1556,37 @@ def test_signals_recurse_to_active_descendants(
     getattr(parent, signal)(reason='wrap up')
     assert parent.record.signal_get(signal) is not None
     assert child.record.signal_get(signal) is not None
+
+
+@pytest.mark.parametrize('signal', ['stop', 'finish', 'pause'])
+def test_signals_heal_a_crashed_descendant_under_the_flock(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signal: str,
+) -> None:
+    """A fan-out over a crashed descendant heals it under the verb's flock.
+
+    The sweep enumerates by registry status, so a descendant that died
+    while active is still swept; its per-node helper already holds the
+    ``.worktrees`` flock when the guard's heal stamps the terminal status,
+    so the heal's writes must reuse that flock rather than re-acquire it.
+    The crashed child settles ``exited`` with the refusal on its record and
+    no signal, while the live target is signaled.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    # only the parent's session is live -- the child crashed while active
+    sessions = frozenset({parent.tmux_session})
+    monkeypatch.setattr('fractal.util.tmux.probe', lambda **kwargs: sessions)
+    _stub_run_script(monkeypatch, Node)
+    getattr(parent, signal)(reason='wrap up')
+    # the crashed child healed to exited: refused, unsignaled, evidenced
+    assert child.status() == 'exited'
+    assert child.record.signal_get(signal) is None
+    events = child.db.read('events', where={'event': signal})
+    metadata = [event['metadata'] or '' for event in events]
+    assert any('refused: node is not active' in entry for entry in metadata)
+    # the live parent carries the signal
+    assert parent.record.signal_get(signal) is not None
 
 
 @pytest.mark.parametrize('signal', ['stop', 'finish', 'kill'])

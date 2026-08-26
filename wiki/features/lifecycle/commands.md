@@ -83,7 +83,8 @@ claiming it), refused with retry-or-remove guidance rather than swept. The
 descendant sweep re-enumerates the subtree to a fixpoint so children registered
 mid-sweep are still caught, and proceeds best-effort per node; a descendant
 refused over a claim in flight is retried within a bounded budget once the claim
-resolves, rather than skipped.
+resolves, rather than skipped; a claim that outlives the budget stands the sweep
+down with a warning naming the survivor and the manual follow-up.
 
 ## pause and resume
 
