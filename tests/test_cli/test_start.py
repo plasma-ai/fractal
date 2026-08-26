@@ -144,8 +144,17 @@ def test_headless_start_runs_without_tmux(repo: dict) -> None:
     assert _await_settled(worktree), result.stdout
     node_dir = worktree / '.fractal' / 'main.headless'
     assert (node_dir / '.headless').read_text(encoding='utf-8') == 'headless\n'
-    assert not (node_dir / '.pgid').exists()
-    assert (node_dir / 'headless.log').read_text(encoding='utf-8')
+    # the loop drops its PGID record in its exit teardown, after the terminal
+    # status lands -- wait for the drop rather than racing the settle
+    pgid_file = node_dir / '.pgid'
+    log = node_dir / 'headless.log'
+    pgid_gone = _await_progress(
+        check=lambda: not pgid_file.exists(),
+        progress=lambda: log.stat().st_size,
+        deadline=time.monotonic() + 30,
+    )
+    assert pgid_gone, log.read_text(encoding='utf-8')
+    assert log.read_text(encoding='utf-8')
 
     # a delegated start receives the backend through the loop environment;
     # pin the CLI's envvar route independently of the explicit flag above
