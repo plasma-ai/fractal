@@ -48,6 +48,8 @@ __all__ = [
     'test_delete_locked_worktree_aborts_before_remote',
     'test_teardown_running_preflight_precedes_paused_settle',
     'test_teardown_refuses_on_inconclusive_tmux_probe',
+    'test_teardown_heals_a_dead_bare_loop_on_a_blind_host',
+    'test_teardown_refuses_group_alive_on_bare_node',
     'test_teardown_refuses_on_inconclusive_headless_probe',
     'test_teardown_refuses_session_alive_on_recorded_socket',
     'test_teardown_refuses_group_alive_on_headless_node',
@@ -701,6 +703,79 @@ def test_teardown_refuses_on_inconclusive_tmux_probe(
     # nothing was torn down
     assert runner.worktree.is_dir()
     assert runner.status() == 'active'
+
+
+def test_teardown_heals_a_dead_bare_loop_on_a_blind_host(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The teardown's own reconcile settles a dead bare loop on a blind host.
+
+    tmux's answer concerns a server a bare loop never joined, so with no
+    tmux answer at all the loop's recorded ``.pgid`` group decides: the
+    pre-teardown reconcile stamps the dead runner ``exited`` and reaps the
+    record. The teardown itself still refuses afterwards -- the reap leaves
+    the node record-less, and a blind preflight has nothing left to vouch
+    for it -- so nothing is torn down, but the crash is settled.
+    """
+    node = Node(git_repo)
+    node.init(agent='claude', user=True)
+    node.init(name='runner')
+    runner = Node(git_repo / '.worktrees' / 'main.runner')
+    runner.status_set('active')
+    # a dead same-user group: spawned and reaped, so the record provably
+    # names a gone group
+    leader = subprocess.Popen(['sleep', '0'], start_new_session=True)
+    leader.wait()
+    pgid_file = runner.node_dir / PGID_FILE
+    pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+    # tmux gives no answer (e.g. no binary on this shell's PATH)
+    monkeypatch.setattr('fractal.util.tmux.probe', lambda: None)
+    with pytest.raises(RuntimeError, match='probe gave no answer'):
+        Node.destroy(git_repo)
+    # the dead bare loop healed on the way in: settled, record reaped
+    assert runner.status() == 'exited'
+    assert not pgid_file.exists()
+    assert runner.worktree.is_dir()
+
+
+def test_teardown_refuses_group_alive_on_bare_node(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blind probe never tears down a bare loop whose group is alive.
+
+    With no tmux answer, a socket-less node's live, identity-verified
+    ``.pgid`` group is the whole answer, and the refusal names the group
+    rather than a tmux session.
+    """
+    node = Node(git_repo)
+    node.init(agent='claude', user=True)
+    node.init(name='runner')
+    runner = Node(git_repo / '.worktrees' / 'main.runner')
+    runner.status_set('active')
+    # a live same-user group standing in for the loop's, recorded after it
+    # spawned so the identity check dates the leader no later than the record
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    pgid_file = runner.node_dir / PGID_FILE
+    try:
+        pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        monkeypatch.setattr('fractal.util.tmux.probe', lambda: None)
+        refusal = f'still running as process group {leader.pid}'
+        with pytest.raises(RuntimeError, match=refusal):
+            Node.destroy(git_repo)
+        with pytest.raises(RuntimeError, match=refusal):
+            Node.reset(git_repo)
+        # nothing was torn down and the live group was left unsignaled
+        assert runner.worktree.is_dir()
+        assert runner.status() == 'active'
+        assert leader.poll() is None
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 def test_teardown_refuses_on_inconclusive_headless_probe(

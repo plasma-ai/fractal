@@ -74,14 +74,16 @@ the central database) and `.pause_abort`. Signals the loop observes — finish,
 stop, pause — take effect at iteration or step boundaries; the escalation path
 that does not wait is kill.
 
-Liveness is one law (`Node._loop_exists`). A `.headless` node is judged by its
+Liveness is one law (`Node._loop_alive`). A `.headless` node is judged by its
 recorded `.pgid` process group alone and tmux is never asked, so a host without
 tmux still heals it. Any other node asks tmux on its recorded `.socket`; a
 definitive "no such session" is proof only when a socket was recorded, and a
-socket-less loop (a bare `fractal node _loop` launch) is judged by its live
-group instead. The group probe compares the leader's start instant with the
-`.pgid` record's timestamp to fence PID reuse, and arbitrates a group owned by
-another user the same way. Only a failed `ps` is inconclusive: reconciliation
-keeps the run active, teardown refuses, kill refuses and names the `ps -p` check
-and the record to clear, and reaping spares any group it cannot positively
-identify.
+socket-less loop (a bare `fractal node _loop` launch) is judged by its own group
+instead — tmux's "no such session" defers to a live or unverified group, and
+with no tmux answer at all the recorded group is the whole answer, while a
+socket-less node with no `.pgid` record then stays unknown. The group probe
+compares the leader's start instant with the `.pgid` record's timestamp to fence
+PID reuse, and arbitrates a group owned by another user the same way. Only a
+failed `ps` is inconclusive: reconciliation keeps the run active, teardown
+refuses, kill refuses and names the `ps -p` check and the record to clear, and
+reaping spares any group it cannot positively identify.

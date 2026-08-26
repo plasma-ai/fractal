@@ -43,7 +43,10 @@ build. Runtime liveness is reconciled on every build through the same
 process-group probe core uses: a tmux loop by the batched session set, a
 headless or socket-less loop by its recorded group; a definitively missing or
 recycled runtime renders `exited`, while a group whose identity probe is
-inconclusive stays `active`.
+inconclusive stays `active`. On a host where tmux gives no answer the batched
+set folds to empty, so a socket-recorded active loop renders `exited` while
+core's liveness law keeps it `active` -- a display-only divergence confined to
+blind hosts.
 
 ## The read stack
 

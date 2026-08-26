@@ -470,12 +470,15 @@ Two deliberate limits:
   state, on this host or after a filesystem transplant.
 - **An inconclusive runtime probe heals nothing.** A tmux node's probe asks
   the server the loop recorded at boot; when tmux gives no answer (binary
-  absent, no visibility from a cron/CI shell), the heal keys off proof,
-  never ignorance, so a blind host cannot kill a healthy loop. A headless or
-  bare loop's probe is inconclusive only when ``ps`` cannot date the live
-  group's leader; that too heals nothing, and teardown and kill refuse,
-  naming the check to run. A group owned by another user is not
-  inconclusive: its leader's start instant decides.
+  absent, no visibility from a cron/CI shell), a socket-recorded loop stays
+  unhealed — the heal keys off proof, never ignorance, so a blind host
+  cannot kill a healthy loop. A socket-less loop with a recorded ``.pgid``
+  group defers to that group instead, exactly as a headless one does, and a
+  socket-less node with no record stays unhealed. A headless or bare loop's
+  probe is inconclusive only when ``ps`` cannot date the live group's
+  leader; that too heals nothing, and teardown and kill refuse, naming the
+  check to run. A group owned by another user is not inconclusive: its
+  leader's start instant decides.
 
 Separate from crash healing, ``fractal node reconcile [node]`` is the audit
 step after out-of-band cleanup: for each registered descendant whose

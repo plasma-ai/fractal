@@ -257,7 +257,7 @@ class TuiData:
     def loop_alive(self: TuiData, branch: str, sessions: frozenset[str]) -> bool:
         """Return whether the branch's loop is alive, for display.
 
-        The cockpit's copy of core's liveness law (``Node._loop_exists``) over
+        The cockpit's copy of core's liveness law (``Node._loop_alive``) over
         the caller's one-per-refresh session set instead of a per-node tmux
         probe: a ``.headless`` node is judged by its recorded process group
         alone; any other node by its listed session, except that a socket-less

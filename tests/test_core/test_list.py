@@ -12,11 +12,12 @@ consumers literal-match.
 from __future__ import annotations
 
 import pathlib
+import subprocess
 from typing import Optional
 
 import pytest
 
-from fractal.constants import SOCKET_FILE
+from fractal.constants import PGID_FILE, SOCKET_FILE
 from fractal.core.node import Node
 from tests._helpers import _past_timestamp
 
@@ -30,6 +31,7 @@ __all__ = [
     'test_list_live_relabels_crashed_active',
     'test_list_live_reads_booting_idle_as_active',
     'test_list_live_confirms_relabels_on_recorded_socket',
+    'test_list_heals_a_bare_loop_on_a_blind_host',
     'test_list_renders_config_caps_over_stale_registry',
     'test_list_decorates_exited_with_run_reason',
     'test_end_reason_types_each_recorded_landing',
@@ -206,6 +208,46 @@ def test_list_live_confirms_relabels_on_recorded_socket(
     child.status_set('idle')
     live = {row['node']: row['status'] for row in parent.list(live=True)}
     assert live[child.branch] == 'active'
+
+
+def test_list_heals_a_bare_loop_on_a_blind_host(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blind probe judges a socket-less child by its recorded group.
+
+    With no tmux answer, a socket-less active child whose recorded ``.pgid``
+    group is dead reads as crashed: ``--live`` relabels it ``exited``
+    (display-only) and the plain listing persists the heal through
+    ``_heal_crashed`` -- while a ``.socket``-recorded active child stays
+    untouched, since the blind host has no proof about its server.
+    """
+    parent, bare = _spawn_parent_child(git_repo, monkeypatch)
+    # a second child whose loop recorded its tmux socket at boot
+    monkeypatch.setenv('_NODE', f'{parent.node_dir}')
+    Node(git_repo).init(name='sock')
+    monkeypatch.delenv('_NODE')
+    socked = Node(git_repo / '.worktrees' / 'main.parent.sock')
+    socked.status_set('active')
+    socked.record.run_start()
+    (socked.node_dir / SOCKET_FILE).write_text('other-sock\n', encoding='utf-8')
+    # the bare child recorded only its group, and that group is dead
+    leader = subprocess.Popen(['sleep', '0'], start_new_session=True)
+    leader.wait()
+    (bare.node_dir / PGID_FILE).write_text(f'{leader.pid}\n', encoding='utf-8')
+    # tmux gives no answer, on the ambient and the recorded socket alike
+    monkeypatch.setattr('fractal.util.tmux.probe', lambda socket=None: None)
+    # --live relabels the bare child without persisting; the socket child stands
+    live = {row['node']: row['status'] for row in parent.list(live=True)}
+    assert live[bare.branch] == 'exited'
+    assert live[socked.branch] == 'active'
+    assert bare.status() == 'active'
+    # the plain listing persists the heal through the child's own reconcile
+    cached = {row['node']: row['status'] for row in parent.list()}
+    assert cached[bare.branch] == 'exited'
+    assert cached[socked.branch] == 'active'
+    assert bare.status() == 'exited'
+    assert socked.status() == 'active'
 
 
 def test_list_renders_config_caps_over_stale_registry(

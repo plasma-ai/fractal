@@ -240,9 +240,10 @@ runtime is its normal parked state. Neither is a loop whose recorded process
 group is still alive: a ``--headless`` node (what a tmux-less host uses) is
 judged by that group alone, and a loop launched bare (``fractal node _loop``,
 what ``start.sh`` execs — the harness launches it directly) never joined a
-tmux server, so the probe's "no such session" says nothing about it, and its
-own recorded group keeps the heal — and the reap that comes with it — off a
-running loop.
+tmux server, so tmux's "no such session" — or no tmux answer at all — says
+nothing about it: its own recorded group decides, keeping the heal — and the
+reap that comes with it — off a running loop while letting a blind host heal
+a dead one.
 
 ``--continue`` restores the worktree before relaunching: uncommitted project
 files refuse without ``--clean`` (which acknowledges discarding them), and a

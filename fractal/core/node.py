@@ -314,7 +314,7 @@ class Node:
         """Return whether this node uses the detached process backend."""
         return (self.node_dir / HEADLESS_FILE).is_file()
 
-    def _loop_exists(self: Node) -> Optional[bool]:
+    def _loop_alive(self: Node) -> Optional[bool]:
         """Return whether a live loop still runs this node (``None`` unknown).
 
         A ``.headless`` launch never joined a tmux server, so its recorded
@@ -327,18 +327,32 @@ class Node:
         node _loop`` is a supported bare entry point (the harness, a cron
         host) that joins no server, so a socket-less node's own live,
         identity-checked group (:func:`_group_alive`) overrules the probe and
-        an unverified group leaves the answer unknown. A socket-recorded loop
-        gets no overrule: its group outliving the pane is the orphan the reap
-        exists for. ``None`` from either probe never reads as gone.
+        an unverified group leaves the answer unknown. When tmux gives no
+        answer at all, that recorded group is the socket-less node's whole
+        answer -- a blind host heals its dead or recycled group exactly as it
+        heals a headless one, with the same transplant exposure the headless
+        path accepts, and an unverifiable group stays unknown -- while a
+        socket-less node with no ``.pgid`` record stays unknown. A
+        socket-recorded loop gets no overrule: its group outliving the pane
+        is the orphan the reap exists for. ``None`` from either probe never
+        reads as gone.
         """
         if self.headless:
             return _group_alive(self.node_dir / PGID_FILE)
         alive = self._tmux_session_exists()
-        # a bare launch is judged by its own group; an unknown group stays unknown
-        if alive is False and not (self.node_dir / SOCKET_FILE).exists():
-            group = _group_alive(self.node_dir / PGID_FILE)
-            if group is not False:
-                return group
+        if not (self.node_dir / SOCKET_FILE).exists():
+            # a bare launch is judged by its own group; an unknown group
+            # stays unknown
+            if alive is False:
+                group = _group_alive(self.node_dir / PGID_FILE)
+                if group is not False:
+                    return group
+            # tmux gave no answer: the recorded group is the only witness;
+            # the record guard keeps the boot window unknown -- .pgid lands
+            # only after the active stamp, so a record-less node may be a
+            # booting loop, never provably a dead one
+            elif alive is None and (self.node_dir / PGID_FILE).exists():
+                return _group_alive(self.node_dir / PGID_FILE)
         return alive
 
     def _reconcile_status(self: Node) -> None:
@@ -369,8 +383,11 @@ class Node:
         proof from the loop's recorded one (see :meth:`_tmux_session_exists`).
         A definitive "no such session" is proof only for a loop that recorded
         a socket: a bare ``node _loop`` launch never joined a server, so its
-        own live, identity-checked process group overrules the probe, and a
-        ``.headless`` launch never asks tmux at all (:meth:`_loop_exists`).
+        own live, identity-checked process group overrules the probe -- and
+        when tmux gives no answer at all, that recorded group is the
+        socket-less node's whole answer, so a blind host still heals a dead
+        bare loop -- and a ``.headless`` launch never asks tmux at all
+        (:meth:`_loop_alive`).
 
         Never reconciles the node from inside its own running loop: the loop
         self-finishes (``send_budget_finish`` calls ``node finish``), and a
@@ -382,7 +399,7 @@ class Node:
             return
         if self.status() != 'active':
             return
-        if self._loop_exists() is False:
+        if self._loop_alive() is False:
             self._reap_orphan()
             self.record.close_open('exited')
             self.status_set('exited')
@@ -3635,11 +3652,11 @@ class Node:
             # probe each node through the one liveness law: a socket-recording
             # loop through the server it recorded at boot, a headless or
             # socket-less loop through its recorded process group (see
-            # _loop_exists); an inconclusive answer means the node may still be
+            # _loop_alive); an inconclusive answer means the node may still be
             # running, so the irreversible teardown refuses rather than tearing
             # down blind
             for _, descendant in descendants:
-                alive = descendant._loop_exists()
+                alive = descendant._loop_alive()
                 pgid_file = descendant.node_dir / PGID_FILE
                 if alive is None:
                     raise RuntimeError(
@@ -4047,7 +4064,7 @@ class Node:
             # snapshot reconcile, so --live is the authoritative
             # settled-vs-crashed view; the batched probe only nominates
             # candidates, and each relabel confirms through the node's own
-            # liveness law (see _loop_exists); an inconclusive runtime probe
+            # liveness law (see _loop_alive); an inconclusive runtime probe
             # proves nothing, so the stored status stands
             sessions = fractal.util.tmux.probe()
             rows = []
@@ -4065,7 +4082,7 @@ class Node:
                     ):
                         alive: Optional[bool] = True
                     else:
-                        alive = node._loop_exists()
+                        alive = node._loop_alive()
                     if current == 'active':
                         if alive is False:
                             row = {**row, 'status': 'exited'}
@@ -4243,11 +4260,14 @@ class Node:
         :meth:`_reconcile_status` (persisted, not just relabeled) and re-read.
         One batched tmux probe nominates tmux rows whose session it does not
         list; a headless row is nominated on every pass, since its recorded
-        group is its only witness and a host without tmux must still heal it.
-        :meth:`_reconcile_status` is the one confirming probe, so no row is
-        probed twice. A row without a live node (worktree gone) passes
-        through untouched. An inconclusive runtime probe heals nothing --
-        stamping live loops ``exited`` on a blind host would reap them.
+        group is its only witness and a host without tmux must still heal it,
+        and a blind probe also nominates a socket-less row with a ``.pgid``
+        record -- the blind host vouches for no row, so the row confirms
+        through its own group. :meth:`_reconcile_status` is the one
+        confirming probe, so no row is probed twice. A row without a live
+        node (worktree gone) passes through untouched. An inconclusive
+        runtime probe heals nothing -- stamping live loops ``exited`` on a
+        blind host would reap them.
 
         Args:
             pairs: ``(row, node)`` per registry row -- ``node`` is ``None``
@@ -4265,9 +4285,18 @@ class Node:
             if _base_status(row.get('status')) == 'active' and node is not None:
                 # nominate only -- the reconcile confirms on the node's own
                 # record: a headless row always (the listing says nothing about
-                # it), a tmux row when a definitive listing misses it
-                absent = node.headless or (
-                    sessions is not None and node.tmux_session not in sessions
+                # it), a tmux row when a definitive listing misses it, and a
+                # record-only row (a .pgid, no .socket) when the host is blind
+                # -- a blind host vouches for no row, so such a row confirms
+                # through its own group
+                absent = (
+                    node.headless
+                    or (sessions is not None and node.tmux_session not in sessions)
+                    or (
+                        sessions is None
+                        and not (node.node_dir / SOCKET_FILE).exists()
+                        and (node.node_dir / PGID_FILE).exists()
+                    )
                 )
                 if node.exists() and absent:
                     node._reconcile_status()

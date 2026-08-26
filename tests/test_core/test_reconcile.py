@@ -38,6 +38,7 @@ __all__ = [
     'test_headless_liveness_reconciles_a_dead_process_group',
     'test_headless_liveness_never_asks_tmux',
     'test_bare_loop_group_overrules_a_definitive_tmux_answer',
+    'test_blind_probe_spares_a_record_less_bare_loop',
     'test_kill_unchanged_on_stale_active',
     'test_reap_orphan_reaps_only_the_recorded_group',
     'test_reap_orphan_spares_a_group_with_unknown_identity',
@@ -320,7 +321,7 @@ def test_foreign_owned_group_is_arbitrated_by_its_leader(
         'fractal.core.node._recorded_group',
         lambda pgid, recorded_at: recorded,
     )
-    assert node._loop_exists() is expected
+    assert node._loop_alive() is expected
 
 
 def test_reconcile_requires_a_definitive_headless_identity(
@@ -404,6 +405,11 @@ def test_headless_liveness_never_asks_tmux(
 
 
 @pytest.mark.parametrize(
+    argnames='tmux_answer',
+    argvalues=[False, None],
+    ids=['no-such-session', 'no-answer'],
+)
+@pytest.mark.parametrize(
     argnames=('recorded', 'expected'),
     argvalues=[(True, 'active'), (None, 'active'), (False, 'exited')],
     ids=['recorded', 'unknown', 'recycled'],
@@ -413,20 +419,22 @@ def test_bare_loop_group_overrules_a_definitive_tmux_answer(
     monkeypatch: pytest.MonkeyPatch,
     recorded: Optional[bool],
     expected: str,
+    tmux_answer: Optional[bool],
 ) -> None:
     """A socket-less loop is judged by its own group, not by tmux's answer.
 
     ``fractal node _loop`` is a supported bare entry point that joins no tmux
     server and records no ``.socket``, so tmux's definitive "no such session"
-    is no proof of death for it: a live, identity-checked group keeps the run
-    open, an unverified group leaves the answer unknown, and only a gone or
-    recycled group lets the heal proceed.
+    is no proof of death for it -- and a probe with no answer at all (a blind
+    host) defers to the same recorded group: a live, identity-checked group
+    keeps the run open, an unverified group leaves the answer unknown, and
+    only a gone or recycled group lets the heal proceed.
     """
     node = node_with_db
     node.status_set('active')
     run_id = node.record.run_start()
     (node.node_dir / PGID_FILE).write_text('4242\n', encoding='utf-8')
-    monkeypatch.setattr(node, '_tmux_session_exists', lambda: False)
+    monkeypatch.setattr(node, '_tmux_session_exists', lambda: tmux_answer)
     monkeypatch.setattr('fractal.core.node.os.killpg', lambda pgid, signal: None)
     monkeypatch.setattr(
         'fractal.core.node._recorded_group',
@@ -436,6 +444,26 @@ def test_bare_loop_group_overrules_a_definitive_tmux_answer(
     assert node.status() == expected
     run = node.db.read('runs', where={'run_id': run_id})[0]
     assert run['status'] == expected
+
+
+def test_blind_probe_spares_a_record_less_bare_loop(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No tmux answer plus no ``.pgid`` record heals nothing.
+
+    ``.pgid`` lands only after the loop stamps ``active``, so a socket-less
+    node without a record may be a booting loop -- a blind probe proves
+    nothing about it and the run stays open.
+    """
+    node = node_with_db
+    node.status_set('active')
+    run_id = node.record.run_start()
+    monkeypatch.setattr(node, '_tmux_session_exists', lambda: None)
+    node._reconcile_status()
+    assert node.status() == 'active'
+    run = node.db.read('runs', where={'run_id': run_id})[0]
+    assert run['status'] == 'active'
 
 
 def test_kill_unchanged_on_stale_active(
