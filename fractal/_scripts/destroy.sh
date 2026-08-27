@@ -123,8 +123,24 @@ fi
 if [[ ${#WORKTREES[@]} -gt 0 ]]; then
     for WORKTREE in "${WORKTREES[@]}"; do
         WT_BRANCH=$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+        # the guard is per-backend (mirrors kill.sh): a headless node owns no
+        # session, so a matching name is another repo's sharing this basename
+        # and must not block the destroy; the node dir nests under the
+        # .worktrees/.project/<branch> project prefix (mirrors Node.node_dir)
+        WT_PROJECT="."
+        WT_PROJECT_FILE="$WORKTREES_DIR/.project/$WT_BRANCH"
+        if [[ -f "$WT_PROJECT_FILE" ]]; then
+            WT_PROJECT=$(cat "$WT_PROJECT_FILE")
+        fi
+        if [[ "$WT_PROJECT" == "." ]]; then
+            HEADLESS_FILE="$WORKTREE/.fractal/$WT_BRANCH/.headless"
+        else
+            HEADLESS_FILE="$WORKTREE/$WT_PROJECT/.fractal/$WT_BRANCH/.headless"
+        fi
         TMUX_SESSION_NAME="${REPO_NAME//[.:]/-} (${WT_BRANCH//./-})"
-        if tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -qxF "$TMUX_SESSION_NAME"; then
+        if [[ ! -f "$HEADLESS_FILE" ]] \
+            && tmux list-sessions -F '#{session_name}' 2>/dev/null \
+            | grep -qxF "$TMUX_SESSION_NAME"; then
             echo "Error: node is still running in tmux ($TMUX_SESSION_NAME)" >&2
             echo "Kill it first with: fractal node kill $WT_BRANCH" >&2
             exit 1

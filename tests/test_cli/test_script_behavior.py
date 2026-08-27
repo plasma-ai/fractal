@@ -32,6 +32,10 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   ``.pgid``/``.step_pgid`` groups without consulting tmux at all, so a
   same-named session from another repo sharing the basename survives the kill
   and the node's own loop is the one reaped.
+- **``delete.sh`` per-backend running guard** blocks the teardown on a bare
+  tmux session-name match only for a tmux node; a headless node owns no
+  session, so a same-named session from another repo sharing the basename
+  never refuses its delete.
 - **``merge.sh`` interrupt safety** re-asserts the target worktree is clean
   immediately before the destructive squash, so an edit that lands in the
   target *during* the merge is refused -- never absorbed into the squash commit
@@ -94,6 +98,7 @@ __all__ = [
     'test_headless_handoff_failure_records_no_backend',
     'test_tmux_relaunch_failure_keeps_the_backend_record',
     'test_kill_reaps_only_the_recorded_group_for_a_headless_node',
+    'test_delete_running_guard_is_per_backend',
     'test_merge_preserves_a_target_edit_that_lands_during_the_merge',
     'test_merge_re_merges_an_iterating_child_without_conflict',
     'test_merge_re_merge_of_a_merged_node_is_a_no_op',
@@ -532,6 +537,60 @@ def test_kill_reaps_only_the_recorded_group_for_a_headless_node(
         except ProcessLookupError:
             pass
         leader.wait()
+
+
+# ------ delete.sh: the per-backend running guard
+
+
+@pytest.mark.parametrize(
+    argnames='headless',
+    argvalues=[False, True],
+    ids=['tmux', 'headless'],
+)
+def test_delete_running_guard_is_per_backend(
+    tmp_path: pathlib.Path,
+    headless: bool,
+) -> None:
+    """A colliding session name blocks a delete only for a tmux node.
+
+    ``delete.sh`` refuses teardown while the node's session is listed, but the
+    guard is per-backend (mirroring ``kill.sh``): a headless node owns no
+    session, so a same-named session from another repo sharing the basename
+    must not refuse its delete. A ``tmux`` PATH shim lists the colliding name
+    for both backends; only the tmux node's delete is refused.
+    """
+    repo = _init_tree(tmp_path / f'delrepo-{headless}')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    if headless:
+        node_dir = worktree / '.fractal' / 'main.task'
+        (node_dir / '.headless').write_text('headless\n', encoding='utf-8')
+    bindir = tmp_path / f'del-bin-{headless}'
+    bindir.mkdir()
+    tmux = bindir / 'tmux'
+    session = f'{repo.name} (main-task)'
+    tmux.write_text(f"#!/bin/sh\nprintf '%s\\n' '{session}'\n", encoding='utf-8')
+    tmux.chmod(0o755)
+    env = _cli_env()
+    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    result = subprocess.run(
+        ['bash', f'{_scripts_dir() / "delete.sh"}', f'{worktree}'],
+        cwd=f'{repo}',
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    if headless:
+        # the name belongs to another repo's session -- the delete proceeds
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert not worktree.exists()
+    else:
+        # a tmux node's listed session refuses the teardown, node intact
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert 'still running in tmux' in result.stderr, result.stderr
+        assert worktree.exists()
 
 
 # ------ merge.sh: an edit landing in the target during the merge

@@ -25,6 +25,8 @@ USAGE
 
 WORKTREE_DIR=""
 HEADLESS=false
+# guarded expansion at each use: an empty array reads as unset under
+# set -u on bash 3.2
 LOOP_ARGS=()
 
 for arg in "$@"; do
@@ -95,7 +97,9 @@ fi
 # the handoff (node _launch) vets the recorded .pgid group under the
 # identity-checked law and refuses a second launch while the loop is
 # still booting or running; it also records the .headless marker
-# beside the .pgid record, so a failed handoff records no backend
+# beside the .pgid record, so a failed handoff records no backend;
+# the exec'd loop inherits the full seat environment -- the counterpart
+# of the tmux arm's targeted -e route-key forwarding below
 if [[ "$HEADLESS" == true ]]; then
     ENV_ARGS+=("FRACTAL_HEADLESS=true")
     exec env "${ENV_ARGS[@]}" fractal node _launch \

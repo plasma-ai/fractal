@@ -61,7 +61,24 @@ LOCAL=$(fractal config _get local --path="$WORKTREE_DIR" 2>/dev/null || echo tru
 # prefix/fnmatch, so a short name false-matches longer session names
 TMUX_SESSION_NAME="${REPO_NAME//[.:]/-} (${BRANCH//./-})"
 
-if tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -qxF "$TMUX_SESSION_NAME"; then
+# the guard is per-backend (mirrors kill.sh): a headless node owns no
+# session, so a matching name is another repo's sharing this basename and
+# must not block the delete; the node dir nests under the
+# .worktrees/.project/<branch> project prefix (mirrors Node.node_dir)
+PROJECT="."
+PROJECT_FILE="$REPO_DIR/.worktrees/.project/$BRANCH"
+if [[ -f "$PROJECT_FILE" ]]; then
+    PROJECT=$(cat "$PROJECT_FILE")
+fi
+if [[ "$PROJECT" == "." ]]; then
+    HEADLESS_FILE="$WORKTREE_DIR/.fractal/$BRANCH/.headless"
+else
+    HEADLESS_FILE="$WORKTREE_DIR/$PROJECT/.fractal/$BRANCH/.headless"
+fi
+
+if [[ ! -f "$HEADLESS_FILE" ]] \
+    && tmux list-sessions -F '#{session_name}' 2>/dev/null \
+    | grep -qxF "$TMUX_SESSION_NAME"; then
     echo "Error: node is still running in tmux ($TMUX_SESSION_NAME)" >&2
     echo "Kill it first with: fractal node kill --path=<path>" >&2
     exit 1

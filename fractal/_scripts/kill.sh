@@ -97,7 +97,14 @@ if [[ -n "$PANE_PID" ]]; then
 fi
 
 # fall back to the pgid recorded at run start when the pane lookup is empty --
-# an out-of-band pane death leaves the agent group headless with no tmux handle
+# an out-of-band pane death leaves the agent group headless with no tmux
+# handle; the record was identity-vetted moments ago under the .worktrees flock
+# (Node._kill's flock'd _group_alive vet unlinks a dead or recycled record and
+# refuses an unverifiable one before this script runs -- lifecycle scripts run
+# only via Node._run_script), so this kill -0 is a signal-avoidance gate for a
+# group that died since, never an identity check; a recycle inside that window
+# is accepted -- kill(2) by process group is check-then-act wherever the check
+# runs, and the pane-pid arm above carries the same irreducible window
 if [[ -z "$PGID" && -n "$PGID_FILE" && -f "$PGID_FILE" ]]; then
     RECORDED_PGID=$(tr -d '[:space:]' <"$PGID_FILE") || true
     if [[ -n "$RECORDED_PGID" ]] && kill -0 -- "-$RECORDED_PGID" 2>/dev/null; then
@@ -107,7 +114,8 @@ fi
 
 # the in-flight agent invocation runs in its own group (.step_pgid, recorded by
 # the loop at launch) outside the pane's -- reap it too or the agent survives the kill,
-# headless and still spending
+# headless and still spending; Node._kill's flock'd vet covers this record too,
+# so its kill -0 is the same signal-avoidance gate, never an identity check
 STEP_PGID=""
 STEP_PGID_FILE=""
 if [[ -n "$PGID_FILE" ]]; then
