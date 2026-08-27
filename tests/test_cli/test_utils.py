@@ -3,9 +3,10 @@
 The helpers are pinned where they surface: ``parse_reserve_budget`` in
 ``test_reserve_budget``, node resolution in ``test_signal_guards``, and
 the ``command`` error wrapper behaviorally across the ``test_cli``
-suites. ``StreamRenderer``'s piped-stream ordering lives here (its
-per-provider event rendering is pinned in ``test_impl``), as does
-``resolve_headless``'s flag > env > recorded-backend cascade.
+suites (its interrupt line here). ``StreamRenderer``'s piped-stream
+ordering lives here (its per-provider event rendering is pinned in
+``test_impl``), as does ``resolve_headless``'s flag > env >
+recorded-backend cascade.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ __all__ = [
     'test_renderer_keeps_piped_output_ordered_with_stderr',
     'test_resolve_headless_resolves_flag_env_then_marker',
     'test_resolve_headless_refuses_an_unrecognized_export',
+    'test_interrupt_reports_and_exits_130',
 ]
 
 # the chat command's epilogue in miniature: a streamed reply, the closing
@@ -153,3 +155,49 @@ def test_resolve_headless_refuses_an_unrecognized_export(
     # the loop's exports are matched case-folded, never refused
     monkeypatch.setenv('FRACTAL_HEADLESS', 'TRUE')
     assert resolve_headless(None, marker_node) is True
+
+
+# a wrapped command interrupted mid-body: the self-delivered SIGINT is a
+# foreground Ctrl-C in miniature
+_INTERRUPTED = """
+import os
+import signal
+
+import typer
+
+from fractal.cli.utils import command
+
+app = typer.Typer()
+
+
+@command(app, 'quick')
+def quick() -> None:
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+app([])
+"""
+
+
+def test_interrupt_reports_and_exits_130() -> None:
+    """A Ctrl-C prints one ``Interrupted.`` line and exits 130.
+
+    The wrapper names the interrupt on stderr and re-raises, so typer's
+    own KeyboardInterrupt handling supplies the exit code and no
+    traceback reaches the operator.
+    """
+    # worktree-first PYTHONPATH so the subprocess imports the edited package
+    root = pathlib.Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join(
+        part for part in (str(root), env.get('PYTHONPATH', '')) if part
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', _INTERRUPTED],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert result.returncode == 130, result.stderr
+    assert result.stderr == 'Interrupted.\n'
