@@ -464,18 +464,29 @@ class Loop:
             return 1
         # record the tmux socket the node's own session lives on ($TMUX is
         # "socket_path,server_pid,session_index" inside the pane) -- the
+        # record asserts ownership, verified at boot: a definitive "no such
+        # session" on a recorded socket is heal-grade proof, so the record
+        # lands only when the $TMUX server actually lists the node's own
+        # session -- a bare `node _loop` launched in an operator's pane
+        # records nothing and is judged by its group like any bare loop,
+        # and an inconclusive probe also records nothing -- the fail-safe
+        # demotion degrades only the orphan reap, never liveness; the
         # record lands before the active stamp and before .pgid, the
         # ordering the socket-less liveness rule (Node._loop_alive) relies
         # on: Node._reconcile_status asks this server, not whichever socket
         # the probing shell resolves, so a shell with a different
         # TMUX_TMPDIR never misreads the live session as gone; a headless
-        # loop joined no server and records none, and a headless or
-        # tmux-less launch (the test harness) drops any stale record so
-        # the group or ambient probe rules
+        # loop joined no server and records none, and every no-record boot
+        # drops any stale record so the group or ambient probe rules
         try:
             tmux_env = os.environ.get('TMUX', '')
-            if tmux_env and not node.headless:
-                socket_path, *_ = tmux_env.split(',')
+            socket_path, *_ = tmux_env.split(',')
+            sessions = (
+                fractal.util.tmux.probe(socket=socket_path)
+                if socket_path and not node.headless
+                else None
+            )
+            if sessions is not None and node.tmux_session in sessions:
                 (node.node_dir / SOCKET_FILE).write_text(
                     f'{socket_path}\n',
                     encoding='utf-8',
@@ -485,8 +496,9 @@ class Loop:
         except OSError:
             pass
         # record the run's process group beside .status, after the socket
-        # record (a .pgid with no .socket means 'booted outside a pane')
-        # and before the active stamp, so an active row always carries its
+        # record (a .pgid with no .socket means the boot never verified
+        # session ownership -- the loop is judged by its group) and
+        # before the active stamp, so an active row always carries its
         # liveness handle -- the one kill.sh and Node._reconcile_status
         # fall back to when an out-of-band pane death leaves the agent
         # group running headless; the headless launcher records the same

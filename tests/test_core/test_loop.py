@@ -95,6 +95,7 @@ __all__ = [
     'test_auto_backstop_commit_carries_step_and_plan_context',
     'test_stop_mid_step_lets_the_seat_complete',
     'test_billing_failures_back_off_exponentially_and_a_success_clears',
+    'test_billing_gate_holds_the_sync_launch_and_counts_it',
     'test_interrupted_billing_gate_books_the_consumed_steps',
     'test_rejected_retunes_warn_once_not_every_iteration',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
@@ -478,29 +479,34 @@ def test_agent_env_inherits_headless_launches(
 
 @pytest.mark.parametrize(
     argnames='mode',
-    argvalues=['tmux-backed', 'headless', 'bare'],
-    ids=['tmux-backed', 'headless', 'bare'],
+    argvalues=['tmux-backed', 'headless', 'bare', 'bare-in-pane', 'probe-none'],
+    ids=['tmux-backed', 'headless', 'bare', 'bare-in-pane', 'probe-none'],
 )
 def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
 ) -> None:
-    """A tmux-backed boot records the pane's socket; no other boot keeps one.
+    """A boot records the pane's socket only after verifying ownership.
 
     ``Node._reconcile_status`` probes the server the node's own session
     lives on via this record, so it must land before any step runs (a
     reconcile racing a fresh boot from a different-socket shell must
     already find it) and must not outlive the loop -- a surviving record,
-    like ``.pgid``, would mark a death no cleanup could catch. A headless
+    like ``.pgid``, would mark a death no cleanup could catch. The record
+    asserts ownership: it lands only when the ``$TMUX`` server actually
+    lists the node's own session, so a bare launch inside an operator's
+    pane (a foreign-only listing) and an inconclusive probe both record
+    nothing -- a record naming a server the session does not live on would
+    hand the reconcile heal-grade proof against a live loop. A headless
     loop joins no server whatever ``$TMUX`` its launching shell carries,
-    and a bare launch (no marker, no ``$TMUX``) joins none either: both
-    record no socket and drop a stale record from an earlier tmux run --
-    kept, it would pin a later reconcile to a dead server and misread the
-    live loop as gone. Either way ``.pgid`` lands after the socket record
-    and the active stamp lands last, so an active row always carries its
-    liveness records and '.pgid and no .socket' reliably reads 'booted
-    outside a pane'.
+    and a bare launch (no marker, no ``$TMUX``) joins none either: every
+    no-record boot drops a stale record from an earlier tmux run -- kept,
+    it would pin a later reconcile to a dead server and misread the live
+    loop as gone. Either way ``.pgid`` lands after the socket record and
+    the active stamp lands last, so an active row always carries its
+    liveness records and '.pgid and no .socket' reliably reads 'never
+    verified session ownership -- judged by the group'.
     """
     socket_path = '/tmp/fx-test/socket'  # noqa: S108
     if mode == 'bare':
@@ -513,6 +519,19 @@ def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
         (loop_node.node_dir / '.headless').write_text('headless\n', encoding='utf-8')
     if mode != 'tmux-backed':
         socket_file.write_text('/tmp/fx-test/stale\n', encoding='utf-8')  # noqa: S108
+    # the ownership probe's answer per arm: the node's own session listed
+    # (records only when a pane backs the boot), a foreign-only listing (an
+    # operator's pane -- never recorded), and no answer at all (fail-safe:
+    # never recorded)
+    answers: dict[str, Optional[frozenset[str]]] = {
+        'bare-in-pane': frozenset({'operator'}),
+        'probe-none': None,
+    }
+    answer = answers.get(mode, frozenset({loop_node.tmux_session}))
+    monkeypatch.setattr(
+        'fractal.util.tmux.probe',
+        lambda *, socket=None: answer,
+    )
 
     class RecordingLoop(MockLoop):
         """Mock loop reading the socket record where a step would run."""
@@ -569,7 +588,8 @@ def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
     # the active stamp found .pgid on record, and the socket only under tmux
     assert stamped == [(True, mode == 'tmux-backed')]
     # .pgid landed once, after the socket record (or after the stale drop),
-    # so '.pgid and no .socket' reliably reads 'booted outside a pane'
+    # so '.pgid and no .socket' reliably reads 'never verified session
+    # ownership'
     assert pgid_stamp == [mode == 'tmux-backed']
 
 

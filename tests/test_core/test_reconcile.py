@@ -40,6 +40,7 @@ __all__ = [
     'test_headless_liveness_never_asks_tmux',
     'test_bare_loop_group_decides_when_tmux_denies_or_is_silent',
     'test_blind_probe_spares_a_record_less_bare_loop',
+    'test_reconcile_spares_a_live_bare_loop_under_inherited_tmux',
     'test_reconcile_stands_down_for_a_relaunch_racing_the_probe',
     'test_reconcile_stands_down_for_a_kill_landing_during_the_reap',
     'test_reconcile_stands_down_for_a_continue_re_armed_during_the_reap',
@@ -513,6 +514,45 @@ def test_blind_probe_spares_a_record_less_bare_loop(
     assert node.status() == 'active'
     run = node.db.read('runs', where={'run_id': run_id})[0]
     assert run['status'] == 'active'
+
+
+def test_reconcile_spares_a_live_bare_loop_under_inherited_tmux(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live bare loop booted inside a foreign pane survives the census.
+
+    A bare ``fractal node _loop`` run in an operator's tmux pane inherits
+    that pane's ``$TMUX``, but the boot's ownership probe finds only the
+    operator's sessions there and records no ``.socket`` -- so the census
+    finds a socket-less node whose ``.pgid`` names a live, identity-checked
+    group, and the group's verdict keeps the run open whatever the inherited
+    server answers about sessions the loop never owned.
+    """
+    node = node_with_db
+    node.status_set('active')
+    run_id = node.record.run_start()
+    # the loop's live group: a real same-user leader recorded at boot
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    pgid_file = node.node_dir / PGID_FILE
+    try:
+        pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        # the operator pane's inherited env -- no '.socket' record exists
+        monkeypatch.setenv('TMUX', '/tmp/fx-test/socket,4242,0')  # noqa: S108
+        node._reconcile_status()
+        # the census deferred to the live group: nothing healed, nothing
+        # reaped, and the record survives for the loop that owns it
+        assert node.status() == 'active'
+        run = node.db.read('runs', where={'run_id': run_id})[0]
+        assert run['status'] == 'active'
+        assert pgid_file.exists()
+        assert leader.poll() is None
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 def test_reconcile_stands_down_for_a_relaunch_racing_the_probe(
