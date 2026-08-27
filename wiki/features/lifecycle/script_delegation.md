@@ -70,14 +70,41 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
 - `delete.sh` removes one node's worktree, local branch, and remote branch; the
   recursive delete calls it once per node, deepest first.
 
+## Launch environment
+
+`start.sh` guarantees the same explicit variables on both arms, forwarded via
+`env(1)` argv: `_NODE` (which also drives the re-entry exec), a venv-prefixed
+`PATH`, and `VIRTUAL_ENV`; the headless arm adds `FRACTAL_HEADLESS=true`, the
+record seats re-export so delegated child starts follow the parent's backend.
+The tmux arm additionally forwards `OPENROUTER_API_KEY` and `XAI_API_KEY` via
+`new-session -e`, on a warm server running tmux >= 3.2 only — a cold
+`new-session` becomes the server and would keep any `-e` pair in its `ps(1)`
+argv for its whole lifetime, which is why only targeted keys ever cross this way
+(a cold server inherits the exported keys into its argv-invisible global
+environment instead). Everything else follows the backend: a headless loop
+inherits the launching seat's full environment, while a tmux loop gets the
+server's global environment — a cold server snapshots the launching shell, a
+warm server keeps its own start-time environment — plus the forwarded keys. The
+practical consequence is that provider config homes (`CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `GROK_HOME`) reach agents headless but not through a warm server
+that predates them; the remedy is killing the tmux server or launching headless,
+and if a workflow ever needs such a variable on warm servers, the surgical fix
+is adding it to `start.sh`'s `-e` forwarding list. `$TMUX` itself rides headless
+and bare loop environments untouched but is never trusted: the `.headless`
+marker and the boot-time ownership probe are authoritative, so scrubbing it
+would only blind the ownership probe for legitimate tmux boots.
+
 ## Marker files
 
 The loop and its scripts coordinate through small marker files in the node
 directory, all git-ignored via the repository's exclude file (kept in lockstep
 with the marker set): `.status` (the current status), `.session` and `.socket`
 (tmux coordinates — a headless boot joins no server, records no socket, and
-drops a stale record; any other boot under `$TMUX` records the server it sees as
-its own), `.headless` (the node's backend record — written by the headless
+drops a stale record; any other boot under `$TMUX` records that server only
+after confirming it lists the node's own session, so a launcher-driven boot
+always passes — `start.sh` creates the session first — while a bare in-pane
+launch or an inconclusive probe records nothing and the loop is judged by its
+group), `.headless` (the node's backend record — written by the headless
 launcher beside `.pgid`, it outlives the run, survives heals and kills, and only
 a tmux launch clears it), `.pgid` and `.step_pgid` (process groups for liveness
 and pause/kill reaping), `.pgid.lock` (the launch handoff's flock sidecar),
@@ -89,15 +116,18 @@ Liveness is one law (`Node._loop_alive`). A `.headless` node is judged by its
 recorded `.pgid` process group alone and tmux is never asked, so a host without
 tmux still heals it. Any other node asks tmux on its recorded `.socket`; a
 definitive "no such session" is proof only when a socket was recorded, and a
-socket-less loop (a bare `fractal node _loop` launch outside tmux) is judged by
-its own group instead — tmux's "no such session" defers to a live or unverified
-group, and with no tmux answer at all the recorded group is the whole answer,
-while a socket-less node with no `.pgid` record then stays unknown. The group
-probe compares the leader's start instant with the `.pgid` record's timestamp to
-fence PID reuse, and arbitrates a group owned by another user the same way. Only
-a failed `ps` is inconclusive: reconciliation keeps the run active, teardown
-refuses, kill refuses and names the `ps -p` check and the record to clear, and
-reaping spares any group it cannot positively identify.
+socket-less loop (a bare `fractal node _loop` launch, in or out of a tmux pane)
+is judged by its own group instead — tmux's "no such session" defers to a live
+or unverified group, and with no tmux answer at all the recorded group is the
+whole answer, while a socket-less node with no `.pgid` record then stays
+unknown. The group probe compares the leader's start instant with the `.pgid`
+record's timestamp to fence PID reuse, and arbitrates a group owned by another
+user the same way. Only a failed `ps` is inconclusive: reconciliation keeps the
+run active, teardown refuses, kill refuses and names the `ps -p` check and the
+record to clear, and reaping spares any group it cannot positively identify. The
+scripts' own `kill -0` checks are handle-selection gates, never identity
+verdicts — identity is judged only by this Python law, `Node._kill`'s flock'd
+vet included.
 
 The crashed-but-active heal holds no flock over its probe, so it fences its own
 writes instead: it fingerprints `.pgid`/`.step_pgid` before probing, re-verifies

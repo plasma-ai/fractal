@@ -223,7 +223,10 @@ detached tmux session, or in an independent process group with
        refuses) override and re-record it — so a delegated
        child start follows its parent unless the seat passes a flag.
        ``resume`` always relaunches through the recorded backend — the
-       flags and ``FRACTAL_HEADLESS`` do not apply to it.
+       flags and ``FRACTAL_HEADLESS`` do not apply to it. A headless loop
+       inherits the launching environment; a tmux loop gets the tmux
+       server's global environment, with the provider route keys
+       forwarded.
 
 A fresh start requires the status to be exactly ``idle``; anything else
 refuses with a pointer to ``--continue``. Both forms re-validate the stored
@@ -465,18 +468,22 @@ gone. The proof is per backend: a tmux node's recorded session, or a headless
 node's recorded ``.pgid`` process group — alive, and the group the record
 named rather than a recycled id. A headless loop joins no server and records
 no ``.socket``, whatever ``$TMUX`` its launching shell carried; every other
-boot under ``$TMUX`` records the server it sees as its own. The same
+boot under ``$TMUX`` records that server only after confirming it lists the
+node's own session — a launcher-driven boot always passes (``start.sh``
+creates the session first), while a bare in-pane launch records none and is
+judged by its group, and an inconclusive probe records nothing. The same
 process-group proof spares a socket-less loop (``fractal node _loop``
-launched bare outside tmux, which records no ``.socket``): while its group
-lives, it is left alone. Otherwise fractal heals the node on the next read or
-verb: the status is stamped ``exited``, the still-open run, iteration, and
-step rows are closed, any surviving process groups the loop recorded are
-reaped with an ``orphan`` event (an orphaned agent would otherwise keep
-spending unseen), and config/registry cap drift is healed. The ``.headless``
-backend record survives the heal — it names how the node runs, not whether —
-so a bare ``--continue`` reselects the headless backend. This runs
-automatically before every signal verb, ``merge``, ``delete``, ``retire``,
-``start --continue``, and on listings — there is no command to run.
+launched bare, inside a tmux pane or not, which records no ``.socket``):
+while its group lives, it is left alone. Otherwise fractal heals the node on
+the next read or verb: the status is stamped ``exited``, the still-open run,
+iteration, and step rows are closed, any surviving process groups the loop
+recorded are reaped with an ``orphan`` event (an orphaned agent would
+otherwise keep spending unseen), and config/registry cap drift is healed.
+The ``.headless`` backend record survives the heal — it names how the node
+runs, not whether — so a bare ``--continue`` reselects the headless backend.
+This runs automatically before every signal verb, ``merge``, ``delete``,
+``retire``, ``start --continue``, and on listings — there is no command to
+run.
 
 Two deliberate limits:
 
@@ -490,9 +497,12 @@ Two deliberate limits:
   group defers to that group instead, exactly as a headless one does, and a
   socket-less node with no record stays unhealed. A headless or bare loop's
   probe is inconclusive only when ``ps`` cannot date the live group's
-  leader; that too heals nothing, and teardown, kill, and
-  ``start``/``--continue`` refuse, naming the check to run. A group owned
-  by another user is not inconclusive: its leader's start instant decides.
+  leader; that too heals nothing, and kill and ``start``/``--continue``
+  refuse, naming the check to run — teardown refuses the same way while
+  the node has something left to protect (an unsettled status, or a
+  lingering ``.pgid``, ``.socket``, or ``.headless`` record) and proceeds
+  over a settled node with none. A group owned by another user is not
+  inconclusive: its leader's start instant decides.
 
 Separate from crash healing, ``fractal node reconcile [node]`` is the audit
 step after out-of-band cleanup: for each registered descendant whose
@@ -592,9 +602,12 @@ pause latch.
 Reset refuses when the caller stands inside a node worktree, while any
 node's loop runtime is alive (a tmux session probed per node on its recorded
 socket, or a headless or bare loop's recorded process group), when that
-runtime probe is **inconclusive** (the refusal names the
-``tmux list-sessions`` and ``ps`` checks to run before retrying — an
-irreversible teardown never proceeds blind), and over any locked worktree.
+runtime probe is **inconclusive** while the node still has something to
+protect — an unsettled status, or a lingering ``.pgid``, ``.socket``, or
+``.headless`` record (the refusal names the ``tmux list-sessions`` and
+``ps`` checks to run before retrying — an irreversible teardown never
+proceeds blind over a node that may hold a runtime, while a settled node
+with none of those records proceeds), and over any locked worktree.
 Paused nodes are killed as part of the confirmed teardown.
 ``.worktrees/`` itself stays (it keeps the root's project-cache entry and
 the lock), remote branches are left on origin and listed in the output, and

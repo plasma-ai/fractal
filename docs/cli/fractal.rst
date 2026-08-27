@@ -381,11 +381,14 @@ nodes as part of the teardown.
 
 Refuses when:
 
-- any of the tree's nodes is still running in tmux — kill it first with
+- any of the tree's nodes' loop runtime is alive (a tmux session, or a
+  headless or bare loop's recorded process group) — kill it first with
   ``fractal node kill <branch>``; ``--force`` never overrides this, it only
   skips the prompt;
-- the tmux probe is inconclusive (nodes may still be running — restore tmux
-  visibility and retry);
+- the runtime probe is inconclusive for a node that still has something to
+  protect — an unsettled status, or a lingering ``.pgid``, ``.socket``, or
+  ``.headless`` record (restore tmux visibility or check ``ps``, then
+  retry); a settled node with none of those records proceeds;
 - any of the tree's node worktrees is locked;
 - the caller stands inside one of the tree's node worktrees (run from the
   repo root).

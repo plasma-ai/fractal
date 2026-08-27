@@ -20,11 +20,18 @@ may include breaking changes, each listed under a Breaking heading.
   headless node and names the log to follow. Liveness, crash healing, kill,
   teardown, and the relaunch guards judge a headless or bare loop by its
   recorded `.pgid` group and verify the group's identity through `ps` (a group
-  owned by another user is arbitrated the same way); kill vets
+  owned by another user is arbitrated the same way); a tmux boot records its
+  `.socket` server only after the server confirms it lists the node's own
+  session, so a bare loop launched inside an unrelated pane is judged by its
+  group, never healed against a server it does not live on; kill vets
   `.pgid`/`.step_pgid` under the `.worktrees` flock and refuses over a group
   whose identity `ps` cannot verify (naming the check to run) or a record still
   naming no pid — a launch's claim in flight — naming the record to clear; a
-  fan-out kill retries a descendant refused over such a claim once it resolves.
+  fan-out kill retries a descendant refused over such a claim once it resolves;
+  destroy/reset's blind-probe refusal binds to rows that could still hide a
+  runtime (unsettled, or holding a `.pgid`/`.socket`/`.headless` record), so a
+  settled, record-less node — the state their own reconcile leaves after healing
+  a dead bare loop on a blind host — proceeds instead of refusing.
 
 ## [1.2.0] - 2026-08-24
 

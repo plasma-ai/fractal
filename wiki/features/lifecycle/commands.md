@@ -34,7 +34,9 @@ independent process group whose output appends to the node's `headless.log`, one
 launch banner per launch; the command still returns immediately. The backend is
 sticky: an unflagged launch reuses the backend the node last launched with,
 delegated child starts follow the parent's backend through the seat-exported
-`FRACTAL_HEADLESS`, and `--headless`/`--tmux` force and re-record the choice.
+`FRACTAL_HEADLESS`, and `--headless`/`--tmux` force and re-record the choice. A
+headless loop inherits the launching environment; a tmux loop gets the tmux
+server's global environment, with the provider route keys forwarded.
 `start --continue` re-arms a settled node for another run — this re-entry
 re-checks the width and descendant caps, since it returns one unsettled node to
 the tree exactly as a spawn adds one. A run that ended on its cost budget never

@@ -96,18 +96,22 @@ initialized; a new `fractal init` starts from zero.
 
 All three tiers refuse over a **running** node — any live tmux session or live
 recorded process group stops the teardown before it touches anything, with the
-kill command named in the error. An inconclusive runtime probe refuses too,
-naming the tmux and `ps` checks to run; the teardown never treats missing
-visibility as proof that a loop is dead. The guards travel with the scope:
-`reset` and `destroy <name>` pre-flight only that tree's nodes, so an ended tree
-can be torn down while a sibling tree runs, and `destroy --all` pre-flights
-every tree before touching any of them. Paused nodes split the tiers: `delete`
-refuses over them (resume or kill first), while `reset` and `destroy` **kill
-paused nodes as part of the confirmed teardown** — the confirmation prompt (or
-`--force`) is what authorizes discarding the frozen mid-step work their parked
-worktrees hold. Both also refuse from inside a node worktree and pre-flight
-every worktree for locks before removing any, keeping the non-atomic teardown
-all-or-nothing in practice.
+kill command named in the error. An inconclusive runtime probe refuses while the
+node still has something to protect — an unsettled status, or a lingering
+`.pgid`, `.socket`, or `.headless` record — naming the tmux and `ps` checks to
+run; the teardown never treats missing visibility as proof that a loop is dead.
+A settled node keeping none of those records proceeds: that is the state the
+teardown's own pre-flight reconcile leaves after healing a dead bare loop on a
+blind host, and nothing is left for the refusal to guard. The guards travel with
+the scope: `reset` and `destroy <name>` pre-flight only that tree's nodes, so an
+ended tree can be torn down while a sibling tree runs, and `destroy --all`
+pre-flights every tree before touching any of them. Paused nodes split the
+tiers: `delete` refuses over them (resume or kill first), while `reset` and
+`destroy` **kill paused nodes as part of the confirmed teardown** — the
+confirmation prompt (or `--force`) is what authorizes discarding the frozen
+mid-step work their parked worktrees hold. Both also refuse from inside a node
+worktree and pre-flight every worktree for locks before removing any, keeping
+the non-atomic teardown all-or-nothing in practice.
 
 Remote branches are the deliberate survivor at tiers 2 and 3: reset and destroy
 report which branches remain on origin rather than deleting them (only tier 1's

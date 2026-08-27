@@ -46,7 +46,13 @@ recycled runtime renders `exited`, while a group whose identity probe is
 inconclusive stays `active`. On a host where tmux gives no answer the batched
 set folds to empty, so a socket-recorded active loop renders `exited` while
 core's liveness law keeps it `active` -- a display-only divergence confined to
-blind hosts.
+blind hosts. The session set vouches by name alone, so a same-named session from
+another repo sharing this repo's basename and branch keeps a crashed tmux row
+rendering `active`. On the same server the display matches core's own probe --
+neither heals until the foreign session ends; on a different server core heals
+at its next verb or listing while the display corrects only at the next
+`.status` write or when the foreign session ends -- any lifecycle verb or
+`fractal node list` censuses and settles the row.
 
 ## The read stack
 
