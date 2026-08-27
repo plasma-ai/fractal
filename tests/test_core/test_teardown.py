@@ -12,6 +12,7 @@ import pathlib
 import shutil
 import signal
 import subprocess
+from collections.abc import Callable
 from typing import Optional
 
 import pytest
@@ -679,49 +680,67 @@ def test_teardown_running_preflight_precedes_paused_settle(
     assert run['ended_at'] is None
 
 
+@pytest.mark.parametrize(
+    argnames=('status', 'keeps_socket'),
+    argvalues=[('active', False), ('exited', True)],
+    ids=['unsettled-row', 'settled-socket-record'],
+)
 def test_teardown_refuses_on_inconclusive_tmux_probe(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    keeps_socket: bool,
 ) -> None:
-    """A teardown never proceeds blind: a failed tmux probe refuses up front.
+    """A teardown never proceeds blind over a row that could hide a loop.
 
-    With no answer from tmux (binary absent, ``list-sessions`` erroring) any
-    node may still be running, so destroy/reset refuse -- naming the probe --
-    rather than tearing live loops down on ignorance.
+    With no answer from tmux (binary absent, ``list-sessions`` erroring) an
+    unsettled node may still be running, and even a settled one still
+    holding a ``.socket`` record names a server that never answered -- so
+    destroy/reset refuse, naming the probe, rather than tearing live loops
+    down on ignorance.
     """
     node = Node(git_repo)
     node.init(agent='claude', user=True)
     node.init(name='runner')
     runner = Node(git_repo / '.worktrees' / 'main.runner')
-    runner.status_set('active')
+    runner.status_set(status)
+    if keeps_socket:
+        socket_file = runner.node_dir / SOCKET_FILE
+        socket_file.write_text('fx-sock\n', encoding='utf-8')
     # tmux gives no answer (e.g. no binary on this shell's PATH)
-    monkeypatch.setattr('fractal.util.tmux.probe', lambda: None)
+    monkeypatch.setattr('fractal.util.tmux.probe', lambda *, socket=None: None)
     with pytest.raises(RuntimeError, match='probe gave no answer'):
         Node.destroy(git_repo)
     with pytest.raises(RuntimeError, match='probe gave no answer'):
         Node.reset(git_repo)
     # nothing was torn down
     assert runner.worktree.is_dir()
-    assert runner.status() == 'active'
+    assert runner.status() == status
 
 
+@pytest.mark.parametrize(
+    argnames='teardown',
+    argvalues=[Node.destroy, Node.reset],
+    ids=['destroy', 'reset'],
+)
 def test_teardown_heals_a_dead_bare_loop_on_a_blind_host(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    teardown: Callable[..., str],
 ) -> None:
-    """The teardown's own reconcile settles a dead bare loop on a blind host.
+    """A blind host heals a dead bare loop and the teardown proceeds.
 
     tmux's answer concerns a server a bare loop never joined, so with no
     tmux answer at all the loop's recorded ``.pgid`` group decides: the
     pre-teardown reconcile stamps the dead runner ``exited`` and reaps the
-    record. The teardown itself still refuses afterwards -- the reap leaves
-    the node record-less, and a blind preflight has nothing left to vouch
-    for it -- so nothing is torn down, but the crash is settled.
+    record. The settled, record-less row has nothing left for the blind
+    preflight to protect, so the teardown completes instead of refusing.
     """
     node = Node(git_repo)
     node.init(agent='claude', user=True)
     node.init(name='runner')
     runner = Node(git_repo / '.worktrees' / 'main.runner')
+    run_id = runner.record.run_start()
     runner.status_set('active')
     # a dead same-user group: spawned and reaped, so the record provably
     # names a gone group
@@ -731,12 +750,17 @@ def test_teardown_heals_a_dead_bare_loop_on_a_blind_host(
     pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
     # tmux gives no answer (e.g. no binary on this shell's PATH)
     monkeypatch.setattr('fractal.util.tmux.probe', lambda: None)
-    with pytest.raises(RuntimeError, match='probe gave no answer'):
-        Node.destroy(git_repo)
-    # the dead bare loop healed on the way in: settled, record reaped
-    assert runner.status() == 'exited'
-    assert not pgid_file.exists()
-    assert runner.worktree.is_dir()
+    teardown(git_repo)
+    # the dead bare loop healed on the way in and the teardown ran through:
+    # the worktree is gone, and (reset keeps the central DB) the crashed
+    # run's open row closed exited
+    assert not runner.worktree.is_dir()
+    if teardown is Node.reset:
+        run = node.db.read('runs', where={'run_id': run_id})[0]
+        assert run['status'] == 'exited'
+        assert run['ended_at'] is not None
+    else:
+        assert not (git_repo / '.fractal').exists()
 
 
 def test_teardown_refuses_group_alive_on_bare_node(
@@ -778,16 +802,22 @@ def test_teardown_refuses_group_alive_on_bare_node(
         leader.wait()
 
 
+@pytest.mark.parametrize('status', ['active', 'exited'])
 def test_teardown_refuses_on_inconclusive_headless_probe(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    status: str,
 ) -> None:
-    """A teardown never treats an unknown process identity as a dead loop."""
+    """A teardown never treats an unknown process identity as a dead loop.
+
+    The refusal holds for a settled row too: its lingering ``.pgid`` record
+    and ``.headless`` marker still name a group the probe could not clear.
+    """
     node = Node(git_repo)
     node.init(agent='claude', user=True)
     node.init(name='runner')
     runner = Node(git_repo / '.worktrees' / 'main.runner')
-    runner.status_set('active')
+    runner.status_set(status)
     (runner.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
     (runner.node_dir / PGID_FILE).write_text('4242\n', encoding='utf-8')
     monkeypatch.setattr('fractal.core.node.os.killpg', lambda pgid, signal: None)
@@ -800,7 +830,7 @@ def test_teardown_refuses_on_inconclusive_headless_probe(
     with pytest.raises(RuntimeError, match='probe gave no answer'):
         Node.reset(git_repo)
     assert runner.worktree.is_dir()
-    assert runner.status() == 'active'
+    assert runner.status() == status
 
 
 def test_teardown_refuses_session_alive_on_recorded_socket(

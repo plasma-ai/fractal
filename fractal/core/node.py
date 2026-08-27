@@ -3953,7 +3953,13 @@ class Node:
         own refusals first -- a live loop runtime or a locked worktree
         anywhere in the trees in scope -- because the paused settle below is
         irreversible (the kills close the parked runs), so a teardown the
-        script would refuse must abort here with nothing touched. Then
+        script would refuse must abort here with nothing touched. An
+        inconclusive liveness probe refuses only while the row could still
+        hide a runtime: any unsettled status, or a lingering ``.pgid``,
+        ``.socket``, or ``.headless`` record. A settled row keeping none of
+        those has nothing left to protect -- the state the caller's own
+        pre-teardown reconcile leaves after healing a dead bare loop on a
+        blind host -- so the teardown proceeds over it. Then
         settles frozen work: a paused node has no loop runtime for the
         liveness refusal to catch, and the confirmed teardown already
         authorized discarding its frozen mid-step work, so each parked
@@ -3999,11 +4005,21 @@ class Node:
             # socket-less loop through its recorded process group (see
             # _loop_alive); an inconclusive answer means the node may still be
             # running, so the irreversible teardown refuses rather than tearing
-            # down blind
-            for _, descendant in descendants:
+            # down blind -- unless the row is settled and keeps no group
+            # record, socket record, or backend marker, in which case nothing
+            # is left for the refusal to protect
+            for row, descendant in descendants:
                 alive = descendant._loop_alive()
                 pgid_file = descendant.node_dir / PGID_FILE
                 if alive is None:
+                    settled = ('completed', 'stopped', 'exited', 'killed', 'retired')
+                    if (
+                        row['status'] in settled
+                        and not descendant.headless
+                        and not (descendant.node_dir / SOCKET_FILE).exists()
+                        and not pgid_file.exists()
+                    ):
+                        continue
                     raise RuntimeError(
                         f'Cannot {verb}: the runtime probe gave no answer for'
                         f' {descendant.branch}, so it may still be running. Check'
