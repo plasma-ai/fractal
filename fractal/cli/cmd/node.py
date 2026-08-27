@@ -481,11 +481,7 @@ def node_finish(app: typer.Typer) -> typer.Typer:
     node_help = 'Target node branch (default: this node).'
     node = typer.Argument(None, help=node_help)
     # reason option
-    reason_help = (
-        'Optional reason for finishing. The loop-authored budget phrases'
-        ' (`cost budget ... (spent $...)`) are reserved and classify the'
-        ' finish as a budget abort.'
-    )
+    reason_help = 'Optional reason for finishing (budget phrases are reserved).'
     reason = typer.Option(None, '--reason', help=reason_help)
     # cancel flag
     cancel_help = 'Withdraw the pending finish signal instead of sending one.'
@@ -501,7 +497,11 @@ def node_finish(app: typer.Typer) -> typer.Typer:
         cancel: bool = cancel,
         path: str = path,
     ) -> None:
-        """Stop after the current iteration (``--cancel`` withdraws a pending finish)."""
+        """Stop after the current iteration (``--cancel`` withdraws a pending finish).
+
+        The loop-authored budget phrases (``cost budget ... (spent $...)``)
+        are reserved reasons and classify the finish as a budget abort.
+        """
         node = resolve_target(path, node)
         if cancel:
             result = node.finish_cancel(reason)
@@ -1414,7 +1414,7 @@ def node_launch(app: typer.Typer) -> typer.Typer:
 
 
 def node_seed(app: typer.Typer) -> typer.Typer:
-    """Register the ``node _seed`` command."""
+    """Register the ``_seed`` command."""
     # node-dir argument (raw path, not a resolved node: init.sh
     # seeds the agent dirs before the node is registered)
     node_dir_help = 'Node data directory to seed under.'

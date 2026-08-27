@@ -319,8 +319,8 @@ def test_list_decorates_exited_with_run_reason(
 
 
 @pytest.mark.parametrize(
-    ('status', 'exit_code', 'reason', 'expected'),
-    [
+    argnames=('status', 'exit_code', 'reason', 'expected'),
+    argvalues=[
         # a budget landing is typed by exited/0 alone, whatever the figures
         (
             'exited',
@@ -672,8 +672,8 @@ def test_list_flags_billing_backoff(
 
 
 @pytest.mark.parametrize(
-    ('signal', 'expected'),
-    [('pause', 'pausing'), ('stop', 'stopping'), ('finish', 'finishing')],
+    argnames=('signal', 'expected'),
+    argvalues=[('pause', 'pausing'), ('stop', 'stopping'), ('finish', 'finishing')],
 )
 def test_pending_signal_literals_are_pinned(
     node_with_db: Node,

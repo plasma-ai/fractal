@@ -136,7 +136,7 @@ def resolve_transport(
                 shape = 'live' if status == 'active' else 'paused'
                 return Transport(
                     kind='fresh',
-                    label=f"{base} {shape} thread can't fork — fresh session",
+                    label=f"{base} {shape} thread can't fork -- fresh session",
                     warn=True,
                 )
             return Transport(

@@ -18,10 +18,12 @@ import tomllib
 from packaging.specifiers import SpecifierSet
 
 import fractal
+from fractal.constants import CONFIG_FILE, LOCK_FILE, PGID_FILE
 
 __all__ = [
     'test_gitignore_spares_node_artifact_names',
     'test_gitignore_packaging_ignores_bind_at_root_only',
+    'test_exclude_template_ignores_every_loop_marker',
     'test_ci_python_version_is_latest_supported',
     'test_seeded_skills_do_not_deny_wiki_walk_up',
     'test_seeded_skills_do_not_call_stale_links_non_blocking',
@@ -115,6 +117,51 @@ def test_gitignore_packaging_ignores_bind_at_root_only(
     assert _check_ignore(repo, 'build/lib/fractal/__init__.py')
     assert _check_ignore(repo, 'dist/fractal-0.1.0.tar.gz')
     assert _check_ignore(repo, 'wheels/fractal-0.1.0-py3-none-any.whl')
+
+
+def test_exclude_template_ignores_every_loop_marker(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The exclude template git-ignores every loop marker file.
+
+    ``fractal/_assets/git/exclude`` seeds each worktree's ``info/exclude``;
+    the loop's marker constants (the lockstep NOTE block in
+    ``fractal/constants.py``, plus the composed lock filenames) must each
+    hit a pattern there, or a marker leaks into node commits. The marker
+    set is read from the constants source, so a marker added without an
+    exclude line fails here.
+    """
+    # collect the marker filenames below the lockstep NOTE in constants.py
+    source = (_REPO_ROOT / 'fractal' / 'constants.py').read_text(encoding='utf-8')
+    block = source.split('exclude<->markers lockstep')[1].split('\n\n')[0]
+    markers = set(re.findall(r"^[A-Z_]+ = '([^']+)'$", block, flags=re.MULTILINE))
+    assert markers, 'no marker constants found below the lockstep NOTE'
+    # the composed lock filenames are ignored by their full names
+    markers.add(PGID_FILE + LOCK_FILE)
+    markers.add(CONFIG_FILE + LOCK_FILE)
+    # probe a throwaway repo with the template installed as info/exclude
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    subprocess.run(
+        ['git', 'init', '-q', '-b', 'main'],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+    )
+    # neutralize any global excludes file so only the template decides
+    subprocess.run(
+        ['git', 'config', 'core.excludesFile', os.devnull],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+    )
+    exclude = _REPO_ROOT / 'fractal' / '_assets' / 'git' / 'exclude'
+    shutil.copy(exclude, repo / '.git' / 'info' / 'exclude')
+    for marker in sorted(markers):
+        assert _check_ignore(repo, marker), (
+            f'{marker!r} has no line in fractal/_assets/git/exclude '
+            '(the exclude<->markers lockstep)'
+        )
 
 
 def test_ci_python_version_is_latest_supported() -> None:
