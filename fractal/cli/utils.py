@@ -83,6 +83,9 @@ def command(
                 return f(*args, **kwargs)
             except (typer.Exit, typer.Abort, typer.BadParameter):
                 raise
+            except KeyboardInterrupt:
+                typer.echo('Interrupted.', err=True)
+                raise
             except BrokenPipeError:
                 # a downstream reader closed the pipe (not an error):
                 # point stdout at devnull so the interpreter's exit
