@@ -531,10 +531,10 @@ def commit_user_init(node: Node, message: str) -> str:
         # that preserves structure is re-staged and retried once, and any
         # other rewrite restores the authored bytes and fails
         _hook_retry(
-            node,
-            _stage_paths,
-            _commit_paths,
-            error,
+            node=node,
+            stage=_stage_paths,
+            commit=_commit_paths,
+            error=error,
             generated=(f'{wiki}/', f'{seed}/'),
             retry=False,
         )
