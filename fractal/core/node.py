@@ -96,6 +96,12 @@ _CLAIM_RETRY_SECONDS = 2.0
 # flight, so the sweep re-attempts the descendant instead of skipping it
 _CLAIM_IN_FLIGHT = 'claim in flight'
 
+# argv shapes a launch pane carries at every exec stage (env/start.sh, then
+# the exec'd loop): a pane command bearing one while naming another worktree
+# is provably another tree's launch, while a command bearing neither -- an
+# operator's shell or editor -- says nothing about which tree owns it
+_LAUNCH_ARGV_MARKERS = ('start.sh', 'node _loop')
+
 
 class Node:
     """An autonomous agent node in a git worktree.
@@ -313,11 +319,17 @@ class Node:
         about one server only: the ambient socket's "no sessions" (a shell
         with a different ``TMUX_TMPDIR``) says nothing about a session alive
         on the recorded one; without a record (a tmux-less launch), the
-        ambient socket is all there is. ``None`` when the probe is
-        inconclusive -- :func:`fractal.util.tmux.probe` got no answer from
-        tmux (binary absent, or ``list-sessions`` failed for anything but
-        the definitive ``no server running``) -- so the reconcile path never
-        mistakes a blind host for a dead loop.
+        ambient socket is all there is. A listed name is a candidate, not
+        proof: another repo sharing this basename and branch collides on it,
+        so the name is arbitrated by pane identity
+        (:meth:`_session_is_foreign`) -- a provably foreign session means
+        this node's own session is *not* there (a definitive ``False``),
+        while ours-or-no-answer keeps the listed answer, so ignorance never
+        heals a live loop. ``None`` when the probe is inconclusive --
+        :func:`fractal.util.tmux.probe` got no answer from tmux (binary
+        absent, or ``list-sessions`` failed for anything but the definitive
+        ``no server running``) -- so the reconcile path never mistakes a
+        blind host for a dead loop.
         """
         # probe the recorded socket, not whichever one this shell resolves;
         # a parking loop can drop the record mid-probe, and a vanished
@@ -326,14 +338,25 @@ class Node:
         try:
             socket = socket_file.read_text(encoding='utf-8').strip()
         except FileNotFoundError:
+            socket = None
             sessions = fractal.util.tmux.probe()
         else:
             sessions = fractal.util.tmux.probe(socket=socket)
         if sessions is None:
             return None
-        return self.tmux_session in sessions
+        if self.tmux_session not in sessions:
+            return False
+        # the listed name vouches only after the identity check clears it --
+        # a foreign vouch would keep a dead loop active until the foreign
+        # session ends
+        return not self._session_is_foreign(self.tmux_session, socket=socket)
 
-    def _session_is_foreign(self: Node, session: str) -> bool:
+    def _session_is_foreign(
+        self: Node,
+        session: str,
+        *,
+        socket: Optional[str] = None,
+    ) -> bool:
         """Return whether a same-named tmux session provably belongs elsewhere.
 
         Two repos sharing a basename collide on session names, and a headless
@@ -341,38 +364,48 @@ class Node:
         own tmux boot still racing its ``.pgid`` record, which a headless
         fresh start must refuse. The pane pid survives every exec stage of
         the launch (``env _NODE=...``, ``start.sh <worktree>``, ``node _loop
-        --path=<worktree>``), so its argv names the launch's worktree
-        throughout: a pane command that never names this node's worktree is
-        another tree's. Ours-or-no-answer returns ``False`` -- ignorance
-        refuses the launch, mirroring the group vet.
+        --path=<worktree>``), so a launch pane's argv names its worktree
+        throughout. Every pane of the exact-named session votes: one naming
+        this node's worktree makes the session ours, a launch-shaped command
+        (:data:`_LAUNCH_ARGV_MARKERS`) naming another worktree is proof of
+        another tree's launch, and anything else -- an operator's shell or
+        editor, a pane ``ps`` cannot attribute -- is no evidence either way.
+        Foreign takes at least one foreign launch pane, no pane of ours, and
+        every pane attributed; ours-or-no-answer returns ``False`` --
+        ignorance never proves foreignness, so each caller keeps its
+        conservative arm (the launch gate refuses; the session probe keeps
+        its listed answer). Pane evidence is about one server only, so
+        ``socket`` names the server the session was seen on (``None`` asks
+        the ambient one).
         """
-        # resolve the pane pid by exact session-name match (mirrors kill.sh:
-        # spaces/parens in the name defeat split-on-space lookup)
-        listing = subprocess.run(
-            ['tmux', 'list-panes', '-a', '-F', '#{session_name}\t#{pane_pid}'],
-            capture_output=True,
-            text=True,
-        )
-        if listing.returncode != 0:
+        # pane evidence comes from the server that vouched for the name;
+        # no panes and no answer alike prove nothing, so both of them
+        # keep the caller's conservative arm
+        pane_pids = fractal.util.tmux.panes(session, socket=socket)
+        if not pane_pids:
             return False
-        pane_pid = ''
-        for line in listing.stdout.splitlines():
-            name, _, pid = line.rpartition('\t')
-            if name == session:
-                pane_pid = pid
-                break
-        if not pane_pid:
-            return False
-        # the argv carries the worktree path at every stage of the launch
-        result = subprocess.run(
-            ['ps', '-p', pane_pid, '-o', 'command='],
-            capture_output=True,
-            text=True,
-        )
-        command = result.stdout.strip()
-        if result.returncode != 0 or not command:
-            return False
-        return f'{self._root}' not in command
+        # arbitrate over every pane: the session's loop pane can list after
+        # an operator's, and judging the first pane alone would misread the
+        # node's own multi-pane session as foreign
+        foreign = False
+        for pane_pid in pane_pids:
+            # the argv carries the worktree path at every stage of the launch
+            try:
+                result = subprocess.run(
+                    ['ps', '-p', pane_pid, '-o', 'command='],
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError:
+                return False
+            command = result.stdout.strip()
+            if result.returncode != 0 or not command:
+                return False
+            if f'{self._root}' in command:
+                return False
+            if any(marker in command for marker in _LAUNCH_ARGV_MARKERS):
+                foreign = True
+        return foreign
 
     @property
     def headless(self: Node) -> bool:

@@ -263,7 +263,13 @@ class TuiData:
         alone; any other node by its listed session, except that a socket-less
         loop (a bare launch) with no listed session is judged by its group. An
         inconclusive group probe stays ``active`` -- display never settles a
-        loop core would spare -- and nothing here mutates lifecycle state.
+        loop core would spare -- and nothing here mutates lifecycle state. The
+        set vouches by name alone, so a foreign same-named session (another
+        repo sharing this basename and branch) keeps a crashed tmux row
+        rendering ``active``; core's per-node probe arbitrates that name by
+        pane identity and heals the row at its next verb, and the display
+        corrects when the healed ``.status`` persists -- it lags core's heal,
+        never outruns it.
         """
         node_dir = self.node_dir(branch)
         alive = self.tmux_session_name(branch) in sessions

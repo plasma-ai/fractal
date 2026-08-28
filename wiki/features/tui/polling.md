@@ -48,11 +48,11 @@ set folds to empty, so a socket-recorded active loop renders `exited` while
 core's liveness law keeps it `active` -- a display-only divergence confined to
 blind hosts. The session set vouches by name alone, so a same-named session from
 another repo sharing this repo's basename and branch keeps a crashed tmux row
-rendering `active`. On the same server the display matches core's own probe --
-neither heals until the foreign session ends; on a different server core heals
-at its next verb or listing while the display corrects only at the next
-`.status` write or when the foreign session ends -- any lifecycle verb or
-`fractal node list` censuses and settles the row.
+rendering `active`. Core's own per-node probe arbitrates a listed name by its
+panes' argv, so any lifecycle verb or `fractal node list` heals such a row
+whatever server the foreign session lives on; the display corrects when the
+healed `.status` persists, or when the foreign session ends -- it lags core's
+heal, never outruns it.
 
 ## The read stack
 

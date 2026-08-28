@@ -6,7 +6,8 @@ live runtime; the reject-active operations reconcile it to the honest
 proceeding. Also pins the heal's definitive-answer requirement (an
 inconclusive runtime probe never reaps), the identity guard (a
 recycled pgid is spared; a foreign-owned group is arbitrated by its
-leader), and kill's stale-active behavior.
+leader; a same-named tmux session is arbitrated by its panes' argv),
+and kill's stale-active behavior.
 """
 
 from __future__ import annotations
@@ -161,6 +162,18 @@ def test_reconcile_status_heals_caps_on_crashed_node(
         # the ambient socket has no server, but the loop recorded its own
         # socket at boot and the session is alive there: no heal
         ('recorded-socket', 'active'),
+        # the listed name's pane provably runs another repo's worktree: a
+        # foreign vouch is no proof of life, so the crashed node heals
+        ('foreign-pane', 'exited'),
+        # the listed name's pane cannot be attributed (ps gave no answer):
+        # ignorance never heals
+        ('unattributable-pane', 'active'),
+        # the listed name's only pane runs a plain shell: a launch-less argv
+        # is no evidence of another tree, so the listed answer stands
+        ('shell-pane', 'active'),
+        # an operator's pane lists ahead of the loop pane in the node's own
+        # session: any pane naming this worktree makes the session ours
+        ('operator-pane-first', 'active'),
     ],
 )
 def test_reconcile_requires_a_definitive_tmux_answer(
@@ -178,7 +191,12 @@ def test_reconcile_requires_a_definitive_tmux_answer(
     is a definitive empty answer, so the genuinely crashed node still heals --
     but only from the server the loop recorded at boot: a shell resolving a
     different socket (its own ``TMUX_TMPDIR``) would otherwise read a live
-    session as gone and reap the healthy loop.
+    session as gone and reap the healthy loop. A listed name is a candidate,
+    not proof: every pane's argv arbitrates it, so a same-named session
+    provably launched from another repo sharing this basename and branch no
+    longer vouches for the dead loop, while a pane the probe cannot
+    attribute, a launch-less operator pane, and the node's own session --
+    whatever pane lists first -- all still do.
     """
     node = node_with_db
     node.status_set('active')
@@ -186,14 +204,29 @@ def test_reconcile_requires_a_definitive_tmux_answer(
     # the loop's boot-time socket record: the reconcile must ask this
     # server, not the ambient one
     recorded_socket = '/tmp/fx-test/other-socket'  # noqa: S108
-    if tmux_answer == 'recorded-socket':
+    # the exact-named session's panes per listed-name arm (None: ps gives
+    # no answer for that pane) -- a launch pane's argv names its worktree,
+    # an operator's shell names none
+    panes = {
+        'recorded-socket': {'4242': f'bash start.sh {node._root}'},
+        'foreign-pane': {'4242': 'bash start.sh /elsewhere/repo/.worktrees/main'},
+        'unattributable-pane': {'4242': None},
+        'shell-pane': {'4242': '-zsh'},
+        'operator-pane-first': {
+            '4242': '-zsh',
+            '4343': f'bash start.sh {node._root}',
+        },
+    }.get(tmux_answer)
+    if panes is not None:
         (node.node_dir / SOCKET_FILE).write_text(
             f'{recorded_socket}\n', encoding='utf-8'
         )
     # restore the real probe (the fixture shadows it as always-alive)
     node._tmux_session_exists = Node._tmux_session_exists.__get__(node)
 
-    # fake only the tmux spawn (git, used to resolve the branch, must work)
+    # fake the tmux and ps spawns (git, used to resolve the branch, must
+    # work) -- one fake, since the probe's and the arbitration's namespaces
+    # share the subprocess module
     real_run = subprocess.run
 
     def fake_run(
@@ -201,14 +234,38 @@ def test_reconcile_requires_a_definitive_tmux_answer(
         *args: object,
         **kwargs: object,
     ) -> subprocess.CompletedProcess:
-        if not cmd or cmd[0] != 'tmux':
+        if not cmd or cmd[0] not in ('tmux', 'ps'):
             return real_run(cmd, *args, **kwargs)
+        if cmd[0] == 'ps':
+            # the identity arbitration reads each pane's argv
+            command = panes[cmd[cmd.index('-p') + 1]]
+            if command is None:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout='',
+                    stderr='',
+                )
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=f'{command}\n',
+                stderr='',
+            )
         if tmux_answer == 'absent':
             raise FileNotFoundError(2, 'No such file or directory', 'tmux')
-        if tmux_answer == 'recorded-socket':
-            # only the recorded server holds the session; every other
-            # socket (the ambient one included) has no server at all
+        if panes is not None:
+            # only the recorded server holds the session and its panes; every
+            # other socket (the ambient one included) has no server at all
             if '-S' in cmd and cmd[cmd.index('-S') + 1] == recorded_socket:
+                if 'list-panes' in cmd:
+                    lines = [f'{node.tmux_session}\t{pid}\n' for pid in panes]
+                    return subprocess.CompletedProcess(
+                        args=cmd,
+                        returncode=0,
+                        stdout=''.join(lines),
+                        stderr='',
+                    )
                 return subprocess.CompletedProcess(
                     args=cmd,
                     returncode=0,
@@ -280,6 +337,12 @@ def test_tmux_probe_falls_back_on_a_record_unlinked_mid_probe(
         probes.append(kwargs)
         return [session]
 
+    # the listed name clears its identity check as the node's own session
+    monkeypatch.setattr(
+        Node,
+        '_session_is_foreign',
+        lambda self, session, *, socket=None: False,
+    )
     monkeypatch.setattr('fractal.util.tmux.probe', probe)
     assert node._tmux_session_exists() is True
     # the fallback asked the ambient server, never the vanished record's
