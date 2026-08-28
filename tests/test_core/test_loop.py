@@ -43,6 +43,7 @@ __all__ = [
     'test_agent_env_publishes_node_branch',
     'test_agent_env_inherits_headless_launches',
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
+    'test_boot_gate_vets_the_recorded_group',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
@@ -591,6 +592,103 @@ def test_boot_records_the_tmux_socket_for_the_reconcile_probe(
     # so '.pgid and no .socket' reliably reads 'never verified session
     # ownership'
     assert pgid_stamp == [mode == 'tmux-backed']
+
+
+@pytest.mark.parametrize(
+    argnames=('record', 'refusal'),
+    argvalues=[
+        ('own', None),
+        ('dead', None),
+        ('stale-claim', None),
+        ('claim', 'claimed the record'),
+        ('live-foreign', 'already runs this node'),
+        ('unverifiable', 'ps -p'),
+    ],
+    ids=['own', 'dead', 'stale-claim', 'claim', 'live-foreign', 'unverifiable'],
+)
+def test_boot_gate_vets_the_recorded_group(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    record: str,
+    refusal: Optional[str],
+) -> None:
+    """A bare boot arbitrates the recorded group before any record lands.
+
+    A bare ``fractal node _loop`` reaches ``run`` with no launch gate ahead
+    of it -- start.sh's session refusal and the headless launcher's claim
+    both live on the verb path -- so the boot vets ``.pgid`` itself. The
+    launcher records the child's own group before the wrapper execs the
+    loop, so a record naming this process's group proceeds (the normal
+    headless boot); a dead record proceeds like no record at all; a live
+    identity-checked foreign group refuses naming the pgid, a group whose
+    identity ``ps`` cannot verify refuses naming the check, and a rival
+    launcher's fresh pid-less claim refuses like a live record (only an
+    age-abandoned claim proceeds) -- ignorance never authorizes a second
+    boot. A refusal boots nothing: the rival's record, its group, and the
+    node's status stay untouched.
+    """
+    node = loop_node
+    pgid_file = node.node_dir / PGID_FILE
+    leader: Optional[subprocess.Popen] = None
+    if record == 'own':
+        pgid_file.write_text(f'{os.getpgid(0)}\n', encoding='utf-8')
+    elif record in ('claim', 'stale-claim'):
+        # a launcher's exclusive create holds the record empty until its
+        # pid write; the stale arm ages the claim past abandonment
+        pgid_file.write_text('', encoding='utf-8')
+        if record == 'stale-claim':
+            abandoned = time.time() - 120.0
+            os.utime(pgid_file, (abandoned, abandoned))
+    else:
+        # a real same-user leader in its own group -- the dead arm reaps it
+        # before the boot, the unverifiable arm blinds the identity read
+        leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+        pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
+        if record == 'dead':
+            os.killpg(leader.pid, signal.SIGKILL)
+            leader.wait()
+        if record == 'unverifiable':
+            real_run = subprocess.run
+
+            def blinded_run(
+                cmd: list,
+                *args: Any,
+                **kwargs: Any,
+            ) -> subprocess.CompletedProcess:
+                # blind only the identity read (the leader's start instant)
+                if cmd[:2] == ['ps', '-p'] and cmd[-1] == 'lstart=':
+                    return subprocess.CompletedProcess(cmd, 1, '', 'ps: denied')
+                return real_run(cmd, *args, **kwargs)
+
+            monkeypatch.setattr('fractal.core.node.subprocess.run', blinded_run)
+    before = node.status()
+    loop = MockLoop(node)
+    try:
+        if refusal is None:
+            assert loop.run() == 0
+            assert loop.launched
+            # the exit dropped the boot's own re-landed record
+            assert not pgid_file.exists()
+        else:
+            with pytest.raises(RuntimeError, match=refusal) as excinfo:
+                loop.run()
+            # the refusal booted nothing: the rival keeps its record and
+            # its group, and the node the status it was running under
+            assert loop.launched == []
+            assert node.status() == before
+            if record == 'claim':
+                assert pgid_file.read_text(encoding='utf-8') == ''
+            else:
+                assert f'{leader.pid}' in f'{excinfo.value}'
+                assert leader.poll() is None
+                assert pgid_file.read_text(encoding='utf-8') == f'{leader.pid}\n'
+    finally:
+        if leader is not None:
+            try:
+                os.killpg(leader.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            leader.wait()
 
 
 def test_continue_restore_lands_config_all_or_nothing(

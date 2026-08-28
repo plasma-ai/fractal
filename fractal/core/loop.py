@@ -426,10 +426,12 @@ class Loop:
         Raises:
             RuntimeError: When a draining seat re-arms a node through this
                 entry (the re-arm primitive ``Node.start``/``Node.resume``
-                front).
+                front), or when the recorded ``.pgid`` names a live rival
+                loop (or one whose identity cannot be verified), or carries
+                a rival launch's still-fresh claim.
 
         """
-        from .node import _draining
+        from .node import _claim_in_flight, _draining, _group_alive
 
         node = self.node
         # the loop entry is the re-arm primitive the guarded verbs front, so a
@@ -445,6 +447,46 @@ class Loop:
             raise RuntimeError(
                 'Cannot run a node loop from a draining run (--drain forbids re-arms).'
             )
+        # vet the recorded group before any boot record lands: a bare
+        # `node _loop` runs with no launch gate ahead of it (start.sh's
+        # session refusal and the headless launcher's claim both live on
+        # the verb path), so the boot itself arbitrates -- the launcher
+        # records this very group before the wrapper execs the loop here,
+        # so the boot's own record passes by identity, and any other record
+        # is judged by the identity-checked law: a live group is a running
+        # loop this boot would clobber, and an unverifiable one refuses
+        # naming the ps check, so ignorance never authorizes a second boot
+        pgid_file = node.node_dir / PGID_FILE
+        try:
+            recorded = pgid_file.read_text(encoding='utf-8').strip()
+        except FileNotFoundError:
+            recorded = ''
+        if recorded != f'{os.getpgid(0)}':
+            alive = _group_alive(pgid_file)
+            if alive is None:
+                raise RuntimeError(
+                    'the process identity probe gave no answer for process'
+                    f' group {recorded}, so the loop may still be running; check'
+                    f' ps -p {recorded} and remove the {PGID_FILE} record from the'
+                    ' node directory if that group is not this node'
+                )
+            if alive:
+                raise RuntimeError(
+                    f'a loop already runs this node: process group {recorded}'
+                    ' is alive; wait for it to exit, or kill the node and'
+                    ' retry the launch'
+                )
+            # a record naming no pid is a launcher's claim in flight (the
+            # pid lands only after its spawn), refused like a live record
+            # unless provably abandoned by its age -- one arbiter
+            # (_claim_in_flight) shared with the launcher
+            if _claim_in_flight(pgid_file, recorded):
+                raise RuntimeError(
+                    'a rival launch claimed the record and its loop may'
+                    ' still be booting; retry once it exits, or remove'
+                    f' the {PGID_FILE} record from the node directory if'
+                    ' no launch is in flight'
+                )
         # the pane transcript must stream live (operators and the e2e harness
         # tail it mid-run): line-buffer stdout even when it is a pipe/file
         if hasattr(sys.stdout, 'reconfigure'):

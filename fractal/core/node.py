@@ -2369,11 +2369,7 @@ class Node:
             except FileNotFoundError:
                 pass
             except ValueError:
-                try:
-                    claimed_at = pgid_file.stat().st_mtime
-                except FileNotFoundError:
-                    claimed_at = 0.0
-                if time.time() - claimed_at < _ABANDONED_CLAIM_SECONDS:
+                if _claim_in_flight(pgid_file, pgid):
                     raise RuntimeError(claimed) from None
                 pgid_file.unlink(missing_ok=True)
             else:
@@ -5985,6 +5981,37 @@ def _draining(node: Node) -> bool:
     if actor is not None and actor.drain_bound():
         return True
     return node.drain_lineage()
+
+
+def _claim_in_flight(pgid_file: pathlib.Path, recorded: str) -> bool:
+    """Return whether ``recorded`` is a rival launch's still-fresh claim.
+
+    A launch claims the record empty and writes the pid only after its
+    spawn, so an unparseable record younger than
+    :data:`_ABANDONED_CLAIM_SECONDS` is a claim mid-handoff -- refused like
+    a live record by every boot arbiter -- while an older one was abandoned
+    by a launcher that died before recording and clears like a dead group.
+    The verdict judges the caller's own read: a re-read could see a rival's
+    pid land mid-arbitration and wave the caller past a record it never
+    identity-checked.
+
+    Args:
+        pgid_file: The record whose age arbitrates an unparseable claim.
+        recorded: The record's content as the caller read it.
+
+    Returns:
+        Whether the record must be refused rather than cleared.
+
+    """
+    try:
+        int(recorded)
+    except ValueError:
+        try:
+            claimed_at = pgid_file.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        return time.time() - claimed_at < _ABANDONED_CLAIM_SECONDS
+    return False
 
 
 def _group_alive(pgid_file: pathlib.Path) -> Optional[bool]:
