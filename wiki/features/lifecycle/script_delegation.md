@@ -48,7 +48,11 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
   `.headless` marker and `.pgid` together (rolled back together when the spawn
   fails, and a spawn that exits before the loop boots is reported as a failed
   launch) and starts `_loop` in its own session, appending one launch banner to
-  `headless.log`.
+  `headless.log`. The loop's own boot re-vets the recorded group under the same
+  identity law — its launcher's own record proceeds, a live rival or a fresh
+  pid-less claim refuses, and an unverifiable group refuses naming the `ps`
+  check — so a bare `fractal node _loop`, which runs none of the launch gates
+  above, still cannot boot over a live loop.
 - `pause.sh` reaps the recorded step process group, aborting the in-flight agent
   so the loop can park.
 - `resume.sh` relaunches the loop through the backend the node's `.headless`
@@ -114,7 +118,11 @@ iteration or step boundaries; the escalation path that does not wait is kill.
 
 Liveness is one law (`Node._loop_alive`). A `.headless` node is judged by its
 recorded `.pgid` process group alone and tmux is never asked, so a host without
-tmux still heals it. Any other node asks tmux on its recorded `.socket`; a
+tmux still heals it. Any other node asks tmux on its recorded `.socket`, and a
+listed name is arbitrated by its panes' argv — a session whose launch pane
+provably names another repo's worktree (a repo sharing the basename and branch)
+reads as the node's own session being gone, while a pane the probe cannot
+attribute, or one running no launch at all, keeps the listed answer; a
 definitive "no such session" is proof only when a socket was recorded, and a
 socket-less loop (a bare `fractal node _loop` launch, in or out of a tmux pane)
 is judged by its own group instead — tmux's "no such session" defers to a live

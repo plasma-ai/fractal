@@ -464,7 +464,11 @@ A loop that dies without settling — a hard kill, a direct
 ``tmux kill-session``, a headless process death, or a host crash — leaves
 ``.status`` reading ``active`` with no live runtime. Because ``start.sh``
 enforces one loop per node, a *provably* missing runtime is proof the loop is
-gone. The proof is per backend: a tmux node's recorded session, or a headless
+gone. The proof is per backend: a tmux node's recorded session (the listed
+name is arbitrated by its panes' commands, so a same-named session provably
+launched from another repository sharing the basename never vouches for a
+dead loop — though a pane that cannot be attributed, or one running a plain
+shell rather than a launch, keeps the node unhealed), or a headless
 node's recorded ``.pgid`` process group — alive, and the group the record
 named rather than a recycled id. A headless loop joins no server and records
 no ``.socket``, whatever ``$TMUX`` its launching shell carried; every other
