@@ -3330,7 +3330,12 @@ class Node:
             return self.config.get('root')
         return None
 
-    def merge(self: Node, *, continue_merge: bool = False) -> tuple[str, str]:
+    def merge(
+        self: Node,
+        *,
+        continue_merge: bool = False,
+        ignore_scope: bool = False,
+    ) -> tuple[str, str]:
         """Squash-merge the node's branch into its merge target.
 
         ``merge.sh`` resolves the target -- the node's configured ``base`` if
@@ -3340,14 +3345,21 @@ class Node:
         the record survives this node's later deletion.
 
         The full commit history is preserved on the node's
-        branch; only a single squash commit lands on the target.
+        branch; only a single squash commit lands on the target. The squash
+        never changes the target's ``.fractal/`` outside this node's scope
+        roots, refuses paths outside the node's commit boundaries (the law
+        ``fractal commit`` enforces) unless ``ignore_scope`` is set, and
+        ends by recording the target's post-merge tree on the node's branch
+        so the node holds the adjudicated content and a later re-merge diffs
+        only new work.
 
         ``continue_merge`` finishes a hand-resolved squash after a conflicted
         merge: the operator redoes ``git merge --squash`` in the target
         worktree, resolves and stages the conflicts, and the continue then
-        runs the merge's own tail -- seed strip, index refresh, commit,
-        merge-base advance -- so a manual resolution never has to hand-roll
-        those steps (a hand-rolled seed strip leaves working-tree residue).
+        runs the merge's own tail -- ``.fractal/`` restore and seed strip,
+        footprint check, index refresh, commit, merge-base advance -- so a
+        manual resolution never has to hand-roll those steps (a hand-rolled
+        seed strip leaves working-tree residue).
 
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
@@ -3403,6 +3415,8 @@ class Node:
         args = [f'{self._root}']
         if continue_merge:
             args.append('--continue')
+        if ignore_scope:
+            args.append('--ignore-scope')
         result = self._run_script('merge.sh', *args)
         # success-path warnings ride stderr (e.g. a skipped merge-base
         # advance predicting spurious re-merge diffs) and would vanish with

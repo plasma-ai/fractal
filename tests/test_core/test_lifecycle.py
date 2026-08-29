@@ -99,6 +99,7 @@ __all__ = [
     'test_merge_refreshes_parent_wiki_indexes',
     'test_merge_restores_parent_when_index_refresh_fails',
     'test_merge_refuses_when_parent_worktree_is_dirty',
+    'test_merge_ignore_scope_lands_an_out_of_scope_squash',
     'test_merge_refuses_settled_child_into_a_running_target',
     'test_merge_event_survives_child_delete',
 ]
@@ -2030,6 +2031,43 @@ def test_merge_refuses_when_parent_worktree_is_dirty(git_repo: pathlib.Path) -> 
     # child's work did not land on the parent
     assert parent_file.read_text(encoding='utf-8') == 'uncommitted edit\n'
     assert not (git_repo / 'feature.txt').is_file()
+
+
+def test_merge_ignore_scope_lands_an_out_of_scope_squash(
+    git_repo: pathlib.Path,
+) -> None:
+    """``merge(ignore_scope=True)`` lands a squash the footprint check refuses.
+
+    The squash is the one point that sees a scoped node's whole offering
+    (commit-time scope is bypassable), so a path outside the node's scope
+    refuses the merge by default and restores the parent. The override mirrors
+    ``fractal commit --ignore-scope`` and lands the offering as it is.
+    """
+    node = Node(git_repo)
+    node.init(agent='claude', user=True)
+    output = node.init(name='scoped', scope=['docs'])
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    # work in and out of scope, committed with raw git (fractal commit would
+    # refuse the out-of-scope path itself)
+    (project_dir / 'docs').mkdir()
+    (project_dir / 'docs' / 'a.md').write_text('# a\n', encoding='utf-8')
+    (project_dir / 'outside.txt').write_text('outside the scope\n', encoding='utf-8')
+    _git(project_dir, 'add', '-A')
+    _git(project_dir, 'commit', '-m', 'work in and out of scope')
+    main_head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
+
+    with pytest.raises(RuntimeError, match='outside its scope'):
+        Node(project_dir).merge()
+    # the parent was restored: nothing landed
+    head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
+    assert head == main_head
+    assert not (git_repo / 'outside.txt').is_file()
+
+    Node(project_dir).merge(ignore_scope=True)
+    assert (git_repo / 'docs' / 'a.md').is_file()
+    assert (git_repo / 'outside.txt').is_file()
 
 
 def test_merge_refuses_settled_child_into_a_running_target(

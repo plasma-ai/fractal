@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import os
 import pathlib
@@ -11,7 +12,7 @@ import subprocess
 import tarfile
 import tempfile
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Optional
 
 import fractal.util
@@ -142,39 +143,16 @@ def commit(
         rows = node.record.iters(status='active', limit=1)
         iteration = rows[0]['iter'] if rows else 0
         label_run = rows[0]['run_id'] if rows else None
-    # resolve the commit boundaries: each scope root is its own boundary,
-    # nested under the project prefix for a sub-project node
-    project = node.project_path
-    scope = node.config.get('scope') or []
-    # a '.' root names the project itself, and subsumes any sibling root --
-    # collapse the whole scope so the boundary becomes the project dir (or
-    # unbounded at the repo root); kept out of the joins below: a literal
-    # './' (or '<project>/./') prefix matches no git path, so leaving it in
-    # place would put every changed file out of scope and refuse every commit
-    if any(not pathlib.PurePosixPath(root).parts for root in scope):
-        scope = []
-    if scope:
-        if project == '.':
-            commit_scopes = list(scope)
-            node_prefix = f'{FRACTAL_FOLDER}/'
-        else:
-            commit_scopes = [f'{project}/{root}' for root in scope]
-            node_prefix = f'{project}/{FRACTAL_FOLDER}/'
-    elif project != '.':
-        commit_scopes = [project]
-        node_prefix = ''
-    else:
-        commit_scopes = []
-        node_prefix = ''
-    if project == '.':
-        wiki_prefix, fractal_prefix = 'wiki', FRACTAL_FOLDER
-    else:
-        wiki_prefix = f'{project}/wiki'
-        fractal_prefix = f'{project}/{FRACTAL_FOLDER}'
+    # resolve the commit boundaries (one law with the merge footprint check)
+    bounds = scope_boundaries(node)
+    commit_scopes = list(bounds.roots)
+    node_prefix = bounds.node_prefix
+    wiki_prefix = bounds.wiki_prefix
+    fractal_prefix = bounds.fractal_prefix
     # check working tree, index, and untracked files for out-of-scope changes
     scoped = not force and not ignore_scope and bool(commit_scopes)
     if scoped:
-        _scope_check(node, commit_scopes, node_prefix, wiki_prefix)
+        _scope_check(node, bounds)
     output: list[str] = []
     # refresh the wiki indexes, then lint (--force and --init skip both: the
     # backstop save must never block, and the baseline wiki lints dirty); the
@@ -541,6 +519,119 @@ def commit_user_init(node: Node, message: str) -> str:
     return f'Committed user node baseline on {node.branch}.'
 
 
+@dataclasses.dataclass(frozen=True)
+class Scope:
+    """A node's commit boundaries.
+
+    One law for every surface that judges a node's paths: ``fractal
+    commit`` checks the worktree against it, and ``merge.sh`` checks the
+    staged squash through ``fractal node _scope``. ``roots`` are the
+    project-prefixed scope roots, each its own boundary (empty means
+    unbounded); ``node_prefix`` is the node data dir prefix, always
+    committable, or ``''`` when the project itself is the boundary;
+    ``wiki_prefix`` is the shared project wiki, committable regardless of
+    scope; ``fractal_prefix`` is the estates dir the stage sweep adds.
+    """
+
+    roots: tuple[str, ...]
+    node_prefix: str
+    wiki_prefix: str
+    fractal_prefix: str
+
+
+def scope_boundaries(node: Node) -> Scope:
+    """Resolve a node's commit boundaries from its project and scope.
+
+    Each scope root is its own boundary, nested under the project prefix
+    for a sub-project node; a sub-project node with no roots is bounded to
+    its project dir, and a repo-root node with no roots is unbounded.
+
+    Args:
+        node: The node whose boundaries to resolve.
+
+    Returns:
+        The boundaries.
+
+    """
+    project = node.project_path
+    configured = node.config.get('scope') or []
+    # a '.' root names the project itself, and subsumes any sibling root --
+    # collapse the whole scope so the boundary becomes the project dir (or
+    # unbounded at the repo root); kept out of the joins below: a literal
+    # './' (or '<project>/./') prefix matches no git path, so leaving it in
+    # place would put every changed file out of scope and refuse every commit;
+    # merge.sh re-derives these roots as SCOPE_ROOTS for its .fractal/ restore
+    # and conflict auto-resolve -- keep the collapse rule aligned
+    if any(not pathlib.PurePosixPath(root).parts for root in configured):
+        configured = []
+    if configured:
+        if project == '.':
+            roots = tuple(configured)
+            node_prefix = f'{FRACTAL_FOLDER}/'
+        else:
+            roots = tuple(f'{project}/{root}' for root in configured)
+            node_prefix = f'{project}/{FRACTAL_FOLDER}/'
+    elif project != '.':
+        roots = (project,)
+        node_prefix = ''
+    else:
+        roots = ()
+        node_prefix = ''
+    if project == '.':
+        wiki_prefix, fractal_prefix = 'wiki', FRACTAL_FOLDER
+    else:
+        wiki_prefix = f'{project}/wiki'
+        fractal_prefix = f'{project}/{FRACTAL_FOLDER}'
+    return Scope(roots, node_prefix, wiki_prefix, fractal_prefix)
+
+
+def out_of_scope(
+    paths: Iterable[str],
+    bounds: Scope,
+    *,
+    attributes_ok: bool,
+) -> list[str]:
+    """Return the paths outside a node's commit boundaries, sorted.
+
+    Literal prefix checks (not regex), so a scope/path with a regex
+    metachar (v1.2, app+web, a[b]) cannot widen the anchor and let a
+    sibling dir slip through as "in scope".
+
+    Args:
+        paths: Repo-relative paths (empty entries are ignored).
+        bounds: The node's commit boundaries; empty roots mean unbounded,
+            so nothing is out of scope.
+        attributes_ok: Admit the worktree-root ``.gitattributes``: the
+            commit pipeline passes whether it is init's own uncommitted
+            edit, and the merge footprint check always admits it, since a
+            child's first squash carries that edit to the target.
+
+    Returns:
+        The out-of-scope paths.
+
+    """
+    if not bounds.roots:
+        return []
+    offending = []
+    for path in sorted(set(paths)):
+        if not path:
+            continue
+        # in scope: under any commit scope dir
+        if any(path.startswith(f'{root}/') for root in bounds.roots):
+            continue
+        # the node data dir is always committable
+        if bounds.node_prefix and path.startswith(bounds.node_prefix):
+            continue
+        # the shared project wiki is committable regardless of scope
+        if path.startswith(f'{bounds.wiki_prefix}/'):
+            continue
+        # init's own worktree-root .gitattributes edit is committable
+        if path == '.gitattributes' and attributes_ok:
+            continue
+        offending.append(path)
+    return offending
+
+
 # ------ helper functions
 
 
@@ -582,34 +673,22 @@ def _check_clean(node: Node) -> None:
         )
 
 
-def _scope_check(
-    node: Node,
-    commit_scopes: list[str],
-    node_prefix: str,
-    wiki_prefix: str,
-) -> None:
+def _scope_check(node: Node, bounds: Scope) -> None:
     """Refuse changes outside the node's commit scopes.
 
     Args:
         node: The node whose worktree to check.
-        commit_scopes: Scope roots (project-prefixed), each its own
-            commit boundary.
-        node_prefix: The node data dir prefix (always committable), or
-            ``''`` when the project itself is the boundary.
-        wiki_prefix: The shared project wiki prefix (always committable).
+        bounds: The node's commit boundaries.
 
     Raises:
         RuntimeError: Naming every scope root and the offending paths.
 
     """
     worktree = node.worktree
-    # collect every changed path (working tree, index, untracked), then keep
-    # only those outside the allowed prefixes; literal prefix checks (not
-    # regex), so a scope/path with a regex metachar (v1.2, app+web, a[b])
-    # cannot widen the anchor and let a sibling dir slip through as "in
-    # scope"; -z everywhere so a non-ASCII path is never C-quoted (a quoted
-    # path starts with '"' and fails every prefix check); raw bytes so a
-    # first path's leading whitespace survives (run() strips)
+    # collect every changed path (working tree, index, untracked); -z
+    # everywhere so a non-ASCII path is never C-quoted (a quoted path
+    # starts with '"' and fails every prefix check); raw bytes so a first
+    # path's leading whitespace survives (run() strips)
     changed: set[str] = set()
     for cmd in (
         ['diff', '--name-only', '-z', 'HEAD'],
@@ -619,26 +698,11 @@ def _scope_check(
         raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
         listing = os.fsdecode(raw)
         changed.update(filter(None, listing.split('\0')))
-    out_of_scope = []
-    for path in sorted(changed):
-        if not path:
-            continue
-        # in scope: under any commit scope dir
-        if any(path.startswith(f'{scope}/') for scope in commit_scopes):
-            continue
-        # the node data dir is always committable
-        if node_prefix and path.startswith(node_prefix):
-            continue
-        # the shared project wiki is committable regardless of scope
-        if path.startswith(f'{wiki_prefix}/'):
-            continue
-        # init's own worktree-root .gitattributes edit is committable
-        if path == '.gitattributes' and _attributes_is_init_edit(node):
-            continue
-        out_of_scope.append(path)
-    if out_of_scope:
-        roots = ' '.join(f'{scope}/' for scope in commit_scopes)
-        listing = '\n'.join(out_of_scope)
+    attributes_ok = _attributes_is_init_edit(node)
+    offending = out_of_scope(changed, bounds, attributes_ok=attributes_ok)
+    if offending:
+        roots = ' '.join(f'{root}/' for root in bounds.roots)
+        listing = '\n'.join(offending)
         raise RuntimeError(f'Changes outside node scope ({roots}):\n{listing}')
 
 

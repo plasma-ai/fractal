@@ -74,6 +74,7 @@ def cli(**kwargs: Any) -> None:
     cmd.node_loop(node_app)
     cmd.node_launch(node_app)
     cmd.node_seed(node_app)
+    cmd.node_scope(node_app)
     cmd.time_remaining(time_app)
     cmd.cost_remaining(cost_app)
     cmd.cost_spent(cost_app)

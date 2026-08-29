@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 from typing import Optional
@@ -22,6 +23,7 @@ from fractal.cli.utils import (
 )
 from fractal.constants import STATUSES
 from fractal.core.agent import seed_agents
+from fractal.core.commit import out_of_scope, scope_boundaries
 from fractal.core.loop import Loop
 from fractal.core.node import Node
 
@@ -49,6 +51,7 @@ __all__ = [
     'node_loop',
     'node_launch',
     'node_seed',
+    'node_scope',
 ]
 
 # consumers bind list columns by header name, never by position
@@ -619,10 +622,14 @@ def node_merge(app: typer.Typer) -> typer.Typer:
     node = typer.Argument(None, help=node_help)
     # continue flag
     continue_help = (
-        'Finish a hand-resolved squash after a conflicted merge: strip the'
-        ' seed, refresh indexes, commit, and advance the merge-base.'
+        'Finish a hand-resolved squash after a conflicted merge: restore'
+        ' .fractal/, strip the seed, check the footprint, refresh indexes,'
+        ' commit, and advance the merge-base.'
     )
     continue_ = typer.Option(False, '--continue', help=continue_help)
+    # ignore scope flag
+    ignore_scope_help = 'Merge out-of-scope changes instead of refusing.'
+    ignore_scope = typer.Option(False, '--ignore-scope', help=ignore_scope_help)
     # delete flag
     delete_help = (
         'Delete the node (worktree, branch, and subtree) after a successful merge.'
@@ -639,6 +646,7 @@ def node_merge(app: typer.Typer) -> typer.Typer:
     def _merge(
         node: Optional[str] = node,
         continue_: bool = continue_,
+        ignore_scope: bool = ignore_scope,
         delete: bool = delete,
         force: bool = force,
         path: str = path,
@@ -675,7 +683,9 @@ def node_merge(app: typer.Typer) -> typer.Typer:
                     err=True,
                 )
                 typer.confirm(prompt, abort=True)
-        output, notices = node.merge(continue_merge=continue_)
+        output, notices = node.merge(
+            continue_merge=continue_, ignore_scope=ignore_scope
+        )
         if output:
             typer.echo(output)
         # success-path warnings ride stderr so piped stdout stays parseable
@@ -1435,5 +1445,36 @@ def node_seed(app: typer.Typer) -> typer.Typer:
         """Seed the node's agent config dirs (invoked by init.sh)."""
         parent_dir = pathlib.Path(parent) if parent else None
         seed_agents(pathlib.Path(node_dir), parent_dir=parent_dir, reset=reset)
+
+    return app
+
+
+def node_scope(app: typer.Typer) -> typer.Typer:
+    """Register the ``_scope`` command."""
+    # path option
+    path_help = 'Worktree directory.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, '_scope')
+    def _scope(path: str = path) -> None:
+        """Print the out-of-scope paths among stdin's (invoked by merge.sh).
+
+        Reads NUL-separated repo-relative paths on stdin and judges them by
+        the node's commit boundaries, the law ``fractal commit`` enforces;
+        prints the out-of-scope ones one per line. Exit 1 when any is out
+        of scope, 0 when all are in scope, 2 on a command error -- scripts
+        branch on the exit code rather than parse the output.
+        """
+        node = resolve_node(path)
+        raw = sys.stdin.buffer.read()
+        paths = filter(None, os.fsdecode(raw).split('\0'))
+        bounds = scope_boundaries(node)
+        # the worktree-root .gitattributes is init's own edit, carried to the
+        # target by the node's first squash
+        offending = out_of_scope(paths, bounds, attributes_ok=True)
+        if offending:
+            listing = '\n'.join(offending)
+            typer.echo(listing)
+            raise SystemExit(1)
 
     return app
