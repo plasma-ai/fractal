@@ -100,12 +100,20 @@ Work flows through three kinds of commit, each with a distinct shape:
   *toward the base*: the target is the node's configured `base` branch if set,
   else the dotted parent. The merge runs as `git merge --squash` inside the
   target's worktree, so a single squash commit lands on the target while the
-  full history stays on the node's branch. The squash strips the node's seed
-  directory (so node machinery never lands in the parent), regenerates tracked
-  wiki indexes from the merged filesystem, and logs the `merge` event on the
-  *target* so the record survives the node's later deletion. The merge refuses
-  while the node or its target is active or paused — except from inside the
-  target's own loop, which merges its settled children as part of a normal
+  full history stays on the node's branch. The squash returns every `.fractal/`
+  directory on the target to the target's HEAD (except paths under the node's
+  own scope roots) and strips the node's seed directory and its descendants' (so
+  node machinery never lands in the parent), refuses a footprint outside the
+  node's scope roots, project wiki, and `.fractal/` unless `--ignore-scope` is
+  passed, regenerates tracked wiki indexes from the merged filesystem, and logs
+  the `merge` event on the *target* so the record survives the node's later
+  deletion. It then advances the node's merge-base with a two-parent commit on
+  the node's branch — `merge <target> (post-squash)`, parents the node's HEAD
+  and the target's HEAD — whose tree is the target's post-squash tree with the
+  node's own seed and its descendants' seeds kept, so the node's worktree
+  converges to the target and a later merge only diffs new work. The merge
+  refuses while the node or its target is active or paused — except from inside
+  the target's own loop, which merges its settled children as part of a normal
   iteration — and failure paths restore the target worktree so a half-merge
   never lands.
 

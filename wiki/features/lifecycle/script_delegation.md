@@ -71,6 +71,14 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
   skipped and only the recorded groups are reaped, so a same-named session from
   another repo sharing the basename is never cross-fired. When nothing is alive
   (a paused park), it exits cleanly and the kill is pure bookkeeping.
+- `merge.sh` squash-merges the node's branch into its target from inside the
+  target's worktree: it restores the target's `.fractal/` outside the node's
+  scope roots, strips the node's own seed, judges the staged squash through the
+  private `node _scope` (NUL-separated paths on stdin, the out-of-scope ones on
+  stdout, exit 1 when any is out of scope — the same `Scope` law
+  `fractal commit` enforces), refreshes the wiki indexes, commits, and records
+  the target's post-squash tree on the node's branch; the operator's view of the
+  merge is [[user_flow/finishing]].
 - `delete.sh` removes one node's worktree, local branch, and remote branch; the
   recursive delete calls it once per node, deepest first.
 

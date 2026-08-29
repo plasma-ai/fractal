@@ -99,12 +99,30 @@ Toward the base — the parent branch a finished node merges into — the
 relationship inverts: the base wants the node's *result*, not its process. So
 the merge squashes: a single commit lands on the target, while the full
 per-iteration history stays preserved on the node's branch for archaeology. The
-squash also strips the node's seed directory from the staged result, so the
-machinery that ran the node never leaks into the parent's tree. The merge
-refuses over a dirty, active, or paused target — the squash mutates the target's
-worktree, and its recovery path resets hard, so it must never run where it could
-destroy someone's uncommitted work — except from inside the target's own loop,
-which merges its settled children as part of a normal iteration.
+squash also returns every `.fractal/` directory on the target to the target's
+HEAD — minus the merging node's own scope roots under it, since a `--meta`
+node's work product *is* the target's seed directory — and strips the node's own
+seed and its descendants' seeds from the staged result, so the machinery that
+ran the node never leaks into the parent's tree and a node's edit to the
+target's estate or to a foreign seed never rides its squash. The squash is held
+to the node's commit scope as well: commit-time enforcement is bypassable
+(`--ignore-scope`, the force backstops, a parent's no-fast-forward merge
+carrying grandchild commits no check saw), so the squash is the one point that
+sees the node's whole offering, and a path outside the scope roots, the project
+wiki, and `.fractal/` is refused there with the paths named and
+`node merge --ignore-scope` as the override. The merge refuses over a dirty,
+active, or paused target — the squash mutates the target's worktree, and its
+recovery path resets hard, so it must never run where it could destroy someone's
+uncommitted work — except from inside the target's own loop, which merges its
+settled children as part of a normal iteration.
+
+After the squash commit lands, the node's merge-base advances with a real
+two-parent commit on its branch — parents the node's HEAD and the target's HEAD,
+tree the target's post-squash tree with the node's own seed and its descendants'
+seeds kept. Recording the target's *content*, not just its ancestry, is what
+keeps re-merges honest: the node converges to whatever the target adjudicated,
+so a later merge in either direction only diffs new work and never takes a stale
+copy of a file the node did not edit as the one changed side.
 
 ## Per-worktree commit identity
 

@@ -496,27 +496,31 @@ Once the node is running, briefly explain how to interact with it:
 
 - **Worktree:** The node runs in a git worktree at
   `<repo>/.worktrees/<branch>/`. The user's repo is untouched. When done, from
-  the repo root, merge with `fractal node merge <branch>`. A conflicted merge
-  restores the target worktree exactly as it was and leaves the resolution to
-  you: redo the squash there by hand (`git merge --squash <branch>`), resolve
-  and stage the conflicts, then finish with
+  the repo root, merge with `fractal node merge <branch>`. The merge refuses a
+  squash that changes paths outside the node's scope roots, its project wiki, or
+  `.fractal/`, naming them: widen the scope
+  (`fractal node config set scope=<dirs> --path=<node worktree>`) or rerun with
+  `--ignore-scope` to land them. A conflicted merge restores the target worktree
+  exactly as it was and leaves the resolution to you (conflicts only under
+  `.fractal/` outside the node's scope roots resolve to the target's content on
+  their own): redo the squash there by hand (`git merge --squash <branch>`),
+  resolve and stage the conflicts, then finish with
   `fractal node merge <branch> --continue` rather than committing yourself — the
-  continue runs the rest of the merge (seed strip, wiki index refresh, commit,
-  merge-base advance) that a hand-rolled finish would miss, and names every file
-  where the resolution kept the target's content over the node's — the node
-  still carries its own version there, so land the resolution on the node (or
-  retire it) or a later re-merge silently re-stages it. Deleting afterward with
-  `fractal node delete <branch>` is optional hygiene, never automatic — a merged
-  branch keeps audit value (delete must run from outside the worktree). Pass
-  `--delete` to `merge` to chain the two in one command: every delete refusal
-  and the confirmation `[y/N]` pre-flight the squash, so a chain that cannot
-  finish never starts. **Delete is destructive:** it is recursive — removing the
-  node's whole subtree — and force-removes each worktree and **force-deletes the
-  branch(es) regardless of merge state**, so any committed-but-unmerged work is
-  lost. Always confirm the `merge` succeeded first (check its output). To keep a
-  node's branch while hiding it, retire it instead. Delete prompts for
-  confirmation `[y/N]`, chained or standalone; pass `--force`/`-f` to skip the
-  prompt.
+  continue runs the rest of the merge (`.fractal/` restore and seed strip,
+  footprint check, wiki index refresh, commit, merge-base advance) that a
+  hand-rolled finish would miss, and the merge-base advance writes the target's
+  adjudicated tree into the node's worktree, so the resolution lands on the node
+  too. Deleting afterward with `fractal node delete <branch>` is optional
+  hygiene, never automatic — a merged branch keeps audit value (delete must run
+  from outside the worktree). Pass `--delete` to `merge` to chain the two in one
+  command: every delete refusal and the confirmation `[y/N]` pre-flight the
+  squash, so a chain that cannot finish never starts. **Delete is destructive:**
+  it is recursive — removing the node's whole subtree — and force-removes each
+  worktree and **force-deletes the branch(es) regardless of merge state**, so
+  any committed-but-unmerged work is lost. Always confirm the `merge` succeeded
+  first (check its output). To keep a node's branch while hiding it, retire it
+  instead. Delete prompts for confirmation `[y/N]`, chained or standalone; pass
+  `--force`/`-f` to skip the prompt.
 
 - **Reset:** `fractal reset` (from anywhere in the repo) tears down every node
   worktree, branch, and registration in the tree in one sweep; the project,

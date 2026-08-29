@@ -431,7 +431,8 @@ Integration and teardown
 
 .. code-block:: console
 
-   $ fractal node merge [NODE] [--continue] [--delete] [--force|-f]
+   $ fractal node merge [NODE] [--continue] [--ignore-scope] [--delete]
+         [--force|-f]
 
 Squash-merge the node's branch into its merge target — the configured
 ``base`` when set, else the dotted parent. One squash commit lands on the
@@ -440,11 +441,44 @@ the user node, when the node itself is ``active`` or ``paused``, and when the
 *target* is ``active`` or ``paused`` (except from inside the target's own
 loop, its normal child-merge path). Non-fatal warnings ride stderr.
 
+Before committing, the merge holds the squash to the node's commit scope: a
+squash that changes any path outside the node's ``scope`` roots, its project
+``wiki/``, ``.fractal/``, or the worktree-root ``.gitattributes`` is refused
+(a repo-root node without a scope is unrestricted; a sub-project node without
+one is bounded to its project directory) — the same law ``fractal commit``
+applies. The refusal names the paths and both remedies: widen the scope with
+``fractal node config set scope=<dirs> --path=<node worktree>``, or rerun
+with ``--ignore-scope``. A fresh merge restores the target on refusal;
+``--continue`` leaves the staged squash in place.
+
+Nothing under any ``.fractal/`` directory on the target changes except paths
+under the merging node's scope roots: every other such path returns to the
+target's HEAD (a warning names the ones the squash had changed), and the node's
+own seed and its descendants' seeds are stripped. Before the squash, a warning
+names node seed directories the target already tracks that it does not own (a
+node owns its own and its descendants'; the user node, whose own directory is
+git-ignored, owns none), with a ``git -C <target worktree> rm -r --cached
+<dirs>`` remedy line; the merge removes only the merging node's own and its
+descendants'. Conflicts only under ``.fractal/`` outside the node's scope roots
+resolve to the target's content — a warning names them — and the merge
+continues; any other conflict fails and restores the target. After the commit,
+the node's merge-base advances with a two-parent commit on the node's branch
+(``merge <target> (post-squash)``) whose tree is the target's post-squash tree
+with the node's own seed and its descendants' seeds kept, so the node's
+worktree converges to the target and a later merge only diffs new work; a dirty
+node skips the advance with a warning.
+
 ``--continue``
    Finish a hand-resolved squash after a conflicted merge: redo
    ``git merge --squash`` in the target worktree, resolve and stage the
-   conflicts, then ``merge --continue`` runs the merge's own tail — seed
-   strip, index refresh, commit, merge-base advance.
+   conflicts, then ``merge --continue`` runs the merge's own tail —
+   ``.fractal/`` restore and seed strip, footprint check, index refresh,
+   commit, merge-base advance.
+
+``--ignore-scope``
+   Merge out-of-scope changes instead of refusing — paths outside the node's
+   scope roots, its project wiki, ``.fractal/``, and the worktree-root
+   ``.gitattributes``.
 
 ``--delete``
    Delete the node (worktree, branch, and whole subtree) after a successful

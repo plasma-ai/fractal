@@ -63,44 +63,81 @@ should know:
 - **One commit lands.** The target receives a single squash commit named
   `merge <branch>`; the node's full per-iteration history stays on its own
   branch. Review the squash like any commit.
-- **The node's machinery does not travel.** The node's `.fractal/<branch>/` seed
-  is stripped from the staged merge, so a parent never accumulates its
-  children's data directories. Work product only.
+- **The node's machinery does not travel.** The squash changes nothing under any
+  `.fractal/` directory on the target — every such path returns to the target's
+  HEAD after the squash — except paths under the merging node's own scope roots
+  (a `--meta` node's scope is the target's own seed directory, which is its work
+  product and lands). The node's own `.fractal/<branch>/` seed and its
+  descendants' seeds are stripped as well, so a parent never accumulates its
+  children's data directories. Work product only. When the restore drops paths
+  outside the node's own machinery — an edit to the target's estate, a foreign
+  seed, a `.fractal/profiles/` change — the merge warns naming them, so a
+  deliberate change can be landed by hand. Before the squash, the merge also
+  warns when the target already tracks node seed directories it does not own (a
+  node owns its own and its descendants'; the user node, whose own directory is
+  git-ignored, owns none), naming them and printing the
+  `git -C <target worktree> rm -r --cached <dirs>` line that removes them; the
+  merge removes only the merging node's own and its descendants'.
 - **The wiki merges cleanly.** Generated wiki indexes are refreshed from the
   merged filesystem on the target, so both branches' wiki pages survive side by
   side.
-- **Re-merges stay cheap.** After the squash, the child's merge-base is
-  advanced, so merging the same node again later only diffs its new work instead
-  of re-conflicting on everything already landed.
+- **Re-merges stay cheap.** After the squash commit lands, the child's
+  merge-base is advanced with a two-parent commit on the child's branch —
+  `merge <target> (post-squash)`, parents the child's HEAD and the target's HEAD
+  — whose tree is the target's post-squash tree with the child's own seed and
+  its descendants' seeds kept from the child. The child's worktree takes that
+  tree, so the node converges to the target's adjudicated content and merging
+  the same node again later only diffs its new work instead of re-conflicting on
+  everything already landed. The advance is skipped, with a warning, when the
+  child's worktree is dirty or on another branch.
 - **Guards.** Merge refuses while the node is active or paused, while the target
   node is active or paused (a running target's worktree must not be mutated
   under it — except by the target's own loop, which merges its settled children
   as part of its normal iteration), and while the target worktree has
   uncommitted changes. On conflict the target worktree is restored exactly as it
-  was.
+  was — unless every conflict sits under `.fractal/` outside the node's scope
+  roots, in which case they resolve to the target's content (the node's own seed
+  deleted) and the merge continues, with a warning naming the paths.
+- **Footprint.** Before committing, the merge refuses if the squash changes any
+  path outside the node's scope roots, its project wiki, `.fractal/`, or the
+  worktree-root `.gitattributes` (a repo-root node with no scope is
+  unrestricted; a sub-project node with no scope is bounded to its project
+  directory) — the same law `fractal commit` applies. The refusal names the
+  paths and both remedies: widen the scope with
+  `fractal node config set scope=<dirs> --path=<node worktree>`, or rerun with
+  `fractal node merge --ignore-scope`, which lands the paths. A fresh merge
+  restores the target on refusal; `--continue` leaves the staged squash in
+  place.
 - **Conflicts finish with `--continue`.** After a conflicted merge, redo the
   squash by hand in the target worktree (`git merge --squash <branch>`), resolve
   and stage the conflicts, then run `fractal node merge <node> --continue`: it
   validates the staged squash came from the node's branch, then runs the merge's
-  own tail — seed strip, index refresh, commit, merge-base advance — so a manual
-  resolution never hand-rolls those steps or strands seed files in the target
-  working tree. Its failure paths leave the staged resolution in place (never
-  `reset --hard`); fix and re-run.
-- **A resolution against the node does not reach it.** The squash records no
-  per-hunk ancestry, so a hunk you resolve in the target's favor stays resolved
-  only on the target — the node still carries its own version, and because the
-  merge-base advanced, the next merge re-stages it cleanly and silently, undoing
-  your decision without a conflict to warn you. A `--continue` therefore ends by
-  naming every file where the target kept its content over the node's. Land that
-  resolution on the node (or retire/delete it) for the decision to stick. The
-  notice is scoped to what the node offered, so hunks you resolved the node's
-  way, and content the target owns that the node never had, are not named.
+  own tail — `.fractal/` restore and seed strip, footprint check, index refresh,
+  commit, merge-base advance — so a manual resolution never hand-rolls those
+  steps or strands seed files in the target working tree. Its failure paths
+  leave the staged resolution in place (never `reset --hard`); fix and re-run.
+- **A resolution lands on the node.** The merge-base advance writes the target's
+  adjudicated tree into the node's worktree, so a hunk resolved in the target's
+  favor, a file dropped from the squash, or a restore to base content reaches
+  the node and the next merge does not re-offer it.
 - **Nothing to merge is a clean outcome.** A node whose changes are already on
   the target reports so and exits without committing. A `--continue` whose
   resolution kept the target's own content for every change the node offered
   reports that instead, and still finishes the tail — the squash state is
   cleared and the merge-base advances, so the resolved conflict is not replayed
   on the next merge.
+
+**A merge-base advanced without content.** A node whose branch carries an
+advance commit that changed no content — a two-parent commit whose tree equals
+its first parent's, so the node's tree is still its own rather than the target's
+— still squashes from that base, so its next merge can land stale copies of
+files the node never edited (`git diff --name-only <base> -- . ':!.fractal'`
+lists them). Before that merge, right after the node's work has landed and while
+its worktree is clean, adopt the base's tree in the node's worktree:
+`git checkout <base> -- . ':!.fractal'`, `git rm` any path
+`git diff --name-only <base> -- . ':!.fractal'` still lists, and commit. A plain
+`git merge <base>` does not fix this: the stale copy is the only changed side,
+so it wins without a conflict.
 
 ## Reaching the base branch and review
 

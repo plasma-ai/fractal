@@ -134,9 +134,13 @@ Fractal's footprint
    ``plans/`` (:doc:`/guide/plans`), a ``memory/`` wiki, a git-ignored
    ``tmp/`` scratch directory, and runtime markers such as the one-line
    ``.status`` file. Agent-node data directories are tracked in git on the
-   node's own branch but never merge upward: ``fractal node merge`` strips
-   the node's ``.fractal/<branch>/`` (and any descendant seeds the branch
-   carries) from the squash, so node machinery never lands in the parent.
+   node's own branch but never merge upward: ``fractal node merge`` returns
+   every ``.fractal/`` path on the target to the target's own HEAD (only
+   paths under the merging node's scope roots land — a ``--meta`` node's
+   scope is the target's seed directory) and strips the node's
+   ``.fractal/<branch>/`` (and any descendant seeds the branch carries) from
+   the squash, so node machinery never lands in the parent and a node's edit
+   to the parent's estate never rides its squash.
    The root node's own data directory is git-ignored by default
    (``fractal track`` and ``fractal untrack`` toggle this).
 

@@ -33,6 +33,55 @@ may include breaking changes, each listed under a Breaking heading.
   settled, record-less node — the state their own reconcile leaves after healing
   a dead bare loop on a blind host — proceeds instead of refusing.
 
+### Fixed
+
+- `node merge` advances the node's merge-base with the target's content: after
+  the squash commit lands, the node's branch gains a two-parent commit
+  (`merge <target> (post-squash)`, parents the node's HEAD and the target's
+  HEAD) whose tree is the target's post-squash tree with the node's own seed and
+  descendant seeds kept, and the node's worktree takes it — so the node
+  converges to what the target adjudicated (a hunk resolved against it, a file
+  dropped from the squash, a restore to base content) and a later merge in
+  either direction never lands a stale copy of a file the node did not edit.
+  Recovery for existing trees: trees created on 1.2.0 or earlier carry
+  merge-base commits recorded without content on their long-lived nodes, and the
+  first merge of such a node after upgrading still squashes from that base and
+  can land stale copies of files the node never edited. Before that merge, right
+  after the node's work has landed and while its worktree is clean, adopt the
+  base's tree in the node's worktree: `git checkout <base> -- . ':!.fractal'`,
+  `git rm` any path `git diff --name-only <base> -- . ':!.fractal'` still lists,
+  and commit. A plain `git merge <base>` does not fix this — the stale copy is
+  the only changed side, so it wins without a conflict.
+- Nothing under `.fractal/` rides a squash onto the target except paths under
+  the merging node's own scope roots (a `--meta` node's scope is the target's
+  seed directory, its work product): every other `.fractal/` path at any depth
+  returns to the target's HEAD — a child's edit to the target's estate, a
+  foreign node's seed, a sub-project descendant's seed under
+  `<project>/.fractal/`, a `.fractal/profiles/` change — with a warning naming
+  what the restore dropped so a deliberate change can be landed by hand, and the
+  node's own seed and its descendants' seeds are stripped.
+
+### Changed
+
+- `node merge` holds the squash to the node's commit scope: before committing, a
+  squash that changes any path outside the node's scope roots, its project wiki,
+  `.fractal/`, or the worktree-root `.gitattributes` is refused (a repo-root
+  node without a scope is unrestricted; a sub-project node without one is
+  bounded to its project directory) — the same law `fractal commit` applies. The
+  refusal names the paths and both remedies: widen the scope with
+  `fractal node config set scope=<dirs> --path=<node worktree>`, or rerun with
+  `node merge --ignore-scope`, which lands the paths. A fresh merge restores the
+  target on refusal; `--continue` leaves the staged squash in place.
+- Leaked seeds on the target are named and, where the merge owns them, cleared:
+  before the squash, `node merge` warns when the target already tracks node seed
+  directories it does not own (a node owns its own and its descendants'; the
+  user node, whose own directory is git-ignored, owns none), naming them with a
+  `git -C <target worktree> rm -r --cached <dirs>` remedy line (the merge
+  removes the merging node's own); and a fresh squash whose only conflicts sit
+  under `.fractal/` outside the node's scope roots resolves to the target's
+  content (the node's own seed deleted) and continues with a warning naming the
+  paths, while any other conflict fails and restores the target.
+
 ## [1.2.0] - 2026-08-24
 
 ### Breaking

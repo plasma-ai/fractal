@@ -35,14 +35,21 @@ qualifier. An optional body paragraph lands below the subject.
 
 With a scope configured, the pipeline checks the working tree, index, and
 untracked files for out-of-scope changes and refuses to commit them; the shared
-`wiki/` and the node's `.fractal/` prefix are always committable.
-`--ignore-scope` commits out-of-scope changes but still lints; `--force`
-bypasses scope, lint, and git hooks alike. Before staging, the pipeline
-refreshes both wiki indexes (the project wiki and the node's memory) with the
-`wiki` CLI and fails the commit if a refresh fails -- a broken wiki must never
-land -- then runs the node's `lint.sh` and surfaces its notices instead of
-dropping them. Helper CLIs are resolved from the invoking installation, not
-ambient PATH, so a foreign install cannot answer the hook's reads.
+`wiki/` and the node's `.fractal/` prefix are always committable. The boundaries
+are one record (`Scope`: the project-prefixed roots, the node data-dir prefix,
+the project wiki prefix, and the estates prefix) resolved by `scope_boundaries`
+and judged by `out_of_scope` -- a sub-project node with no roots is bounded to
+its project dir, a repo-root node with no roots is unbounded. The same record
+backs `merge.sh`'s footprint check through the private `fractal node _scope`
+command, so a squash is judged by exactly the law the commit enforces (see
+[[user_flow/finishing]]). `--ignore-scope` commits out-of-scope changes but
+still lints; `--force` bypasses scope, lint, and git hooks alike. Before
+staging, the pipeline refreshes both wiki indexes (the project wiki and the
+node's memory) with the `wiki` CLI and fails the commit if a refresh fails -- a
+broken wiki must never land -- then runs the node's `lint.sh` and surfaces its
+notices instead of dropping them. Helper CLIs are resolved from the invoking
+installation, not ambient PATH, so a foreign install cannot answer the hook's
+reads.
 
 ## Staging and warnings
 
