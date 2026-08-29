@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import os
 import pathlib
@@ -11,7 +12,7 @@ import subprocess
 import tarfile
 import tempfile
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Optional
 
 import fractal.util
@@ -32,7 +33,7 @@ _STAGE_EXCLUDES = (
     # virtualenvs -- the dir entry and, for per-file listings, its contents
     ':!**/.venv',
     ':!**/.venv/**',
-    # the central DB and its sidecars (registry.db is the legacy spelling)
+    # the central DB and its sidecars, under either filename
     ':!**/.db',
     ':!**/.db-*',
     ':!**/registry.db',
@@ -129,7 +130,7 @@ def commit(
         if prefixed or re.match(r'iteration\b', lowered):
             raise RuntimeError(
                 f'Commit message {message!r} starts with the branch name or'
-                f" an 'iteration' label — the tool wraps the message as"
+                f" an 'iteration' label -- the tool wraps the message as"
                 f" '{node.branch}: iteration <run>.<iter> (<message>)'."
                 f' Re-commit with a bare lowercase summary.'
             )
@@ -142,39 +143,16 @@ def commit(
         rows = node.record.iters(status='active', limit=1)
         iteration = rows[0]['iter'] if rows else 0
         label_run = rows[0]['run_id'] if rows else None
-    # resolve the commit boundaries: each scope root is its own boundary,
-    # nested under the project prefix for a sub-project node
-    project = node.project_path
-    scope = node.config.get('scope') or []
-    # a '.' root names the project itself, and subsumes any sibling root --
-    # collapse the whole scope so the boundary becomes the project dir (or
-    # unbounded at the repo root); kept out of the joins below: a literal
-    # './' (or '<project>/./') prefix matches no git path, so leaving it in
-    # place would put every changed file out of scope and refuse every commit
-    if any(not pathlib.PurePosixPath(root).parts for root in scope):
-        scope = []
-    if scope:
-        if project == '.':
-            commit_scopes = list(scope)
-            node_prefix = f'{FRACTAL_FOLDER}/'
-        else:
-            commit_scopes = [f'{project}/{root}' for root in scope]
-            node_prefix = f'{project}/{FRACTAL_FOLDER}/'
-    elif project != '.':
-        commit_scopes = [project]
-        node_prefix = ''
-    else:
-        commit_scopes = []
-        node_prefix = ''
-    if project == '.':
-        wiki_prefix, fractal_prefix = 'wiki', FRACTAL_FOLDER
-    else:
-        wiki_prefix = f'{project}/wiki'
-        fractal_prefix = f'{project}/{FRACTAL_FOLDER}'
+    # resolve the commit boundaries (one law with the merge footprint check)
+    bounds = scope_boundaries(node)
+    commit_scopes = list(bounds.roots)
+    node_prefix = bounds.node_prefix
+    wiki_prefix = bounds.wiki_prefix
+    fractal_prefix = bounds.fractal_prefix
     # check working tree, index, and untracked files for out-of-scope changes
     scoped = not force and not ignore_scope and bool(commit_scopes)
     if scoped:
-        _scope_check(node, commit_scopes, node_prefix, wiki_prefix)
+        _scope_check(node, bounds)
     output: list[str] = []
     # refresh the wiki indexes, then lint (--force and --init skip both: the
     # backstop save must never block, and the baseline wiki lints dirty); the
@@ -233,11 +211,10 @@ def commit(
                 output.append(stream.strip())
 
     # stage relevant paths; closure so the post-hook retry can re-use it
-    # the record pass's notices ride the commit output -- a force-add past
-    # a host ignore rule, and any non-record file it refused, must be said
-    # out loud rather than inferred from the diff; the hook retry re-stages
-    # through this same closure, so the latest pass's notices are the ones
-    # reported
+    # the record pass's notices ride the commit output -- a force-add past a
+    # host ignore rule, and any non-record file it refused, must be said out
+    # loud rather than inferred from the diff; the hook retry re-stages through
+    # this same closure, so the latest pass's notices are the ones reported
     record_notices: list[str] = []
 
     def _stage_changes() -> None:
@@ -311,8 +288,8 @@ def commit(
             f'Warning: {skipped} path(s) skipped by ignore rules (see git check-ignore)'
         )
         output.append(skip_warning)
-    # an oversized staged file is usually an artifact staged by accident, but
-    # large commits are also legitimate -- so the size guard warns and never blocks
+    # an oversized staged file is usually an artifact staged by accident, but a
+    # large commit is also legitimate -- so the size guard warns and never blocks
     cmd = ['diff', '--cached', '--name-only', '--diff-filter=d', '-z']
     raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
     staged = os.fsdecode(raw)
@@ -541,6 +518,117 @@ def commit_user_init(node: Node, message: str) -> str:
     return f'Committed user node baseline on {node.branch}.'
 
 
+@dataclasses.dataclass(frozen=True)
+class Scope:
+    """A node's commit boundaries.
+
+    One law for every surface that judges a node's paths: ``fractal
+    commit`` checks the worktree against it, and ``merge.sh`` checks the
+    staged squash through ``fractal node _scope``. ``roots`` are the
+    project-prefixed scope roots, each its own boundary (empty means
+    unbounded); ``node_prefix`` is the node data dir prefix, always
+    committable, or ``''`` when the project itself is the boundary;
+    ``wiki_prefix`` is the shared project wiki, committable regardless of
+    scope; ``fractal_prefix`` is the estates dir the stage sweep adds.
+    """
+
+    roots: tuple[str, ...]
+    node_prefix: str
+    wiki_prefix: str
+    fractal_prefix: str
+
+
+def scope_boundaries(node: Node) -> Scope:
+    """Resolve a node's commit boundaries from its project and scope.
+
+    Each scope root is its own boundary, nested under the project prefix
+    for a sub-project node; a sub-project node with no roots is bounded to
+    its project dir, and a repo-root node with no roots is unbounded.
+
+    Args:
+        node: The node whose boundaries to resolve.
+
+    Returns:
+        The boundaries.
+
+    """
+    project = node.project_path
+    configured = node.config.get('scope') or []
+    # a '.' root names the project itself, and subsumes any sibling root --
+    # collapse the whole scope so the boundary becomes the project dir (or
+    # unbounded at the repo root); kept out of the joins below: a literal
+    # './' (or '<project>/./') prefix matches no git path, so leaving it in
+    # place would put every changed file out of scope and refuse every commit;
+    # merge.sh re-derives these roots as SCOPE_ROOTS for its .fractal/ restore
+    # and conflict auto-resolve -- keep the collapse rule aligned
+    if any(not pathlib.PurePosixPath(root).parts for root in configured):
+        configured = []
+    if configured:
+        if project == '.':
+            roots = tuple(configured)
+            node_prefix = f'{FRACTAL_FOLDER}/'
+        else:
+            roots = tuple(f'{project}/{root}' for root in configured)
+            node_prefix = f'{project}/{FRACTAL_FOLDER}/'
+    elif project != '.':
+        roots = (project,)
+        node_prefix = ''
+    else:
+        roots = ()
+        node_prefix = ''
+    if project == '.':
+        wiki_prefix, fractal_prefix = 'wiki', FRACTAL_FOLDER
+    else:
+        wiki_prefix = f'{project}/wiki'
+        fractal_prefix = f'{project}/{FRACTAL_FOLDER}'
+    return Scope(roots, node_prefix, wiki_prefix, fractal_prefix)
+
+
+def out_of_scope(
+    paths: Iterable[str],
+    bounds: Scope,
+    *,
+    attributes_ok: bool,
+) -> list[str]:
+    """Return the paths outside a node's commit boundaries, sorted.
+
+    Literal prefix checks (not regex), so a scope/path with a regex
+    metachar (v1.2, app+web, a[b]) cannot widen the anchor and let a
+    sibling dir slip through as "in scope".
+
+    Args:
+        paths: Repo-relative paths.
+        bounds: The node's commit boundaries; empty roots mean unbounded,
+            so nothing is out of scope.
+        attributes_ok: Admit the worktree-root ``.gitattributes``: the
+            commit pipeline passes whether it is init's own uncommitted
+            edit, and the merge footprint check passes whether the target's
+            staged copy is that edit (a child's first squash carries it).
+
+    Returns:
+        The out-of-scope paths.
+
+    """
+    if not bounds.roots:
+        return []
+    offending = []
+    for path in sorted(set(paths)):
+        # in scope: under any commit scope dir
+        if any(path.startswith(f'{root}/') for root in bounds.roots):
+            continue
+        # the node data dir is always committable
+        if bounds.node_prefix and path.startswith(bounds.node_prefix):
+            continue
+        # the shared project wiki is committable regardless of scope
+        if path.startswith(f'{bounds.wiki_prefix}/'):
+            continue
+        # init's own worktree-root .gitattributes edit is committable
+        if path == '.gitattributes' and attributes_ok:
+            continue
+        offending.append(path)
+    return offending
+
+
 # ------ helper functions
 
 
@@ -582,34 +670,22 @@ def _check_clean(node: Node) -> None:
         )
 
 
-def _scope_check(
-    node: Node,
-    commit_scopes: list[str],
-    node_prefix: str,
-    wiki_prefix: str,
-) -> None:
+def _scope_check(node: Node, bounds: Scope) -> None:
     """Refuse changes outside the node's commit scopes.
 
     Args:
         node: The node whose worktree to check.
-        commit_scopes: Scope roots (project-prefixed), each its own
-            commit boundary.
-        node_prefix: The node data dir prefix (always committable), or
-            ``''`` when the project itself is the boundary.
-        wiki_prefix: The shared project wiki prefix (always committable).
+        bounds: The node's commit boundaries.
 
     Raises:
         RuntimeError: Naming every scope root and the offending paths.
 
     """
     worktree = node.worktree
-    # collect every changed path (working tree, index, untracked), then keep
-    # only those outside the allowed prefixes; literal prefix checks (not
-    # regex), so a scope/path with a regex metachar (v1.2, app+web, a[b])
-    # cannot widen the anchor and let a sibling dir slip through as "in
-    # scope"; -z everywhere so a non-ASCII path is never C-quoted (a quoted
-    # path starts with '"' and fails every prefix check); raw bytes so a
-    # first path's leading whitespace survives (run() strips)
+    # collect every changed path (working tree, index, untracked); -z
+    # everywhere so a non-ASCII path is never C-quoted (a quoted path
+    # starts with '"' and fails every prefix check); raw bytes so a first
+    # path's leading whitespace survives (run() strips)
     changed: set[str] = set()
     for cmd in (
         ['diff', '--name-only', '-z', 'HEAD'],
@@ -619,27 +695,17 @@ def _scope_check(
         raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
         listing = os.fsdecode(raw)
         changed.update(filter(None, listing.split('\0')))
-    out_of_scope = []
-    for path in sorted(changed):
-        if not path:
-            continue
-        # in scope: under any commit scope dir
-        if any(path.startswith(f'{scope}/') for scope in commit_scopes):
-            continue
-        # the node data dir is always committable
-        if node_prefix and path.startswith(node_prefix):
-            continue
-        # the shared project wiki is committable regardless of scope
-        if path.startswith(f'{wiki_prefix}/'):
-            continue
-        # init's own worktree-root .gitattributes edit is committable
-        if path == '.gitattributes' and _attributes_is_init_edit(node):
-            continue
-        out_of_scope.append(path)
-    if out_of_scope:
-        roots = ' '.join(f'{scope}/' for scope in commit_scopes)
-        listing = '\n'.join(out_of_scope)
+    attributes_ok = _attributes_is_init_edit(node)
+    offending = out_of_scope(changed, bounds, attributes_ok=attributes_ok)
+    if offending:
+        roots = ' '.join(f'{root}/' for root in bounds.roots)
+        listing = '\n'.join(offending)
         raise RuntimeError(f'Changes outside node scope ({roots}):\n{listing}')
+
+
+#: the lines the wiki tool appends to the worktree-root .gitattributes at
+#: init; merge.sh's footprint check mirrors them for the target's staged copy
+_ATTRIBUTES_INIT_LINES = ('# Wiki index merge driver', '**/_index.md merge=wiki')
 
 
 def _attributes_is_init_edit(node: Node) -> bool:
@@ -647,26 +713,33 @@ def _attributes_is_init_edit(node: Node) -> bool:
 
     Init writes the memory wiki's ``**/_index.md merge=wiki`` attribute at
     the worktree root when the base lacks it -- an artifact outside every
-    scope root, committable exactly while it is init's own uncommitted edit
-    (in the working file but not in HEAD's copy). The match is line-exact so
-    an attribute line assigning some other merge driver to ``_index.md`` is
-    never mistaken for init's own.
+    scope root, committable exactly while it is init's own uncommitted edit:
+    HEAD's content followed by exactly the lines the wiki tool appends. The
+    match is line-exact and covers the whole change, so an attribute line
+    assigning some other merge driver, or any other line riding beside
+    init's, makes the file an ordinary out-of-scope path.
 
     Args:
         node: The node whose worktree to check.
 
     Returns:
-        Whether the attribute is present and uncommitted.
+        Whether the file is HEAD's copy plus init's lines.
 
     """
     attributes = node.worktree / '.gitattributes'
     if not attributes.is_file():
         return False
     text = attributes.read_text(encoding='utf-8')
+    # raw bytes: a stripped read would drop a leading blank line or trailing
+    # whitespace from HEAD's copy alone and fail the prefix comparison
     cmd = ['show', 'HEAD:.gitattributes']
-    committed = fractal.util.git.run(cmd, cwd=node.worktree, check=False) or ''
-    attribute = '**/_index.md merge=wiki'
-    return attribute in text.splitlines() and attribute not in committed.splitlines()
+    committed = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+    committed_lines = committed.decode('utf-8').splitlines()
+    lines = text.splitlines()
+    if lines[: len(committed_lines)] != committed_lines:
+        return False
+    added = [line for line in lines[len(committed_lines) :] if line]
+    return added == list(_ATTRIBUTES_INIT_LINES)
 
 
 #: estate subdirectories whose contents are node records canon requires
@@ -697,7 +770,7 @@ _TOOL_STATE_FILES = ('.gitkeep',)
 
 
 def _is_committable(relpath: str, estate: str) -> bool:
-    """Whether an estate-relative path is content a node may commit.
+    """Return whether an estate-relative path is content a node may commit.
 
     One law governs both estate staging paths, because both decide what
     a node's own directory folds into git history: anything a node
@@ -725,9 +798,8 @@ def _is_committable(relpath: str, estate: str) -> bool:
         return False
     # a dot-named directory is machine or agent state (an agent config dir,
     # a parked .ssh/) unless it is the estate's own tool state
-    if any(
-        part.startswith('.') and part not in _TOOL_STATE_DIRS for part in parts[1:-1]
-    ):
+    dot_dirs = [part for part in parts[1:-1] if part.startswith('.')]
+    if any(part not in _TOOL_STATE_DIRS for part in dot_dirs):
         return False
     # the leaf is either named tool state or a record at a text suffix, so
     # no pass can stage a key, a certificate, an archive, or a binary
@@ -737,7 +809,7 @@ def _is_committable(relpath: str, estate: str) -> bool:
 
 
 def _is_refused_estate(relpath: str, fractal_prefix: str) -> bool:
-    """Whether a worktree path is estate content no staging pass may commit.
+    """Return whether a worktree path is estate content no staging pass may commit.
 
     Args:
         relpath: The file's worktree-relative path.
@@ -787,10 +859,10 @@ def _stage(
     worktree = node.worktree
     # settle the estate content law before any sweep, and withhold what it
     # refuses by name: what a node's own directory folds into history must
-    # not turn on whether a host rule happens to fence it. Naming refused
+    # not turn on whether a host rule happens to fence it; naming refused
     # paths (never a whole estate) keeps the sweeps whole -- an exclude
     # matching an ignored path fails the add outright, and an ignored path
-    # is already outside the sweep anyway.
+    # is already outside the sweep anyway
     denied = _estate_denied(node, fractal_prefix)
     withheld = [f':(exclude,literal){path}' for path in denied]
     # heal a baseline that force-tracked the wiki tool's self-ignored derived
@@ -839,7 +911,7 @@ def _stage(
 
 
 def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
-    """The estate directories the content law governs.
+    """Return the estate directories the content law governs.
 
     A self-ignored seed dir (the user node's untracked-by-design state)
     is not an estate the law speaks for, so it is left alone.
@@ -863,7 +935,7 @@ def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
 
 
 def _estate_denied(node: Node, fractal_prefix: str) -> list[str]:
-    """Estate content the law refuses to let a plain add stage.
+    """Return the estate content the law refuses to let a plain add stage.
 
     The plain adds would otherwise take anything a node parked in its
     estate -- a dotenv, a key, a downloaded credential -- the moment no
@@ -939,9 +1011,9 @@ def _stage_records(node: Node, fractal_prefix: str, denied: list[str]) -> list[s
         # a broad foreign line shadows the block while barring the very same
         # artifact) plus the repo's committed per-directory .gitignore files
         # (repo content a node can see and fix; an estate cache's self-ignore
-        # rides here). The machine-local layers -- info/exclude beyond the
+        # rides here); the machine-local layers -- info/exclude beyond the
         # template's rules, core.excludesFile -- are deliberately absent:
-        # their holds are exactly what the force pass overrides.
+        # their holds are exactly what the force pass overrides
         assets = pathlib.Path(__file__).parent.parent / '_assets'
         template = assets / 'git' / 'exclude'
         cmd = [
@@ -1120,21 +1192,23 @@ def _hook_retry(
         # is meaningless for a byte-guarded seed page and vice versa
         details = []
         if broken:
+            listing = ', '.join(broken)
             details.append(
-                f'wiki pages with broken structure: {", ".join(broken)}'
+                f'wiki pages with broken structure: {listing}'
                 ' (hook rewrites of wiki pages must preserve wikilinks,'
-                ' frontmatter, and *** separators — give mdformat the'
+                ' frontmatter, and *** separators -- give mdformat the'
                 ' wikilink-aware plugin (additional_dependencies:'
                 ' [mdformat-wiki] on its hook, dropping mdformat-frontmatter'
-                ' if present — both register a frontmatter renderer and'
+                ' if present -- both register a frontmatter renderer and'
                 ' whichever is discovered first wins), or keep formatters'
                 ' off the wiki paths)'
             )
         if byte_gated:
+            listing = ', '.join(byte_gated)
             details.append(
-                f'byte-guarded pages: {", ".join(byte_gated)}'
+                f'byte-guarded pages: {listing}'
                 ' (seed and machine pages must never be rewritten by hooks'
-                ' — keep formatters off the .fractal/ paths)'
+                ' -- keep formatters off the .fractal/ paths)'
             )
         detail = '; '.join(details)
         raise RuntimeError(
@@ -1147,9 +1221,8 @@ def _hook_retry(
     # frontmatter values behind an intact fence, damage `wiki update` then
     # propagates into parent link rows and lint.sh only soft-warns -- so
     # lint every wiki root the hook touched, blaming the hook only for the
-    # roots that linted clean before its rewrite (a pre-existing failure
-    # keeps the pipeline's soft-warn tolerance instead of dead-ending every
-    # commit)
+    # roots that linted clean before its rewrite (a pre-existing failure keeps
+    # the pipeline's soft-warn tolerance instead of dead-ending every commit)
     notices: list[str] = []
     if retry:
         roots = set()
@@ -1224,7 +1297,7 @@ def _structure_preserved(
     tree_after: str,
     path: str,
 ) -> bool:
-    r"""Whether a hook's rewrite of a guarded page preserved wiki structure.
+    r"""Return whether a hook's rewrite of a guarded page preserved wiki structure.
 
     Compares the authored bytes against the rewrite on the invariants a
     structure-blind formatter breaks -- the wikilink opener count
@@ -1293,7 +1366,7 @@ def _lints_clean_at(
     wiki_cli: str,
     env: dict[str, str],
 ) -> bool:
-    """Whether the wiki root under ``root`` linted clean at ``tree``.
+    """Return whether the wiki root under ``root`` linted clean at ``tree``.
 
     Materializes the tree's root into a temp dir (``git archive``) and lints
     it there, so a pre-existing failure -- one the pipeline soft-warns on

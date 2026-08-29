@@ -6,13 +6,14 @@ import os
 import pathlib
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
 import fractal.util
 from fractal.core import commit
 from fractal.core.node import Node
+from tests._helpers import _git
 
 from .conftest import (
     _make_git_repo,
@@ -21,23 +22,17 @@ from .conftest import (
     _spawn_parent_child,
 )
 
-#: the console script beside the running interpreter -- a bare name would
-#: resolve through a shim to whatever install the ambient PATH front-runs
-_FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
-
 __all__ = [
     'test_user_node_commit_init_commits_baseline',
     'test_commit_pushes_unless_local',
+    'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
-    'test_commit_excludes_registry_sidecars',
-    'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_commit_excludes_project_registry_sidecars',
     'test_commit_stages_node_records_past_external_excludes',
     'test_stage_records_tolerates_a_vanished_held_file',
     'test_stage_records_survives_an_unreadable_held_file',
     'test_skip_alarm_covers_foreign_info_exclude_lines',
-    'test_commit_excludes_registry_sidecars',
-    'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_record_force_add_refuses_non_record_files',
     'test_estate_add_refuses_non_record_files_with_no_ignore_layer',
     'test_estate_commits_its_own_tool_state',
@@ -51,8 +46,10 @@ __all__ = [
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
     'test_multi_scope_commit_boundary',
     'test_dot_scope_root_bounds_the_whole_project',
+    'test_sub_project_commit_boundary',
     'test_scoped_commit_handles_non_ascii_and_whitespace_paths',
     'test_scoped_child_baseline_commits_init_gitattributes',
+    'test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes',
     'test_commit_check_detects_untracked_work',
     'test_commit_surfaces_hook_aborted_commit',
     'test_commit_retries_after_reformat_hook',
@@ -61,11 +58,15 @@ __all__ = [
     'test_lint_runs_standalone_without_node_dir',
 ]
 
+# the console script beside the running interpreter -- a bare name would
+# resolve through a shim to whatever install the ambient PATH front-runs
+_FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
+
 
 # ------ baselines and pushes
 
 
-@pytest.mark.parametrize('track', [False, True])
+@pytest.mark.parametrize('track', [False, True], ids=['untracked', 'tracked'])
 def test_user_node_commit_init_commits_baseline(
     git_repo: pathlib.Path,
     track: bool,
@@ -83,7 +84,7 @@ def test_user_node_commit_init_commits_baseline(
     node.init(agent='claude', user=True)
     if track:
         subprocess.run(
-            ['fractal', 'track'],
+            [f'{_FRACTAL_BIN}', 'track'],
             cwd=git_repo,
             capture_output=True,
             text=True,
@@ -94,13 +95,7 @@ def test_user_node_commit_init_commits_baseline(
         node.commit('x')
 
     def _head() -> str:
-        result = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
-            cwd=git_repo,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = _git(git_repo, 'rev-parse', 'HEAD')
         return result.stdout.strip()
 
     # the baseline commits without error and always tracks the project wiki; the
@@ -126,13 +121,7 @@ def test_user_node_commit_init_commits_baseline(
     # is already committed by the fixture, so the baseline is legitimately a no-op
     if track:
         assert _head() != before
-    result = subprocess.run(
-        ['git', 'ls-files', '.fractal', 'wiki'],
-        cwd=git_repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(git_repo, 'ls-files', '.fractal', 'wiki')
     tracked = result.stdout
     assert 'wiki/_index.md' in tracked
     assert ('.fractal/main/config.json' in tracked) == track
@@ -152,18 +141,9 @@ def test_commit_pushes_unless_local(tmp_path: pathlib.Path) -> None:
     """
     # bare remote wired as origin
     remote = tmp_path / 'remote.git'
-    subprocess.run(
-        ['git', 'init', '--bare', f'{remote}'],
-        capture_output=True,
-        check=True,
-    )
+    _git(tmp_path, 'init', '--bare', f'{remote}')
     repo = _make_git_repo(tmp_path / 'repo')
-    subprocess.run(
-        ['git', 'remote', 'add', 'origin', f'{remote}'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(repo, 'remote', 'add', 'origin', f'{remote}')
     Node(repo).init(agent='claude', user=True)
 
     def _commit_node(name: str, *, local: bool) -> str:
@@ -171,13 +151,8 @@ def test_commit_pushes_unless_local(tmp_path: pathlib.Path) -> None:
         project_dir = _parse_project_dir(output)
         branch = _resolve_branch(project_dir)
         # configure git user in the worktree
-        for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-            subprocess.run(
-                ['git', 'config', key, val],
-                cwd=project_dir,
-                capture_output=True,
-                check=True,
-            )
+        _git(project_dir, 'config', 'user.email', 'test@test.com')
+        _git(project_dir, 'config', 'user.name', 'Test')
         # baseline commit through the real path (--init skips the empty-memory
         # lint stub but still pushes unless local)
         (project_dir / f'{name}.txt').write_text('work\n', encoding='utf-8')
@@ -188,15 +163,50 @@ def test_commit_pushes_unless_local(tmp_path: pathlib.Path) -> None:
     held = _commit_node('held', local=True)
 
     # the non-local node's branch reaches the remote; the local one does not
-    result = subprocess.run(
-        ['git', 'ls-remote', '--heads', f'{remote}'],
+    result = _git(tmp_path, 'ls-remote', '--heads', f'{remote}')
+    refs = result.stdout
+    assert pushed in refs
+    assert held not in refs
+
+
+def test_user_init_baseline_survives_a_hostile_external_ignore(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The baseline commits its seed and wiki past a broad external ignore.
+
+    ``fractal init`` writes the user node's seed and the project wiki and
+    must land them as the tree's baseline; a machine-local ``/.fractal/``
+    line (or a host ``.gitignore``) would otherwise silently empty the
+    pathspec and leave a tree whose baseline never happened.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    _git(repo, 'config', 'user.email', 'test@test.com')
+    _git(repo, 'config', 'user.name', 'Test')
+    # the hostile layer, in place BEFORE init writes anything
+    exclude = repo / '.git' / 'info' / 'exclude'
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write('/.fractal/\nwiki/\n')
+    Node(repo).init(agent='claude', user=True)
+    # opt the tree in, so the seed is committable at all (the self-ignore
+    # is fractal's own choice; the hostile layer above is the operator's)
+    subprocess.run(
+        [f'{_FRACTAL_BIN}', 'track'],
+        cwd=repo,
         capture_output=True,
         text=True,
         check=True,
     )
-    refs = result.stdout
-    assert pushed in refs
-    assert held not in refs
+    node = Node(repo)
+    node.commit('configure', init=True)
+
+    tracked = _git(repo, 'ls-files').stdout
+    # the seed and the wiki are on the branch despite both ignore rules
+    assert '.fractal/main/config.json' in tracked
+    assert 'wiki/_index.md' in tracked
+    # runtime state still never rides the baseline
+    assert '.status' not in tracked
+    assert '.db' not in tracked
 
 
 # ------ events, staging, and subjects
@@ -215,22 +225,12 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
     branch = _resolve_branch(project_dir)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
     def _head() -> str:
-        result = subprocess.run(
-            ['git', '-C', f'{project_dir}', 'rev-parse', 'HEAD'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = _git(project_dir, 'rev-parse', 'HEAD')
         return result.stdout.strip()
 
     # freshen both generated wikis up front -- the pipeline's index refresh
@@ -272,12 +272,7 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
         encoding='utf-8',
     )
     hook.chmod(0o755)
-    subprocess.run(
-        ['git', 'config', 'core.hooksPath', f'{hooks_dir}'],
-        cwd=project_dir,
-        capture_output=True,
-        check=True,
-    )
+    _git(project_dir, 'config', 'core.hooksPath', f'{hooks_dir}')
 
     # a real (non-init) commit through the abort-and-retry path -- the marker
     # proves the hook actually fired, so the retry was exercised
@@ -294,12 +289,7 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
     events = node.db.read('events', where={'event': 'commit'})
     assert [row['metadata'] for row in events] == [_head()]
     # the subject carries no repo-name prefix
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'log', '-1', '--format=%s'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'log', '-1', '--format=%s')
     subject = result.stdout.strip()
     assert subject.startswith(f'{branch}: iteration ')
     assert subject.endswith('(do the work)')
@@ -317,13 +307,8 @@ def test_commit_excludes_write_atomic_temp_files(tmp_path: pathlib.Path) -> None
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
     # a real work file plus a write_atomic-shaped crash residue beside it
@@ -331,18 +316,21 @@ def test_commit_excludes_write_atomic_temp_files(tmp_path: pathlib.Path) -> None
     (project_dir / '.work.txt-a1b2c3.tmp').write_text('half\n', encoding='utf-8')
     node.commit('do the work', force=True)
 
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files')
     tracked = result.stdout
     assert 'work.txt' in tracked
     assert '.work.txt-a1b2c3.tmp' not in tracked
 
 
-def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    argnames='folder',
+    argvalues=['.', '.fractal'],
+    ids=['worktree-root', 'node-dir'],
+)
+def test_commit_excludes_project_registry_sidecars(
+    tmp_path: pathlib.Path,
+    folder: str,
+) -> None:
     """A legacy ``registry.db``'s SQLite sidecars never ride a work commit.
 
     SQLite writes ``-wal``/``-shm`` (WAL mode) or ``-journal`` (rollback)
@@ -350,37 +338,29 @@ def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
     capture of a database another process is mid-write on, plus perpetual
     churn commits as it mutates -- the exact reason the modern spelling is
     barred as a ``.db``/``.db-*`` pair. The legacy spelling gets the same
-    pair, in the stage excludes and the exclude template alike.
+    pair, in the stage excludes and the exclude template alike, wherever
+    the DB sits -- the worktree root or beside the node's seed dir.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
     # a work file plus a legacy DB and a live writer's sidecars beside it
     (project_dir / 'work.txt').write_text('real work\n', encoding='utf-8')
     sidecars = ('registry.db-wal', 'registry.db-shm', 'registry.db-journal')
     for name in ('registry.db', *sidecars):
-        (project_dir / name).write_text('', encoding='utf-8')
+        (project_dir / folder / name).write_text('', encoding='utf-8')
     node.commit('do the work', force=True)
 
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files')
     tracked = result.stdout
     assert 'work.txt' in tracked
-    assert 'registry.db' not in tracked
+    for name in ('registry.db', *sidecars):
+        assert name not in tracked, name
 
 
 def test_commit_stages_node_records_past_external_excludes(
@@ -388,8 +368,8 @@ def test_commit_stages_node_records_past_external_excludes(
 ) -> None:
     """Node records commit under a broad external ignore rule; runtime never.
 
-    One ``/.fractal/`` line in the shared ``.git/info/exclude`` broke every
-    node's commit fleet-wide: the plain add honors the rule and either
+    A single ``/.fractal/`` line in the shared ``.git/info/exclude`` would
+    break every node's commit: the plain add honors the rule and either
     silently unstages the audit trail or hard-fails the whole add. The
     record pass owns the node dir with ``git add -f``, so record custody
     never depends on git ignore state -- while the runtime artifacts the
@@ -400,16 +380,11 @@ def test_commit_stages_node_records_past_external_excludes(
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    # the incident's exclude: everything under .fractal ignored, appended
+    # a hostile exclude: everything under .fractal ignored, appended
     # OUTSIDE fractal's managed block (worktrees share info/exclude)
     exclude = repo / '.git' / 'info' / 'exclude'
     with exclude.open('a', encoding='utf-8') as handle:
@@ -430,12 +405,7 @@ def test_commit_stages_node_records_past_external_excludes(
     sidecar.write_text('', encoding='utf-8')
     node.commit('record custody', force=True)
 
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files')
     tracked = result.stdout
     # the record landed despite the broad exclude ...
     assert 'memory/state.md' in tracked
@@ -467,16 +437,11 @@ def test_stage_records_tolerates_a_vanished_held_file(
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    # the incident's exclude: everything under .fractal externally ignored,
+    # a hostile exclude: everything under .fractal externally ignored,
     # so the record pass owns both files below
     exclude = repo / '.git' / 'info' / 'exclude'
     with exclude.open('a', encoding='utf-8') as handle:
@@ -499,12 +464,7 @@ def test_stage_records_tolerates_a_vanished_held_file(
     monkeypatch.setattr('fractal.util.git.run_bytes', racing_run_bytes)
     node.commit('record custody', force=True)
 
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files')
     tracked = result.stdout
     # the surviving record landed; the vanished one is simply absent
     assert 'memory/state.md' in tracked
@@ -527,15 +487,10 @@ def test_stage_records_survives_an_unreadable_held_file(
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
-    # the incident's exclude: everything under .fractal externally ignored,
+    # a hostile exclude: everything under .fractal externally ignored,
     # so the record pass owns both files below
     exclude = repo / '.git' / 'info' / 'exclude'
     with exclude.open('a', encoding='utf-8') as handle:
@@ -549,12 +504,7 @@ def test_stage_records_survives_an_unreadable_held_file(
     doomed.chmod(0)
     result = node.commit('backstop save', force=True)
 
-    tracked = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    tracked = _git(project_dir, 'ls-files').stdout
     # the healthy record landed; the unreadable one is named, never fatal
     assert 'memory/irreplaceable.md' in tracked
     assert 'plans/0099-doomed.md' not in tracked
@@ -577,13 +527,8 @@ def test_skip_alarm_covers_foreign_info_exclude_lines(
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     # a path held only by fractal's own block (the tmp/ scratch pattern)
     # is an intentional runtime ignore -- no alarm
@@ -605,43 +550,6 @@ def test_skip_alarm_covers_foreign_info_exclude_lines(
     assert 'skipped by ignore rules' in result
 
 
-def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
-    """A registry database's SQLite sidecars never ride a commit.
-
-    ``registry.db-wal``/``-shm``/``-journal`` are mid-write runtime state:
-    committing one stages a torn snapshot of a database whose main file is
-    excluded, and the pair can never be read back consistently. The main
-    file was fenced already; the sidecars share its fate.
-    """
-    repo = _make_git_repo(tmp_path / 'repo')
-    Node(repo).init(agent='claude', user=True)
-    output = Node(repo).init(name='task', agent='claude', local=True)
-    project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
-    node = Node(project_dir)
-    folder = node.node_dir.parent
-    for name in ('registry.db', 'registry.db-wal', 'registry.db-shm'):
-        (folder / name).write_bytes(b'sqlite')
-    (project_dir / 'work.txt').write_text('real work\n', encoding='utf-8')
-    node.commit('sidecar sweep', force=True)
-
-    tracked = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    assert 'work.txt' in tracked
-    for name in ('registry.db', 'registry.db-wal', 'registry.db-shm'):
-        assert name not in tracked, name
-
-
 def test_record_force_add_refuses_non_record_files(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -658,15 +566,10 @@ def test_record_force_add_refuses_non_record_files(
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
-    # the incident's exclude: everything under .fractal ignored
+    # a hostile exclude: everything under .fractal ignored
     exclude = repo / '.git' / 'info' / 'exclude'
     with exclude.open('a', encoding='utf-8') as handle:
         handle.write('/.fractal/\n')
@@ -680,12 +583,7 @@ def test_record_force_add_refuses_non_record_files(
     (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
     result = node.commit('record custody', force=True)
 
-    tracked = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    tracked = _git(project_dir, 'ls-files').stdout
     # the record landed; nothing secret-shaped or binary did
     assert 'memory/state.md' in tracked
     for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
@@ -719,32 +617,23 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     # no hostile exclude this time: nothing fences the estate at all
     memory = node.node_dir / 'memory' / 'state.md'
     memory.parent.mkdir(parents=True, exist_ok=True)
     memory.write_text('finding of record\n', encoding='utf-8')
     (node.node_dir / '.env').write_text(
-        'AWS_SECRET_ACCESS_KEY=hunter2\n', encoding='utf-8'
+        'AWS_SECRET_ACCESS_KEY=hunter2\n',
+        encoding='utf-8',
     )
     (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
     (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
     (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
     result = node.commit('plain add path')
 
-    tracked = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    tracked = _git(project_dir, 'ls-files').stdout
     # the record landed; nothing secret-shaped or binary did
     assert 'memory/state.md' in tracked
     for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
@@ -758,18 +647,8 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
     # (the memory wiki's index refresh owns the frontmatter around the body)
     memory.write_text('finding of record, revised\n', encoding='utf-8')
     node.commit('record upkeep')
-    committed = subprocess.run(
-        [
-            'git',
-            '-C',
-            f'{project_dir}',
-            'show',
-            'HEAD:.fractal/main.task/memory/state.md',
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    listing = _git(project_dir, 'show', 'HEAD:.fractal/main.task/memory/state.md')
+    committed = listing.stdout
     assert 'finding of record, revised' in committed
 
 
@@ -790,23 +669,13 @@ def test_estate_commits_its_own_tool_state(tmp_path: pathlib.Path) -> None:
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
     result = node.commit('ordinary work')
 
-    tracked = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    tracked = _git(project_dir, 'ls-files').stdout
     # the estate's own tool state rides the commit beside the records
     estate = '.fractal/main.task'
     for state in (f'{estate}/plans/.gitkeep', f'{estate}/memory/.wiki/settings.json'):
@@ -835,13 +704,8 @@ def test_refused_estate_content_leaves_the_clean_check_quiet(
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
     node.commit('ordinary work')
@@ -854,12 +718,7 @@ def test_refused_estate_content_leaves_the_clean_check_quiet(
     (keys / 'id_ed25519').write_text('PRIVATE KEY\n', encoding='utf-8')
     result = node.commit('work beside parked credentials')
 
-    tracked = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    tracked = _git(project_dir, 'ls-files').stdout
     for parked in ('.env', 'id_ed25519'):
         assert parked not in tracked, parked
         assert parked in result, parked
@@ -887,23 +746,13 @@ def test_commit_stamps_iteration_from_args_or_open_row(
     project_dir = _parse_project_dir(output)
     branch = _resolve_branch(project_dir)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     node.commit('baseline', init=True)
 
     def _subject() -> str:
-        result = subprocess.run(
-            ['git', '-C', f'{project_dir}', 'log', '-1', '--format=%s'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = _git(project_dir, 'log', '-1', '--format=%s')
         return result.stdout.strip()
 
     # no open iteration and no exported loop env: the label falls back to 0
@@ -961,13 +810,8 @@ def test_commit_rejects_prelabeled_agent_messages(tmp_path: pathlib.Path) -> Non
     project_dir = _parse_project_dir(output)
     branch = _resolve_branch(project_dir)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     # baseline, then stub the lint gate (not under test)
     node.commit('baseline', init=True)
@@ -1007,13 +851,8 @@ def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path) -> None:
     project_dir = _parse_project_dir(output)
     branch = _resolve_branch(project_dir)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     node.commit('baseline', init=True)
     # new pages in both wikis, with the generated indexes left stale
@@ -1028,24 +867,14 @@ def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path) -> None:
     node.commit('add topic and finding pages')
 
     def _committed(path: str) -> str:
-        result = subprocess.run(
-            ['git', '-C', f'{project_dir}', 'show', f'HEAD:{path}'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = _git(project_dir, 'show', f'HEAD:{path}')
         return result.stdout
 
     # both committed indexes carry the regenerated link rows...
     assert '[[topic' in _committed('wiki/_index.md')
     assert '[[finding' in _committed(f'.fractal/{branch}/memory/_index.md')
     # ...and the refresh left nothing behind for a later commit to sweep
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'status', '--porcelain'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'status', '--porcelain')
     status = result.stdout
     assert status == ''
 
@@ -1065,13 +894,8 @@ def test_commit_untracks_a_pretracked_wiki_cache(tmp_path: pathlib.Path) -> None
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     # a legacy baseline that force-tracked the derived cache past its ignore
     wiki_dir = project_dir / 'wiki'
@@ -1080,34 +904,14 @@ def test_commit_untracks_a_pretracked_wiki_cache(tmp_path: pathlib.Path) -> None
         capture_output=True,
         check=True,
     )
-    subprocess.run(
-        ['git', 'add', '-A'],
-        cwd=project_dir,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ['git', 'add', '-f', '--', 'wiki/.wiki/cache'],
-        cwd=project_dir,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ['git', 'commit', '-m', 'legacy baseline tracks the cache'],
-        cwd=project_dir,
-        capture_output=True,
-        check=True,
-    )
+    _git(project_dir, 'add', '-A')
+    _git(project_dir, 'add', '-f', '--', 'wiki/.wiki/cache')
+    _git(project_dir, 'commit', '-m', 'legacy baseline tracks the cache')
     # a work commit drops the cache from tracking and keeps the disk copy
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
     node.commit('do the work')
 
-    tracked = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files', 'wiki'],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    tracked = _git(project_dir, 'ls-files', 'wiki').stdout
     assert '.wiki/cache' not in tracked
     assert (wiki_dir / '.wiki' / 'cache' / 'word_counts.json').is_file()
     # untracked again, the refresh's rewrites stay invisible: the tree reads
@@ -1130,22 +934,12 @@ def test_commit_update_failure_blocks_commit_but_not_backstops(
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
     def _head() -> str:
-        result = subprocess.run(
-            ['git', '-C', f'{project_dir}', 'rev-parse', 'HEAD'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = _git(project_dir, 'rev-parse', 'HEAD')
         return result.stdout.strip()
 
     # a conflict-marked wiki page -- `wiki update` refuses to write over it
@@ -1181,21 +975,15 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     project_dir = _parse_project_dir(output)
     branch = _resolve_branch(project_dir)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     node.commit('baseline', init=True)
     # a tracked host ignore rule eats a workspace file (the skip warning), an
     # oversized file trips the size warning, and real work rides the sweep
     gitignore = project_dir / '.gitignore'
-    gitignore.write_text(
-        gitignore.read_text(encoding='utf-8') + 'eaten.log\n', encoding='utf-8'
-    )
+    ignored = gitignore.read_text(encoding='utf-8') + 'eaten.log\n'
+    gitignore.write_text(ignored, encoding='utf-8')
     (project_dir / 'eaten.log').write_text('eaten\n', encoding='utf-8')
     (project_dir / 'blob.bin').write_bytes(b'\0' * (11 * 1024 * 1024))
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
@@ -1218,12 +1006,7 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     )
 
     def _log(fmt: str) -> str:
-        result = subprocess.run(
-            ['git', '-C', f'{project_dir}', 'log', '-1', f'--format={fmt}'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = _git(project_dir, 'log', '-1', f'--format={fmt}')
         return result.stdout.strip()
 
     # the subject is the run-qualified backstop label
@@ -1261,13 +1044,8 @@ def test_commit_ignore_scope_bypasses_scope_but_not_lint(
     project_dir = _parse_project_dir(output)
     branch = _resolve_branch(project_dir)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     # baseline (clean tree), then scope the node to a subdir that holds no changes
     node.commit('baseline', init=True)
@@ -1288,12 +1066,7 @@ def test_commit_ignore_scope_bypasses_scope_but_not_lint(
     # --ignore-scope commits the out-of-scope change once lint passes
     lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
     node.commit('touch outside', ignore_scope=True)
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files', 'outside.txt'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files', 'outside.txt')
     tracked = result.stdout
     assert 'outside.txt' in tracked
 
@@ -1321,13 +1094,8 @@ def test_multi_scope_commit_boundary(tmp_path: pathlib.Path) -> None:
     )
     project_dir = _parse_project_dir(output)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     # baseline cleans the tree (sweeping init's root .gitattributes); stub the
     # lint gate (not under test) so the boundary check alone decides
@@ -1341,12 +1109,7 @@ def test_multi_scope_commit_boundary(tmp_path: pathlib.Path) -> None:
         work = project_dir / scope_root / 'work.txt'
         work.write_text('in-scope work\n', encoding='utf-8')
     node.commit('touch both roots')
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files', 'inscope_a', 'inscope_b'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files', 'inscope_a', 'inscope_b')
     tracked = result.stdout
     assert 'inscope_a/work.txt' in tracked
     assert 'inscope_b/work.txt' in tracked
@@ -1376,13 +1139,8 @@ def test_dot_scope_root_bounds_the_whole_project(tmp_path: pathlib.Path) -> None
     )
     project_dir = _parse_project_dir(output)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     # '.' is its own canonical form, so the setter's normalization keeps it
     assert node.config.get('scope') == ['.']
@@ -1397,15 +1155,82 @@ def test_dot_scope_root_bounds_the_whole_project(tmp_path: pathlib.Path) -> None
     (project_dir / 'nested' / 'work.txt').write_text('nested work\n', encoding='utf-8')
     (project_dir / 'root.txt').write_text('root work\n', encoding='utf-8')
     node.commit('touch the whole project')
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files')
     tracked = result.stdout
     assert 'nested/work.txt' in tracked
     assert 'root.txt' in tracked
+
+
+@pytest.mark.parametrize(
+    argnames=('scope', 'inside', 'strays'),
+    argvalues=[
+        pytest.param(None, ['app/wiki/note.md'], ['wiki/note.md'], id='project-bound'),
+        pytest.param(
+            ['docs'],
+            ['app/docs/a.md'],
+            ['app/other.txt', 'root.txt'],
+            id='scoped-in-project',
+        ),
+    ],
+)
+def test_sub_project_commit_boundary(
+    tmp_path: pathlib.Path,
+    scope: Optional[list[str]],
+    inside: list[str],
+    strays: list[str],
+) -> None:
+    """A sub-project node's boundaries sit inside its project dir.
+
+    A node initialized with ``--path <project>`` owns that directory: with
+    no scope roots it is bounded to ``<project>/``, and its always-committable
+    wiki is the project's own, so the repo-root ``wiki/`` is as foreign as
+    any other path outside the project. Scope roots nest under the project
+    too -- a root of ``docs`` admits ``<project>/docs/`` alone, not the rest
+    of the project nor the repo root -- and the refusal names exactly the
+    paths outside them.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # a committed sub-project wiki -- the base-ref precondition for the init
+    app_wiki = repo / 'app' / 'wiki' / '_index.md'
+    app_wiki.parent.mkdir(parents=True)
+    app_wiki.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+    _git(repo, 'add', 'app')
+    _git(repo, 'commit', '-m', 'add app wiki')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        path='app',
+        scope=scope,
+    )
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    worktree = node.worktree
+    # baseline cleans the tree (sweeping init's root .gitattributes); stub the
+    # lint gate (not under test) so the boundary check alone decides
+    node.commit('baseline', init=True)
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+    # work inside and outside the boundaries refuses, naming
+    # exactly the paths outside
+    for path in (*inside, *strays):
+        (worktree / path).parent.mkdir(parents=True, exist_ok=True)
+        (worktree / path).write_text(f'{path}\n', encoding='utf-8')
+    with pytest.raises(RuntimeError) as excinfo:
+        node.commit('work in and out of the project')
+    listed = str(excinfo.value).split(':\n', 1)[1].splitlines()
+    assert listed == strays
+    # the inside work alone commits
+    for path in strays:
+        (worktree / path).unlink()
+    node.commit('work in the project')
+    result = _git(worktree, 'ls-files', *inside)
+    tracked = result.stdout.split()
+    assert tracked == inside
 
 
 def test_scoped_commit_handles_non_ascii_and_whitespace_paths(
@@ -1425,13 +1250,8 @@ def test_scoped_commit_handles_non_ascii_and_whitespace_paths(
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True, scope=['src'])
     project_dir = _parse_project_dir(output)
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     node.commit('baseline', init=True)
     branch = _resolve_branch(project_dir)
@@ -1441,12 +1261,7 @@ def test_scoped_commit_handles_non_ascii_and_whitespace_paths(
     (project_dir / 'src').mkdir()
     (project_dir / 'src' / 'café.md').write_text('# café\n', encoding='utf-8')
     node.commit('non-ascii in scope')
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files', '-z', 'src'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files', '-z', 'src')
     tracked = result.stdout
     assert 'src/café.md' in tracked
     # out-of-scope non-ASCII and leading-whitespace paths refuse, naming the
@@ -1460,16 +1275,74 @@ def test_scoped_commit_handles_non_ascii_and_whitespace_paths(
     assert '\n leading.txt' in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    argnames='base',
+    argvalues=[
+        pytest.param(None, id='no-base-file'),
+        pytest.param('\n*.md text\n', id='leading-blank-line'),
+        pytest.param('*.md text  \n', id='trailing-spaces'),
+    ],
+)
 def test_scoped_child_baseline_commits_init_gitattributes(
     tmp_path: pathlib.Path,
+    base: Optional[str],
 ) -> None:
     """A scoped child's baseline sweeps the ``.gitattributes`` init wrote.
 
-    Node init writes a worktree-root ``.gitattributes`` (the
-    memory wiki's ``merge=wiki`` attribute) when the base lacks it --
-    an init artifact outside every scope root, which a scoped child's baseline
-    would otherwise refuse as out-of-scope, leaving the tree dirty forever. The
-    baseline must sweep init's own artifact, like the user-init commit does.
+    Node init writes a worktree-root ``.gitattributes`` (the memory wiki's
+    ``merge=wiki`` attribute) when the base lacks it -- an init artifact
+    outside every scope root, which a scoped child's baseline would otherwise
+    refuse as out-of-scope, leaving the tree dirty forever. The baseline must
+    sweep init's own artifact, like the user-init commit does -- over a base
+    with no file, and over one whose own lines the tool appends to, compared
+    byte for byte: a stripped read of HEAD's copy would lose a leading blank
+    line or trailing whitespace and miss init's edit.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    if base is not None:
+        (repo / '.gitattributes').write_text(base, encoding='utf-8')
+        _git(repo, 'add', '.gitattributes')
+        _git(repo, 'commit', '-m', 'own attributes')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        scope=['inscope'],
+    )
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # the baseline sweeps init's own artifact -- no manual add/commit first
+    node.commit('baseline', init=True)
+    # the artifact is committed: tracked on the branch and clean in the tree
+    result = _git(project_dir, 'ls-files', '.gitattributes')
+    tracked = result.stdout
+    assert '.gitattributes' in tracked
+    result = _git(project_dir, 'status', '--porcelain', '--', '.gitattributes')
+    status = result.stdout
+    assert status == ''
+    # the committed file is the base's own bytes followed by init's lines
+    result = _git(project_dir, 'show', 'HEAD:.gitattributes')
+    committed = result.stdout
+    assert committed.startswith(base or ''), committed
+    lines = [line for line in committed.splitlines() if line]
+    assert lines[-2:] == ['# Wiki index merge driver', '**/_index.md merge=wiki']
+
+
+def test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A foreign line in init's uncommitted ``.gitattributes`` puts it out of scope.
+
+    Init's ``.gitattributes`` edit is admitted past the scope check as a
+    whole: HEAD's content followed by exactly the two lines the wiki tool
+    appends. Any other line riding beside them -- an attribute an agent adds
+    while the init edit is still uncommitted -- makes the file an ordinary
+    out-of-scope path, so a scoped node's commit refuses it naming the file;
+    with the foreign line gone, the same baseline sweeps the edit in.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
@@ -1481,41 +1354,21 @@ def test_scoped_child_baseline_commits_init_gitattributes(
     )
     project_dir = _parse_project_dir(output)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
-    # the baseline sweeps init's own artifact -- no manual add/commit first
+    attributes = project_dir / '.gitattributes'
+    init_edit = attributes.read_text(encoding='utf-8')
+    # a foreign attribute beside init's lines refuses, naming the file
+    attributes.write_text(init_edit + '*.bin binary\n', encoding='utf-8')
+    with pytest.raises(RuntimeError, match=r'\.gitattributes'):
+        node.commit('baseline', init=True)
+    # init's edit alone sweeps in
+    attributes.write_text(init_edit, encoding='utf-8')
     node.commit('baseline', init=True)
-    # the artifact is committed: tracked on the branch and clean in the tree
-    result = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'ls-files', '.gitattributes'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    result = _git(project_dir, 'ls-files', '.gitattributes')
     tracked = result.stdout
     assert '.gitattributes' in tracked
-    result = subprocess.run(
-        [
-            'git',
-            '-C',
-            f'{project_dir}',
-            'status',
-            '--porcelain',
-            '--',
-            '.gitattributes',
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    status = result.stdout
-    assert status == ''
 
 
 # ------ the dirty-tree check
@@ -1525,26 +1378,22 @@ def test_commit_check_detects_untracked_work(tmp_path: pathlib.Path) -> None:
     """``commit(check=True)`` reports an untracked-only dirty tree as dirty.
 
     The loop's post-iteration safety net runs ``fractal commit --check`` and
-    force-commits when it reports the tree dirty (the loop's backstops). The tracked-only
-    query ``git diff --name-only HEAD`` never lists untracked files, so a step
-    that leaves only new untracked work would be reported clean -- the
-    force-commit skipped, and a later ``--continue`` (``git clean -fd``) would
-    discard the work. ``--check`` must use a query that sees untracked files,
-    and it sees only dirt the stage could commit: runtime artifacts barred by
-    the stage excludes stay invisible even when info/exclude is stale.
+    force-commits when it reports the tree dirty (the loop's backstops). The
+    tracked-only query ``git diff --name-only HEAD`` never lists untracked
+    files, so a step that leaves only new untracked work would be reported
+    clean -- the force-commit skipped, and a later ``--continue``
+    (``git clean -fd``) would discard the work. ``--check`` must use a query
+    that sees untracked files, and it sees only dirt the stage could commit:
+    runtime artifacts barred by the stage excludes stay invisible even when
+    info/exclude is stale.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     # baseline commit -- everything committed, tree clean
     node.commit('baseline', init=True)
@@ -1590,22 +1439,12 @@ def test_commit_surfaces_hook_aborted_commit(tmp_path: pathlib.Path) -> None:
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
     def _head() -> str:
-        result = subprocess.run(
-            ['git', '-C', f'{project_dir}', 'rev-parse', 'HEAD'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = _git(project_dir, 'rev-parse', 'HEAD')
         return result.stdout.strip()
 
     # baseline commit -- tree clean
@@ -1624,12 +1463,7 @@ def test_commit_surfaces_hook_aborted_commit(tmp_path: pathlib.Path) -> None:
         encoding='utf-8',
     )
     hook.chmod(0o755)
-    subprocess.run(
-        ['git', 'config', 'core.hooksPath', f'{hooks_dir}'],
-        cwd=project_dir,
-        capture_output=True,
-        check=True,
-    )
+    _git(project_dir, 'config', 'core.hooksPath', f'{hooks_dir}')
     # leave real work -- the script stages it, then the hook aborts the commit
     (project_dir / 'work.txt').write_text('iteration work\n', encoding='utf-8')
     # a masked abort would read as success: the aborted commit must surface
@@ -1656,22 +1490,12 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
     # configure git identity in the worktree
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
     def _head() -> str:
-        result = subprocess.run(
-            ['git', '-C', f'{project_dir}', 'rev-parse', 'HEAD'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = _git(project_dir, 'rev-parse', 'HEAD')
         return result.stdout.strip()
 
     node.commit('baseline', init=True)
@@ -1697,12 +1521,7 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
         encoding='utf-8',
     )
     hook.chmod(0o755)
-    subprocess.run(
-        ['git', 'config', 'core.hooksPath', f'{hooks_dir}'],
-        cwd=project_dir,
-        capture_output=True,
-        check=True,
-    )
+    _git(project_dir, 'config', 'core.hooksPath', f'{hooks_dir}')
 
     work.write_text('original work\n', encoding='utf-8')
     # first hook run reformats + aborts; the pipeline re-stages and retries
@@ -1710,12 +1529,7 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
 
     # HEAD advanced and the committed work is the hook's reformatted version
     assert _head() != head_before
-    committed = subprocess.run(
-        ['git', '-C', f'{project_dir}', 'show', 'HEAD:work.txt'],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    committed = _git(project_dir, 'show', 'HEAD:work.txt')
     assert committed.stdout.strip() == 'reformatted'
 
 
@@ -1735,9 +1549,9 @@ def test_commit_resolves_invoking_installation_cli(
     fronted on PATH.
     """
     _, child = _spawn_parent_child(git_repo, monkeypatch)
-    # front a decoy `fractal` on PATH that records any consultation -- its exit 1
-    # lands in lint.sh's `|| echo` fallback, so the commit itself still
-    # completes on the local path
+    # front a decoy `fractal` on PATH that records any consultation -- its
+    # exit 1 lands in lint.sh's `|| echo` fallback, so the commit itself
+    # still completes on the local path
     decoy_dir = tmp_path / 'decoy_bin'
     decoy_dir.mkdir()
     marker = decoy_dir / 'consulted'
@@ -1790,9 +1604,10 @@ def test_lint_runs_standalone_without_node_dir(
     """``lint.sh`` resolves its own paths when run outside the loop.
 
     The loop's launches export ``NODE_DIR``, but ``fractal commit`` (hence
-    ``lint.sh``) also runs standalone -- e.g. a human committing from a plain shell -- where
-    ``NODE_DIR`` is unset. ``lint.sh`` must derive it from its own location rather
-    than abort under ``set -u`` with an unbound-variable error.
+    ``lint.sh``) also runs standalone -- e.g. a human committing from a
+    plain shell -- where ``NODE_DIR`` is unset. ``lint.sh`` must derive it
+    from its own location rather than abort under ``set -u`` with an
+    unbound-variable error.
     """
     worktree = initialized_node['project_dir']
     node_dir = initialized_node['node_dir']
@@ -1806,54 +1621,3 @@ def test_lint_runs_standalone_without_node_dir(
         env=env,
     )
     assert 'unbound variable' not in result.stderr
-
-
-def test_user_init_baseline_survives_a_hostile_external_ignore(
-    tmp_path: pathlib.Path,
-) -> None:
-    """The baseline commits its seed and wiki past a broad external ignore.
-
-    ``fractal init`` writes the user node's seed and the project wiki and
-    must land them as the tree's baseline; a machine-local ``/.fractal/``
-    line (or a host ``.gitignore``) would otherwise silently empty the
-    pathspec and leave a tree whose baseline never happened -- the
-    fleet-wide breakage this staging work exists to end.
-    """
-    repo = _make_git_repo(tmp_path / 'repo')
-    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
-        subprocess.run(
-            ['git', 'config', key, val],
-            cwd=repo,
-            capture_output=True,
-            check=True,
-        )
-    # the hostile layer, in place BEFORE init writes anything
-    exclude = repo / '.git' / 'info' / 'exclude'
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    with exclude.open('a', encoding='utf-8') as handle:
-        handle.write('/.fractal/\nwiki/\n')
-    Node(repo).init(agent='claude', user=True)
-    # opt the tree in, so the seed is committable at all (the self-ignore
-    # is fractal's own choice; the hostile layer above is the operator's)
-    subprocess.run(
-        [f'{_FRACTAL_BIN}', 'track'],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    node = Node(repo)
-    node.commit('configure', init=True)
-
-    tracked = subprocess.run(
-        ['git', '-C', f'{repo}', 'ls-files'],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    # the seed and the wiki are on the branch despite both ignore rules
-    assert '.fractal/main/config.json' in tracked
-    assert 'wiki/_index.md' in tracked
-    # runtime state still never rides the baseline
-    assert '.status' not in tracked
-    assert '.db' not in tracked

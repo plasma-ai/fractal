@@ -37,10 +37,21 @@ and the wiki is seeded with the strict ascii/identifier naming policy so project
 pages mirror source-module identifiers. A pre-existing non-empty `wiki/`
 directory that is not a wiki (no `.wiki/` marker) is refused, never adopted —
 the operator must convert it explicitly with `wiki init`; an empty one is
-initialized in place. The user node's baseline commit (`fractal/core/commit.py`)
-then commits the fresh wiki along with the `.gitattributes` merge attribute that
-`wiki init` writes, so every child branch forks from a committed wiki with merge
-handling in place (see [[features/wiki_system/merge_behavior]]).
+initialized in place. An existing wiki (one carrying `_index.md`) is adopted as
+it is — init leaves tracked files alone — but an index without the tool's
+frontmatter stamps (no `created:` line) is flagged with a warning naming the
+remedy: run `wiki update --path=wiki` and commit the result before initializing
+nodes, since siblings forking from an unstamped index each stamp their own copy
+and then conflict on the `created:` line, which the merge driver cannot
+regenerate. A second warning fires when the worktree-root `.gitattributes` lacks
+the `**/_index.md merge=wiki` line `wiki init` writes for a fresh wiki — git
+reads the attribute from the target's own tree, so an adopted wiki without it
+conflicts on its index at the first merge where both sides changed the index;
+append the line and commit before initializing nodes. The user node's baseline
+commit (`fractal/core/commit.py`) then commits the fresh wiki along with the
+`.gitattributes` merge attribute that `wiki init` writes, so every child branch
+forks from a committed wiki with merge handling in place (see
+[[features/wiki_system/merge_behavior]]).
 
 Memory starts empty; the node lays it out as topical pages as it learns.
 

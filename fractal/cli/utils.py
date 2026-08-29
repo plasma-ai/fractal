@@ -232,7 +232,7 @@ class StreamRenderer:
     cost facts render nothing (they are recorded, not displayed). Tracks
     the open text run (a delta without a trailing newline) so tool headers
     and closing summaries start below it, and ``close()`` ends a truncated
-    stream on a fresh line with the ``— $?`` placeholder summary. Every
+    stream on a fresh line with the em-dash ``$?`` placeholder summary. Every
     write flushes: piped stdout is block-buffered while the driving
     command's stderr echoes are write-through, so an unflushed line would
     land out of order in a merged capture.
@@ -304,7 +304,7 @@ class StreamRenderer:
 
         Called by the driving command after the stream drains -- a truncated
         stream (killed before its result frame) otherwise leaves the cursor
-        mid-line and shows no closing summary, so the ``— $?`` placeholder
+        mid-line and shows no closing summary, so the em-dash ``$?`` placeholder
         marks the unaccounted turn. Idempotent, and resets for the next
         stream (the loop reuses one renderer across steps).
         """
@@ -433,7 +433,8 @@ def init_node(path: PathLike) -> Node:
         except RuntimeError:
             pass
     # otherwise resolve the given path as-is
-    return Node(_absolute(path))
+    path = _absolute(path)
+    return Node(path)
 
 
 def resolve_init_target(path: PathLike) -> tuple[Node, pathlib.Path]:
@@ -455,7 +456,8 @@ def resolve_init_target(path: PathLike) -> tuple[Node, pathlib.Path]:
 
     Raises:
         typer.BadParameter: If the target is a linked git worktree (outside
-            the main repo root, so never a sub-project path).
+            the main repo root, so never a sub-project path), or a directory
+            below a node worktree's root (the sub-project would be lost).
 
     """
     target = init_node(path)
@@ -469,6 +471,16 @@ def resolve_init_target(path: PathLike) -> tuple[Node, pathlib.Path]:
             f' Run `fractal init` from the main checkout.'
         )
     path = target.worktree.relative_to(target.repo_dir)
+    # a path below a node worktree's root names a sub-project the init cannot
+    # carry (under .worktrees/ the path stands for the parent node), so the
+    # request is refused rather than silently anchored at the parent
+    if path.parts[:1] == (WORKTREES_FOLDER,) and len(path.parts) > 2:
+        project = pathlib.Path(*path.parts[2:])
+        raise typer.BadParameter(
+            f'{target.worktree} lies inside a node worktree; a sub-project'
+            f' child is initialized against the repo root: --path'
+            f' {target.repo_dir / project}.'
+        )
     return node, path
 
 
@@ -536,7 +548,7 @@ def resolve_node(path: PathLike, *, check: bool = True) -> Node:
     # otherwise construct node at worktree path
     node = Node(path)
     # require an initialized node unless a pre-init caller opted out, so a
-    # user-facing command run outside a node fails cleanly (mirrors resolve_target)
+    # user-facing command outside a node fails cleanly (like resolve_target)
     if check and not node.exists():
         raise typer.BadParameter(
             f'No fractal node at {node.worktree}. Run `fractal init` first.'
@@ -651,8 +663,8 @@ def resolve_user_node(path: PathLike, name: Optional[str] = None) -> Node:
     # remedy is naming the tree, so it refuses like the unknown name below
     try:
         user = Node.resolve_user(path, name=name)
-    except RuntimeError as error:
-        raise typer.BadParameter(str(error)) from None
+    except RuntimeError as e:
+        raise typer.BadParameter(str(e)) from None
     if user is None:
         repo = Node(path).repo_dir
         if name is not None:

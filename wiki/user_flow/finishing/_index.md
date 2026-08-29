@@ -2,15 +2,33 @@
 name: user_flow/finishing
 desc: |
   How work concludes: the finish signal and who sends it, what the
-  squash-merge does and guards, and how finished work climbs the tree to
-  the base branch and the operator's review.
+  squash-merge does — the machinery restore, the merge-base advance, and the
+  merge guards each have a page here — and how finished work climbs the tree
+  to the base branch and the operator's review.
 created: 2026-07-21T04:47:43Z
-updated: 2026-07-21T04:47:43Z
+updated: 2026-08-29T11:30:50Z
 ---
 
 # user_flow/finishing
 
-[[_index|..]]
+[[user_flow/_index|..]]
+
+[[user_flow/finishing/machinery_restore|machinery_restore]]: How the squash
+keeps a node's machinery off the target: every machinery path returns to the
+target's content except the merging node's own scope roots, the warnings that
+name what the restore dropped and where the node's copy survives, and the leak
+check that strips seed copies from the user node's branch.
+
+[[user_flow/finishing/merge_base_advance|merge_base_advance]]: The post-squash
+advance that converges a node onto its target: the two-parent commit it records,
+when it is skipped and how to clear the way, how a resolution on the target and
+the nothing-to-merge outcome reach the node, and the recipe for a node whose
+advance carried no content.
+
+[[user_flow/finishing/merge_guards|merge_guards]]: The refusals and recovery
+paths of a merge: the node and target state guards and the repo-wide merge lock,
+the untracked-file and footprint refusals, conflict restore and its verdicts,
+interrupts, and finishing a hand-resolved squash with the continue flag.
 
 ***
 
@@ -63,44 +81,28 @@ should know:
 - **One commit lands.** The target receives a single squash commit named
   `merge <branch>`; the node's full per-iteration history stays on its own
   branch. Review the squash like any commit.
-- **The node's machinery does not travel.** The node's `.fractal/<branch>/` seed
-  is stripped from the staged merge, so a parent never accumulates its
-  children's data directories. Work product only.
+- **The node's machinery does not travel.** The squash changes nothing under any
+  `.fractal/` directory on the target except a scope root of the merging node
+  that lies there, so the node's own seed and its descendants' seeds never land,
+  and a copy the user node's branch already tracks is stripped.
+  [[user_flow/finishing/machinery_restore]] covers the restore, its warnings,
+  and the leak check on the user node.
 - **The wiki merges cleanly.** Generated wiki indexes are refreshed from the
   merged filesystem on the target, so both branches' wiki pages survive side by
   side.
-- **Re-merges stay cheap.** After the squash, the child's merge-base is
-  advanced, so merging the same node again later only diffs its new work instead
-  of re-conflicting on everything already landed.
-- **Guards.** Merge refuses while the node is active or paused, while the target
-  node is active or paused (a running target's worktree must not be mutated
-  under it — except by the target's own loop, which merges its settled children
-  as part of its normal iteration), and while the target worktree has
-  uncommitted changes. On conflict the target worktree is restored exactly as it
-  was.
-- **Conflicts finish with `--continue`.** After a conflicted merge, redo the
-  squash by hand in the target worktree (`git merge --squash <branch>`), resolve
-  and stage the conflicts, then run `fractal node merge <node> --continue`: it
-  validates the staged squash came from the node's branch, then runs the merge's
-  own tail — seed strip, index refresh, commit, merge-base advance — so a manual
-  resolution never hand-rolls those steps or strands seed files in the target
-  working tree. Its failure paths leave the staged resolution in place (never
-  `reset --hard`); fix and re-run.
-- **A resolution against the node does not reach it.** The squash records no
-  per-hunk ancestry, so a hunk you resolve in the target's favor stays resolved
-  only on the target — the node still carries its own version, and because the
-  merge-base advanced, the next merge re-stages it cleanly and silently, undoing
-  your decision without a conflict to warn you. A `--continue` therefore ends by
-  naming every file where the target kept its content over the node's. Land that
-  resolution on the node (or retire/delete it) for the decision to stick. The
-  notice is scoped to what the node offered, so hunks you resolved the node's
-  way, and content the target owns that the node never had, are not named.
-- **Nothing to merge is a clean outcome.** A node whose changes are already on
-  the target reports so and exits without committing. A `--continue` whose
-  resolution kept the target's own content for every change the node offered
-  reports that instead, and still finishes the tail — the squash state is
-  cleared and the merge-base advances, so the resolved conflict is not replayed
-  on the next merge.
+- **Re-merges stay cheap.** After the squash commit lands, the node's merge-base
+  advances with a two-parent commit on its branch whose tree is the target's
+  post-squash tree, so the node converges to the target and merging it again
+  later only diffs its new work. [[user_flow/finishing/merge_base_advance]]
+  covers the advance, when it is skipped, how a resolution on the target reaches
+  the node, and the recipe for a node whose advance carried no content.
+- **Guards.** Merge refuses while the node or its target is active or paused,
+  while the target worktree has uncommitted changes, when the squash would write
+  over a file that exists untracked on the target's disk, and when the staged
+  paths fall outside the node's commit boundaries; a conflict restores the
+  target, and `--continue` finishes a hand-resolved squash.
+  [[user_flow/finishing/merge_guards]] covers each refusal and its remedy, the
+  restore verdicts, interrupts, and the `--continue` contract.
 
 ## Reaching the base branch and review
 

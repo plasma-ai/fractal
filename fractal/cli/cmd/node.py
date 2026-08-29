@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 from typing import Optional
@@ -22,6 +23,7 @@ from fractal.cli.utils import (
 )
 from fractal.constants import STATUSES
 from fractal.core.agent import seed_agents
+from fractal.core.commit import out_of_scope, scope_boundaries
 from fractal.core.loop import Loop
 from fractal.core.node import Node
 
@@ -49,6 +51,7 @@ __all__ = [
     'node_loop',
     'node_launch',
     'node_seed',
+    'node_scope',
 ]
 
 # consumers bind list columns by header name, never by position
@@ -197,7 +200,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
     wait = typer.Option(None, '--wait', help=wait_help)
     # max cost option
     max_cost_help = (
-        'Maximum cost in USD per run — runs are isolated, so each launch'
+        'Maximum cost in USD per run -- runs are isolated, so each launch'
         ' arms the cap anew; after a budget-ended run, `node start'
         ' --continue` refuses without an explicit --max-cost.'
     )
@@ -359,14 +362,10 @@ def node_init(app: typer.Typer) -> typer.Typer:
                 parent = node
             effective_agent = agent or parent.agent_effective()
             tracked = True
-            # the probe needs an initialized node to anchor the agent
-            # registry's database: the resolve_init target falls back to the
-            # repo root, which carries no config (and so no tree root to
-            # resolve the database through) whenever the checkout sits off
-            # the tree's root branch -- the operator's own branch, while
-            # nodes run; an unprobed agent reads as tracked, exactly like the
-            # unregistered backend below: unknown spend earns the warning,
-            # and this advisory must never fail a spawn that already succeeded
+            # the probe anchors the agent registry's database on an initialized
+            # node, and the resolve_init target (the repo root, off the tree's
+            # root branch) may carry no config -- an unprobed agent reads as
+            # tracked, and this advisory never fails a spawn that succeeded
             if effective_agent and parent.exists():
                 # an unregistered backend reads as tracked -- unknown
                 # spend earns the warning, never a block
@@ -376,7 +375,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
                     tracked = True
             if tracked:
                 typer.echo(
-                    'Warning: no --max-cost/--max-iters — this node can run'
+                    'Warning: no --max-cost/--max-iters -- this node can run'
                     ' and spend without bound.',
                     err=True,
                 )
@@ -392,8 +391,8 @@ def node_start(app: typer.Typer) -> typer.Typer:
     # continue flag
     continue_help = (
         'Continue a stopped/exited node (further iterations): the launch'
-        ' restores the worktree — uncommitted project files refuse without'
-        ' --clean — and a budget-ended run refuses without an explicit'
+        ' restores the worktree -- uncommitted project files refuse without'
+        ' --clean -- and a budget-ended run refuses without an explicit'
         ' --max-cost.'
     )
     continue_ = typer.Option(False, '--continue', help=continue_help)
@@ -402,7 +401,7 @@ def node_start(app: typer.Typer) -> typer.Typer:
     clean = typer.Option(False, '--clean', help=clean_help)
     # drain flag
     drain_help = (
-        'With --continue: run a drain — the harness forbids spawns and'
+        'With --continue: run a drain -- the harness forbids spawns and'
         ' re-arms from this run and tells every seat it is draining.'
     )
     drain = typer.Option(False, '--drain', help=drain_help)
@@ -445,13 +444,13 @@ def node_start(app: typer.Typer) -> typer.Typer:
         budget refuses a bare ``--continue``: pass ``--max-cost`` to arm
         the next run explicitly.
 
-        The backend is sticky. With neither flag nor FRACTAL_HEADLESS
+        The backend is sticky. With neither flag nor ``FRACTAL_HEADLESS``
         set, a relaunch reuses the backend the node last launched with;
-        the flags and the exported FRACTAL_HEADLESS (true/false, matched
-        case-insensitively; anything else refuses) force and re-record
-        it. Seats always export the parent's backend in
-        FRACTAL_HEADLESS, so a delegated child start follows its parent
-        unless the seat overrides.
+        the flags and the exported ``FRACTAL_HEADLESS`` (true/false,
+        matched case-insensitively; anything else refuses) force and
+        re-record it. Seats always export the parent's backend in
+        ``FRACTAL_HEADLESS``, so a delegated child start follows its
+        parent unless the seat overrides.
         """
         require_non_negative(max_cost=max_cost)
         if clean and not continue_:
@@ -619,10 +618,14 @@ def node_merge(app: typer.Typer) -> typer.Typer:
     node = typer.Argument(None, help=node_help)
     # continue flag
     continue_help = (
-        'Finish a hand-resolved squash after a conflicted merge: strip the'
-        ' seed, refresh indexes, commit, and advance the merge-base.'
+        'Finish a hand-resolved squash after a conflicted merge: restore'
+        ' .fractal/, strip the seed, check the footprint, refresh indexes,'
+        ' commit, and advance the merge-base.'
     )
     continue_ = typer.Option(False, '--continue', help=continue_help)
+    # ignore scope flag
+    ignore_scope_help = 'Merge out-of-scope changes instead of refusing.'
+    ignore_scope = typer.Option(False, '--ignore-scope', help=ignore_scope_help)
     # delete flag
     delete_help = (
         'Delete the node (worktree, branch, and subtree) after a successful merge.'
@@ -639,6 +642,7 @@ def node_merge(app: typer.Typer) -> typer.Typer:
     def _merge(
         node: Optional[str] = node,
         continue_: bool = continue_,
+        ignore_scope: bool = ignore_scope,
         delete: bool = delete,
         force: bool = force,
         path: str = path,
@@ -675,7 +679,10 @@ def node_merge(app: typer.Typer) -> typer.Typer:
                     err=True,
                 )
                 typer.confirm(prompt, abort=True)
-        output, notices = node.merge(continue_merge=continue_)
+        output, notices = node.merge(
+            continue_merge=continue_,
+            ignore_scope=ignore_scope,
+        )
         if output:
             typer.echo(output)
         # success-path warnings ride stderr so piped stdout stays parseable
@@ -725,6 +732,15 @@ def node_delete(app: typer.Typer) -> typer.Typer:
                 typer.echo(output)
                 return
             raise
+        # the teardown's refusals (a live or locked member, the cwd inside a
+        # doomed worktree) land before any warning about discarded work, which
+        # would otherwise describe a deletion that never happens
+        node.guard_delete()
+        # print the unmerged-work warnings ahead of the point of no
+        # return, while the branches still exist to merge
+        unmerged = node.unmerged_warnings()
+        for warning in unmerged:
+            typer.echo(warning, err=True)
         if not force:
             descendants = len(node.child_list())
             if descendants:
@@ -747,6 +763,10 @@ def node_delete(app: typer.Typer) -> typer.Typer:
         output, notices = node.delete()
         if output:
             typer.echo(output)
+        # delete.sh repeats these warnings on its own path -- drop its copies
+        if unmerged:
+            lines = [line for line in notices.splitlines() if line not in unmerged]
+            notices = '\n'.join(lines)
         # unmerged-work warnings ride stderr so piped stdout stays parseable
         if notices:
             typer.echo(notices, err=True)
@@ -1212,7 +1232,7 @@ def node_update(app: typer.Typer) -> typer.Typer:
     title = typer.Option(None, '--title', help=title_help)
     # max cost option
     max_cost_help = (
-        'Child maximum cost in USD per run — runs are isolated, so each'
+        'Child maximum cost in USD per run -- runs are isolated, so each'
         ' launch arms the cap anew; after a budget-ended run, `node start'
         ' --continue` refuses without an explicit --max-cost.'
     )
@@ -1435,5 +1455,43 @@ def node_seed(app: typer.Typer) -> typer.Typer:
         """Seed the node's agent config dirs (invoked by init.sh)."""
         parent_dir = pathlib.Path(parent) if parent else None
         seed_agents(pathlib.Path(node_dir), parent_dir=parent_dir, reset=reset)
+
+    return app
+
+
+def node_scope(app: typer.Typer) -> typer.Typer:
+    """Register the ``_scope`` command."""
+    # attributes-ok flag
+    attributes_ok_help = 'Admit the worktree-root .gitattributes.'
+    attributes_ok = typer.Option(False, '--attributes-ok', help=attributes_ok_help)
+    # path option
+    path_help = 'Worktree directory.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, '_scope')
+    def _scope(
+        attributes_ok: bool = attributes_ok,
+        path: str = path,
+    ) -> None:
+        """Print the out-of-scope paths among stdin's (invoked by merge.sh).
+
+        Reads NUL-separated repo-relative paths on stdin and judges them by
+        the node's commit boundaries, the law ``fractal commit`` enforces;
+        prints the out-of-scope ones one per line. Exit 1 when any is out
+        of scope, 0 when all are in scope, 2 on a command error -- scripts
+        branch on the exit code rather than parse the output.
+        """
+        node = resolve_node(path)
+        raw = sys.stdin.buffer.read()
+        decoded = os.fsdecode(raw)
+        paths = filter(None, decoded.split('\0'))
+        bounds = scope_boundaries(node)
+        offending = out_of_scope(paths, bounds, attributes_ok=attributes_ok)
+        if offending:
+            # bytes, so a name that is not valid UTF-8 (surrogate-escaped by
+            # fsdecode) round-trips to git's own bytes instead of failing
+            listing = os.fsencode('\n'.join(offending))
+            typer.echo(listing)
+            raise SystemExit(1)
 
     return app

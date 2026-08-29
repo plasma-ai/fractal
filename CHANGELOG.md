@@ -33,6 +33,217 @@ may include breaking changes, each listed under a Breaking heading.
   settled, record-less node — the state their own reconcile leaves after healing
   a dead bare loop on a blind host — proceeds instead of refusing.
 
+### Fixed
+
+- `node merge` advances the node's merge-base with the target's content: after
+  the squash commit lands, the node's branch gains a two-parent commit
+  (`merge <target> (post-squash)`, parents the node's HEAD and the target's
+  HEAD) whose tree is the target's post-squash tree with the node's own seed and
+  descendant seeds kept, and the node's worktree takes it — so the node
+  converges to what the target adjudicated (a hunk resolved against it, a file
+  dropped from the squash, a restore to base content) and a later merge in
+  either direction never lands a stale copy of a file the node did not edit. The
+  advance is skipped with a warning when the node's worktree is dirty, on
+  another branch, or holds an untracked or ignored file or directory in the way
+  of a path the target now tracks — a rename on the target that lands where the
+  node keeps a private file, or an untracked case-only alias on a
+  case-insensitive filesystem, included, while a path the node tracks under a
+  different case is not a collision (the update renames it), and neither is a
+  path the node tracks at, under, or above the hit (the target turned a file
+  into a directory or back — a type change the update performs); move it aside,
+  and the next merge that lands work advances it (a fresh merge offering nothing
+  exits at "Nothing to merge" before the advance — unless the restore dropped a
+  `.fractal/` change outside the node's own seed and its descendants', the paths
+  the restore warnings name, or a `.fractal/` conflict outside them resolved to
+  the target's content, either of which still advances the merge-base so the
+  node converges and the warning does not repeat; a node whose only offering is
+  an edit to its own seed exits without advancing, and its next work merge
+  advances it), and a failed worktree update rolls the worktree back before
+  skipping. Recovery for existing trees: a merge run on any earlier release
+  (1.0.0 through 1.2.0), whenever the tree was created, records the node's
+  merge-base commit without content, and the first merge of such a node after
+  upgrading still squashes from that base and can land stale copies of files the
+  node never edited. A poisoned node with unmerged work lands that work with a
+  merge first. The stale copies ride the squash onto the target as reverts; the
+  footprint refusal names only a scoped node's stale copies outside its scope
+  roots (restore those paths from the base on the node's branch, commit with
+  `fractal commit "<message>" --ignore-scope --path=<node worktree>`, and
+  rerun), while stale copies inside its roots ride the squash exactly like the
+  unscoped case — so in both cases review the squash commit and restore any
+  reverted file from the target's history, or run the recipe below before the
+  first post-upgrade merge. A node that merges real work needs no recipe: that
+  landed work merge advances its merge-base, and the advance converges the node.
+  A node with nothing new still offers its stale copies: merging it lands them
+  on the target as a revert commit and then advances the node onto the reverted
+  target, so do not merge such a node — run the recipe first, closing step
+  included. A scoped node whose stale copies all fall outside its roots is
+  refused by the footprint check and never advances, so it needs the recipe too.
+  The recipe adopts the base's tree in the node's clean worktree, discarding any
+  unmerged work on the branch. Its checkout writes the base's copy over any
+  untracked or ignored file in the node's worktree at a path the base tracks, so
+  first check `git -C <node worktree> status --ignored --porcelain` and move
+  such files aside. The steps:
+  `git checkout <base> -- . ':(exclude,glob)**/.fractal/**'`, `git rm` any path
+  `git diff --name-only <base> -- . ':(exclude,glob)**/.fractal/**' ':(exclude).gitattributes'`
+  still lists, then, if `.gitattributes` lacks `**/_index.md merge=wiki`, append
+  init's two lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`),
+  commit (the `.fractal/` exclude keeps the node's seed, at any depth, in place;
+  the checkout adopts the base's `.gitattributes`, so only the `git rm` step
+  excludes it), then, before the base moves again, run
+  `git -C <node worktree> merge -s ours --no-edit <base>` — the node's tree
+  already equals the base's, so recording the base's tip as a parent gives a
+  correct merge-base with correct content (the step records that tip only when
+  the base has moved since the poisoned merge; otherwise git reports
+  `Already up to date`, and the adopt commit alone fixes the node). A plain
+  `git merge <base>` does not fix this — the stale copy is the only changed
+  side, so it wins without a conflict.
+- Nothing under `.fractal/` rides a squash onto the target except a scope root
+  of the merging node that is, or lies under, a `.fractal/` directory (a
+  `--meta` node's scope is the target's seed directory, its work product): every
+  other `.fractal/` path at any depth returns to the target's HEAD — a child's
+  edit to the target's estate, a foreign node's seed, a sub-project descendant's
+  seed under `<project>/.fractal/`, a `.fractal/profiles/` change — with two
+  warnings naming what the restore dropped: paths the target tracks are restored
+  to its content, paths it does not track are removed, and the node's copy
+  survives only in its branch history once the merge-base advance brings the
+  target's tree into the node's worktree
+  (`git -C <node worktree> log --full-history -- <path>` lists the advance that
+  dropped the path first and the node's own commit below it;
+  `git show <commit>:<path>` on that lower commit, or
+  `git show <advance>^:<path>`, reads the copy; a plain `git log` follows the
+  target's side and lists nothing). The squash therefore never adds the node's
+  own seed or its descendants' seeds; on the user node's branch a copy the
+  branch already tracks is stripped as well (a leak there), while a node target
+  keeps a copy its PREPARE `git merge --no-ff` of the child tracks until it
+  merges upward itself, so a child whose advance was skipped never inherits a
+  deletion of its own live seed on its next merge of the parent. A fresh merge
+  refuses before the squash when it would write over any file that exists
+  untracked on the target's disk — an ignored private file such as `local.env`,
+  or the user node's own live seed, self-ignored on the root but committable
+  from a child — judged over every path the node added or changed since the
+  merge-base that the target's HEAD does not track, a file sitting where the
+  squash would create a directory included ("would overwrite untracked files in
+  `<target>`'s worktree"), naming the files to move aside or drop from the
+  branch; a tracked file the node replaced with a directory is the squash's own
+  type change, not a collision, and a `--continue` cannot prevent that
+  overwrite, since the hand squash has already done it.
+- `node merge` runs one squash at a time per repository: a repo-wide merge lock
+  (`.worktrees/.merge.lock`, removed by `fractal destroy` with the rest of the
+  plumbing) queues two sibling merges into one target instead of letting them
+  interleave their index writes and leave the target half-merged, and an
+  interrupt (SIGINT) delivered to the `fractal node merge` process is forwarded
+  to the merge script: before the squash commit its restore trap resets the
+  target and marks the merge event failed instead of leaving the squash staged
+  (an interrupt that lands while the event is still being opened closes it as
+  failed too); once `git commit` has moved the target's ref the squash has
+  landed, and the merge finishes it — the merge-base advances, the event closes
+  as completed, and the command prints `Squash-merged ...` and exits 0 — rather
+  than reporting a restore. An interrupt during the advance finishes the node's
+  worktree update or rolls it back, warning only when an advance was underway;
+  one during a no-op merge's bookkeeping prints that arm's own summary
+  (`Nothing to merge: ...`) with no advance warning. The "restored" verdict is
+  judged by the target's state, not by git's exit code, and a squash that fails
+  after git wrote the index (a stale or unwritable `SQUASH_MSG`) is reset and
+  its markers cleared, reported as failed after staging.
+- `fractal init` warns when an adopted `wiki/_index.md` carries no frontmatter
+  stamps, naming the `wiki update --path=wiki` and commit to run before
+  initializing nodes, instead of letting sibling nodes conflict on its
+  `created:` line when they merge. It also warns when `.gitattributes` lacks the
+  `**/_index.md merge=wiki` line, naming the append and commit to run first,
+  since git reads the attribute from the target's own tree and an adopted wiki
+  without it conflicts on its index at the first merge where both sides changed
+  the index.
+- `node init` into a fresh worktree whose fork point already carries any file
+  under `.fractal/<branch>/` (a whole or partial copy of an earlier node of the
+  same name, PREPARE-merged or leaked) warns, removes the directory whole, and
+  seeds it afresh, so the init's flags hold and a leaked `NODE.md` alone never
+  becomes the charter.
+- `node init --path <dir>` refuses a `<dir>` below a node worktree's root,
+  naming `--path <repo root>/<project>` as the form to use, since under
+  `.worktrees/` the path stands for the parent node and a sub-project below it
+  cannot be carried.
+- `node delete` prints the unmerged-work warning before the confirmation prompt
+  (and before the teardown under `--force`), and
+  `Deleted branch: <branch> (was <sha>)` names the discarded tip.
+- `node init --meta` spells the scope as the target's seed directory relative to
+  the meta node's own project, so a meta node for a sub-project target
+  initialized from that target's worktree (or from the repo root) commits and
+  merges within its scope; one initialized from a different sub-project is
+  refused at init, naming both projects.
+- `node delete` counts a `--meta` node's edits to its target's seed directory as
+  unmerged work: a scope root that is, or lies under, a `.fractal/` directory is
+  judged like any other path (only the node's own seed and its descendants' are
+  waived), so an unlanded edit to the target's contract warns before the prompt
+  and on the teardown instead of being discarded silently.
+- `node delete` prints the unmerged-work warning for every live descendant
+  before the confirmation prompt (and before the teardown under `--force`), each
+  judged against the deleted node's surviving merge target, and each warning
+  reads once.
+- `node init --meta` refuses when the derived scope root would contain
+  whitespace (a target in a sub-project directory with a space), naming the root
+  and the remedies, since the scope list splits on whitespace and would store
+  the root as two; nothing is created.
+- `node retire` refuses an already-retired node
+  (`Cannot retire: node is already retired.`), so the recorded pre-retire status
+  stays the real one and `unretire` restores it exactly.
+
+### Changed
+
+- `node merge` holds the squash to the node's commit scope: before committing,
+  the staged paths outside `.fractal/` are judged by the node's scope roots and
+  its project wiki (a repo-root node without a scope is unrestricted; a
+  sub-project node without one is bounded to its project directory) — the same
+  law `fractal commit` applies — and a path outside them refuses the merge. The
+  worktree-root `.gitattributes` is admitted, at merge and at `fractal commit`
+  alike, only when the whole change is init's own edit — HEAD's content followed
+  by exactly the two lines the wiki tool appends (`# Wiki index merge driver`,
+  `**/_index.md merge=wiki`); any other added or removed line makes it an
+  ordinary out-of-scope path. The refusal names the paths and both remedies:
+  widen the scope with
+  `fractal node config set scope=<dirs> --path=<node worktree>` and commit it
+  with `fractal commit "widen scope" --path=<node worktree>` (an uncommitted
+  config change makes the rerun skip the merge-base advance), or rerun with
+  `node merge --ignore-scope`, which lands the paths. A fresh merge restores the
+  target on refusal; a `--continue` leaves the staged squash in place on every
+  refusal, and its footprint remedies are `--continue --ignore-scope` or
+  widening the scope and redoing the squash, since the widening commit lands
+  after the hand squash. `--continue` also refuses unstaged tracked changes in
+  the target (a hand-resolved squash must be fully staged: save any copy you
+  need, stage the paths that belong to the resolution, and discard the rest with
+  `git -C <target worktree> checkout -- <path>` — the merge restores every
+  `.fractal/` path to the target's HEAD) and a node commit newer than the hand
+  squash (an iteration or a nested child's merge landed after the operator's
+  `git merge --squash`; the refusal names the redo,
+  `git -C <target worktree> reset --hard HEAD && git -C <target worktree> merge --squash <branch>`).
+- Leaked seeds on the user node are named and, where the merge owns them,
+  cleared: before a squash into the user node, `node merge` judges the root's
+  committed tree for seed directories of the root's own dotted nodes
+  (`.fractal/<target>.*/`, so a `--base` merge into another tree's root judges
+  that root) — the root owns no seed, so every one is a leak. Exactly what the
+  strip removes — the merging node's seed at its own project prefix and its
+  descendants' seeds at any depth — is named in one warning
+  (`tracks seeds of <branch> or its descendants, leaked by an earlier merge: <dirs>; this merge removes them`);
+  the rest, a same-named copy of the node's seed under another project prefix
+  (the node re-created at a different project path) included, get a second
+  warning with a
+  `git -C <target worktree> rm -r -- <dirs> && git -C <target worktree> commit -m 'drop leaked node seeds'`
+  remedy line that removes them from the tree and from the root worktree's disk
+  (the copies are never live seeds, which sit in each node's own worktree; the
+  check reads the committed tree, so a `--continue` never reports the
+  hand-staged seed). A node target is not judged, since its branch legitimately
+  carries other nodes' seeds (its ancestors' by fork, its descendants' by
+  PREPARE merges, a sibling's by the merge-base advance). Whether the target is
+  the user node is read from the repo's record of the target branch (so a root
+  checked out in a linked worktree is still stripped and leak-checked), and a
+  direct `merge.sh` call that cannot read the target's node config warns
+  `could not read <target>'s node config; treating it as a node target` instead
+  of judging it silently. A fresh squash whose only conflicts sit under
+  `.fractal/` outside the node's scope roots resolves to the target's content (a
+  path the target tracks returns to its content, a path it lacks is removed; on
+  the user node the node's own seed is then stripped, while a node target keeps
+  the copy it tracks) and continues with a warning naming the paths, while any
+  other conflict fails and restores the target.
+
 ## [1.2.0] - 2026-08-24
 
 ### Breaking

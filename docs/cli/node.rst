@@ -109,7 +109,10 @@ node at ``--path``.
      - none
      - Target node branch for meta-configuration; expands to
        ``--base=<target> --scope=<target's seed dir>``. Mutually exclusive
-       with ``--scope``/``--base``.
+       with ``--scope``/``--base``. The scope is spelled relative to the
+       meta node's own project: initialize a meta node for a sub-project
+       target from that target's worktree or from the repo root — one
+       initialized from a different sub-project is refused.
    * - ``--inherit <surfaces>``
      - package seed
      - Seed surfaces from the parent instead of the package seed
@@ -305,9 +308,9 @@ node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a
 paused ancestor or tree-wide pause latch; a foreign tmux session already
 holding the node's session name; a node whose recorded process group is
 still alive (identity-verified, so a recycled group id never blocks); and a
-stored config the launch re-validation rejects.
-Continuing from ``killed`` surfaces the recorded kill attribution as a
-notice. An uncapped start is allowed but warns loudly.
+stored config the launch re-validation rejects. Continuing from ``killed``
+surfaces the recorded kill attribution as a notice. An uncapped start is
+allowed but warns loudly.
 
 .. code-block:: console
 
@@ -431,7 +434,8 @@ Integration and teardown
 
 .. code-block:: console
 
-   $ fractal node merge [NODE] [--continue] [--delete] [--force|-f]
+   $ fractal node merge [NODE] [--continue] [--ignore-scope] [--delete]
+         [--force|-f]
 
 Squash-merge the node's branch into its merge target — the configured
 ``base`` when set, else the dotted parent. One squash commit lands on the
@@ -440,11 +444,146 @@ the user node, when the node itself is ``active`` or ``paused``, and when the
 *target* is ``active`` or ``paused`` (except from inside the target's own
 loop, its normal child-merge path). Non-fatal warnings ride stderr.
 
+Before committing, the merge holds the squash to the node's commit scope: the
+staged paths outside ``.fractal/`` are judged by the node's ``scope`` roots
+and its project ``wiki/``, with the worktree-root ``.gitattributes`` admitted
+only as init's own ``**/_index.md merge=wiki`` edit (a repo-root node without
+a scope is unrestricted; a sub-project node without one is bounded to its
+project directory) — the same law ``fractal commit`` applies — and a path
+outside them refuses the merge. The refusal names the paths and both
+remedies: widen the scope with ``fractal node config set scope=<dirs>
+--path=<node worktree>`` and commit it with ``fractal commit "widen scope"
+--path=<node worktree>`` (an uncommitted config change makes the rerun skip
+the merge-base advance), or rerun with ``--ignore-scope``. A fresh merge
+restores the target on refusal. A ``--continue`` leaves the staged squash in
+place, and its remedies differ: re-run with ``--continue --ignore-scope``, or
+widen the scope (config set, then commit) and redo the squash (``git -C
+<target worktree> reset --hard HEAD && git -C <target worktree> merge
+--squash <branch>``), because the widening commit is a node commit made after
+the hand squash, which makes ``--continue`` refuse.
+
+Nothing under any ``.fractal/`` directory on the target changes except a
+scope root of the merging node that is, or lies under, a ``.fractal/``
+directory (a ``--meta`` node's scope is the target's seed directory): every
+other such path the squash changed returns to the target's HEAD — a path the
+target tracks is restored to its content, a path it does not track is
+removed — with a warning naming each, so the squash never adds the node's own
+seed or its descendants' seeds. On the user node's branch a copy the branch
+already tracks is stripped as well (the root owns no seed, so it is a leak);
+a node target keeps a copy it already tracks — its PREPARE ``git merge
+--no-ff`` of the child put it there — until it merges upward itself, so a
+child whose advance was skipped never inherits a deletion of its own live
+seed on its next merge of the parent. The merge-base advance then brings the
+target's tree into the node's worktree, so the node's copy of a dropped path
+survives only in its branch history (``git -C <node worktree> log
+--full-history -- <path>`` lists the advance that dropped the path first and
+the node's own commit below it; ``git show <commit>:<path>`` on that lower
+commit, or ``git show <advance>^:<path>``, reads the copy; a plain ``git
+log`` follows the target's side of the advance and lists nothing). A fresh
+merge refuses before the squash when it would write over any file that exists
+untracked on the target's disk — an ignored private file such as
+``local.env``, or the user node's own live seed, self-ignored on the root but
+committable from a child — judged over every path the node added or changed
+since the merge-base that the target's HEAD does not track, a file sitting
+where the squash would create a directory included (the prefix walk stops at
+a path the target's HEAD tracks: a tracked file the node replaced with a
+directory is the squash's own type change, not a collision); the refusal
+names the files to move aside or drop from the branch. When the target is the
+user node, the root's committed tree is judged before the squash for seed
+directories of the root's own dotted nodes (``.fractal/<target>.*/``, so a
+``--base`` merge into another tree's root judges that root) — the root owns
+no seed, so every one is a leak. Exactly what the strip removes — the merging
+node's seed at its own project prefix and its descendants' seeds at any
+depth — is named in one warning (``tracks seeds of <branch> or its
+descendants, leaked by an earlier merge: <dirs>; this merge removes them``);
+the rest, a same-named copy of the node's seed under another project prefix
+(the node re-created at a different project path) included, get a second
+warning with a ``git -C <target worktree> rm -r -- <dirs> && git -C <target
+worktree> commit -m 'drop leaked node seeds'`` remedy line that removes them
+from the tree and from the root worktree's disk (the copies are never live
+seeds; those sit in each node's own worktree). A node target is not judged:
+its branch legitimately carries other nodes' seeds (its ancestors' by fork,
+its descendants' by PREPARE merges, a sibling's by the merge-base advance).
+The check reads the committed tree, so a ``--continue`` never reports the
+hand-staged seed. Whether the target is the user node is read from the repo's
+record of the target branch, so a root checked out in a linked worktree is
+still stripped and leak-checked; a direct ``merge.sh`` call that cannot read
+the target's node config warns ``could not read <target>'s node config;
+treating it as a node target`` instead of silently treating it as a node.
+
+Conflicts only under ``.fractal/`` outside the node's scope roots resolve to
+the target's content — a warning names them — and the merge continues; any
+other conflict fails and restores the target (the "restored" verdict is
+judged by the target's state, not by git's exit code; when it is not
+restored, the error names the ``git -C <target worktree> reset --hard HEAD``
+to run before merging again). A squash that dies after git wrote the index (a
+stale or unwritable ``SQUASH_MSG``) is reset and its squash markers cleared,
+and the error reads ``merging <branch> into <target> failed after staging;
+the parent worktree has been restored; resolve and retry`` (or its ``could
+NOT be restored`` form, judged the same way); ``failed before staging
+anything`` is reserved for a squash that staged nothing — git's own refusal
+over a plain untracked file, or another git process holding the target's
+index. An interrupt before the squash commit restores the target the same
+way and marks the merge event failed (one that lands while the event is still
+being opened closes it as failed too); once ``git commit`` has moved the
+target's ref the squash has landed, and the merge finishes it — the
+merge-base advances, the event closes as completed, and the command prints
+``Squash-merged ...`` and exits 0 — rather than reporting a restore. An
+interrupt during the advance finishes the node's worktree update or rolls it
+back, warning only when an advance was underway; one during a no-op merge's
+bookkeeping prints that arm's own summary (``Nothing to merge: ...``) with no
+advance warning. After the commit, the node's merge-base advances with a
+two-parent commit on the node's branch (``merge <target> (post-squash)``)
+whose tree is the target's post-squash tree with the node's own seed and its
+descendants' seeds kept, so the node's worktree converges to the target and a
+later merge only diffs new work. The advance is skipped with a warning when
+the node's worktree is dirty, on another branch, or holds an untracked or
+ignored file or directory in the way of a path the target now tracks — a
+rename on the target that lands where the node keeps a private file, or an
+untracked case-only alias on a case-insensitive filesystem, included, while a
+path the node tracks under a different case is not a collision (the update
+renames it), and neither is a path the node tracks at, under, or above the hit
+(the target turned a file into a directory or back — a type change the update
+performs). Move the file aside; the next merge that lands work advances it (a
+fresh merge offering nothing exits at "Nothing to merge" before the advance —
+unless the restore dropped a ``.fractal/`` change outside the node's own seed
+and its descendants', the paths the restore warnings name, or a ``.fractal/``
+conflict outside them resolved to the target's content, either of which still
+advances the merge-base so the node converges and the warning does not repeat;
+a node whose only offering is an edit to its own seed exits without advancing,
+and its next work merge advances it); a failed worktree update rolls the
+worktree back before skipping. A git read that fails during the advance (the
+node's worktree stops answering) skips it with a warning rather than failing
+the landed merge, and an edit to a tracked file the commit law's excludes hide
+(a force-added lock or status file) counts as dirt, so the update never
+overwrites it.
+
 ``--continue``
    Finish a hand-resolved squash after a conflicted merge: redo
    ``git merge --squash`` in the target worktree, resolve and stage the
-   conflicts, then ``merge --continue`` runs the merge's own tail — seed
-   strip, index refresh, commit, merge-base advance.
+   conflicts, then ``merge --continue`` runs the merge's own tail —
+   ``.fractal/`` restore and seed strip, footprint check, index refresh,
+   commit, merge-base advance. The squash must be fully staged: unstaged
+   tracked changes in the target refuse the continue — save any copy you
+   need, stage (``git add``) the paths that belong to the resolution, and
+   discard the rest (``git -C <target worktree> checkout -- <path>``); the
+   merge restores every ``.fractal/`` path to the target's HEAD anyway.
+   It must also cover the node's current tip: a commit the node made after
+   the hand squash (an iteration, a nested child's merge) refuses the
+   continue and names the redo — ``git -C <target worktree> reset --hard HEAD
+   && git -C <target worktree> merge --squash <branch>``. The fresh merge's
+   untracked-file check does not run here, so a ``--continue`` cannot prevent
+   the overwrite of a file that exists untracked on the target's disk: git's
+   own squash refuses over a plain untracked file but writes over an ignored
+   one (git treats it as expendable) — a file the fresh merge would have
+   refused over — and the hand squash has already done it, so move private
+   files aside before redoing the squash by hand.
+
+``--ignore-scope``
+   Merge out-of-scope changes instead of refusing — paths outside the node's
+   scope roots and its project wiki (``.fractal/`` paths are never judged; the
+   worktree-root ``.gitattributes`` is admitted only as init's own
+   ``merge=wiki`` edit).
 
 ``--delete``
    Delete the node (worktree, branch, and whole subtree) after a successful
@@ -475,7 +614,11 @@ descendant count and suggests ``retire`` as the non-destructive alternative.
 Deletion refuses on: the user node; a subtree containing any ``active`` or
 ``paused`` node (stop, resume, or kill it first); a caller standing inside a
 subtree worktree; and any locked worktree in the subtree. Warnings about
-unmerged work ride stderr without blocking.
+unmerged work ride stderr without blocking: one per node in the subtree whose
+branch has commits its merge target never absorbed (each descendant judged
+against the deleted node's surviving target), printed after those refusals
+have passed and before the confirmation prompt, and a ``--meta`` node's edits
+to its target's seed directory count as that work.
 
 When the target's worktree is already gone (removed out of band), ``delete
 <branch> --force`` takes the orphan path instead: it deregisters the branch
@@ -508,11 +651,13 @@ orphaned nodes to record.``
    $ fractal node unretire [NODE]
 
 ``retire`` parks a node: hidden from ``list`` by default and unstartable,
-with its branch and history kept. It refuses ``active``/``paused`` nodes and
-the user node. The pre-retire status is recorded on the retire event, and
-``unretire`` restores it (falling back to ``idle``). An ``idle`` restore
-returns the node to the unsettled pool, so the width and descendant caps are
-re-checked as at spawn — refused over cap, with no override.
+with its branch and history kept. It refuses ``active``/``paused`` nodes,
+already-retired nodes (``Cannot retire: node is already retired.``, so the
+recorded pre-retire status stays the real one), and the user node. The
+pre-retire status is recorded on the retire event, and ``unretire`` restores
+it (falling back to ``idle``). An ``idle`` restore returns the node to the
+unsettled pool, so the width and descendant caps are re-checked as at spawn —
+refused over cap, with no override.
 
 .. code-block:: console
 
@@ -561,20 +706,19 @@ reason, ``run exhausted: <reason>`` on a ``completed`` run that ended on its
 iteration cap and ``final iteration failed`` on a drained finish whose last
 iteration died (a clean drained finish stays bare), ``orphaned`` for a
 registered node whose worktree is gone, ``model drop`` for an unresolved
-served-model divergence, ``iteration gap <span>`` for numbers that advanced with
-no recorded row, and ``PAUSED: billing`` while the newest launches carry the
-dead-credits signature. ``end_reason`` is ``detail``'s typed counterpart, a
-closed vocabulary naming a settled row's landing: ``goal_met``,
+served-model divergence, ``iteration gap <span>`` for numbers that advanced
+with no recorded row, and ``PAUSED: billing`` while the newest launches carry
+the dead-credits signature. ``end_reason`` is ``detail``'s typed counterpart,
+a closed vocabulary naming a settled row's landing: ``goal_met``,
 ``run_exhausted``, or ``final_iteration_failed`` on a ``completed`` row;
 ``cost_budget``, ``timeout``, ``setup_abort``, ``final_iteration_failed``, or
 ``other`` (recorded but unmapped) on an ``exited`` row; null when no reason is
 recorded (e.g. a reconcile-healed crash) and on every other status. ``spend``
-is the current run's subtree cost at the
-scope ``max_cost`` is enforced at, blank for a node that has never run. Blank
-limit columns mean unlimited. ``last`` is the age of each node's newest
-activity, with a ``!`` suffix flagging an active node quiet past
-``max(step_timeout, 5m)``. On a TTY, statuses render bracketed
-(``[active]``); machine output stays unbracketed.
+is the current run's subtree cost at the scope ``max_cost`` is enforced at,
+blank for a node that has never run. Blank limit columns mean unlimited.
+``last`` is the age of each node's newest activity, with a ``!`` suffix
+flagging an active node quiet past ``max(step_timeout, 5m)``. On a TTY,
+statuses render bracketed (``[active]``); machine output stays unbracketed.
 
 ``--all``
    Include retired nodes.
@@ -596,9 +740,9 @@ activity, with a ``!`` suffix flagging an active node quiet past
    Trust each child's real state: relabel a crashed active node — its loop
    runtime (the tmux session, or a headless or bare loop's recorded process
    group) provably gone — as ``exited``, a booting idle node as ``active``,
-   and drop nodes whose worktree is gone. This view is read-only;
-   the plain listing instead persists the crash heal and flags worktree-less
-   rows as ``orphan`` (or ``<status> (orphaned)`` when settled).
+   and drop nodes whose worktree is gone. This view is read-only; the plain
+   listing instead persists the crash heal and flags worktree-less rows as
+   ``orphan`` (or ``<status> (orphaned)`` when settled).
 
 ``--count``
    Print only the number of matching nodes (mutually exclusive with the
@@ -791,7 +935,8 @@ with the node).
 
 .. code-block:: console
 
-   $ fractal node cost remaining [NODE] [--run <id> | --iter <id> | --step <id>]
+   $ fractal node cost remaining [NODE]
+         [--run <id> | --iter <id> | --step <id>]
 
 Print the remaining budget: ``max_cost`` minus the run's **subtree** spend —
 the node's own steps plus every descendant run chained beneath it. ``--iter``
@@ -850,8 +995,7 @@ in :doc:`/configuration`.
 
 Print one config value. Unknown keys refuse with the valid-keys list.
 Booleans render as ``true``/``false``, list values (``scope`` and
-``clone_dirs``) one item per line, and an unset key prints nothing
-(exit 0).
+``clone_dirs``) one item per line, and an unset key prints nothing (exit 0).
 
 ``config set``
 ~~~~~~~~~~~~~~
@@ -868,14 +1012,13 @@ than 0); cost keys a non-negative number — the ceilings (``max_cost``,
 ``max_iter_cost``, ``max_step_cost``) must additionally be positive, with
 ``0`` refused by the merged validation, while ``reserve_budget`` may be
 ``0``; the list keys ``scope`` and ``clone_dirs`` a comma- or space-joined
-list of repo-relative roots (stored in canonical form; ``.`` is a legal
-scope root but never a ``clone_dirs`` entry); every other key
-stores a literal string. The merged result is validated — cost positivity
-and ordering, reserve range, duration suffixes, pacing exclusivity — before
-anything is written; ``init``'s additional flag
-checks (the agent registry, provider support, the base worktree) do not run
-here. Multi-key sets are checked upfront, so no earlier key lands when a
-later one is rejected.
+list of repo-relative roots (stored in canonical form; ``.`` is a legal scope
+root but never a ``clone_dirs`` entry); every other key stores a literal
+string. The merged result is validated — cost positivity and ordering,
+reserve range, duration suffixes, pacing exclusivity — before anything is
+written; ``init``'s additional flag checks (the agent registry, provider
+support, the base worktree) do not run here. Multi-key sets are checked
+upfront, so no earlier key lands when a later one is rejected.
 
 A *change* to the init-fixed keys ``root``, ``user``, and ``project`` always
 refuses: ``<key> is fixed at init and cannot be set.`` (Re-setting the

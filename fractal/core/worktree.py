@@ -9,6 +9,7 @@ import logging
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 from collections.abc import Iterator
 from typing import Optional
@@ -17,6 +18,7 @@ import fractal.util
 from fractal.constants import (
     FRACTAL_FOLDER,
     LOCK_FILE,
+    MERGE_LOCK_FILE,
     PROJECT_FOLDER,
     SEED_IGNORE_FILE,
     WORKTREES_FOLDER,
@@ -59,6 +61,29 @@ def lock(repo_dir: pathlib.Path) -> Iterator[None]:
     lock_dir = repo_dir / WORKTREES_FOLDER
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / LOCK_FILE, 'a', encoding='utf-8') as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+
+
+@contextlib.contextmanager
+def merge_lock(repo_dir: pathlib.Path) -> Iterator[None]:
+    """Hold the repo-wide merge flock while a squash merge runs.
+
+    ``git merge --squash`` locks the target's index only for its final
+    write, so two sibling merges into one target both pass their preflight
+    and interleave: the loser's files land untracked in the target, the
+    winner's index write drops the loser's staged entries, and the loser's
+    ``reset --hard`` cannot undo untracked files. One kernel lock per repo
+    serializes them; a separate file from the ``.worktrees`` lock, since
+    merge.sh shells back into ``fractal`` verbs that take that one.
+
+    Args:
+        repo_dir: Main git repo root.
+
+    """
+    lock_dir = repo_dir / WORKTREES_FOLDER
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / MERGE_LOCK_FILE, 'a', encoding='utf-8') as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         yield
 
@@ -186,7 +211,7 @@ def ensure_git_repo(path: PathLike) -> None:
         if sha:
             return
     # init a fresh repo on the project-named branch; an existing repo with an
-    # unborn branch (a prior init whose commit failed) skips init and just births it
+    # unborn branch (a prior init whose commit failed) skips init and births it
     if git_dir is None:
         name = derive_project_name(target)
         fractal.util.git.run(['init', '-b', name], cwd=target)
@@ -379,7 +404,7 @@ def clone_cache_dirs(
         # config reaches here -- and a skip beats cloning an unrelated tree
         path = pathlib.PurePosixPath(rel)
         if path.is_absolute() or '..' in path.parts or not path.parts:
-            logger.info('Cache clone skipped for %s: not a repo-relative dir', rel)
+            logger.info(f'Cache clone skipped for {rel}: not a repo-relative dir')
             continue
         source = repo_dir / rel
         target = worktree_dir / rel
@@ -394,22 +419,21 @@ def clone_cache_dirs(
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(temp, ignore_errors=True)
             result = subprocess.run(
-                ['cp', '-c', '-R', str(source), str(temp)],
+                ['cp', '-c', '-R', f'{source}', f'{temp}'],
                 capture_output=True,
                 text=True,
             )
             if result.returncode != 0:
                 shutil.rmtree(temp, ignore_errors=True)
-                logger.info(
-                    'Cache clone skipped for %s: %s', rel, result.stderr.strip()
-                )
+                error = result.stderr.strip()
+                logger.info(f'Cache clone skipped for {rel}: {error}')
                 continue
             temp.rename(target)
         except OSError as error:
             shutil.rmtree(temp, ignore_errors=True)
-            logger.info('Cache clone skipped for %s: %s', rel, error)
+            logger.info(f'Cache clone skipped for {rel}: {error}')
             continue
-        logger.info('Cloned cache dir %s into %s', rel, worktree_dir)
+        logger.info(f'Cloned cache dir {rel} into {worktree_dir}')
 
 
 def exclude_strip(repo_dir: pathlib.Path) -> None:
@@ -499,6 +523,31 @@ def ensure_project_wiki(
     else:
         wiki_dir = worktree / path / 'wiki'
     if (wiki_dir / '_index.md').exists():
+        # an adopted index that lacks the tool's frontmatter stamps is flagged,
+        # not rewritten (init leaves tracked files alone): siblings forking
+        # from an unstamped index each stamp their own copy, and their merges
+        # then conflict on the created: line the merge driver cannot regenerate
+        index = (wiki_dir / '_index.md').read_text(encoding='utf-8')
+        if not re.search(r'^created:', index, flags=re.MULTILINE):
+            wiki_rel = wiki_dir.relative_to(worktree)
+            logger.warning(
+                f'Warning: {wiki_rel}/_index.md carries no frontmatter stamps;'
+                f" run 'wiki update --path={wiki_rel}' and commit the result"
+                ' before initializing nodes, or sibling nodes conflict on the'
+                ' index when they merge'
+            )
+        # likewise the merge attribute `wiki init` writes for a fresh wiki:
+        # git reads it from the target's own tree, so an adopted wiki without
+        # it conflicts on its index at the first divergent merge
+        attributes = worktree / '.gitattributes'
+        lines = attributes.read_text(encoding='utf-8') if attributes.is_file() else ''
+        if '**/_index.md merge=wiki' not in lines:
+            logger.warning(
+                'Warning: .gitattributes lacks the wiki index merge driver line;'
+                " append '**/_index.md merge=wiki' to it and commit before"
+                ' initializing nodes, or wiki indexes that diverge on both sides'
+                ' conflict when they merge'
+            )
         return False
     # refuse to adopt a pre-existing docs directory: `wiki init` rewrites
     # every page under its root (frontmatter, generated indexes), so a
@@ -509,7 +558,7 @@ def ensure_project_wiki(
     if foreign and any(wiki_dir.iterdir()):
         relative = wiki_dir.relative_to(worktree)
         raise RuntimeError(
-            f'{relative}/ already exists and is not a project wiki —'
+            f'{relative}/ already exists and is not a project wiki --'
             ' adopting it would rewrite its files in place. Move the'
             ' directory aside and re-run init, or adopt it deliberately'
             f' first: wiki init --path={relative}'
@@ -528,7 +577,7 @@ def ensure_project_wiki(
         executable = fractal.util.system.console_script('wiki')
     except RuntimeError as e:
         raise RuntimeError(
-            "No 'wiki' executable found — install fractal's plasma-wiki"
+            "No 'wiki' executable found -- install fractal's plasma-wiki"
             ' dependency into its environment and re-run init.'
         ) from e
     cmd = [executable, 'init', name, f'--path={wiki_dir}', f'--settings={settings}']
@@ -536,7 +585,7 @@ def ensure_project_wiki(
     if result.returncode != 0:
         error = result.stderr.strip()
         raise RuntimeError(
-            f'wiki init failed (exit {result.returncode}): {error!r} —'
+            f'wiki init failed (exit {result.returncode}): {error!r} --'
             ' fix the cause and re-run init (a partial init is repaired'
             ' in place)'
         )
@@ -567,13 +616,13 @@ def verify_hook_formatters(repo_dir: pathlib.Path) -> None:
     if 'mdformat-wiki' in config or FRACTAL_FOLDER in config:
         return
     logger.warning(
-        'Note: this repo runs pre-commit hooks — structure-preserving'
+        'Note: this repo runs pre-commit hooks -- structure-preserving'
         ' reformats of wiki pages are auto-retried, structure-breaking ones'
         ' fail loud with the pages restored, and any hook rewrite of other'
         ' node-data pages (.fractal/ seeds) is refused outright. Give'
         ' mdformat the wikilink-aware plugin (additional_dependencies:'
         ' [mdformat-wiki] on its hook, dropping mdformat-frontmatter if'
-        ' present — both register a frontmatter renderer and whichever is'
+        ' present -- both register a frontmatter renderer and whichever is'
         ' discovered first wins), or keep formatters off the wiki paths.'
     )
 
@@ -602,15 +651,33 @@ def run_script(
     # invoking installation, not ambient PATH, so a fronted foreign
     # install (e.g. the root venv's) cannot answer in this one's place
     env = fractal.util.system.prepend_bin_path()
-    result = subprocess.run(
-        ['bash', f'{script_path}', *args],
-        capture_output=True,
+    # a pid-targeted SIGINT (timeout -s INT, kill -INT, a supervisor) reaches
+    # only this process: forward it and wait, so the script's own INT trap
+    # restores its target and closes its event instead of being SIGKILLed
+    # mid-squash with the squash left staged
+    cmd = ['bash', f'{script_path}', *args]
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env=env,
-    )
+    ) as process:
+        try:
+            stdout, stderr = process.communicate()
+        except KeyboardInterrupt:
+            # the script's own trap decides the outcome: exit 0 means it
+            # finished the operation (a merge whose squash had landed), a
+            # failure carries its restore message, so neither reads as a
+            # bare interrupt to the caller
+            process.send_signal(signal.SIGINT)
+            stdout, stderr = process.communicate()
+    result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     if result.returncode != 0:
+        # the script's stderr is the operator's message and carries its own
+        # quoting (a pasteable remedy), so it is shown as written, not repr'd
         error = result.stderr.strip()
-        raise RuntimeError(f'{script} failed (exit {result.returncode}): {error!r}')
+        raise RuntimeError(f'{script} failed (exit {result.returncode}): {error}')
     return result
 
 

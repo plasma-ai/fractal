@@ -496,16 +496,30 @@ Once the node is running, briefly explain how to interact with it:
 
 - **Worktree:** The node runs in a git worktree at
   `<repo>/.worktrees/<branch>/`. The user's repo is untouched. When done, from
-  the repo root, merge with `fractal node merge <branch>`. A conflicted merge
-  restores the target worktree exactly as it was and leaves the resolution to
-  you: redo the squash there by hand (`git merge --squash <branch>`), resolve
-  and stage the conflicts, then finish with
+  the repo root, merge with `fractal node merge <branch>`. The merge judges the
+  squash's paths outside `.fractal/` by the node's scope roots and its project
+  wiki (the root `.gitattributes` passes only as init's own `merge=wiki` edit;
+  an unscoped repo-root node is unrestricted, an unscoped sub-project node is
+  bounded to its project directory) and refuses any outside them, naming them:
+  widen the scope
+  (`fractal node config set scope=<dirs> --path=<node worktree>`, then
+  `fractal commit "widen scope" --path=<node worktree>` — an uncommitted config
+  change makes the rerun skip the merge-base advance) or rerun with
+  `--ignore-scope` to land them. A conflicted merge restores the target worktree
+  exactly as it was and leaves the resolution to you (conflicts only under
+  `.fractal/` outside the node's scope roots resolve to the target's content on
+  their own): redo the squash there by hand (`git merge --squash <branch>`),
+  resolve and stage the conflicts, then finish with
   `fractal node merge <branch> --continue` rather than committing yourself — the
-  continue runs the rest of the merge (seed strip, wiki index refresh, commit,
-  merge-base advance) that a hand-rolled finish would miss, and names every file
-  where the resolution kept the target's content over the node's — the node
-  still carries its own version there, so land the resolution on the node (or
-  retire it) or a later re-merge silently re-stages it. Deleting afterward with
+  continue runs the rest of the merge (`.fractal/` restore and seed strip,
+  footprint check, wiki index refresh, commit, merge-base advance) that a
+  hand-rolled finish would miss, and the merge-base advance writes the target's
+  adjudicated tree into the node's worktree, so the resolution lands on the node
+  too. A footprint refusal on the continue names its own remedies:
+  `--continue --ignore-scope`, or widen the scope and redo the squash
+  (`git -C <target worktree> reset --hard HEAD && git -C <target worktree> merge --squash <branch>`),
+  since the widening commit lands after the hand squash and a continue refuses a
+  node commit newer than its squash. Deleting afterward with
   `fractal node delete <branch>` is optional hygiene, never automatic — a merged
   branch keeps audit value (delete must run from outside the worktree). Pass
   `--delete` to `merge` to chain the two in one command: every delete refusal

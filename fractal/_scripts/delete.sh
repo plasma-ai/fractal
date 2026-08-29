@@ -4,6 +4,7 @@ set -euo pipefail
 # Remove a node's worktree and delete its branch
 # ----------------------------------------------
 
+# ------ argument parsing
 usage() {
     cat <<USAGE
 Usage: delete.sh <path> [options]
@@ -103,7 +104,8 @@ fi
 # preserved there; a missing target is best-effort, never blocks the delete; a
 # recursive caller threads the deletion root's surviving target instead: a
 # descendant's self-derived target is its own parent, which dies in the same
-# teardown, so the advice would name a deleted branch
+# teardown, so the advice would name a deleted branch; the CLI shows the same
+# verdict before its prompt (mirrors Node.unmerged_warning)
 if [[ -z "$MERGE_TARGET" ]]; then
     DELETE_BASE=$(fractal config _get base --path="$WORKTREE_DIR" 2>/dev/null || true)
     if [[ -n "$DELETE_BASE" ]]; then
@@ -118,12 +120,32 @@ if [[ -n "$MERGE_TARGET" ]] \
     # under PROJECT_PATH) so SEED_EXCLUDE below points at the real seed location
     PROJECT_PATH=$(cat "$REPO_DIR/.worktrees/.project/$BRANCH" 2>/dev/null || echo ".")
     if [[ "$PROJECT_PATH" == "." ]]; then
-        SEED_EXCLUDE=":!.fractal"
+        SEED_PREFIX=".fractal"
         WIKI_PREFIX="wiki"
     else
-        SEED_EXCLUDE=":!$PROJECT_PATH/.fractal"
+        SEED_PREFIX="$PROJECT_PATH/.fractal"
         WIKI_PREFIX="$PROJECT_PATH/wiki"
     fi
+    # a scope root that is, or lies under, a .fractal dir is work the
+    # merge lands (a --meta node's scope is the target's own seed dir), so
+    # exclude only the node's own seed and its descendants' instead of the
+    # whole .fractal/ (mirrors Node.unmerged_warning and merge.sh's
+    # SCOPE_ROOTS test: a "." root collapses the scope, and an unset or
+    # unreadable scope reads empty)
+    SEED_EXCLUDE=(":(exclude)$SEED_PREFIX")
+    while IFS= read -r SCOPE_ROOT; do
+        [[ -n "$SCOPE_ROOT" ]] || continue
+        if [[ "$SCOPE_ROOT" == "." ]]; then
+            SEED_EXCLUDE=(":(exclude)$SEED_PREFIX")
+            break
+        fi
+        if [[ "$PROJECT_PATH" != "." ]]; then
+            SCOPE_ROOT="$PROJECT_PATH/$SCOPE_ROOT"
+        fi
+        if [[ "$SCOPE_ROOT" == .fractal || "$SCOPE_ROOT" == *"/.fractal" || "$SCOPE_ROOT" == *".fractal/"* ]]; then
+            SEED_EXCLUDE=(":(exclude)$SEED_PREFIX/$BRANCH" ":(exclude,glob)**/.fractal/$BRANCH.*/**")
+        fi
+    done < <(fractal config _get scope --path="$WORKTREE_DIR" 2>/dev/null || true)
     # the branch's work is preserved when it is an ancestor of the target (a fast
     # merge) or the target already matches it on the paths the branch itself
     # changed since it forked (a squash merge leaves no ancestry but lands that
@@ -149,13 +171,15 @@ if [[ -n "$MERGE_TARGET" ]] \
         while IFS= read -r -d '' CHANGED_PATH; do
             CHANGED_PATHS+=("$CHANGED_PATH")
         done < <(git -C "$REPO_DIR" diff --name-only -z "$MERGE_BASE" "$BRANCH" \
-            -- "$SEED_EXCLUDE" ":(exclude,glob)$WIKI_PREFIX/**/_index.md" \
-            ":!$WIKI_PREFIX/.wiki" 2>/dev/null || true)
+            -- "${SEED_EXCLUDE[@]}" ":(exclude,glob)$WIKI_PREFIX/**/_index.md" \
+            ":(exclude)$WIKI_PREFIX/.wiki" 2>/dev/null || true)
         # warn only when the target still differs from the branch on those paths
         # (after a squash merge the target already matches them -> no warning)
         if [[ ${#CHANGED_PATHS[@]} -gt 0 ]] \
             && ! git -C "$REPO_DIR" diff --quiet "$MERGE_TARGET" "$BRANCH" \
                 -- "${CHANGED_PATHS[@]}" 2>/dev/null; then
+            # word for word the line Node.unmerged_warning builds: the CLI
+            # prints that one before its prompt and drops this copy by equality
             echo "Warning: $BRANCH has commits not merged into $MERGE_TARGET;" \
                 "deleting discards them (merge first to keep them)" >&2
         fi
@@ -184,10 +208,11 @@ SIZE=${SIZE:-?}
 git -C "$REPO_DIR" worktree remove --force "$WORKTREE_DIR"
 echo "Removed worktree: $WORKTREE_DIR ($SIZE)"
 
+TIP=$(git -C "$REPO_DIR" rev-parse --short "$BRANCH")
 # >/dev/null: drop git's own "Deleted branch ... (was <sha>)"
 # so only the script's message below shows (no duplicate line)
 git -C "$REPO_DIR" branch -D "$BRANCH" >/dev/null
-echo "Deleted branch: $BRANCH"
+echo "Deleted branch: $BRANCH (was $TIP)"
 
 # ------ clean up .project/ cache entry from init.sh
 rm -f "$REPO_DIR/.worktrees/.project/$BRANCH"

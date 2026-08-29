@@ -109,7 +109,8 @@ Steering tools, ordered by weight:
   step), `finish` (end after the current iteration), `pause` (freeze the subtree
   in place), `kill` (immediate teardown of the node's processes and tmux session
   — the emergency stop, always available). Their semantics and when each is
-  right live in [[user_flow/finishing]] and [[user_flow/continue_resume]].
+  right live in [[user_flow/finishing/_index|user_flow/finishing]] and
+  [[user_flow/continue_resume]].
 
 ## The operator's cadence
 

@@ -8,9 +8,9 @@ live source of truth: the loop reads it from disk at every access, so the
 re-read keys — the cost caps, ``max_iters``, ``iter_timeout``,
 ``step_timeout``, ``wait``, ``interval``, ``sleep``, ``scope``, ``local``, and
 ``sealed`` — can be changed while a node runs (see `When edits take effect`_
-for each key's boundary). This page is the complete key
-reference; :doc:`/guide/loop` describes how the loop enforces the budget and
-timeout keys, and :doc:`/guide/plans` covers the per-step override surface.
+for each key's boundary). This page is the complete key reference;
+:doc:`/guide/loop` describes how the loop enforces the budget and timeout
+keys, and :doc:`/guide/plans` covers the per-step override surface.
 
 Where ``config.json`` lives
 ---------------------------
@@ -106,9 +106,9 @@ directory; pass ``--path <dir>`` to target another worktree.
   ``a/b``).
 - The merged result is checked by the validator (see `Validation`_) before
   anything is written, so ``set`` cannot store a value the validator rejects.
-  ``node init``'s additional flag checks — the agent registry,
-  provider support, the base worktree, a reserve requiring ``max_cost`` — do
-  not run here; ``node start`` re-validates the stored file at launch.
+  ``node init``'s additional flag checks — the agent registry, provider
+  support, the base worktree, a reserve requiring ``max_cost`` — do not run
+  here; ``node start`` re-validates the stored file at launch.
 
 ``fractal node update``
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -125,12 +125,13 @@ registry row together and echoes every change ``old -> new``:
    max_cost: 10.0 -> 100.0
    reserve_budget: 1.0 -> 10.0
 
-It covers ``--title``, ``--max-cost``, ``--max-iter-cost``, ``--max-step-cost``,
-``--reserve-budget``, ``--step-timeout``, ``--max-depth``, ``--max-children``,
-and ``--max-descendants`` (``--max-iter-cost``, ``--max-step-cost``,
-``--reserve-budget``, and ``--step-timeout`` live only in config — they have
-no registry column). A running loop picks new caps up at its next
-iteration boundary. See :doc:`/cli/node` for the full option surface.
+It covers ``--title``, ``--max-cost``, ``--max-iter-cost``,
+``--max-step-cost``, ``--reserve-budget``, ``--step-timeout``,
+``--max-depth``, ``--max-children``, and ``--max-descendants``
+(``--max-iter-cost``, ``--max-step-cost``, ``--reserve-budget``, and
+``--step-timeout`` live only in config — they have no registry column). A
+running loop picks new caps up at its next iteration boundary. See
+:doc:`/cli/node` for the full option surface.
 
 Direct file edits
 ~~~~~~~~~~~~~~~~~
@@ -256,7 +257,10 @@ Plain values
      - ``null``
      - Target node branch for meta-configuration. Set via
        ``fractal node init --meta``, which expands to a ``base``/``scope``
-       pair pointing at the target's seed directory.
+       pair pointing at the target's seed directory, spelled relative to the
+       meta node's own project: initialize a meta node for a sub-project
+       target from that target's worktree or from the repo root; one
+       initialized from a different sub-project is refused at init.
    * - ``agent``
      - inherited from the nearest ancestor
      - The agent command driving the node (the base word names a registered

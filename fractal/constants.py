@@ -13,6 +13,8 @@ CONFIG_FILE = 'config.json'
 DB_FILE = '.db'
 #: lock filename, standalone or as a suffix, serializing concurrent access
 LOCK_FILE = '.lock'
+#: flock file serializing squash merges into one repo's targets
+MERGE_LOCK_FILE = '.merge.lock'
 #: self-ignore file in the user node's data directory (fractal track removes it)
 SEED_IGNORE_FILE = '.gitignore'
 
