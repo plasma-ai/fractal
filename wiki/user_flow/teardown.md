@@ -17,8 +17,8 @@ updated: 2026-07-21T04:47:43Z
 
 Teardown comes in three tiers of increasing blast radius. Each tier states what
 it removes, what survives it, and the guards that keep it from destroying live
-or frozen work. Merge first ([[user_flow/finishing]]) — teardown never lands
-work anywhere.
+or frozen work. Merge first ([[user_flow/finishing/_index|user_flow/finishing]])
+— teardown never lands work anywhere.
 
 ## Tier 1: `fractal node delete` — one subtree
 

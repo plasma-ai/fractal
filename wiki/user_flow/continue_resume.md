@@ -26,7 +26,8 @@ between them is choosing what you want to survive the interruption.
 Three verbs end a run, differing in how much of the current work they let land:
 
 - `fractal node finish` — after the current **iteration**: the iteration's
-  commit lands first. The graceful conclusion ([[user_flow/finishing]]).
+  commit lands first. The graceful conclusion
+  ([[user_flow/finishing/_index|user_flow/finishing]]).
 - `fractal node stop` — after the current **step**: the loop exits at the next
   step boundary, status `stopped`. Both signals fan out to active descendants
   children-first; from the user node they broadcast tree-wide.

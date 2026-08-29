@@ -180,14 +180,13 @@ worktree. The bootstrap and baseline commit by pathspec, so other staged work
 stays staged; the merge refuses while the target worktree has uncommitted
 tracked changes or when the squash would write over any file that exists
 untracked there (an ignored ``local.env``, your own live seed), and restores
-it if the squash conflicts. The
-project wiki at ``wiki/`` and the ``.gitattributes`` merge rule are created by
-``fractal init`` but committed as ordinary project content for you and the
-nodes to grow. Teardown respects the same line — ``fractal node delete``
-removes a subtree, ``fractal reset`` removes every node while keeping the
-database, and even ``fractal destroy`` leaves committed artifacts (the wiki
-and baseline commits) and remote branches in place. See
-:doc:`/guide/lifecycle` for the teardown tiers.
+it if the squash conflicts. The project wiki at ``wiki/`` and the
+``.gitattributes`` merge rule are created by ``fractal init`` but committed
+as ordinary project content for you and the nodes to grow. Teardown respects
+the same line — ``fractal node delete`` removes a subtree, ``fractal reset``
+removes every node while keeping the database, and even ``fractal destroy``
+leaves committed artifacts (the wiki and baseline commits) and remote
+branches in place. See :doc:`/guide/lifecycle` for the teardown tiers.
 
 Package names
 -------------

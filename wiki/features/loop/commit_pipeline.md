@@ -48,14 +48,14 @@ The same record backs `merge.sh`'s footprint check through the private
 `fractal node _scope` command -- the staged paths outside `.fractal/`, with
 `--attributes-ok` passed under the same whole-change rule applied to the
 target's staged copy -- so a squash is judged by exactly the law the commit
-enforces (see [[user_flow/finishing]]). `--ignore-scope` commits out-of-scope
-changes but still lints; `--force` bypasses scope, lint, and git hooks alike.
-Before staging, the pipeline refreshes both wiki indexes (the project wiki and
-the node's memory) with the `wiki` CLI and fails the commit if a refresh fails
--- a broken wiki must never land -- then runs the node's `lint.sh` and surfaces
-its notices instead of dropping them. Helper CLIs are resolved from the invoking
-installation, not ambient PATH, so a foreign install cannot answer the hook's
-reads.
+enforces (see [[user_flow/finishing/_index|user_flow/finishing]]).
+`--ignore-scope` commits out-of-scope changes but still lints; `--force`
+bypasses scope, lint, and git hooks alike. Before staging, the pipeline
+refreshes both wiki indexes (the project wiki and the node's memory) with the
+`wiki` CLI and fails the commit if a refresh fails -- a broken wiki must never
+land -- then runs the node's `lint.sh` and surfaces its notices instead of
+dropping them. Helper CLIs are resolved from the invoking installation, not
+ambient PATH, so a foreign install cannot answer the hook's reads.
 
 ## Staging and warnings
 

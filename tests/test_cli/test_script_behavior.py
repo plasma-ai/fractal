@@ -172,18 +172,17 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   comes from another node's branch, an unstaged edit to a tracked path
   remains (the restore would rewrite it), or the node has commits newer than
   the hand squash (the advance would record them as adjudicated away) -- the
-  unstaged
-  refusal names ``git add`` or ``checkout --`` per path (never a stash the
-  restore would not see), and the footprint refusal names both
-  ``--continue --ignore-scope`` and the redo of the squash. A resolution
-  that keeps the target's content for
-  everything the node offered stages nothing, and still finishes that tail
-  minus the commit, so the target is left neither mid-squash nor primed to
-  replay the resolved conflict. Every resolution reaches the node through the
-  advance -- a third version, a restore of the fork-point content, an added
-  file dropped from the squash -- so a re-merge never undoes the decision;
-  and a foreign ``.fractal/`` edit the hand squash carries is restored with
-  the same warning a clean merge prints.
+  unstaged refusal names ``git add`` or ``checkout --`` per path (never a
+  stash the restore would not see), and the footprint refusal names both
+  ``--continue --ignore-scope`` and the redo of the squash. A resolution that
+  keeps the target's content for everything the node offered stages nothing,
+  and still finishes that tail minus the commit, so the target is left
+  neither mid-squash nor primed to replay the resolved conflict. Every
+  resolution reaches the node through the advance -- a third version, a
+  restore of the fork-point content, an added file dropped from the squash --
+  so a re-merge never undoes the decision; and a foreign ``.fractal/`` edit
+  the hand squash carries is restored with the same warning a clean merge
+  prints.
 - **``fractal node merge``** around the script holds one merge lock per repo,
   so two sibling merges racing into one target both land instead of
   interleaving their index writes, and forwards a pid-targeted SIGINT to the
@@ -226,7 +225,7 @@ import pytest
 import fractal
 from tests._helpers import _git
 
-from .conftest import _cli_env, _fractal_bin, _run
+from .conftest import _await_progress, _cli_env, _fractal_bin, _reap_group, _run
 
 __all__ = [
     'test_init_resolves_parent_worktree_under_a_space_path',
@@ -272,7 +271,6 @@ __all__ = [
     'test_merge_continue_refuses_unresolved_conflicts',
     'test_merge_continue_refuses_a_siblings_squash',
     'test_merge_leaves_the_targets_fractal_dir_as_it_is',
-    'test_merge_refuses_over_a_live_ignored_file_under_the_targets_fractal_dir',
     'test_merge_refuses_over_any_untracked_file_the_squash_would_overwrite',
     'test_merge_refuses_over_a_seed_file_the_root_untracked_but_kept',
     'test_merge_refuses_over_an_ignored_copy_of_the_nodes_own_seed',
@@ -307,7 +305,7 @@ __all__ = [
     'test_merge_serializes_concurrent_sibling_merges',
     'test_merge_interrupt_never_leaves_a_half_merge',
     'test_merge_interrupt_after_the_squash_finishes_the_merge',
-    'test_merge_cli_relays_a_remedy_path_with_a_single_backslash',
+    'test_merge_footprint_refusal_quotes_a_path_with_a_space',
     'test_merge_into_a_root_checked_out_in_a_linked_worktree',
     'test_destroy_removes_the_merge_lock_with_the_worktrees_dir',
     'test_delete_warns_on_unmerged_commits',
@@ -508,7 +506,9 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     stray.write_text('left beside the dead incarnation\n', encoding='utf-8')
     _git(parent, 'add', '-f', '.fractal/main.parent.c/stray.txt')
     _git(parent, 'commit', '-m', 'stray file under the stale seed')
-    # the same name again, with flags the stale copy does not carry
+    # the same name again, with flags the stale copy does not carry, so the
+    # reseed is visible in config.json
+    max_iters = 3
     again = _run(
         repo,
         'node',
@@ -517,7 +517,7 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
         '--agent',
         'codex',
         '--max-iters',
-        '3',
+        f'{max_iters}',
         '--local',
         _NODE=str(node_dir),
     )
@@ -532,7 +532,7 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     ) in again.stdout, (again.stdout, again.stderr)
     config = json.loads((seed / 'config.json').read_text(encoding='utf-8'))
     assert config['agent'] == 'codex'
-    assert config['max_iters'] == 3
+    assert config['max_iters'] == max_iters
     assert not (seed / 'stray.txt').exists()
 
 
@@ -1020,10 +1020,8 @@ def test_merge_re_merges_an_iterating_child_without_conflict(
 
 @pytest.mark.parametrize(
     argnames='dropped',
-    argvalues=[
-        pytest.param(False, id='wiki-state-only'),
-        pytest.param(True, id='with-a-dropped-path'),
-    ],
+    argvalues=[False, True],
+    ids=['wiki-state-only', 'with-a-dropped-path'],
 )
 def test_merge_re_merge_of_a_merged_node_is_a_no_op(
     tmp_path: pathlib.Path,
@@ -1236,21 +1234,13 @@ def test_merge_no_op_marker_clearing_never_touches_the_target_root(
     )
     assert first.returncode == 0, (first.stdout, first.stderr)
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    real_git = shutil.which('git')
-    assert real_git is not None
-    bindir = tmp_path / 'git_shim'
-    bindir.mkdir()
-    shim = bindir / 'git'
-    shim.write_text(
-        '#!/usr/bin/env bash\n'
+    bindir = _git_shim(
+        tmp_path,
         'if [[ " $* " == *" --git-path "* ]]; then\n'
         '    echo "fatal: the marker paths cannot be resolved" >&2\n'
         '    exit 128\n'
-        'fi\n'
-        f'exec "{real_git}" "$@"\n',
-        encoding='utf-8',
+        'fi\n',
     )
-    shim.chmod(0o755)
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
@@ -1558,10 +1548,8 @@ def test_merge_skips_the_merge_base_advance_for_dirty_tracked_work(
 
 @pytest.mark.parametrize(
     argnames='edited',
-    argvalues=[
-        pytest.param(True, id='edited-on-disk'),
-        pytest.param(False, id='committed-clean'),
-    ],
+    argvalues=[True, False],
+    ids=['edited-on-disk', 'committed-clean'],
 )
 def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     tmp_path: pathlib.Path,
@@ -1899,10 +1887,8 @@ def test_merge_advance_brings_the_targets_profiles_to_the_child(
 
 @pytest.mark.parametrize(
     argnames='lock',
-    argvalues=[
-        pytest.param('index.lock', id='index-lock'),
-        pytest.param('refs/heads/main.task.lock', id='ref-lock'),
-    ],
+    argvalues=['index.lock', 'refs/heads/main.task.lock'],
+    ids=['index-lock', 'ref-lock'],
 )
 def test_merge_skips_the_advance_when_the_child_index_is_locked(
     tmp_path: pathlib.Path,
@@ -1990,14 +1976,9 @@ def test_merge_skips_the_advance_when_reading_the_child_worktree_fails(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
-    real_git = shutil.which('git')
-    assert real_git is not None
-    bindir = tmp_path / 'git_shim'
-    bindir.mkdir()
-    shim = bindir / 'git'
-    reads = bindir / 'reads'
-    shim.write_text(
-        '#!/usr/bin/env bash\n'
+    reads = tmp_path / 'git_shim' / 'reads'
+    bindir = _git_shim(
+        tmp_path,
         f'if [[ "$*" == "-C {worktree} rev-parse --abbrev-ref HEAD" '
         '&& "$(ps -o comm= -p "$PPID")" == *bash* ]]; then\n'
         f'    echo "$*" >> "{reads}"\n'
@@ -2005,11 +1986,8 @@ def test_merge_skips_the_advance_when_reading_the_child_worktree_fails(
         f'        echo "fatal: not a git repository: {worktree}" >&2\n'
         '        exit 128\n'
         '    fi\n'
-        'fi\n'
-        f'exec "{real_git}" "$@"\n',
-        encoding='utf-8',
+        'fi\n',
     )
-    shim.chmod(0o755)
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
@@ -2043,13 +2021,16 @@ def test_merge_skips_the_advance_when_reading_the_child_worktree_fails(
 @pytest.mark.parametrize(
     argnames=('ignored', 'private', 'landed', 'named'),
     argvalues=[
-        pytest.param('local.env', 'local.env', 'local.env', 'local.env', id='file'),
-        pytest.param('build/', 'build/out.bin', 'build', 'build', id='dir-in-the-way'),
-        pytest.param('out', 'out', 'out/report.txt', 'out', id='file-in-the-way'),
-        pytest.param(
-            'LOCAL.ENV', 'LOCAL.ENV', 'local.env', 'local.env', id='case-alias'
-        ),
+        # the same file on both sides
+        ('local.env', 'local.env', 'local.env', 'local.env'),
+        # a private directory where the target adds a file
+        ('build/', 'build/out.bin', 'build', 'build'),
+        # a private file where the target adds a directory
+        ('out', 'out', 'out/report.txt', 'out'),
+        # a name differing only by case
+        ('LOCAL.ENV', 'LOCAL.ENV', 'local.env', 'local.env'),
     ],
+    ids=['file', 'dir-in-the-way', 'file-in-the-way', 'case-alias'],
 )
 def test_merge_skips_the_advance_over_a_private_ignored_file(
     tmp_path: pathlib.Path,
@@ -2074,9 +2055,7 @@ def test_merge_skips_the_advance_over_a_private_ignored_file(
     """
     # a case-only alias collides only where the filesystem folds case
     if private != landed and private.casefold() == landed.casefold():
-        (tmp_path / 'a').write_text('a', encoding='utf-8')
-        if not (tmp_path / 'A').exists():
-            pytest.skip('case-sensitive filesystem')
+        _require_case_folding(tmp_path)
     repo = _init_tree(tmp_path / 'privaterepo')
     (repo / '.gitignore').write_text(f'{ignored}\n', encoding='utf-8')
     _git(repo, 'add', '.gitignore')
@@ -2196,9 +2175,7 @@ def test_merge_advance_moves_a_tracked_case_variant(tmp_path: pathlib.Path) -> N
     spelling and content.
     """
     # a case-only alias is a disk hit only where the filesystem folds case
-    (tmp_path / 'a').write_text('a', encoding='utf-8')
-    if not (tmp_path / 'A').exists():
-        pytest.skip('case-sensitive filesystem')
+    _require_case_folding(tmp_path)
     repo = _init_tree(tmp_path / 'caserepo')
     (repo / 'Readme.md').write_text('mixed case\n', encoding='utf-8')
     _git(repo, 'add', 'Readme.md')
@@ -2240,10 +2217,8 @@ def test_merge_advance_moves_a_tracked_case_variant(tmp_path: pathlib.Path) -> N
 
 @pytest.mark.parametrize(
     argnames=('before', 'after'),
-    argvalues=[
-        pytest.param('out', 'out/x', id='file-to-dir'),
-        pytest.param('out/x', 'out', id='dir-to-file'),
-    ],
+    argvalues=[('out', 'out/x'), ('out/x', 'out')],
+    ids=['file-to-dir', 'dir-to-file'],
 )
 def test_merge_advance_performs_a_type_change_the_target_made(
     tmp_path: pathlib.Path,
@@ -2380,10 +2355,8 @@ def test_merge_fresh_no_op_advances_past_dropped_fractal_paths(
 
 @pytest.mark.parametrize(
     argnames=('seed', 'advances'),
-    argvalues=[
-        pytest.param('main.other', True, id='foreign-seed'),
-        pytest.param('main.task', False, id='own-seed'),
-    ],
+    argvalues=[('main.other', True), ('main.task', False)],
+    ids=['foreign-seed', 'own-seed'],
 )
 def test_merge_fresh_no_op_advances_past_a_resolved_foreign_conflict(
     tmp_path: pathlib.Path,
@@ -2685,10 +2658,14 @@ def test_merge_continue_finishes_a_target_only_resolution(
 @pytest.mark.parametrize(
     argnames=('resolution', 'keep_added'),
     argvalues=[
-        pytest.param('resolved line\n', True, id='third-version'),
-        pytest.param('original\n', True, id='base-content'),
-        pytest.param('resolved line\n', False, id='dropped-add'),
+        # a third version of the conflicted line
+        ('resolved line\n', True),
+        # the fork-point content restored
+        ('original\n', True),
+        # the added file dropped from the squash
+        ('resolved line\n', False),
     ],
+    ids=['third-version', 'base-content', 'dropped-add'],
 )
 def test_merge_continue_lands_the_resolution_on_the_node(
     tmp_path: pathlib.Path,
@@ -3253,87 +3230,38 @@ def test_merge_leaves_the_targets_fractal_dir_as_it_is(
     assert 'leaked by an earlier merge' not in result.stderr, result.stderr
 
 
-def test_merge_refuses_over_a_live_ignored_file_under_the_targets_fractal_dir(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A ``.fractal/`` path the target holds untracked refuses the merge up front.
-
-    The user node's own seed is self-ignored on the root, so its live memory
-    is invisible to git there -- and committable from a child, whose commit
-    sweeps all of ``.fractal/``. Git treats an ignored file as expendable, so
-    the squash would overwrite the live file and the restore would then
-    delete it as an addition the target never tracked. The merge refuses
-    before the squash, naming the path, and leaves the live file, the
-    target's HEAD, and its index exactly as they were.
-    """
-    repo = _init_tree(tmp_path / 'liverepo')
-    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
-    assert init.returncode == 0, init.stderr
-    worktree = repo / '.worktrees' / 'main.task'
-    _git(worktree, 'add', '-A')
-    _git(worktree, 'commit', '-m', 'settle node scaffolding')
-    (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
-    _git(worktree, 'add', 'f.txt')
-    _git(worktree, 'commit', '-m', 'child work')
-    # the root's live memory, self-ignored there; the child writes the same
-    # path into its own tree, where nothing ignores it
-    live = repo / '.fractal' / 'main' / 'memory' / 'notes.md'
-    live.parent.mkdir(parents=True, exist_ok=True)
-    live.write_text('root live\n', encoding='utf-8')
-    assert _git(repo, 'status', '--porcelain').stdout == ''
-    foreign = worktree / '.fractal' / 'main' / 'memory' / 'notes.md'
-    foreign.parent.mkdir(parents=True)
-    foreign.write_text('child\n', encoding='utf-8')
-    _git(worktree, 'add', '-A')
-    _git(worktree, 'commit', '-m', 'child writes the root memory')
-    main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
-
-    # refused naming the path; the live file, HEAD, and index are untouched
-    # and no squash state was left behind
-    assert result.returncode != 0, (result.stdout, result.stderr)
-    assert (
-        "would overwrite untracked files in main's worktree:"
-        ' .fractal/main/memory/notes.md; move them aside or drop them from'
-        ' main.task before merging'
-    ) in result.stderr, result.stderr
-    assert live.read_text(encoding='utf-8') == 'root live\n'
-    assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == main_head
-    assert _git(repo, 'status', '--porcelain').stdout == ''
-    assert not (repo / '.git' / 'SQUASH_MSG').exists()
-
-
 @pytest.mark.parametrize(
     argnames=('scope', 'live', 'added', 'named'),
     argvalues=[
-        pytest.param(
+        # the root's live memory, self-ignored there
+        (
+            [],
+            '.fractal/main/memory/notes.md',
+            '.fractal/main/memory/notes.md',
+            '.fractal/main/memory/notes.md',
+        ),
+        # the root's own config, from a node scoped to .fractal itself
+        (
             ['--scope', '.fractal'],
             '.fractal/main/config.json',
             '.fractal/main/config.json',
             '.fractal/main/config.json',
-            id='root-config-in-scope',
         ),
-        pytest.param(
+        # a live file where the squash creates a directory
+        (
             [],
             '.fractal/main/scratch',
             '.fractal/main/scratch/x.md',
             '.fractal/main/scratch',
-            id='file-at-a-prefix',
         ),
-        pytest.param(
-            ['--scope', 'docs'],
-            'local.env',
-            'local.env',
-            'local.env',
-            id='ignored-outside-fractal',
-        ),
+        # a private ignored file outside .fractal/
+        (['--scope', 'docs'], 'local.env', 'local.env', 'local.env'),
+    ],
+    ids=[
+        'root-memory',
+        'root-config-in-scope',
+        'file-at-a-prefix',
+        'ignored-outside-fractal',
     ],
 )
 def test_merge_refuses_over_any_untracked_file_the_squash_would_overwrite(
@@ -3348,15 +3276,18 @@ def test_merge_refuses_over_any_untracked_file_the_squash_would_overwrite(
     Git treats an untracked ignored file as expendable, so a squash adding
     the same path silently overwrites it -- and the tail then commits or
     deletes it. The guard covers every path the node added or changed since
-    the merge-base, wherever it sits: the root's live ``config.json`` even
-    from a node scoped to ``.fractal`` itself (no scope carve-out -- the root
-    never tracks its own seed, so no restore could bring it back), a file
-    sitting where the squash creates a directory (every parent prefix is
-    probed), and a private ``local.env`` outside ``.fractal/`` that a scoped
-    node force-added -- which the footprint refusal's reset would otherwise
-    delete from the root's disk after the squash had overwritten it. Each
-    refuses before the squash, naming the path in the way, and leaves the
-    live file, HEAD, and index as they were -- and the root still answers.
+    the merge-base, wherever it sits: the root's live memory (its own seed
+    is self-ignored on the root, so the memory is invisible to git there yet
+    committable from a child, whose commit sweeps all of ``.fractal/``), the
+    root's live ``config.json`` even from a node scoped to ``.fractal``
+    itself (no scope carve-out -- the root never tracks its own seed, so no
+    restore could bring it back), a file sitting where the squash creates a
+    directory (every parent prefix is probed), and a private ``local.env``
+    outside ``.fractal/`` that a scoped node force-added -- which the
+    footprint refusal's reset would otherwise delete from the root's disk
+    after the squash had overwritten it. Each refuses before the squash,
+    naming the path in the way, and leaves the live file, HEAD, and index as
+    they were -- and the root still answers.
     """
     repo = _init_tree(tmp_path / 'overwriterepo')
     if live == 'local.env':
@@ -3481,11 +3412,10 @@ def test_merge_refuses_over_a_seed_file_the_root_untracked_but_kept(
 @pytest.mark.parametrize(
     argnames=('project', 'seed_prefix', 'work'),
     argvalues=[
-        pytest.param([], '.fractal', 'feature.txt', id='repo-root'),
-        pytest.param(
-            ['--path', 'app'], 'app/.fractal', 'app/feature.txt', id='sub-project'
-        ),
+        ([], '.fractal', 'feature.txt'),
+        (['--path', 'app'], 'app/.fractal', 'app/feature.txt'),
     ],
+    ids=['repo-root', 'sub-project'],
 )
 def test_merge_refuses_over_an_ignored_copy_of_the_nodes_own_seed(
     tmp_path: pathlib.Path,
@@ -3765,11 +3695,10 @@ def test_merge_lands_a_multi_root_scope_with_a_profile_root(
 @pytest.mark.parametrize(
     argnames=('seed', 'target_edit', 'node_copy'),
     argvalues=[
-        pytest.param('main.task', None, 'child v2\n', id='purged'),
-        pytest.param(
-            'main.other', 'target v2\n', 'target v2\n', id='edited-on-both-sides'
-        ),
+        ('main.task', None, 'child v2\n'),
+        ('main.other', 'target v2\n', 'target v2\n'),
     ],
+    ids=['purged', 'edited-on-both-sides'],
 )
 def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     tmp_path: pathlib.Path,
@@ -3996,10 +3925,8 @@ def test_merge_refuses_a_mixed_conflict(tmp_path: pathlib.Path) -> None:
 
 @pytest.mark.parametrize(
     argnames='target',
-    argvalues=[
-        pytest.param('main', id='user-target'),
-        pytest.param('main.parent', id='node-target'),
-    ],
+    argvalues=['main', 'main.parent'],
+    ids=['user-target', 'node-target'],
 )
 def test_merge_warns_about_leaked_seed_dirs_on_the_target(
     tmp_path: pathlib.Path,
@@ -4539,13 +4466,12 @@ def test_merge_into_a_node_target_resolves_a_conflict_on_its_own_seed(
 
 
 def test_merge_remedies_quote_a_path_with_a_space(tmp_path: pathlib.Path) -> None:
-    """Every remedy the merge prints quotes its paths for the paste back.
+    """The leaked-seed remedy the merge prints quotes its path for the paste back.
 
     A remedy is copy-paste material, and an unquoted path with a space splits
-    into two words in the shell it is pasted into. Both remedies carry
-    ``printf %q`` quoted paths: the leaked-seed line runs as printed through
-    ``bash -c`` and removes the leak, and the footprint refusal names the
-    escaped worktree path in its ``--path``.
+    into two words in the shell it is pasted into. The leaked-seed line
+    carries a ``printf %q`` quoted path, so it runs as printed through
+    ``bash -c`` and removes the leak.
     """
     repo = _init_tree(tmp_path / 'with space' / 'repo')
     leaked = repo / '.fractal' / 'main.other' / 'NODE.md'
@@ -4585,38 +4511,6 @@ def test_merge_remedies_quote_a_path_with_a_space(tmp_path: pathlib.Path) -> Non
     assert removed.returncode == 0, (removed.stdout, removed.stderr)
     assert _git(repo, 'ls-files', '.fractal').stdout == ''
     assert not (repo / '.fractal' / 'main.other').exists()
-
-    # the footprint refusal names the escaped worktree path
-    init = _run(
-        repo,
-        'node',
-        'init',
-        'scoped',
-        '--scope',
-        'docs',
-        '--agent',
-        'claude',
-        '--local',
-    )
-    assert init.returncode == 0, init.stderr
-    scoped = repo / '.worktrees' / 'main.scoped'
-    (scoped / 'docs').mkdir()
-    (scoped / 'docs' / 'a.md').write_text('# a\n', encoding='utf-8')
-    (scoped / 'outside.txt').write_text('outside the scope\n', encoding='utf-8')
-    _git(scoped, 'add', '-A')
-    _git(scoped, 'commit', '-m', 'work in and out of scope')
-    refused = subprocess.run(
-        ['bash', f'{merge_sh}', f'{scoped}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
-    assert refused.returncode != 0, (refused.stdout, refused.stderr)
-    assert 'outside its scope' in refused.stderr, refused.stderr
-    quoted = f'{scoped}'.replace(' ', '\\ ')
-    assert f'--path={quoted}' in refused.stderr, refused.stderr
-    assert f'--path={scoped}' not in refused.stderr, refused.stderr
 
 
 def test_merge_warnings_print_a_non_ascii_path_readably(
@@ -4673,25 +4567,23 @@ def test_merge_warnings_print_a_non_ascii_path_readably(
 @pytest.mark.parametrize(
     argnames=('scope', 'flags', 'stray', 'lands'),
     argvalues=[
-        pytest.param(
-            ['--scope', 'docs'], [], 'outside.txt', False, id='scoped-refused'
-        ),
-        pytest.param(
-            ['--scope', 'docs'],
-            ['--ignore-scope'],
-            'outside.txt',
-            True,
-            id='scoped-overridden',
-        ),
-        pytest.param(['--scope', 'docs'], [], None, True, id='scoped-landing'),
-        pytest.param(
-            ['--scope', 'docs'],
-            [],
-            '.gitattributes',
-            False,
-            id='scoped-foreign-attributes',
-        ),
-        pytest.param([], [], 'outside.txt', True, id='unscoped'),
+        # a stray outside the scope refuses the squash
+        (['--scope', 'docs'], [], 'outside.txt', False),
+        # --ignore-scope lands it anyway
+        (['--scope', 'docs'], ['--ignore-scope'], 'outside.txt', True),
+        # in-scope work alone lands
+        (['--scope', 'docs'], [], None, True),
+        # a foreign .gitattributes is a stray like any other
+        (['--scope', 'docs'], [], '.gitattributes', False),
+        # an unscoped node has no footprint to refuse
+        ([], [], 'outside.txt', True),
+    ],
+    ids=[
+        'scoped-refused',
+        'scoped-overridden',
+        'scoped-landing',
+        'scoped-foreign-attributes',
+        'unscoped',
     ],
 )
 def test_merge_refuses_a_squash_outside_the_nodes_scope(
@@ -4774,11 +4666,12 @@ def test_merge_refuses_a_squash_outside_the_nodes_scope(
 
 @pytest.mark.parametrize(
     argnames='attributes',
-    argvalues=[
-        pytest.param('* text=auto\n', id='trailing-newline'),
-        pytest.param('* text=auto', id='no-trailing-newline'),
-        pytest.param('\n* text=auto\n', id='leading-blank-line'),
-        pytest.param('* text=auto  \n', id='trailing-spaces'),
+    argvalues=['* text=auto\n', '* text=auto', '\n* text=auto\n', '* text=auto  \n'],
+    ids=[
+        'trailing-newline',
+        'no-trailing-newline',
+        'leading-blank-line',
+        'trailing-spaces',
     ],
 )
 def test_merge_admits_init_attributes_over_a_targets_own_lines(
@@ -4964,17 +4857,14 @@ def test_merge_continue_refuses_a_squash_outside_the_nodes_scope(
 @pytest.mark.parametrize(
     argnames=('scope', 'inside', 'strays'),
     argvalues=[
-        pytest.param([], ['app/feature.txt'], ['outside.txt'], id='project-bound'),
-        pytest.param(
-            [], ['app/wiki/note.md'], ['wiki/note.md'], id='root-wiki-refused'
-        ),
-        pytest.param(
-            ['--scope', 'docs'],
-            ['app/docs/a.md'],
-            ['app/other.txt', 'root.txt'],
-            id='scoped-in-project',
-        ),
+        # work outside the project is a stray
+        ([], ['app/feature.txt'], ['outside.txt']),
+        # the root's wiki is outside a sub-project
+        ([], ['app/wiki/note.md'], ['wiki/note.md']),
+        # a scope is judged inside the project
+        (['--scope', 'docs'], ['app/docs/a.md'], ['app/other.txt', 'root.txt']),
     ],
+    ids=['project-bound', 'root-wiki-refused', 'scoped-in-project'],
 )
 def test_merge_bounds_a_sub_project_node_to_its_project(
     tmp_path: pathlib.Path,
@@ -5263,10 +5153,8 @@ def test_merge_resets_a_squash_git_aborted_after_staging(
 
 @pytest.mark.parametrize(
     argnames='arm',
-    argvalues=[
-        pytest.param([], id='fresh'),
-        pytest.param(['--continue'], id='continue'),
-    ],
+    argvalues=[[], ['--continue']],
+    ids=['fresh', 'continue'],
 )
 def test_merge_interrupt_during_the_commit_hook_finishes_the_merge(
     tmp_path: pathlib.Path,
@@ -5298,14 +5186,18 @@ def test_merge_interrupt_during_the_commit_hook_finishes_the_merge(
     # the continue arm picks up an operator's hand squash
     if arm:
         _git(repo, 'merge', '--squash', 'main.task')
-    # the hook marks the ref update and holds the commit open past it; a
-    # second marker after the sleep shows whether the signal cut it short
-    marker = tmp_path / 'committed'
+    # the hook marks the ref update and holds the commit open past it at a
+    # gate; a marker after the gate shows whether the signal cut it short
+    ready = tmp_path / 'gate_ready'
+    release = tmp_path / 'gate_release'
     slept = tmp_path / 'slept'
     hook = repo / '.git' / 'hooks' / 'post-commit'
     hook.parent.mkdir(exist_ok=True)
     hook.write_text(
-        f'#!/usr/bin/env bash\ntouch "{marker}"\nsleep 3\ntouch "{slept}"\n',
+        '#!/usr/bin/env bash\n'
+        f'touch "{ready}"\n'
+        f'while [[ ! -e "{release}" ]]; do sleep 0.05; done\n'
+        f'touch "{slept}"\n',
         encoding='utf-8',
     )
     hook.chmod(0o755)
@@ -5319,12 +5211,17 @@ def test_merge_interrupt_during_the_commit_hook_finishes_the_merge(
         env=_cli_env(),
         start_new_session=True,
     )
-    deadline = time.monotonic() + 60
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert marker.exists(), 'the commit never reached its hook'
-    os.killpg(proc.pid, signal.SIGINT)
-    stdout, stderr = proc.communicate(timeout=60)
+    try:
+        parked = _await_gate(ready, repo, deadline=time.monotonic() + 60)
+        assert parked, 'the commit never reached its hook'
+        os.killpg(proc.pid, signal.SIGINT)
+        # released right behind the signal: a hook the signal missed runs on
+        # to its marker instead of stalling the wait
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=60)
+    finally:
+        release.touch()
+        _reap_group(proc)
 
     # the signal cut the hook short, and the merge finished anyway: the squash
     # commit on the target, the child advanced and clean, the event closed
@@ -5362,9 +5259,9 @@ def test_merge_interrupt_after_a_skipped_advance_warns_once(
     advance only then, so the skip's own warning stands alone. The event
     still closes completed and the landed squash is reported with exit 0.
 
-    The event close is held open with a ``fractal`` shim that sleeps before
-    running the real ``event _end``, and the signal goes to the process
-    group so the shim dies of it and bash acts on it.
+    The event close is held open at a gate with a ``fractal`` shim that parks
+    before running the real ``event _end``, and the signal goes to the
+    process group so the shim dies of it and bash acts on it.
     """
     repo = _init_tree(tmp_path / 'skipinterruptrepo')
     (repo / '.gitignore').write_text('local.env\n', encoding='utf-8')
@@ -5383,8 +5280,9 @@ def test_merge_interrupt_after_a_skipped_advance_warns_once(
     (repo / 'local.env').write_text('TARGET COPY\n', encoding='utf-8')
     _git(repo, 'add', '-f', 'local.env')
     _git(repo, 'commit', '-m', 'track a local.env')
-    marker = tmp_path / 'closing'
-    bindir = _fractal_shim_holding(tmp_path, marker, on='event _end')
+    bindir = _fractal_shim_holding(tmp_path, on='event _end')
+    ready = bindir / 'gate_ready'
+    release = bindir / 'gate_release'
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
@@ -5398,12 +5296,17 @@ def test_merge_interrupt_after_a_skipped_advance_warns_once(
         env=env,
         start_new_session=True,
     )
-    deadline = time.monotonic() + 60
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert marker.exists(), 'the event close never started'
-    os.killpg(proc.pid, signal.SIGINT)
-    stdout, stderr = proc.communicate(timeout=60)
+    try:
+        parked = _await_gate(ready, repo, deadline=time.monotonic() + 60)
+        assert parked, 'the event close never started'
+        os.killpg(proc.pid, signal.SIGINT)
+        # released right behind the signal: a shim the signal missed runs on
+        # instead of stalling the wait
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=60)
+    finally:
+        release.touch()
+        _reap_group(proc)
 
     # the signal cut the first event close short and the trap closed it again;
     # the landed squash is reported, the skip's one warning names the path in
@@ -5436,9 +5339,9 @@ def test_merge_interrupt_in_a_no_op_merges_event_close_reports_the_no_op(
     closes the event completed and prints the arm's own summary, exactly
     the "Nothing to merge" line a quiet run prints, with exit 0.
 
-    The event close is held open with a ``fractal`` shim that sleeps before
-    running the real ``event _end``, and the signal goes to the process
-    group so the shim dies of it and bash acts on it.
+    The event close is held open at a gate with a ``fractal`` shim that parks
+    before running the real ``event _end``, and the signal goes to the
+    process group so the shim dies of it and bash acts on it.
     """
     repo = _init_tree(tmp_path / 'noopinterruptrepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -5458,8 +5361,9 @@ def test_merge_interrupt_in_a_no_op_merges_event_close_reports_the_no_op(
     assert first.returncode == 0, (first.stdout, first.stderr)
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
-    marker = tmp_path / 'closing'
-    bindir = _fractal_shim_holding(tmp_path, marker, on='event _end')
+    bindir = _fractal_shim_holding(tmp_path, on='event _end')
+    ready = bindir / 'gate_ready'
+    release = bindir / 'gate_release'
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
@@ -5472,12 +5376,17 @@ def test_merge_interrupt_in_a_no_op_merges_event_close_reports_the_no_op(
         env=env,
         start_new_session=True,
     )
-    deadline = time.monotonic() + 60
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert marker.exists(), 'the event close never started'
-    os.killpg(proc.pid, signal.SIGINT)
-    stdout, stderr = proc.communicate(timeout=60)
+    try:
+        parked = _await_gate(ready, repo, deadline=time.monotonic() + 60)
+        assert parked, 'the event close never started'
+        os.killpg(proc.pid, signal.SIGINT)
+        # released right behind the signal: a shim the signal missed runs on
+        # instead of stalling the wait
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=60)
+    finally:
+        release.touch()
+        _reap_group(proc)
 
     # the signal cut the first event close short and the trap closed it again;
     # the no-op is reported as the single stdout line, with no advance
@@ -5513,9 +5422,9 @@ def test_merge_interrupt_during_the_event_start_fails_the_event(
     failed. Nothing has touched the target yet, so it stays clean at the
     same HEAD, and the script exits non-zero.
 
-    The start is held open with a ``fractal`` shim that runs the real
-    ``event _start`` and sleeps before exiting, and the signal goes to the
-    process group -- the Ctrl-C shape -- so the shim dies of it and bash
+    The start is held open at a gate with a ``fractal`` shim that runs the
+    real ``event _start`` and parks before exiting, and the signal goes to
+    the process group -- the Ctrl-C shape -- so the shim dies of it and bash
     acts on it.
     """
     repo = _init_tree(tmp_path / 'eventstartrepo')
@@ -5526,8 +5435,9 @@ def test_merge_interrupt_during_the_event_start_fails_the_event(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    marker = tmp_path / 'started'
-    bindir = _fractal_shim_lingering(tmp_path, marker, on='event _start')
+    bindir = _fractal_shim_lingering(tmp_path, on='event _start')
+    ready = bindir / 'gate_ready'
+    release = bindir / 'gate_release'
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
@@ -5541,12 +5451,17 @@ def test_merge_interrupt_during_the_event_start_fails_the_event(
         env=env,
         start_new_session=True,
     )
-    deadline = time.monotonic() + 60
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert marker.exists(), 'the event start never returned'
-    os.killpg(proc.pid, signal.SIGINT)
-    stdout, stderr = proc.communicate(timeout=60)
+    try:
+        parked = _await_gate(ready, repo, deadline=time.monotonic() + 60)
+        assert parked, 'the event start never returned'
+        os.killpg(proc.pid, signal.SIGINT)
+        # released right behind the signal: a shim the signal missed runs on
+        # instead of stalling the wait
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=60)
+    finally:
+        release.touch()
+        _reap_group(proc)
 
     # the script aborted, the target is untouched, and the one merge row the
     # start opened is closed failed
@@ -5567,54 +5482,100 @@ def test_merge_interrupt_during_the_event_start_fails_the_event(
 
 
 def test_merge_serializes_concurrent_sibling_merges(tmp_path: pathlib.Path) -> None:
-    """Two sibling merges racing into one target both land.
+    """Two sibling merges racing into one target both land, one after the other.
 
     ``git merge --squash`` locks the target's index only for its final write,
     so two sibling merges both pass their preflight and interleave: the
     loser's files land untracked in the target, the winner's index write
     drops the loser's staged entries, and the loser's ``reset --hard`` cannot
     undo untracked files. ``fractal node merge`` holds one lock per repo
-    around the script, so both land -- one commit each, the target clean, no
-    squash state behind. Run three times over fresh siblings, since the race
-    is a timing one.
+    around the script, so a merge started while another is inside its squash
+    parks before its script runs, and both land -- one commit each, the
+    second's on top, the target clean, no squash state behind.
+
+    The first squash is held open at a gate with a ``git`` shim that parks
+    before running the real ``merge --squash``; the second squash only marks
+    its start, so a merge that reaches it while the first is parked shows.
     """
     repo = _init_tree(tmp_path / 'racerepo')
-    for attempt in range(3):
-        names = (f'a{attempt}', f'b{attempt}')
-        worktrees = []
-        for name in names:
-            init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
-            assert init.returncode == 0, init.stderr
-            worktree = repo / '.worktrees' / f'main.{name}'
-            (worktree / f'{name}.txt').write_text(f'{name} work\n', encoding='utf-8')
-            _git(worktree, 'add', '-A')
-            _git(worktree, 'commit', '-m', f'{name} work')
-            worktrees.append(worktree)
-        # both merges start at once and run through the CLI, where the lock is
-        procs = [
+    names = ('a', 'b')
+    for name in names:
+        init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
+        assert init.returncode == 0, init.stderr
+        worktree = repo / '.worktrees' / f'main.{name}'
+        (worktree / f'{name}.txt').write_text(f'{name} work\n', encoding='utf-8')
+        _git(worktree, 'add', '-A')
+        _git(worktree, 'commit', '-m', f'{name} work')
+    first, second = (repo / '.worktrees' / f'main.{name}' for name in names)
+    ready_a = tmp_path / 'gate_ready_a'
+    release_a = tmp_path / 'gate_release_a'
+    ready_b = tmp_path / 'gate_ready_b'
+    bindir = _git_shim(
+        tmp_path,
+        'if [[ " $* " == *" merge --squash main.a "* ]]; then\n'
+        f'    touch "{ready_a}"\n'
+        f'    while [[ ! -e "{release_a}" ]]; do sleep 0.05; done\n'
+        'elif [[ " $* " == *" merge --squash main.b "* ]]; then\n'
+        f'    touch "{ready_b}"\n'
+        'fi\n',
+    )
+    env = _cli_env()
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    procs: list[subprocess.Popen] = []
+    try:
+        # the first merge runs through the CLI, where the lock is, and parks
+        # inside its squash with the lock held
+        procs.append(
             subprocess.Popen(
-                [_fractal_bin(), 'node', 'merge', f'--path={worktree}'],
+                [_fractal_bin(), 'node', 'merge', f'--path={first}'],
                 cwd=f'{repo}',
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=_cli_env(),
+                env=env,
+                start_new_session=True,
             )
-            for worktree in worktrees
-        ]
+        )
+        parked = _await_gate(ready_a, repo, deadline=time.monotonic() + 60)
+        assert parked, 'the first squash never started'
+        # the second starts against the held lock
+        procs.append(
+            subprocess.Popen(
+                [_fractal_bin(), 'node', 'merge', f'--path={second}'],
+                cwd=f'{repo}',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                start_new_session=True,
+            )
+        )
+        # an observation margin before the negative check: long enough for an
+        # unlocked second merge to boot the CLI, run its preflight, and reach
+        # its own squash
+        time.sleep(5)
+        assert procs[1].poll() is None, procs[1].communicate()
+        assert not ready_b.exists(), 'the second squash ran while the first was parked'
+        release_a.touch()
         outputs = [proc.communicate(timeout=180) for proc in procs]
+    finally:
+        release_a.touch()
+        for proc in procs:
+            _reap_group(proc)
 
-        # both landed: one merge commit each, the work on the target, and no
-        # residue in the index, the working tree, or git's squash state
-        for proc, (stdout, stderr) in zip(procs, outputs):
-            assert proc.returncode == 0, (attempt, stdout, stderr)
-        subjects = _git(repo, 'log', '--format=%s').stdout.splitlines()
-        for name in names:
-            assert f'merge main.{name}' in subjects, (attempt, subjects)
-            landed = (repo / f'{name}.txt').read_text(encoding='utf-8')
-            assert landed == f'{name} work\n'
-        assert _git(repo, 'status', '--porcelain').stdout == ''
-        assert not (repo / '.git' / 'SQUASH_MSG').exists()
+    # both landed in turn: one merge commit each with the second's on top, the
+    # work on the target, and no residue in the index, the working tree, or
+    # git's squash state
+    for proc, (stdout, stderr) in zip(procs, outputs):
+        assert proc.returncode == 0, (stdout, stderr)
+    subjects = _git(repo, 'log', '--format=%s').stdout.splitlines()
+    assert subjects[:2] == ['merge main.b', 'merge main.a'], subjects
+    for name in names:
+        landed = (repo / f'{name}.txt').read_text(encoding='utf-8')
+        assert landed == f'{name} work\n'
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    assert not (repo / '.git' / 'SQUASH_MSG').exists()
 
 
 def test_merge_interrupt_never_leaves_a_half_merge(tmp_path: pathlib.Path) -> None:
@@ -5629,8 +5590,9 @@ def test_merge_interrupt_never_leaves_a_half_merge(tmp_path: pathlib.Path) -> No
     -- so either way the target ends clean, with no squash state and no
     merge event left active.
 
-    The squash is held open with a ``git`` shim that sleeps before running
-    the real ``merge --squash``, so the signal lands inside that window.
+    The squash is held open at a gate with a ``git`` shim that parks before
+    running the real ``merge --squash``, so the signal lands inside that
+    window.
     """
     repo = _init_tree(tmp_path / 'interruptrepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -5639,24 +5601,17 @@ def test_merge_interrupt_never_leaves_a_half_merge(tmp_path: pathlib.Path) -> No
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
-    # the shim marks the squash's start and holds it open, then execs the
-    # real git it fronts
-    real_git = shutil.which('git')
-    assert real_git is not None
-    marker = tmp_path / 'squashing'
-    bindir = tmp_path / 'git_shim'
-    bindir.mkdir()
-    shim = bindir / 'git'
-    shim.write_text(
-        '#!/usr/bin/env bash\n'
+    # the shim marks the squash's start and parks it at a gate, then execs
+    # the real git it fronts
+    ready = tmp_path / 'gate_ready'
+    release = tmp_path / 'gate_release'
+    bindir = _git_shim(
+        tmp_path,
         'if [[ " $* " == *" merge "* && " $* " == *" --squash "* ]]; then\n'
-        f'    touch "{marker}"\n'
-        '    sleep 2\n'
-        'fi\n'
-        f'exec "{real_git}" "$@"\n',
-        encoding='utf-8',
+        f'    touch "{ready}"\n'
+        f'    while [[ ! -e "{release}" ]]; do sleep 0.05; done\n'
+        'fi\n',
     )
-    shim.chmod(0o755)
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
@@ -5667,13 +5622,19 @@ def test_merge_interrupt_never_leaves_a_half_merge(tmp_path: pathlib.Path) -> No
         stderr=subprocess.PIPE,
         text=True,
         env=env,
+        start_new_session=True,
     )
-    deadline = time.monotonic() + 60
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert marker.exists(), 'the squash never started'
-    proc.send_signal(signal.SIGINT)
-    stdout, stderr = proc.communicate(timeout=20)
+    try:
+        parked = _await_gate(ready, repo, deadline=time.monotonic() + 60)
+        assert parked, 'the squash never started'
+        proc.send_signal(signal.SIGINT)
+        # the signal is the CLI's alone, so the parked squash is released
+        # behind it and runs on to where the script's own trap acts
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=20)
+    finally:
+        release.touch()
+        _reap_group(proc)
 
     # the CLI aborted, and the target is clean: nothing staged, no squash
     # state, and the merge event closed one way or the other
@@ -5702,8 +5663,9 @@ def test_merge_interrupt_after_the_squash_finishes_the_merge(
     the landed squash, and exits 0 with the child converged; the CLI relays
     that outcome rather than a bare interrupt.
 
-    The advance's reset is held open with a ``git`` shim that sleeps before
-    running the real ``reset --hard <sha>``, so the signal lands inside it.
+    The advance's reset is held open at a gate with a ``git`` shim that parks
+    before running the real ``reset --hard <sha>``, so the signal lands
+    inside it.
     """
     repo = _init_tree(tmp_path / 'lateinterruptrepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -5712,25 +5674,19 @@ def test_merge_interrupt_after_the_squash_finishes_the_merge(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
-    # the shim marks the advance's reset and holds it open, then execs the
-    # real git it fronts (only a reset --hard onto a full sha is the advance's)
-    real_git = shutil.which('git')
-    assert real_git is not None
-    marker = tmp_path / 'advancing'
-    bindir = tmp_path / 'git_shim'
-    bindir.mkdir()
-    shim = bindir / 'git'
-    shim.write_text(
-        '#!/usr/bin/env bash\n'
+    # the shim marks the advance's reset and parks it at a gate, then execs
+    # the real git it fronts (only a reset --hard onto a full sha is the
+    # advance's)
+    ready = tmp_path / 'gate_ready'
+    release = tmp_path / 'gate_release'
+    bindir = _git_shim(
+        tmp_path,
         'if [[ " $* " == *" reset "* && " $* " == *" --hard "* '
         '&& "$*" =~ [0-9a-f]{40} ]]; then\n'
-        f'    touch "{marker}"\n'
-        '    sleep 2\n'
-        'fi\n'
-        f'exec "{real_git}" "$@"\n',
-        encoding='utf-8',
+        f'    touch "{ready}"\n'
+        f'    while [[ ! -e "{release}" ]]; do sleep 0.05; done\n'
+        'fi\n',
     )
-    shim.chmod(0o755)
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
@@ -5741,13 +5697,19 @@ def test_merge_interrupt_after_the_squash_finishes_the_merge(
         stderr=subprocess.PIPE,
         text=True,
         env=env,
+        start_new_session=True,
     )
-    deadline = time.monotonic() + 60
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert marker.exists(), 'the advance never started'
-    proc.send_signal(signal.SIGINT)
-    stdout, stderr = proc.communicate(timeout=30)
+    try:
+        parked = _await_gate(ready, repo, deadline=time.monotonic() + 60)
+        assert parked, 'the advance never started'
+        proc.send_signal(signal.SIGINT)
+        # the signal is the CLI's alone, so the parked reset is released
+        # behind it and runs on to where the script's own trap acts
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=30)
+    finally:
+        release.touch()
+        _reap_group(proc)
 
     # the CLI reports the landed squash with exit 0; the target has the
     # commit, the child converged clean onto the merged tree with its work in
@@ -5770,17 +5732,24 @@ def test_merge_interrupt_after_the_squash_finishes_the_merge(
     assert all(row['status'] != 'active' for row in merges), merges
 
 
-def test_merge_cli_relays_a_remedy_path_with_a_single_backslash(
+@pytest.mark.parametrize(
+    argnames='direct',
+    argvalues=[False, True],
+    ids=['cli', 'script'],
+)
+def test_merge_footprint_refusal_quotes_a_path_with_a_space(
     tmp_path: pathlib.Path,
+    direct: bool,
 ) -> None:
-    """The CLI shows the script's refusal as written, its quoting intact.
+    """The footprint refusal names the escaped worktree path through either entry.
 
-    Every remedy the merge prints quotes its paths for a paste back into a
-    shell, so the CLI must relay the script's stderr verbatim: a repr'd
-    message would double each backslash, and the pasted line would then
-    name a path that does not exist. Under a repo path with a space the
-    footprint refusal's ``--path=`` reaches the operator with one backslash
-    per space, and the unquoted path never appears.
+    A remedy is copy-paste material, and an unquoted path with a space splits
+    into two words in the shell it is pasted into: under a repo path with a
+    space the refusal's ``--path=`` carries a ``printf %q`` quoted path, and
+    the unquoted path never appears. The CLI relays the script's stderr
+    verbatim -- a repr'd message would double each backslash, and the pasted
+    line would then name a path that does not exist -- so the operator sees
+    one backslash per space there too.
     """
     repo = _init_tree(tmp_path / 'with space' / 'repo')
     init = _run(
@@ -5801,25 +5770,35 @@ def test_merge_cli_relays_a_remedy_path_with_a_single_backslash(
     (scoped / 'outside.txt').write_text('outside the scope\n', encoding='utf-8')
     _git(scoped, 'add', '-A')
     _git(scoped, 'commit', '-m', 'work in and out of scope')
-    result = _run(repo, 'node', 'merge', f'--path={scoped}')
+    if direct:
+        merge_sh = _scripts_dir() / 'merge.sh'
+        result = subprocess.run(
+            ['bash', f'{merge_sh}', f'{scoped}'],
+            cwd=f'{repo}',
+            capture_output=True,
+            text=True,
+            env=_cli_env(),
+        )
+    else:
+        result = _run(repo, 'node', 'merge', f'--path={scoped}')
 
-    # refused through the CLI with the remedy's quoting as the script wrote it
+    # refused naming the escaped worktree path, never the unquoted one
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert 'outside its scope' in result.stderr, result.stderr
     quoted = f'{scoped}'.replace(' ', '\\ ')
     assert f'--path={quoted}' in result.stderr, result.stderr
     assert f'--path={scoped}' not in result.stderr, result.stderr
-    assert 'with\\ space' in result.stderr, result.stderr
-    assert 'with\\\\ space' not in result.stderr, result.stderr
-    assert '\\\\' not in result.stderr, result.stderr
+    # the CLI relays the script's quoting as written, one backslash per space
+    if not direct:
+        assert 'with\\ space' in result.stderr, result.stderr
+        assert 'with\\\\ space' not in result.stderr, result.stderr
+        assert '\\\\' not in result.stderr, result.stderr
 
 
 @pytest.mark.parametrize(
     argnames='direct',
-    argvalues=[
-        pytest.param(False, id='cli'),
-        pytest.param(True, id='script'),
-    ],
+    argvalues=[False, True],
+    ids=['cli', 'script'],
 )
 def test_merge_into_a_root_checked_out_in_a_linked_worktree(
     tmp_path: pathlib.Path,
@@ -6254,6 +6233,37 @@ def _init_tree(root: pathlib.Path) -> pathlib.Path:
     return root
 
 
+def _require_case_folding(tmp: pathlib.Path) -> None:
+    """Skip the test when the filesystem under ``tmp`` keeps case distinct.
+
+    A case-only alias is a disk hit only where the filesystem folds case, so
+    the probe writes ``a`` and looks for ``A``.
+    """
+    (tmp / 'a').write_text('a', encoding='utf-8')
+    if not (tmp / 'A').exists():
+        pytest.skip('requires a case-insensitive filesystem')
+
+
+def _git_shim(tmp: pathlib.Path, body: str) -> pathlib.Path:
+    """A bindir holding a pass-through ``git`` that runs ``body`` first.
+
+    ``body`` is a bash block over the call's ``$*`` -- one that fails, marks,
+    or parks a chosen subcommand -- after which the shim execs the real git
+    for the call. Returns the bindir to prepend to ``PATH``.
+    """
+    real_git = shutil.which('git')
+    assert real_git is not None
+    bindir = tmp / 'git_shim'
+    bindir.mkdir()
+    shim = bindir / 'git'
+    shim.write_text(
+        f'#!/usr/bin/env bash\n{body}exec "{real_git}" "$@"\n',
+        encoding='utf-8',
+    )
+    shim.chmod(0o755)
+    return bindir
+
+
 def _fractal_shim_dirtying(
     tmp: pathlib.Path,
     target_file: pathlib.Path,
@@ -6282,32 +6292,30 @@ def _fractal_shim_dirtying(
     return bindir
 
 
-def _fractal_shim_holding(
-    tmp: pathlib.Path,
-    marker: pathlib.Path,
-    *,
-    on: str,
-) -> pathlib.Path:
-    """A bindir holding a pass-through ``fractal`` that holds one call open.
+def _fractal_shim_holding(tmp: pathlib.Path, *, on: str) -> pathlib.Path:
+    """A bindir holding a pass-through ``fractal`` that holds one call at a gate.
 
     The shim execs the real console script for every call, but the first time
-    the joined arguments contain ``on`` it touches ``marker`` and sleeps first
-    -- a window for a signal to land while the script waits on that call; a
-    later matching call (a trap's retry) passes straight through. Every call's
-    arguments are appended to ``calls`` beside the shim, so a test can tell a
-    call the signal cut short from the retry that followed. Returns the bindir
-    to prepend to ``PATH``.
+    the joined arguments contain ``on`` it touches ``gate_ready`` beside the
+    shim and parks until ``gate_release`` appears there -- a window for a
+    signal to land while the script waits on that call; a later matching call
+    (a trap's retry) passes straight through. Every call's arguments are
+    appended to ``calls`` beside the shim, so a test can tell a call the
+    signal cut short from the retry that followed. Returns the bindir to
+    prepend to ``PATH``.
     """
     bindir = tmp / 'fractal_shim'
     bindir.mkdir(parents=True, exist_ok=True)
     shim = bindir / 'fractal'
     calls = bindir / 'calls'
+    ready = bindir / 'gate_ready'
+    release = bindir / 'gate_release'
     shim.write_text(
         '#!/usr/bin/env bash\n'
         f'printf \'%s\\n\' "$*" >> "{calls}"\n'
-        f'if [[ "$*" == *"{on}"* && ! -e "{marker}" ]]; then\n'
-        f'    touch "{marker}"\n'
-        '    sleep 3\n'
+        f'if [[ "$*" == *"{on}"* && ! -e "{ready}" ]]; then\n'
+        f'    touch "{ready}"\n'
+        f'    while [[ ! -e "{release}" ]]; do sleep 0.05; done\n'
         'fi\n'
         f'exec "{_fractal_bin()}" "$@"\n',
         encoding='utf-8',
@@ -6316,34 +6324,62 @@ def _fractal_shim_holding(
     return bindir
 
 
-def _fractal_shim_lingering(
-    tmp: pathlib.Path,
-    marker: pathlib.Path,
-    *,
-    on: str,
-) -> pathlib.Path:
+def _fractal_shim_lingering(tmp: pathlib.Path, *, on: str) -> pathlib.Path:
     """A bindir holding a pass-through ``fractal`` that lingers after one call.
 
     The shim runs the real console script for every call, but the first time
-    the joined arguments contain ``on`` it touches ``marker`` once that call
-    has returned -- its output already written -- and sleeps before exiting
-    with the call's status: a window for a signal to land while the script
-    waits on a call whose work is already done. Returns the bindir to prepend
-    to ``PATH``.
+    the joined arguments contain ``on`` it touches ``gate_ready`` beside the
+    shim once that call has returned -- its output already written -- and
+    parks until ``gate_release`` appears there before exiting with the call's
+    status: a window for a signal to land while the script waits on a call
+    whose work is already done. Returns the bindir to prepend to ``PATH``.
     """
     bindir = tmp / 'fractal_shim'
     bindir.mkdir(parents=True, exist_ok=True)
     shim = bindir / 'fractal'
+    ready = bindir / 'gate_ready'
+    release = bindir / 'gate_release'
     shim.write_text(
         '#!/usr/bin/env bash\n'
         f'"{_fractal_bin()}" "$@"\n'
         'STATUS=$?\n'
-        f'if [[ "$*" == *"{on}"* && ! -e "{marker}" ]]; then\n'
-        f'    touch "{marker}"\n'
-        '    sleep 3\n'
+        f'if [[ "$*" == *"{on}"* && ! -e "{ready}" ]]; then\n'
+        f'    touch "{ready}"\n'
+        f'    while [[ ! -e "{release}" ]]; do sleep 0.05; done\n'
         'fi\n'
         'exit "$STATUS"\n',
         encoding='utf-8',
     )
     shim.chmod(0o755)
     return bindir
+
+
+def _await_gate(ready: pathlib.Path, repo: pathlib.Path, *, deadline: float) -> bool:
+    """Block until a gated call parks (its ``gate_ready`` marker appears).
+
+    Idle-based via ``_await_progress``: activity under the target repo's
+    ``.git`` refreshes the allowance. Returns whether the call parked.
+    """
+    return _await_progress(
+        check=ready.exists,
+        progress=lambda: _git_activity(repo),
+        deadline=deadline,
+    )
+
+
+def _git_activity(repo: pathlib.Path) -> list[tuple[str, int]]:
+    """An mtime listing of a live merge's footprint under the target's ``.git``.
+
+    The squash and commit churn the top-level entries (the index,
+    ``SQUASH_MSG``, ``COMMIT_EDITMSG``, the refs) and the advance rewrites
+    the child worktree's index under ``worktrees/``; an entry gone between
+    the listing and its stat is churn too.
+    """
+    git_dir = repo / '.git'
+    listing = []
+    for path in (*git_dir.glob('*'), *git_dir.glob('worktrees/*/index')):
+        try:
+            listing.append((f'{path.relative_to(git_dir)}', path.stat().st_mtime_ns))
+        except FileNotFoundError:
+            continue
+    return listing

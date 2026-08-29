@@ -86,7 +86,7 @@ queue instead of interleaving their index writes.
   the out-of-scope ones on stdout, exit 1 when any is out of scope — the same
   `Scope` law `fractal commit` enforces), refreshes the wiki indexes, commits,
   and records the target's post-squash tree on the node's branch; the operator's
-  view of the merge is [[user_flow/finishing]].
+  view of the merge is [[user_flow/finishing/_index|user_flow/finishing]].
 - `delete.sh` removes one node's worktree, local branch, and remote branch; the
   recursive delete calls it once per node, deepest first.
 

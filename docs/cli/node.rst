@@ -500,8 +500,8 @@ the rest, a same-named copy of the node's seed under another project prefix
 (the node re-created at a different project path) included, get a second
 warning with a ``git -C <target worktree> rm -r -- <dirs> && git -C <target
 worktree> commit -m 'drop leaked node seeds'`` remedy line that removes them
-from the tree and from the root worktree's disk (the copies are
-never live seeds; those sit in each node's own worktree). A node target is
+from the tree and from the root worktree's disk (the copies are never
+live seeds; those sit in each node's own worktree). A node target is
 not judged: its branch legitimately carries other nodes' seeds (its
 ancestors' by fork, its descendants' by PREPARE merges, a sibling's by the
 merge-base advance). The check reads the committed tree, so a ``--continue``
@@ -527,38 +527,37 @@ over a plain untracked file, or another git process holding the target's
 index. An interrupt before the squash commit restores the target the same
 way and marks the merge event failed (one that lands while the event is still
 being opened closes it as failed too); once ``git commit`` has moved the
-target's ref the squash has landed, and the merge finishes it —
-the merge-base advances, the event closes as completed, and the command
-prints ``Squash-merged ...`` and exits 0 — rather than reporting a restore. An
+target's ref the squash has landed, and the merge finishes it — the
+merge-base advances, the event closes as completed, and the command prints
+``Squash-merged ...`` and exits 0 — rather than reporting a restore. An
 interrupt during the advance finishes the node's worktree update or rolls it
 back, warning only when an advance was underway; one during a no-op merge's
 bookkeeping prints that arm's own summary (``Nothing to merge: ...``) with no
-advance warning. After the commit, the node's merge-base advances
-with a two-parent commit on the node's branch
-(``merge <target> (post-squash)``) whose tree is the target's post-squash
-tree with the node's own seed and its descendants' seeds kept, so the node's
-worktree converges to the target and a later merge only diffs new work. The
-advance is skipped with a warning when the node's worktree is dirty, on
-another branch, or holds an untracked or ignored file or directory in the way
-of a path the target now tracks — a rename on the target that lands where the
-node keeps a private file, or an untracked case-only alias on a
-case-insensitive filesystem, included, while a path the node tracks under a
-different case is not a collision (the update renames it), and neither is a
-path the node tracks at, under, or above the hit (the target turned a file
-into a directory or back — a type change the update performs). Move the file
-aside; the next merge that lands work advances it (a fresh merge offering
-nothing exits at "Nothing to merge" before the advance — unless the restore
-dropped a ``.fractal/`` change outside the node's own seed and its
-descendants', the paths the restore warnings name, or a ``.fractal/``
+advance warning. After the commit, the node's merge-base advances with a
+two-parent commit on the node's branch (``merge <target> (post-squash)``)
+whose tree is the target's post-squash tree with the node's own seed and its
+descendants' seeds kept, so the node's worktree converges to the target and a
+later merge only diffs new work. The advance is skipped with a warning when
+the node's worktree is dirty, on another branch, or holds an untracked or
+ignored file or directory in the way of a path the target now tracks — a
+rename on the target that lands where the node keeps a private file, or an
+untracked case-only alias on a case-insensitive filesystem, included, while a
+path the node tracks under a different case is not a collision (the update
+renames it), and neither is a path the node tracks at, under, or above the hit
+(the target turned a file into a directory or back — a type change the update
+performs). Move the file aside; the next merge that lands work advances it (a
+fresh merge offering nothing exits at "Nothing to merge" before the advance —
+unless the restore dropped a ``.fractal/`` change outside the node's own seed
+and its descendants', the paths the restore warnings name, or a ``.fractal/``
 conflict outside them resolved to the target's content, either of which still
-advances the merge-base so the node converges and the warning does not
-repeat; a node whose only offering is an edit to its own seed exits without
-advancing, and its next work merge advances it); a failed worktree update
-rolls the worktree back before skipping. A git read that fails during the
-advance (the node's worktree stops answering) skips it with a warning rather
-than failing the landed merge, and an edit to a tracked file the commit law's
-excludes hide (a force-added lock or status file) counts as dirt, so the
-update never overwrites it.
+advances the merge-base so the node converges and the warning does not repeat;
+a node whose only offering is an edit to its own seed exits without advancing,
+and its next work merge advances it); a failed worktree update rolls the
+worktree back before skipping. A git read that fails during the advance (the
+node's worktree stops answering) skips it with a warning rather than failing
+the landed merge, and an edit to a tracked file the commit law's excludes hide
+(a force-added lock or status file) counts as dirt, so the update never
+overwrites it.
 
 ``--continue``
    Finish a hand-resolved squash after a conflicted merge: redo

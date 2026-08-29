@@ -1289,14 +1289,13 @@ class Node:
         # from the repo root, and unreachable from any other project
         if meta:
             target_project = worktree.project_path(self.repo_dir, meta)
-            if (
-                path is not None
-                and path != '.'
-                and pathlib.Path(path).parts[0] != WORKTREES_FOLDER
-            ):
-                child_project = path
-            else:
-                child_project = parent.project_path
+            # a non-root path names the child's project (default: inherit); a
+            # .worktrees/ path is the cwd-in-a-worktree case -- inherit too
+            child_project = parent.project_path
+            if path is not None and path != '.':
+                parts = pathlib.Path(path).parts
+                if parts[0] != WORKTREES_FOLDER:
+                    child_project = path
             if child_project == target_project:
                 scope = [f'{FRACTAL_FOLDER}/{meta}']
             elif child_project == '.':
@@ -1307,10 +1306,9 @@ class Node:
                     f" outside this node's project {child_project!r}; initialize"
                     f' the meta node from the repo root or from {target_project!r}.'
                 )
-            # the scope list key splits on whitespace, so a root carrying any
-            # (a target project dir with a space) would be stored as two roots
-            # and the node's edits to the target's seed would fall outside its
-            # scope
+            # the scope list key splits on whitespace, so a root carrying any (a
+            # target project dir with a space) would be stored as two roots and
+            # the node's edits to the target's seed would fall outside its scope
             if any(char.isspace() for char in scope[0]):
                 raise ValueError(
                     f'Meta scope root {scope[0]!r} contains whitespace, which'
@@ -3377,7 +3375,7 @@ class Node:
         never changes the target's ``.fractal/`` outside this node's scope
         roots, refuses paths outside the node's commit boundaries (the law
         ``fractal commit`` enforces) unless ``ignore_scope`` is set, and
-        ends by recording the target's post-merge tree on the node's branch
+        ends by recording the target's post-squash tree on the node's branch
         so the node holds the adjudicated content and a later re-merge diffs
         only new work.
 
@@ -3573,17 +3571,18 @@ class Node:
                 target, *_ = self.branch.rsplit('.', 1)
         if not target:
             return ''
-        repo = self.repo_dir
+        repo_dir = self.repo_dir
+        # nothing to judge without an existing target that shares history
         cmd = ['show-ref', '--verify', '--quiet', f'refs/heads/{target}']
-        if fractal.util.git.run(cmd, cwd=repo, check=False) is None:
+        if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is None:
             return ''
-        base = fractal.util.git.run(
-            ['merge-base', target, self.branch], cwd=repo, check=False
-        )
+        cmd = ['merge-base', target, self.branch]
+        base = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
         if not base:
             return ''
+        # already merged: every commit is reachable from the target
         cmd = ['merge-base', '--is-ancestor', self.branch, target]
-        if fractal.util.git.run(cmd, cwd=repo, check=False) is not None:
+        if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is not None:
             return ''
         project = self.project_path
         seed = FRACTAL_FOLDER if project == '.' else f'{project}/{FRACTAL_FOLDER}'
@@ -3591,25 +3590,25 @@ class Node:
         # a scope root that is, or lies under, a .fractal dir is work the merge
         # lands (a --meta node's scope is the target's own seed dir), so exclude
         # only the node's own seed and its descendants' instead of the whole
-        # .fractal/ (mirrors delete.sh; a '.' root collapses the scope, as in
-        # fractal.core.commit.scope_boundaries)
+        # .fractal/ (mirrors delete.sh; '.' collapses as in commit.scope_boundaries)
         roots = self.config.get('scope') or []
         if any(not pathlib.PurePosixPath(root).parts for root in roots):
             roots = []
         if project != '.':
             roots = [f'{project}/{root}' for root in roots]
-        if any(
-            root == FRACTAL_FOLDER
-            or root.endswith(f'/{FRACTAL_FOLDER}')
-            or f'{FRACTAL_FOLDER}/' in root
-            for root in roots
-        ):
+        seed_scoped = False
+        for root in roots:
+            is_seed = (root == FRACTAL_FOLDER) or root.endswith(f'/{FRACTAL_FOLDER}')
+            if is_seed or (f'{FRACTAL_FOLDER}/' in root):
+                seed_scoped = True
+        if seed_scoped:
             excludes = [
                 f':(exclude){seed}/{self.branch}',
                 f':(exclude,glob)**/{FRACTAL_FOLDER}/{self.branch}.*/**',
             ]
         else:
             excludes = [f':!{seed}']
+        # list the branch's own changes, minus its seed and the wiki's generated state
         cmd = [
             'diff',
             '--name-only',
@@ -3621,18 +3620,35 @@ class Node:
             f':(exclude,glob){wiki}/**/_index.md',
             f':!{wiki}/.wiki',
         ]
-        raw = fractal.util.git.run_bytes(cmd, cwd=repo) or b''
+        raw = fractal.util.git.run_bytes(cmd, cwd=repo_dir) or b''
         changed = [path for path in os.fsdecode(raw).split('\0') if path]
         if not changed:
             return ''
+        # only paths still differing on the target would be discarded
         specs = [f':(literal){path}' for path in changed]
         cmd = ['diff', '--quiet', target, self.branch, '--', *specs]
-        if fractal.util.git.run(cmd, cwd=repo, check=False) is not None:
+        if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is not None:
             return ''
         return (
             f'Warning: {self.branch} has commits not merged into {target};'
             ' deleting discards them (merge first to keep them)'
         )
+
+    def unmerged_warnings(self: Node) -> list[str]:
+        """Return the unmerged-work warnings for deleting this subtree.
+
+        The node's own, then each live descendant's judged against the
+        node's surviving target -- a descendant's own parent dies in the
+        same teardown -- the judgment :meth:`delete` threads into
+        ``delete.sh``; empties are dropped.
+        """
+        target = self.config.get('base') or ''
+        if not target and '.' in self.branch:
+            target, *_ = self.branch.rsplit('.', 1)
+        warnings = [self.unmerged_warning()]
+        for _, descendant in self._live_descendants():
+            warnings.append(descendant.unmerged_warning(target=target))
+        return [warning for warning in warnings if warning]
 
     def delete(self: Node) -> tuple[str, str]:
         """Recursively remove the node and its whole subtree.
