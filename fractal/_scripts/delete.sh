@@ -118,12 +118,31 @@ if [[ -n "$MERGE_TARGET" ]] \
     # under PROJECT_PATH) so SEED_EXCLUDE below points at the real seed location
     PROJECT_PATH=$(cat "$REPO_DIR/.worktrees/.project/$BRANCH" 2>/dev/null || echo ".")
     if [[ "$PROJECT_PATH" == "." ]]; then
-        SEED_EXCLUDE=":!.fractal"
+        SEED_PREFIX=".fractal"
         WIKI_PREFIX="wiki"
     else
-        SEED_EXCLUDE=":!$PROJECT_PATH/.fractal"
+        SEED_PREFIX="$PROJECT_PATH/.fractal"
         WIKI_PREFIX="$PROJECT_PATH/wiki"
     fi
+    # a scope root that is, or lies under, a .fractal dir is work the merge
+    # lands (a --meta node's scope is the target's own seed dir), so exclude
+    # only the node's own seed and its descendants' instead of the whole
+    # .fractal/ (mirrors merge.sh's SCOPE_ROOTS test: a "." root collapses
+    # the scope, and an unset or unreadable scope reads empty)
+    SEED_EXCLUDE=(":!$SEED_PREFIX")
+    while IFS= read -r SCOPE_ROOT; do
+        [[ -n "$SCOPE_ROOT" ]] || continue
+        if [[ "$SCOPE_ROOT" == "." ]]; then
+            SEED_EXCLUDE=(":!$SEED_PREFIX")
+            break
+        fi
+        if [[ "$PROJECT_PATH" != "." ]]; then
+            SCOPE_ROOT="$PROJECT_PATH/$SCOPE_ROOT"
+        fi
+        if [[ "$SCOPE_ROOT" == .fractal || "$SCOPE_ROOT" == *"/.fractal" || "$SCOPE_ROOT" == *".fractal/"* ]]; then
+            SEED_EXCLUDE=(":(exclude)$SEED_PREFIX/$BRANCH" ":(exclude,glob)**/.fractal/$BRANCH.*/**")
+        fi
+    done < <(fractal config _get scope --path="$WORKTREE_DIR" 2>/dev/null || true)
     # the branch's work is preserved when it is an ancestor of the target (a fast
     # merge) or the target already matches it on the paths the branch itself
     # changed since it forked (a squash merge leaves no ancestry but lands that
@@ -149,7 +168,7 @@ if [[ -n "$MERGE_TARGET" ]] \
         while IFS= read -r -d '' CHANGED_PATH; do
             CHANGED_PATHS+=("$CHANGED_PATH")
         done < <(git -C "$REPO_DIR" diff --name-only -z "$MERGE_BASE" "$BRANCH" \
-            -- "$SEED_EXCLUDE" ":(exclude,glob)$WIKI_PREFIX/**/_index.md" \
+            -- "${SEED_EXCLUDE[@]}" ":(exclude,glob)$WIKI_PREFIX/**/_index.md" \
             ":!$WIKI_PREFIX/.wiki" 2>/dev/null || true)
         # warn only when the target still differs from the branch on those paths
         # (after a squash merge the target already matches them -> no warning)
@@ -186,8 +205,9 @@ echo "Removed worktree: $WORKTREE_DIR ($SIZE)"
 
 # >/dev/null: drop git's own "Deleted branch ... (was <sha>)"
 # so only the script's message below shows (no duplicate line)
+TIP=$(git -C "$REPO_DIR" rev-parse --short "$BRANCH")
 git -C "$REPO_DIR" branch -D "$BRANCH" >/dev/null
-echo "Deleted branch: $BRANCH"
+echo "Deleted branch: $BRANCH (was $TIP)"
 
 # ------ clean up .project/ cache entry from init.sh
 rm -f "$REPO_DIR/.worktrees/.project/$BRANCH"

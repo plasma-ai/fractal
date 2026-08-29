@@ -44,6 +44,7 @@ LOCAL=false
 BLIND=false
 SEALED=false
 RESET=false
+FRESH=false
 
 usage() {
     cat <<USAGE
@@ -498,6 +499,7 @@ else
         # BASE_REF) so a child inherits the spawning node's work -- never the bare
         # main-repo HEAD, which would start the child divergent from its parent
         git -C "$REPO_DIR" worktree add -q -b "$BRANCH" "$WORKTREE_DIR" "$BASE_REF"
+        FRESH=true
     fi
     echo "Created worktree at $WORKTREE_DIR on branch $BRANCH"
 fi
@@ -521,6 +523,16 @@ if [[ "$PROJECT_PATH" == "." ]]; then
     NODE_DIR="$WORKTREE_DIR/.fractal/$BRANCH"
 else
     NODE_DIR="$WORKTREE_DIR/$PROJECT_PATH/.fractal/$BRANCH"
+fi
+# a fresh worktree whose fork point already carries files under this node's
+# seed dir -- a PREPARE-merged or leaked copy of an earlier node of the same
+# name, whole or partial -- would adopt those stale files (a leaked NODE.md
+# would become the charter) and drop every flag of this init; a fresh
+# worktree holds only what the fork point tracks, so the dir is removed whole
+if [[ "$FRESH" == true && -e "$NODE_DIR" ]]; then
+    echo "Warning: $BASE_REF already carries a seed for $BRANCH at $NODE_DIR" \
+        "(a copy of an earlier node of this name); reseeding it" >&2
+    rm -rf "$NODE_DIR"
 fi
 
 mkdir -p "$NODE_DIR"

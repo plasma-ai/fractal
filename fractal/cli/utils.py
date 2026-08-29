@@ -455,7 +455,8 @@ def resolve_init_target(path: PathLike) -> tuple[Node, pathlib.Path]:
 
     Raises:
         typer.BadParameter: If the target is a linked git worktree (outside
-            the main repo root, so never a sub-project path).
+            the main repo root, so never a sub-project path), or a directory
+            below a node worktree's root (the sub-project would be lost).
 
     """
     target = init_node(path)
@@ -469,6 +470,16 @@ def resolve_init_target(path: PathLike) -> tuple[Node, pathlib.Path]:
             f' Run `fractal init` from the main checkout.'
         )
     path = target.worktree.relative_to(target.repo_dir)
+    # a path below a node worktree's root names a sub-project the init cannot
+    # carry (under .worktrees/ the path stands for the parent node), so the
+    # request is refused rather than silently anchored at the parent
+    if path.parts[:1] == (WORKTREES_FOLDER,) and len(path.parts) > 2:
+        project = pathlib.Path(*path.parts[2:])
+        raise typer.BadParameter(
+            f'{target.worktree} lies inside a node worktree; a sub-project'
+            f' child is initialized against the repo root: --path'
+            f' {target.repo_dir / project}'
+        )
     return node, path
 
 
