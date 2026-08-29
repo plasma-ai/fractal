@@ -4,8 +4,10 @@ Regressions here drive the real console script on real repos: ``init`` must
 resolve its ``wiki`` step off its own interpreter, leave a repairable state
 behind a failed wiki step, refuse to adopt a pre-existing docs directory,
 refuse a slash branch with the rule named, record a sub-project target under
-its subdir, and sweep everything init itself wrote -- never the user's own
-pending edits -- into the baseline commit.
+its subdir, flag an adopted wiki index that lacks the tool's frontmatter
+stamps or a ``.gitattributes`` that lacks the wiki merge driver line without
+rewriting either, and sweep everything init itself wrote -- never the user's
+own pending edits -- into the baseline commit.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import os
 import pathlib
 import shutil
 import sys
+from typing import Optional
 
 import pytest
 
@@ -31,6 +34,8 @@ __all__ = [
     'test_init_refuses_a_slash_branch',
     'test_init_summarizes_creations_and_baseline_commit',
     'test_init_subproject_records_project',
+    'test_init_warns_about_an_unstamped_wiki_index',
+    'test_init_warns_about_a_missing_wiki_merge_driver_line',
     'test_commit_init_sweeps_the_gitattributes_edit',
     'test_commit_init_never_sweeps_user_gitattributes_edits',
 ]
@@ -185,6 +190,108 @@ def test_init_subproject_records_project(tmp_path: pathlib.Path) -> None:
     cache = repo / '.worktrees' / '.project' / 'main'
     assert cache.read_text(encoding='utf-8').strip() == 'app'
     assert not (repo / 'app' / 'app').exists()
+
+
+@pytest.mark.parametrize(
+    argnames='stamped',
+    argvalues=[
+        pytest.param(False, id='hand-written'),
+        pytest.param(True, id='stamped'),
+    ],
+)
+def test_init_warns_about_an_unstamped_wiki_index(
+    tmp_path: pathlib.Path,
+    stamped: bool,
+) -> None:
+    """``init`` flags an adopted index without frontmatter stamps and rewrites nothing.
+
+    Sibling nodes forking from an unstamped ``wiki/_index.md`` each stamp
+    their own copy, and their merges then conflict on the ``created:`` line
+    the merge driver cannot regenerate. Init leaves tracked files alone, so
+    it warns with the ``wiki update`` remedy instead of rewriting the index,
+    and the tree stays clean; an index already carrying ``created:`` draws
+    no warning.
+    """
+    repo = _init_repo(tmp_path / 'repo')
+    wiki = repo / 'wiki'
+    wiki.mkdir()
+    stamps = ''
+    if stamped:
+        stamps = (
+            'desc: The project wiki.\n'
+            'created: 2026-01-01T00:00:00Z\n'
+            'updated: 2026-01-01T00:00:00Z\n'
+        )
+    (wiki / '_index.md').write_text(
+        f'---\nname: wiki\n{stamps}---\n\n# wiki\n\n***\n', encoding='utf-8'
+    )
+    _git(repo, 'add', 'wiki')
+    _git(repo, 'commit', '-m', 'adopted wiki')
+    result = _run(repo, 'init')
+    assert result.returncode == 0, result.stderr
+
+    # the unstamped index is flagged with the remedy, the stamped one is not,
+    # and neither is rewritten
+    warning = (
+        "Warning: wiki/_index.md carries no frontmatter stamps; run 'wiki update"
+        " --path=wiki' and commit the result before initializing nodes, or sibling"
+        ' nodes conflict on the index when they merge'
+    )
+    assert (warning in result.stderr) is (not stamped), result.stderr
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+@pytest.mark.parametrize(
+    argnames=('attributes', 'warned'),
+    argvalues=[
+        pytest.param(None, True, id='absent'),
+        pytest.param('*.png binary\n', True, id='without-the-line'),
+        pytest.param(
+            '*.png binary\n**/_index.md merge=wiki\n', False, id='with-the-line'
+        ),
+    ],
+)
+def test_init_warns_about_a_missing_wiki_merge_driver_line(
+    tmp_path: pathlib.Path,
+    attributes: Optional[str],
+    warned: bool,
+) -> None:
+    """``init`` flags an adopted wiki without the wiki merge driver attribute.
+
+    ``wiki init`` writes ``**/_index.md merge=wiki`` to ``.gitattributes``
+    for a fresh wiki, but an adopted wiki skips that step, and git reads the
+    attribute from the target's own tree -- so wiki indexes that diverge on
+    both sides conflict when they merge. Init leaves tracked files alone, so
+    it warns with the line to append instead of writing it, whether the file
+    is missing or merely lacks the line, and the tree stays clean; a
+    ``.gitattributes`` already carrying the line draws no warning.
+    """
+    repo = _init_repo(tmp_path / 'repo')
+    wiki = repo / 'wiki'
+    wiki.mkdir()
+    # a stamped index, so the attribute is the only thing init can flag
+    (wiki / '_index.md').write_text(
+        '---\nname: wiki\ndesc: The project wiki.\n'
+        'created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n'
+        '---\n\n# wiki\n\n***\n',
+        encoding='utf-8',
+    )
+    if attributes is not None:
+        (repo / '.gitattributes').write_text(attributes, encoding='utf-8')
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'adopted wiki')
+    result = _run(repo, 'init')
+    assert result.returncode == 0, result.stderr
+
+    # the missing line is flagged with the remedy, the present one is not,
+    # and nothing is written either way
+    warning = (
+        'Warning: .gitattributes lacks the wiki index merge driver line; append'
+        " '**/_index.md merge=wiki' to it and commit before initializing nodes,"
+        ' or wiki indexes that diverge on both sides conflict when they merge'
+    )
+    assert (warning in result.stderr) is warned, result.stderr
+    assert _git(repo, 'status', '--porcelain').stdout == ''
 
 
 def test_commit_init_sweeps_the_gitattributes_edit(tmp_path: pathlib.Path) -> None:

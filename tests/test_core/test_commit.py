@@ -6,7 +6,7 @@ import os
 import pathlib
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -30,8 +30,7 @@ __all__ = [
     'test_commit_pushes_unless_local',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
-    'test_commit_excludes_registry_sidecars',
-    'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_commit_excludes_project_registry_sidecars',
     'test_commit_stages_node_records_past_external_excludes',
     'test_stage_records_tolerates_a_vanished_held_file',
     'test_stage_records_survives_an_unreadable_held_file',
@@ -51,8 +50,10 @@ __all__ = [
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
     'test_multi_scope_commit_boundary',
     'test_dot_scope_root_bounds_the_whole_project',
+    'test_sub_project_commit_boundary',
     'test_scoped_commit_handles_non_ascii_and_whitespace_paths',
     'test_scoped_child_baseline_commits_init_gitattributes',
+    'test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes',
     'test_commit_check_detects_untracked_work',
     'test_commit_surfaces_hook_aborted_commit',
     'test_commit_retries_after_reformat_hook',
@@ -342,7 +343,7 @@ def test_commit_excludes_write_atomic_temp_files(tmp_path: pathlib.Path) -> None
     assert '.work.txt-a1b2c3.tmp' not in tracked
 
 
-def test_commit_excludes_registry_sidecars(tmp_path: pathlib.Path) -> None:
+def test_commit_excludes_project_registry_sidecars(tmp_path: pathlib.Path) -> None:
     """A legacy ``registry.db``'s SQLite sidecars never ride a work commit.
 
     SQLite writes ``-wal``/``-shm`` (WAL mode) or ``-journal`` (rollback)
@@ -1408,6 +1409,92 @@ def test_dot_scope_root_bounds_the_whole_project(tmp_path: pathlib.Path) -> None
     assert 'root.txt' in tracked
 
 
+@pytest.mark.parametrize(
+    argnames=('scope', 'inside', 'strays'),
+    argvalues=[
+        pytest.param(None, ['app/wiki/note.md'], ['wiki/note.md'], id='project-bound'),
+        pytest.param(
+            ['docs'],
+            ['app/docs/a.md'],
+            ['app/other.txt', 'root.txt'],
+            id='scoped-in-project',
+        ),
+    ],
+)
+def test_sub_project_commit_boundary(
+    tmp_path: pathlib.Path,
+    scope: Optional[list[str]],
+    inside: list[str],
+    strays: list[str],
+) -> None:
+    """A sub-project node's boundaries sit inside its project dir.
+
+    A node initialized with ``--path <project>`` owns that directory: with
+    no scope roots it is bounded to ``<project>/``, and its always-committable
+    wiki is the project's own, so the repo-root ``wiki/`` is as foreign as
+    any other path outside the project. Scope roots nest under the project
+    too -- a root of ``docs`` admits ``<project>/docs/`` alone, not the rest
+    of the project nor the repo root -- and the refusal names exactly the
+    paths outside them.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # a committed sub-project wiki -- the base-ref precondition for the init
+    app_wiki = repo / 'app' / 'wiki' / '_index.md'
+    app_wiki.parent.mkdir(parents=True)
+    app_wiki.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'app'], cwd=repo, capture_output=True, check=True)
+    subprocess.run(
+        ['git', 'commit', '-m', 'add app wiki'],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+    )
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        path='app',
+        scope=scope,
+    )
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    worktree = node.worktree
+    # baseline cleans the tree (sweeping init's root .gitattributes); stub the
+    # lint gate (not under test) so the boundary check alone decides
+    node.commit('baseline', init=True)
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+    # work inside and outside the boundaries refuses, naming exactly the
+    # paths outside
+    for path in (*inside, *strays):
+        (worktree / path).parent.mkdir(parents=True, exist_ok=True)
+        (worktree / path).write_text(f'{path}\n', encoding='utf-8')
+    with pytest.raises(RuntimeError) as excinfo:
+        node.commit('work in and out of the project')
+    assert str(excinfo.value).split(':\n', 1)[1].splitlines() == strays
+    # the inside work alone commits
+    for path in strays:
+        (worktree / path).unlink()
+    node.commit('work in the project')
+    result = subprocess.run(
+        ['git', '-C', f'{worktree}', 'ls-files', *inside],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = result.stdout.split()
+    assert tracked == inside
+
+
 def test_scoped_commit_handles_non_ascii_and_whitespace_paths(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1460,8 +1547,17 @@ def test_scoped_commit_handles_non_ascii_and_whitespace_paths(
     assert '\n leading.txt' in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    argnames='base',
+    argvalues=[
+        pytest.param(None, id='no-base-file'),
+        pytest.param('\n*.md text\n', id='leading-blank-line'),
+        pytest.param('*.md text  \n', id='trailing-spaces'),
+    ],
+)
 def test_scoped_child_baseline_commits_init_gitattributes(
     tmp_path: pathlib.Path,
+    base: Optional[str],
 ) -> None:
     """A scoped child's baseline sweeps the ``.gitattributes`` init wrote.
 
@@ -1469,9 +1565,26 @@ def test_scoped_child_baseline_commits_init_gitattributes(
     memory wiki's ``merge=wiki`` attribute) when the base lacks it --
     an init artifact outside every scope root, which a scoped child's baseline
     would otherwise refuse as out-of-scope, leaving the tree dirty forever. The
-    baseline must sweep init's own artifact, like the user-init commit does.
+    baseline must sweep init's own artifact, like the user-init commit does --
+    over a base with no file, and over one whose own lines the tool appends
+    to, compared byte for byte: a stripped read of HEAD's copy would lose a
+    leading blank line or trailing whitespace and miss init's edit.
     """
     repo = _make_git_repo(tmp_path / 'repo')
+    if base is not None:
+        (repo / '.gitattributes').write_text(base, encoding='utf-8')
+        subprocess.run(
+            ['git', 'add', '.gitattributes'],
+            cwd=repo,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ['git', 'commit', '-m', 'own attributes'],
+            cwd=repo,
+            capture_output=True,
+            check=True,
+        )
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(
         name='task',
@@ -1516,6 +1629,66 @@ def test_scoped_child_baseline_commits_init_gitattributes(
     )
     status = result.stdout
     assert status == ''
+    # the committed file is the base's own bytes followed by init's lines
+    result = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'show', 'HEAD:.gitattributes'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    committed = result.stdout
+    assert committed.startswith(base or ''), committed
+    lines = [line for line in committed.splitlines() if line]
+    assert lines[-2:] == ['# Wiki index merge driver', '**/_index.md merge=wiki']
+
+
+def test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A foreign line in init's uncommitted ``.gitattributes`` puts it out of scope.
+
+    Init's ``.gitattributes`` edit is admitted past the scope check as a
+    whole: HEAD's content followed by exactly the two lines the wiki tool
+    appends. Any other line riding beside them -- an attribute an agent adds
+    while the init edit is still uncommitted -- makes the file an ordinary
+    out-of-scope path, so a scoped node's commit refuses it naming the file;
+    with the foreign line gone, the same baseline sweeps the edit in.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        scope=['inscope'],
+    )
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    for key, val in (('user.email', 'test@test.com'), ('user.name', 'Test')):
+        subprocess.run(
+            ['git', 'config', key, val],
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+        )
+    node = Node(project_dir)
+    attributes = project_dir / '.gitattributes'
+    init_edit = attributes.read_text(encoding='utf-8')
+    # a foreign attribute beside init's lines refuses, naming the file
+    attributes.write_text(init_edit + '*.bin binary\n', encoding='utf-8')
+    with pytest.raises(RuntimeError, match=r'\.gitattributes'):
+        node.commit('baseline', init=True)
+    # init's edit alone sweeps in
+    attributes.write_text(init_edit, encoding='utf-8')
+    node.commit('baseline', init=True)
+    result = subprocess.run(
+        ['git', '-C', f'{project_dir}', 'ls-files', '.gitattributes'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = result.stdout
+    assert '.gitattributes' in tracked
 
 
 # ------ the dirty-tree check

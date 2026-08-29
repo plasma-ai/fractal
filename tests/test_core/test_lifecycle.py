@@ -80,6 +80,7 @@ __all__ = [
     'test_unretire_restores_pre_retire_status',
     'test_unretire_without_recorded_prior_falls_back_to_idle',
     'test_unretire_restores_the_latest_prior_when_raced',
+    'test_retire_refuses_an_already_retired_node',
     'test_retire_rejects_user',
     'test_signals_recurse_to_active_descendants',
     'test_signals_heal_a_crashed_descendant_under_the_flock',
@@ -94,12 +95,16 @@ __all__ = [
     'test_merge_lifecycle',
     'test_merge_no_op_when_nothing_to_merge',
     'test_merge_surfaces_script_notices',
+    'test_merge_notices_omit_the_squashs_own_success_line',
     'test_merge_excludes_merged_node_seed',
     'test_merge_excludes_subproject_node_seed',
     'test_merge_refreshes_parent_wiki_indexes',
     'test_merge_restores_parent_when_index_refresh_fails',
     'test_merge_refuses_when_parent_worktree_is_dirty',
     'test_merge_ignore_scope_lands_an_out_of_scope_squash',
+    'test_meta_node_scope_is_spelled_from_its_own_project',
+    'test_meta_init_refuses_a_target_project_with_whitespace',
+    'test_delete_judges_a_meta_nodes_unmerged_work_over_its_targets_seed',
     'test_merge_refuses_settled_child_into_a_running_target',
     'test_merge_event_survives_child_delete',
 ]
@@ -1532,6 +1537,38 @@ def test_unretire_restores_the_latest_prior_when_raced(
     assert node.status() == 'stopped'
 
 
+def test_retire_refuses_an_already_retired_node(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second retire is refused, so unretire restores the real prior status.
+
+    Retired accepts only unretire and delete: a retire that went through on
+    a retired node would record ``retired`` as the pre-retire status, and
+    the next unretire would fall back to ``idle`` instead of the
+    ``completed`` the node held. The refusal records nothing, so the first
+    retire's event stays the one unretire reads, in both stores.
+    """
+    node = node_with_db
+    node.db.write({'node': node.branch, 'status': 'completed'}, 'nodes')
+    node.status_set('completed')
+    node.record.run_start()
+    # retire, then retire again (stub shell scripts)
+    _stub_run_script(monkeypatch, node)
+    node.retire()
+    with pytest.raises(RuntimeError, match='already retired'):
+        node.retire()
+    # the refusal recorded nothing: one retire event, carrying the real prior
+    retire_events = node.db.read('events', where={'event': 'retire'})
+    assert [row['metadata'] for row in retire_events] == ['completed']
+    assert node.status() == 'retired'
+    # unretire lands back on the pre-retire status in both stores
+    node.unretire()
+    assert node.status() == 'completed'
+    rows = node.db.read('nodes', where={'node': node.branch}, limit=1)
+    assert rows[0]['status'] == 'completed'
+
+
 @pytest.mark.parametrize('op', ['retire', 'unretire'])
 def test_retire_rejects_user(node_with_db: Node, op: str) -> None:
     """Retire/unretire raise for user nodes (the root is not retirable)."""
@@ -1851,6 +1888,29 @@ def test_merge_surfaces_script_notices(git_repo: pathlib.Path) -> None:
     assert 'skipped advancing' in notices
 
 
+def test_merge_notices_omit_the_squashs_own_success_line(
+    git_repo: pathlib.Path,
+) -> None:
+    """A clean three-way squash's git notice never rides the merge notices.
+
+    Once the target has moved past the fork point, ``git merge --squash``
+    reports "Automatic merge went well" on stderr as it stages -- routine
+    output, not something to act on. The notices carry only warnings, so the
+    squash's stderr is replayed only when the squash fails.
+    """
+    project_dir, _ = _init_and_commit(git_repo, 'feature')
+    # the target moves on after the fork, so the squash is a real three-way merge
+    (git_repo / 'README.md').write_text('# moved on\n', encoding='utf-8')
+    _git(git_repo, 'add', 'README.md')
+    _git(git_repo, 'commit', '-m', 'target moves on')
+
+    output, notices = Node(project_dir).merge()
+
+    assert 'Squash-merged' in output
+    assert 'Automatic merge went well' not in notices, notices
+    assert (git_repo / 'feature.txt').is_file()
+
+
 def test_merge_excludes_merged_node_seed(git_repo: pathlib.Path) -> None:
     """Squash-merge must not pull the merged node's own seed dir into the parent.
 
@@ -2068,6 +2128,153 @@ def test_merge_ignore_scope_lands_an_out_of_scope_squash(
     Node(project_dir).merge(ignore_scope=True)
     assert (git_repo / 'docs' / 'a.md').is_file()
     assert (git_repo / 'outside.txt').is_file()
+
+
+@pytest.mark.parametrize(
+    argnames=('path', 'branch', 'scope'),
+    argvalues=[
+        pytest.param(
+            '.worktrees/main.q', 'main.q.m', ['.fractal/main.q'], id='from-the-target'
+        ),
+        pytest.param(None, 'main.m', ['app/.fractal/main.q'], id='from-the-repo-root'),
+    ],
+)
+def test_meta_node_scope_is_spelled_from_its_own_project(
+    git_repo: pathlib.Path,
+    path: Optional[str],
+    branch: str,
+    scope: list[str],
+) -> None:
+    """A meta node's scope names the target's seed dir from the meta node's project.
+
+    Scope roots resolve against a node's own project, so a meta node whose
+    target is a sub-project node spells the target's seed dir bare when it
+    shares the target's project (initialized from the target's worktree) and
+    with the target's project prefix when it sits at the repo root. Either
+    way its edit to the target's contract lands through the merge, which
+    carves the scope root out of the ``.fractal/`` restore. A meta node in a
+    third project could not reach the target's seed at all, so its init
+    refuses naming both projects.
+    """
+    # committed sub-project wikis -- the base-ref precondition for their nodes
+    for project in ('app', 'lib'):
+        index = git_repo / project / 'wiki' / '_index.md'
+        index.parent.mkdir(parents=True)
+        index.write_text(
+            f'---\nname: {project}\n---\n# {project}\n\n***\n', encoding='utf-8'
+        )
+    _git(git_repo, 'add', 'app', 'lib')
+    _git(git_repo, 'commit', '-m', 'add project wikis')
+    Node(git_repo).init(agent='claude', user=True)
+    Node(git_repo).init(name='q', path='app')
+    target = git_repo / '.worktrees' / 'main.q'
+    # the target tracks its own estate, so the meta node forks with it
+    _git(target, 'add', '-A')
+    _git(target, 'commit', '-m', 'settle q estate')
+    Node(git_repo).init(name='m', meta='main.q', path=path)
+    meta = git_repo / '.worktrees' / branch
+    assert Node(meta).config.get('scope') == scope
+    assert Node(meta).config.get('base') == 'main.q'
+
+    # the meta node's edit to the target's contract lands on the target
+    contract = meta / 'app' / '.fractal' / 'main.q' / 'NODE.md'
+    contract.write_text(
+        contract.read_text(encoding='utf-8') + '\nTuned by the meta node.\n',
+        encoding='utf-8',
+    )
+    _git(meta, 'add', '-A')
+    _git(meta, 'commit', '-m', 'tune the target contract')
+    output, notices = Node(meta).merge()
+    assert 'Squash-merged' in output
+    assert 'changed paths under .fractal/' not in notices, notices
+    landed = (target / 'app' / '.fractal' / 'main.q' / 'NODE.md').read_text(
+        encoding='utf-8'
+    )
+    assert landed.endswith('Tuned by the meta node.\n')
+    assert _git(target, 'status', '--porcelain').stdout == ''
+
+    # a third project cannot spell a path to the target's seed
+    with pytest.raises(ValueError, match='outside this node'):
+        Node(git_repo).init(name='far', meta='main.q', path='lib')
+
+
+def test_meta_init_refuses_a_target_project_with_whitespace(
+    git_repo: pathlib.Path,
+) -> None:
+    """A meta node whose scope root would carry whitespace is refused at init.
+
+    The scope list key splits on whitespace, so a root spelled through a
+    sub-project directory with a space would land as two roots, and the meta
+    node's edits to its target's seed would fall outside its scope for the
+    merge to revert. The refusal lands before anything is created: no
+    worktree, branch, project-cache entry, or registry row.
+    """
+    project = 'sub proj'
+    index = git_repo / project / 'wiki' / '_index.md'
+    index.parent.mkdir(parents=True)
+    index.write_text('---\nname: sub\n---\n# sub\n\n***\n', encoding='utf-8')
+    _git(git_repo, 'add', project)
+    _git(git_repo, 'commit', '-m', 'add project wiki')
+    Node(git_repo).init(agent='claude', user=True)
+    Node(git_repo).init(name='q', path=project)
+    with pytest.raises(ValueError, match='contains whitespace'):
+        Node(git_repo).init(name='m', meta='main.q')
+    assert not (git_repo / '.worktrees' / 'main.m').exists()
+    assert not (git_repo / '.worktrees' / '.project' / 'main.m').exists()
+    assert _git(git_repo, 'branch', '--list', 'main.m').stdout.strip() == ''
+    assert [row['node'] for row in Node(git_repo).child_list()] == ['main.q']
+
+
+def test_delete_judges_a_meta_nodes_unmerged_work_over_its_targets_seed(
+    git_repo: pathlib.Path,
+) -> None:
+    """A meta node's unlanded edits to its target's seed warn at delete.
+
+    The unmerged check leaves ``.fractal/`` out as the seed the merge strips,
+    but a meta node's scope root is its target's seed dir -- the one path
+    under ``.fractal/`` the merge lands -- so all of a meta node's work would
+    otherwise be discarded with no warning. With a scope root under
+    ``.fractal/`` only the node's own seed (and its descendants') is left
+    out: the CLI's pre-prompt judgment and ``delete.sh``'s own agree that an
+    unlanded edit to the target's contract is work, and both go quiet once
+    the merge lands it.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    Node(git_repo).init(name='p')
+    target = git_repo / '.worktrees' / 'main.p'
+    # the target tracks its own estate, so the meta nodes fork with it
+    _git(target, 'add', '-A')
+    _git(target, 'commit', '-m', 'settle p estate')
+    for name in ('fix', 'tune'):
+        Node(git_repo).init(name=name, meta='main.p')
+        meta = git_repo / '.worktrees' / f'main.{name}'
+        _git(meta, 'add', '-A')
+        _git(meta, 'commit', '-m', f'seed {name}')
+        # the node's own seed is never work
+        assert Node(meta).unmerged_warning() == ''
+        contract = meta / '.fractal' / 'main.p' / 'NODE.md'
+        contract.write_text(
+            contract.read_text(encoding='utf-8') + f'\nTuned by {name}.\n',
+            encoding='utf-8',
+        )
+        _git(meta, 'add', '-A')
+        _git(meta, 'commit', '-m', f'{name}: tune the target contract')
+    unmerged = (
+        'Warning: main.fix has commits not merged into main.p; deleting'
+        ' discards them (merge first to keep them)'
+    )
+    fix = git_repo / '.worktrees' / 'main.fix'
+    assert Node(fix).unmerged_warning() == unmerged
+    # delete.sh makes the same judgment on its own path
+    _, notices = Node(fix).delete()
+    assert notices.count(unmerged) == 1, notices
+    # landed, the edit is no longer work to warn about
+    tune = git_repo / '.worktrees' / 'main.tune'
+    output, _ = Node(tune).merge()
+    assert 'Squash-merged' in output
+    assert Node(tune).unmerged_warning() == ''
+    _, notices = Node(tune).delete()
+    assert 'not merged' not in notices, notices
 
 
 def test_merge_refuses_settled_child_into_a_running_target(
