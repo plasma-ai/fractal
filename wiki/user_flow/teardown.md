@@ -50,7 +50,15 @@ Its guards:
   pre-flighted before anything is touched, so a problem found late never strands
   a half-deleted tree.
 - Warns when the branch has commits its merge target never absorbed: deleting
-  discards them, so merge first if the warning surprises you.
+  discards them, so merge first if the warning surprises you. The warning prints
+  once the refusals above have passed — a live or locked member, or the cwd
+  inside a doomed worktree, refuses before any warning — and before the
+  confirmation prompt (and, under `--force`, before the teardown), while the
+  branch still exists to merge, and the `Deleted branch: <branch> (was <sha>)`
+  line names the tip the delete discarded. Every live descendant is judged the
+  same way, each against the deleted node's surviving merge target, and a
+  `--meta` node's edits to its target's seed directory count as work (only its
+  own seed and its descendants' seeds are waived as machinery).
 
 Softer alternative: `fractal node retire` parks a node — hidden from
 `fractal node list`, unstartable, but its branch, worktree, and history all kept

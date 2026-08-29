@@ -135,12 +135,18 @@ Fractal's footprint
    ``tmp/`` scratch directory, and runtime markers such as the one-line
    ``.status`` file. Agent-node data directories are tracked in git on the
    node's own branch but never merge upward: ``fractal node merge`` returns
-   every ``.fractal/`` path on the target to the target's own HEAD (only
-   paths under the merging node's scope roots land — a ``--meta`` node's
-   scope is the target's seed directory) and strips the node's
-   ``.fractal/<branch>/`` (and any descendant seeds the branch carries) from
-   the squash, so node machinery never lands in the parent and a node's edit
-   to the parent's estate never rides its squash.
+   every ``.fractal/`` path on the target to the target's own HEAD (only a
+   scope root of the merging node that is, or lies under, a ``.fractal/``
+   directory lands — a ``--meta`` node's scope is the target's seed
+   directory), so the squash never adds the node's ``.fractal/<branch>/`` or
+   any descendant seed the branch carries, node machinery never lands in the
+   parent, and a node's edit to the parent's estate never rides its squash —
+   the parent's version is restored, the merge-base advance then brings the
+   parent's tree into the node's worktree, and the node's copy survives only
+   in its branch history. On the user node's branch the merge also strips a
+   copy of those seeds the branch already tracks (a leak there); a node
+   target keeps a copy its PREPARE merge of the child tracks until it merges
+   upward itself.
    The root node's own data directory is git-ignored by default
    (``fractal track`` and ``fractal untrack`` toggle this).
 
@@ -172,8 +178,10 @@ repository bootstraps one with an initial ``.gitignore`` commit,
 and ``fractal node merge`` squash-merges a node and commits in the target's
 worktree. The bootstrap and baseline commit by pathspec, so other staged work
 stays staged; the merge refuses while the target worktree has uncommitted
-tracked changes and restores it if the squash conflicts. The project wiki at
-``wiki/`` and the ``.gitattributes`` merge rule are created by
+tracked changes or when the squash would write over any file that exists
+untracked there (an ignored ``local.env``, your own live seed), and restores
+it if the squash conflicts. The
+project wiki at ``wiki/`` and the ``.gitattributes`` merge rule are created by
 ``fractal init`` but committed as ordinary project content for you and the
 nodes to grow. Teardown respects the same line — ``fractal node delete``
 removes a subtree, ``fractal reset`` removes every node while keeping the

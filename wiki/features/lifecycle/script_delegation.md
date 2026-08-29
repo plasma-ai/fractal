@@ -20,7 +20,11 @@ transition, and filesystem/process work delegated to a shell script shipped in
 `setup.sh`/`test.sh`/`lint.sh` ([[configuration/scripts]]). The node object runs
 each script through a shared subprocess runner — every lifecycle method has a
 corresponding script, even when that script is a no-op hook, so the seam stays
-uniform and per-deployment customization has a place to land.
+uniform and per-deployment customization has a place to land. The runner
+forwards an interrupt it receives (SIGINT) to the running script and waits for
+it, so a script's own trap — `merge.sh`'s target restore, or its post-commit
+finish of the node's worktree update — runs instead of the script dying
+mid-step.
 
 ## The lock boundary
 
@@ -30,6 +34,10 @@ and flips are atomic. Scripts that perform slow work (git worktrees, remotes)
 run *outside* the lock so they do not hold up lifecycle operations elsewhere in
 the tree. `start.sh` is the bounded exception: start holds the lock through its
 runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
+`merge.sh` runs under a separate repo-wide merge flock
+(`.worktrees/.merge.lock`) — separate because the script shells back into
+`fractal` verbs that take the `.worktrees` lock — so two merges into one target
+queue instead of interleaving their index writes.
 
 ## What the scripts do
 
@@ -73,12 +81,12 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
   (a paused park), it exits cleanly and the kill is pure bookkeeping.
 - `merge.sh` squash-merges the node's branch into its target from inside the
   target's worktree: it restores the target's `.fractal/` outside the node's
-  scope roots, strips the node's own seed, judges the staged squash through the
-  private `node _scope` (NUL-separated paths on stdin, the out-of-scope ones on
-  stdout, exit 1 when any is out of scope — the same `Scope` law
-  `fractal commit` enforces), refreshes the wiki indexes, commits, and records
-  the target's post-squash tree on the node's branch; the operator's view of the
-  merge is [[user_flow/finishing]].
+  scope roots, strips the node's own seed from a user-node target, judges the
+  staged squash through the private `node _scope` (NUL-separated paths on stdin,
+  the out-of-scope ones on stdout, exit 1 when any is out of scope — the same
+  `Scope` law `fractal commit` enforces), refreshes the wiki indexes, commits,
+  and records the target's post-squash tree on the node's branch; the operator's
+  view of the merge is [[user_flow/finishing]].
 - `delete.sh` removes one node's worktree, local branch, and remote branch; the
   recursive delete calls it once per node, deepest first.
 

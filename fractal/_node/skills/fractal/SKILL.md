@@ -297,8 +297,11 @@ A meta node configures another node's seed instead of doing project work
 directly. Use `--meta=<target_branch>` at init to create one -- this sets
 `--base` to the target's branch and `--scope` to its seed directory
 (`.fractal/<target-branch>`), so the meta node can only edit the target's seed
-files (NODE.md, steps, scripts, skills, etc.). `$META_MODE` is `true` when
-running as a meta node, and `$META_TARGET` is the target node's branch.
+files (NODE.md, steps, scripts, skills, etc.). The scope is spelled relative to
+the meta node's own project, so init a meta node for a sub-project target from
+that target's worktree or from the repo root -- one started from a different
+sub-project is refused at init. `$META_MODE` is `true` when running as a meta
+node, and `$META_TARGET` is the target node's branch.
 
 Use a meta node when a child's configuration is complex enough to warrant its
 own iteration cycle. The meta node studies the project and writes a high-quality
@@ -333,10 +336,14 @@ seed; once done, merge it and launch the target.
   stopped/exited nodes (fresh run, restored worktree -- uncommitted project
   files need `--clean`, and a budget-ended run needs an explicit `--max-cost`),
   never for paused ones.
-- **Clean up:** `fractal node merge <branch>`. The merge refuses a squash that
-  changes paths outside the child's scope roots, its project wiki, or
-  `.fractal/`, naming them: widen the child's scope
-  (`fractal node config set scope=<dirs> --path=<child worktree>`) or rerun with
+- **Clean up:** `fractal node merge <branch>`. The merge judges the squash's
+  paths outside `.fractal/` by the child's scope roots and its project wiki (the
+  root `.gitattributes` passes only as init's own `merge=wiki` edit; an unscoped
+  repo-root child is unrestricted, an unscoped sub-project child is bounded to
+  its project directory) and refuses any outside them, naming them: widen the
+  child's scope (`fractal node config set scope=<dirs> --path=<child worktree>`,
+  then `fractal commit "widen scope" --path=<child worktree>` -- an uncommitted
+  config change makes the rerun skip the merge-base advance) or rerun with
   `--ignore-scope` to land them. A conflicted merge restores your worktree
   exactly as it was and leaves the resolution to you (conflicts only under
   `.fractal/` outside the child's scope roots resolve to your content on their
@@ -347,7 +354,12 @@ seed; once done, merge it and launch the target.
   commit, merge-base advance) that a hand-rolled finish would miss, and the
   merge-base advance writes your adjudicated tree into the child's worktree, so
   the resolution lands on the child too. The continue's own failures leave your
-  staged resolution in place to fix and re-run. Deleting after the merge
+  staged resolution in place to fix and re-run; a footprint refusal on the
+  continue names its own remedies: `--continue --ignore-scope`, or widen the
+  child's scope and redo the squash
+  (`git reset --hard HEAD && git merge --squash <branch>` in your worktree),
+  since the widening commit lands after the hand squash and a continue refuses a
+  child commit newer than its squash. Deleting after the merge
   (`fractal node delete <branch>`) is OPTIONAL hygiene, never automatic -- a
   merged node's branch and records keep audit value, so keep them unless clutter
   demands otherwise. Delete is destructive -- it force-removes the worktree and

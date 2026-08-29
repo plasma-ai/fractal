@@ -101,20 +101,37 @@ the merge squashes: a single commit lands on the target, while the full
 per-iteration history stays preserved on the node's branch for archaeology. The
 squash also returns every `.fractal/` directory on the target to the target's
 HEAD — minus the merging node's own scope roots under it, since a `--meta`
-node's work product *is* the target's seed directory — and strips the node's own
-seed and its descendants' seeds from the staged result, so the machinery that
-ran the node never leaks into the parent's tree and a node's edit to the
-target's estate or to a foreign seed never rides its squash. The squash is held
-to the node's commit scope as well: commit-time enforcement is bypassable
-(`--ignore-scope`, the force backstops, a parent's no-fast-forward merge
-carrying grandchild commits no check saw), so the squash is the one point that
-sees the node's whole offering, and a path outside the scope roots, the project
-wiki, and `.fractal/` is refused there with the paths named and
+node's work product *is* the target's seed directory — so the machinery that ran
+the node never lands in the parent's tree and a node's edit to the target's
+estate or to a foreign seed never rides its squash: the target's version is
+restored (an added path is removed), the merge-base advance then carries the
+target's tree into the node's worktree, and the node's copy survives only in its
+branch history. The node's own seed and its descendants' are stripped from the
+user node's branch as well, where a tracked copy is a leak; a node target keeps
+a copy it already tracks — its PREPARE `git merge --no-ff` of the child put it
+there — until it merges upward itself, so a child whose advance was skipped
+never inherits a deletion of its own live seed on its next merge of the parent.
+A fresh squash that would write over any file that exists untracked on the
+target's disk — an ignored private file, or the user node's own live seed,
+self-ignored there but committable from a child — is refused before it runs,
+since git treats an ignored file as expendable and the tail would then commit or
+delete it. The squash is held to the node's commit scope as well: commit-time
+enforcement is bypassable (`--ignore-scope`, the force backstops, a parent's
+no-fast-forward merge carrying grandchild commits no check saw), so the squash
+is the one point that sees the node's whole offering: the staged paths outside
+`.fractal/` are judged by the node's boundaries — its scope roots and the
+project wiki, with the worktree-root `.gitattributes` admitted only as init's
+own `**/_index.md merge=wiki` edit, exactly as `fractal commit` judges them —
+and a path outside them is refused there with the paths named and
 `node merge --ignore-scope` as the override. The merge refuses over a dirty,
 active, or paused target — the squash mutates the target's worktree, and its
 recovery path resets hard, so it must never run where it could destroy someone's
 uncommitted work — except from inside the target's own loop, which merges its
-settled children as part of a normal iteration.
+settled children as part of a normal iteration. Merges are serialized per
+repository for the same reason: `git merge --squash` locks the target's index
+only for its final write, so two sibling merges into one target would pass their
+preflight and interleave, leaving the loser's files untracked in the target
+where its reset cannot undo them; a repo-wide merge lock queues them instead.
 
 After the squash commit lands, the node's merge-base advances with a real
 two-parent commit on its branch — parents the node's HEAD and the target's HEAD,

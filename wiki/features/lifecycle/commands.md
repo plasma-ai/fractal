@@ -110,11 +110,13 @@ and refuses under a paused ancestor until that ancestor is resumed first.
 ## retire and unretire
 
 `retire` shelves a non-running node: it refuses the user node, `active`, and
-`paused` nodes. The pre-retire status rides in the retire event's metadata so
-`unretire` can restore it exactly; a retired node is hidden from listings by
-default and cannot be started. `unretire` refuses a non-retired node and
-restores the recorded prior status, falling back to `idle` when the metadata is
-unusable. Restoring to `idle` re-enters the unsettled pool, so it re-runs the
+`paused` nodes, and an already-retired node
+(`Cannot retire: node is already retired.`), so a second retire never records
+`retired` as the prior status. The pre-retire status rides in the retire event's
+metadata so `unretire` can restore it exactly; a retired node is hidden from
+listings by default and cannot be started. `unretire` refuses a non-retired node
+and restores the recorded prior status, falling back to `idle` when the metadata
+is unusable. Restoring to `idle` re-enters the unsettled pool, so it re-runs the
 width and descendant gates just like a spawn; restoring to a settled status
 holds no slot and passes ungated.
 

@@ -36,8 +36,11 @@ exists.
   `<parent>.<name>`.
 - `--path` (default `.`) -- project root: the repo root or a monorepo
   sub-project folder. A child passes a non-root value to select its own
-  sub-project; otherwise the parent's project is inherited. The resolved value
-  persists as the immutable `project` config key.
+  sub-project; otherwise the parent's project is inherited. A path below a node
+  worktree's root is refused, naming `--path <repo root>/<project>` as the form
+  to use -- under `.worktrees/` the path stands for the parent node, so a
+  sub-project below it cannot be carried. The resolved value persists as the
+  immutable `project` config key.
 - `--title` -- human-readable display name. Defaults to the de-slugged node
   name.
 - `--scope` (comma-separated; repeatable) -- subdirectory scope within the
@@ -54,7 +57,10 @@ exists.
   editing another node's seed. Expands to `--base=<target>` plus a scope of the
   target's `.fractal/<target>` directory, and is therefore mutually exclusive
   with both `--base` and `--scope`. The target node must already have a
-  worktree.
+  worktree. The scope is the target's seed directory spelled relative to the
+  meta node's own project, so initialize a meta node for a sub-project target
+  from that target's worktree or from the repo root -- one initialized from a
+  different sub-project is refused at init.
 
 ## Seeding and agent selection
 
@@ -164,4 +170,9 @@ explicit reserve must stay below 99% of `--max-cost`.
 
 ## Maintenance
 
-- `--reset` -- delete the node's files and reinitialize it from the seed.
+- `--reset` -- delete the node's files and reinitialize it from the seed. An
+  init into a fresh worktree whose fork point already carries any file under
+  `.fractal/<branch>/` -- a whole or partial copy of an earlier node of the same
+  name, PREPARE-merged or leaked -- warns, removes the directory whole, and
+  seeds it afresh, so the init's own flags hold instead of the stale copy's and
+  a leaked `NODE.md` alone never becomes the charter.

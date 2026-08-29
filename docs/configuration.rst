@@ -256,7 +256,10 @@ Plain values
      - ``null``
      - Target node branch for meta-configuration. Set via
        ``fractal node init --meta``, which expands to a ``base``/``scope``
-       pair pointing at the target's seed directory.
+       pair pointing at the target's seed directory, spelled relative to the
+       meta node's own project: initialize a meta node for a sub-project
+       target from that target's worktree or from the repo root; one
+       initialized from a different sub-project is refused at init.
    * - ``agent``
      - inherited from the nearest ancestor
      - The agent command driving the node (the base word names a registered
