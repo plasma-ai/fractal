@@ -262,7 +262,7 @@ else
     # surface as untracked junk; rmdir, never rm -rf, so a non-empty dir
     # (a sibling tree, an out-of-band leftover) is left alone
     if rmdir "$WORKTREES_DIR/.project" 2>/dev/null; then
-        rm -f "$WORKTREES_DIR/.lock"
+        rm -f "$WORKTREES_DIR/.lock" "$WORKTREES_DIR/.merge.lock"
         rmdir "$WORKTREES_DIR" 2>/dev/null || true
     fi
 fi

@@ -1241,15 +1241,9 @@ class Node:
                     f'Meta target {meta!r} has no worktree.'
                     ' Initialize the target node first.'
                 )
-            # branch from the target node
+            # branch from the target node; the scope is set once the parent is
+            # known, since it is spelled relative to the child's own project
             base = meta
-            # scope to the target's seed dir; read its project from the .project
-            # cache so sub-project nodes get the right prefix
-            target_project = worktree.project_path(self.repo_dir, meta)
-            if target_project == '.':
-                scope = [f'{FRACTAL_FOLDER}/{meta}']
-            else:
-                scope = [f'{target_project}/{FRACTAL_FOLDER}/{meta}']
         # the base is also the squash-merge target: merge.sh squashes inside
         # the base's checked-out worktree, so a worktree-less base (a typo,
         # or a branch nothing has checked out) would only fail at merge time,
@@ -1289,6 +1283,40 @@ class Node:
         # file per branch, plus a .lock suffix) -- checkable only now
         # that the parent is resolved
         worktree.validate_name(name, parent_branch=parent.branch)
+        # a meta node's scope is the target's seed dir, spelled relative to the
+        # child's own project (scope roots resolve against a node's project):
+        # bare when the two share a project, prefixed with the target's project
+        # from the repo root, and unreachable from any other project
+        if meta:
+            target_project = worktree.project_path(self.repo_dir, meta)
+            if (
+                path is not None
+                and path != '.'
+                and pathlib.Path(path).parts[0] != WORKTREES_FOLDER
+            ):
+                child_project = path
+            else:
+                child_project = parent.project_path
+            if child_project == target_project:
+                scope = [f'{FRACTAL_FOLDER}/{meta}']
+            elif child_project == '.':
+                scope = [f'{target_project}/{FRACTAL_FOLDER}/{meta}']
+            else:
+                raise ValueError(
+                    f'Meta target {meta!r} lives in project {target_project!r},'
+                    f" outside this node's project {child_project!r}; initialize"
+                    f' the meta node from the repo root or from {target_project!r}.'
+                )
+            # the scope list key splits on whitespace, so a root carrying any
+            # (a target project dir with a space) would be stored as two roots
+            # and the node's edits to the target's seed would fall outside its
+            # scope
+            if any(char.isspace() for char in scope[0]):
+                raise ValueError(
+                    f'Meta scope root {scope[0]!r} contains whitespace, which'
+                    ' the scope list cannot hold; rename the project directory'
+                    ' or init the node without --meta.'
+                )
         # validate the cost and duration flags (the one merged validator:
         # finiteness, positive ceiling, reserve range, step <= iter <= run
         # ordering, unit suffixes) -- a pure check of the passed flags (no live
@@ -3417,7 +3445,14 @@ class Node:
             args.append('--continue')
         if ignore_scope:
             args.append('--ignore-scope')
-        result = self._run_script('merge.sh', *args)
+        # the target's user-ness from the repo's record: a root checked out in
+        # a linked worktree carries no self-ignored seed there to probe
+        if any(user.branch == target_branch for user in Node.user_nodes(self.repo_dir)):
+            args.append('--user-target')
+        # one squash at a time per repo: two sibling merges racing into the
+        # same target interleave their index writes and leave it half-merged
+        with worktree.merge_lock(self.repo_dir):
+            result = self._run_script('merge.sh', *args)
         # success-path warnings ride stderr (e.g. a skipped merge-base
         # advance predicting spurious re-merge diffs) and would vanish with
         # the CompletedProcess -- return them beside the output
@@ -3512,6 +3547,92 @@ class Node:
                     f' (unlock with: git -C "{repo_dir}"'
                     f' worktree unlock "{worktree_dir}").'
                 )
+
+    def unmerged_warning(self: Node, *, target: Optional[str] = None) -> str:
+        """Return the unmerged-work warning for deleting this node, or ``''``.
+
+        The judgment ``delete.sh`` makes before its teardown -- the paths the
+        branch changed since its merge-base with its merge target, minus its
+        seed and the wiki's generated state, still differing on the target --
+        so the CLI can show it before the confirmation, while the branch still
+        exists to merge (mirrors ``delete.sh``'s unmerged check).
+
+        Args:
+            target: Branch to judge against (default: the node's base, else
+                its dotted parent). A subtree teardown passes the deletion
+                root's surviving target for each descendant, as
+                :meth:`delete` threads it into ``delete.sh``.
+
+        Returns:
+            The warning line, or ``''`` when nothing would be discarded.
+
+        """
+        if target is None:
+            target = self.config.get('base') or ''
+            if not target and '.' in self.branch:
+                target, *_ = self.branch.rsplit('.', 1)
+        if not target:
+            return ''
+        repo = self.repo_dir
+        cmd = ['show-ref', '--verify', '--quiet', f'refs/heads/{target}']
+        if fractal.util.git.run(cmd, cwd=repo, check=False) is None:
+            return ''
+        base = fractal.util.git.run(
+            ['merge-base', target, self.branch], cwd=repo, check=False
+        )
+        if not base:
+            return ''
+        cmd = ['merge-base', '--is-ancestor', self.branch, target]
+        if fractal.util.git.run(cmd, cwd=repo, check=False) is not None:
+            return ''
+        project = self.project_path
+        seed = FRACTAL_FOLDER if project == '.' else f'{project}/{FRACTAL_FOLDER}'
+        wiki = 'wiki' if project == '.' else f'{project}/wiki'
+        # a scope root that is, or lies under, a .fractal dir is work the merge
+        # lands (a --meta node's scope is the target's own seed dir), so exclude
+        # only the node's own seed and its descendants' instead of the whole
+        # .fractal/ (mirrors delete.sh; a '.' root collapses the scope, as in
+        # fractal.core.commit.scope_boundaries)
+        roots = self.config.get('scope') or []
+        if any(not pathlib.PurePosixPath(root).parts for root in roots):
+            roots = []
+        if project != '.':
+            roots = [f'{project}/{root}' for root in roots]
+        if any(
+            root == FRACTAL_FOLDER
+            or root.endswith(f'/{FRACTAL_FOLDER}')
+            or f'{FRACTAL_FOLDER}/' in root
+            for root in roots
+        ):
+            excludes = [
+                f':(exclude){seed}/{self.branch}',
+                f':(exclude,glob)**/{FRACTAL_FOLDER}/{self.branch}.*/**',
+            ]
+        else:
+            excludes = [f':!{seed}']
+        cmd = [
+            'diff',
+            '--name-only',
+            '-z',
+            base,
+            self.branch,
+            '--',
+            *excludes,
+            f':(exclude,glob){wiki}/**/_index.md',
+            f':!{wiki}/.wiki',
+        ]
+        raw = fractal.util.git.run_bytes(cmd, cwd=repo) or b''
+        changed = [path for path in os.fsdecode(raw).split('\0') if path]
+        if not changed:
+            return ''
+        specs = [f':(literal){path}' for path in changed]
+        cmd = ['diff', '--quiet', target, self.branch, '--', *specs]
+        if fractal.util.git.run(cmd, cwd=repo, check=False) is not None:
+            return ''
+        return (
+            f'Warning: {self.branch} has commits not merged into {target};'
+            ' deleting discards them (merge first to keep them)'
+        )
 
     def delete(self: Node) -> tuple[str, str]:
         """Recursively remove the node and its whole subtree.
@@ -3730,6 +3851,10 @@ class Node:
                 raise RuntimeError(
                     'Cannot retire a paused node. Resume or kill it first.'
                 )
+            # retired accepts only unretire and delete: a second retire would
+            # record 'retired' as the prior status and lose the real one
+            if self.status() == 'retired':
+                raise RuntimeError('Cannot retire: node is already retired.')
             # set status and log event -- the pre-retire status rides the
             # event metadata (ahead of any ': <reason>' suffix) so unretire
             # can restore it instead of dropping it

@@ -9,6 +9,7 @@ import logging
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 from collections.abc import Iterator
 from typing import Optional
@@ -17,6 +18,7 @@ import fractal.util
 from fractal.constants import (
     FRACTAL_FOLDER,
     LOCK_FILE,
+    MERGE_LOCK_FILE,
     PROJECT_FOLDER,
     SEED_IGNORE_FILE,
     WORKTREES_FOLDER,
@@ -59,6 +61,29 @@ def lock(repo_dir: pathlib.Path) -> Iterator[None]:
     lock_dir = repo_dir / WORKTREES_FOLDER
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / LOCK_FILE, 'a', encoding='utf-8') as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+
+
+@contextlib.contextmanager
+def merge_lock(repo_dir: pathlib.Path) -> Iterator[None]:
+    """Hold the repo-wide merge flock while a squash merge runs.
+
+    ``git merge --squash`` locks the target's index only for its final
+    write, so two sibling merges into one target both pass their preflight
+    and interleave: the loser's files land untracked in the target, the
+    winner's index write drops the loser's staged entries, and the loser's
+    ``reset --hard`` cannot undo untracked files. One kernel lock per repo
+    serializes them; a separate file from the ``.worktrees`` lock, since
+    merge.sh shells back into ``fractal`` verbs that take that one.
+
+    Args:
+        repo_dir: Main git repo root.
+
+    """
+    lock_dir = repo_dir / WORKTREES_FOLDER
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / MERGE_LOCK_FILE, 'a', encoding='utf-8') as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         yield
 
@@ -499,6 +524,32 @@ def ensure_project_wiki(
     else:
         wiki_dir = worktree / path / 'wiki'
     if (wiki_dir / '_index.md').exists():
+        # an adopted index that lacks the tool's frontmatter stamps is
+        # flagged, not rewritten (init leaves tracked files alone): siblings
+        # forking from an unstamped index each stamp their own copy, and
+        # their merges then conflict on the created: line the merge driver
+        # cannot regenerate
+        index = (wiki_dir / '_index.md').read_text(encoding='utf-8')
+        if not re.search(r'^created:', index, flags=re.MULTILINE):
+            wiki_rel = wiki_dir.relative_to(worktree)
+            logger.warning(
+                f'Warning: {wiki_rel}/_index.md carries no frontmatter stamps;'
+                f" run 'wiki update --path={wiki_rel}' and commit the result"
+                ' before initializing nodes, or sibling nodes conflict on the'
+                ' index when they merge'
+            )
+        # likewise the merge attribute `wiki init` writes for a fresh wiki:
+        # git reads it from the target's own tree, so an adopted wiki without
+        # it conflicts on its index at the first divergent merge
+        attributes = worktree / '.gitattributes'
+        lines = attributes.read_text(encoding='utf-8') if attributes.is_file() else ''
+        if '**/_index.md merge=wiki' not in lines:
+            logger.warning(
+                'Warning: .gitattributes lacks the wiki index merge driver line;'
+                " append '**/_index.md merge=wiki' to it and commit before"
+                ' initializing nodes, or wiki indexes that diverge on both sides'
+                ' conflict when they merge'
+            )
         return False
     # refuse to adopt a pre-existing docs directory: `wiki init` rewrites
     # every page under its root (frontmatter, generated indexes), so a
@@ -602,15 +653,29 @@ def run_script(
     # invoking installation, not ambient PATH, so a fronted foreign
     # install (e.g. the root venv's) cannot answer in this one's place
     env = fractal.util.system.prepend_bin_path()
-    result = subprocess.run(
-        ['bash', f'{script_path}', *args],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    # a pid-targeted SIGINT (timeout -s INT, kill -INT, a supervisor) reaches
+    # only this process: forward it and wait, so the script's own INT trap
+    # restores its target and closes its event instead of being SIGKILLed
+    # mid-squash with the squash left staged
+    cmd = ['bash', f'{script_path}', *args]
+    with subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
+    ) as process:
+        try:
+            stdout, stderr = process.communicate()
+        except KeyboardInterrupt:
+            # the script's own trap decides the outcome: exit 0 means it
+            # finished the operation (a merge whose squash had landed), a
+            # failure carries its restore message, so neither reads as a
+            # bare interrupt to the caller
+            process.send_signal(signal.SIGINT)
+            stdout, stderr = process.communicate()
+    result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     if result.returncode != 0:
+        # the script's stderr is the operator's message and carries its own
+        # quoting (a pasteable remedy), so it is shown as written, not repr'd
         error = result.stderr.strip()
-        raise RuntimeError(f'{script} failed (exit {result.returncode}): {error!r}')
+        raise RuntimeError(f'{script} failed (exit {result.returncode}): {error}')
     return result
 
 

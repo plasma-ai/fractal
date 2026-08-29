@@ -735,6 +735,25 @@ def node_delete(app: typer.Typer) -> typer.Typer:
                 typer.echo(output)
                 return
             raise
+        # the teardown's refusals (a live or locked member, the cwd inside a
+        # doomed worktree) land before any warning about discarded work, which
+        # would otherwise describe a deletion that never happens
+        node.guard_delete()
+        # the unmerged-work warnings ahead of the point of no return, while the
+        # branches still exist to merge: the node's, then each live
+        # descendant's against the node's surviving target (the judgment
+        # Node.delete threads into delete.sh -- a descendant's own parent dies
+        # in the same teardown); delete.sh repeats them on its own path, so
+        # its copies are dropped from the notices below
+        unmerged = [node.unmerged_warning()]
+        target = node.config.get('base') or ''
+        if not target and '.' in node.branch:
+            target, *_ = node.branch.rsplit('.', 1)
+        for _, descendant in node._live_descendants():
+            unmerged.append(descendant.unmerged_warning(target=target))
+        unmerged = [warning for warning in unmerged if warning]
+        for warning in unmerged:
+            typer.echo(warning, err=True)
         if not force:
             descendants = len(node.child_list())
             if descendants:
@@ -758,6 +777,9 @@ def node_delete(app: typer.Typer) -> typer.Typer:
         if output:
             typer.echo(output)
         # unmerged-work warnings ride stderr so piped stdout stays parseable
+        if unmerged:
+            lines = [line for line in notices.splitlines() if line not in unmerged]
+            notices = '\n'.join(lines)
         if notices:
             typer.echo(notices, err=True)
 
@@ -1451,12 +1473,15 @@ def node_seed(app: typer.Typer) -> typer.Typer:
 
 def node_scope(app: typer.Typer) -> typer.Typer:
     """Register the ``_scope`` command."""
+    # attributes-ok flag
+    attributes_ok_help = 'Admit the worktree-root .gitattributes.'
+    attributes_ok = typer.Option(False, '--attributes-ok', help=attributes_ok_help)
     # path option
     path_help = 'Worktree directory.'
     path = typer.Option('.', '--path', help=path_help)
 
     @command(app, '_scope')
-    def _scope(path: str = path) -> None:
+    def _scope(attributes_ok: bool = attributes_ok, path: str = path) -> None:
         """Print the out-of-scope paths among stdin's (invoked by merge.sh).
 
         Reads NUL-separated repo-relative paths on stdin and judges them by
@@ -1469,12 +1494,13 @@ def node_scope(app: typer.Typer) -> typer.Typer:
         raw = sys.stdin.buffer.read()
         paths = filter(None, os.fsdecode(raw).split('\0'))
         bounds = scope_boundaries(node)
-        # the worktree-root .gitattributes is init's own edit, carried to the
-        # target by the node's first squash
-        offending = out_of_scope(paths, bounds, attributes_ok=True)
+        offending = out_of_scope(paths, bounds, attributes_ok=attributes_ok)
         if offending:
-            listing = '\n'.join(offending)
-            typer.echo(listing)
+            # bytes, so a name that is not valid UTF-8 (surrogate-escaped by
+            # fsdecode) round-trips to git's own bytes instead of failing
+            listing = os.fsencode('\n'.join(offending)) + b'\n'
+            sys.stdout.buffer.write(listing)
+            sys.stdout.buffer.flush()
             raise SystemExit(1)
 
     return app

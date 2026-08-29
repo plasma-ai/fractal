@@ -603,8 +603,8 @@ def out_of_scope(
             so nothing is out of scope.
         attributes_ok: Admit the worktree-root ``.gitattributes``: the
             commit pipeline passes whether it is init's own uncommitted
-            edit, and the merge footprint check always admits it, since a
-            child's first squash carries that edit to the target.
+            edit, and the merge footprint check passes whether the target's
+            staged copy is that edit (a child's first squash carries it).
 
     Returns:
         The out-of-scope paths.
@@ -706,31 +706,43 @@ def _scope_check(node: Node, bounds: Scope) -> None:
         raise RuntimeError(f'Changes outside node scope ({roots}):\n{listing}')
 
 
+#: the lines the wiki tool appends to the worktree-root .gitattributes at
+#: init; merge.sh's footprint check mirrors them for the target's staged copy
+_ATTRIBUTES_INIT_LINES = ('# Wiki index merge driver', '**/_index.md merge=wiki')
+
+
 def _attributes_is_init_edit(node: Node) -> bool:
     """Return whether ``.gitattributes`` is init's uncommitted ``merge=wiki`` edit.
 
     Init writes the memory wiki's ``**/_index.md merge=wiki`` attribute at
     the worktree root when the base lacks it -- an artifact outside every
-    scope root, committable exactly while it is init's own uncommitted edit
-    (in the working file but not in HEAD's copy). The match is line-exact so
-    an attribute line assigning some other merge driver to ``_index.md`` is
-    never mistaken for init's own.
+    scope root, committable exactly while it is init's own uncommitted edit:
+    HEAD's content followed by exactly the lines the wiki tool appends. The
+    match is line-exact and covers the whole change, so an attribute line
+    assigning some other merge driver, or any other line riding beside
+    init's, makes the file an ordinary out-of-scope path.
 
     Args:
         node: The node whose worktree to check.
 
     Returns:
-        Whether the attribute is present and uncommitted.
+        Whether the file is HEAD's copy plus init's lines.
 
     """
     attributes = node.worktree / '.gitattributes'
     if not attributes.is_file():
         return False
     text = attributes.read_text(encoding='utf-8')
+    # raw bytes: a stripped read would drop a leading blank line or trailing
+    # whitespace from HEAD's copy alone and fail the prefix comparison
     cmd = ['show', 'HEAD:.gitattributes']
-    committed = fractal.util.git.run(cmd, cwd=node.worktree, check=False) or ''
-    attribute = '**/_index.md merge=wiki'
-    return attribute in text.splitlines() and attribute not in committed.splitlines()
+    committed = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+    committed_lines = committed.decode('utf-8').splitlines()
+    lines = text.splitlines()
+    if lines[: len(committed_lines)] != committed_lines:
+        return False
+    added = [line for line in lines[len(committed_lines) :] if line]
+    return added == list(_ATTRIBUTES_INIT_LINES)
 
 
 #: estate subdirectories whose contents are node records canon requires

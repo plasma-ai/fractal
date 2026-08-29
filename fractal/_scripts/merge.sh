@@ -22,6 +22,9 @@ Options:
                       advance -- exactly like a clean merge.
     --ignore-scope    Land paths outside the node's scope instead of refusing
                       the merge.
+    --user-target     Judge the target as its tree's user node (Node.merge
+                      passes it from the repo's record; the checkout probe is
+                      the fallback for a direct call).
     --help|-h         Show this help message
 USAGE
     exit 0
@@ -30,12 +33,14 @@ USAGE
 WORKTREE_DIR=""
 CONTINUE=0
 IGNORE_SCOPE=0
+USER_TARGET=0
 
 for arg in "$@"; do
     case "$arg" in
         --help | -h) usage ;;
         --continue) CONTINUE=1 ;;
         --ignore-scope) IGNORE_SCOPE=1 ;;
+        --user-target) USER_TARGET=1 ;;
         *)
             if [[ -z "$WORKTREE_DIR" ]]; then
                 WORKTREE_DIR="$arg"
@@ -90,6 +95,10 @@ if [[ -z "$PARENT_WORKTREE_DIR" ]]; then
     echo "Error: no worktree found with branch $PARENT_BRANCH checked out" >&2
     exit 1
 fi
+# shell-quoted copies for every remedy an operator pastes back into a shell, so
+# a path with a space stays one word (printf %q is bash 3.2)
+WORKTREE_Q=$(printf '%q' "$WORKTREE_DIR")
+PARENT_Q=$(printf '%q' "$PARENT_WORKTREE_DIR")
 
 # ------ seed prefix and scope roots
 
@@ -121,47 +130,81 @@ while IFS= read -r SCOPE_ROOT; do
         SCOPE_ROOTS+=("$PROJECT_PATH/$SCOPE_ROOT")
     fi
 done < <(fractal config _get scope --path="$WORKTREE_DIR" 2>/dev/null || true)
+# a scope root that is, or lies under, a .fractal dir is work the squash may
+# change there (a --meta node's scope is the target's own seed dir); every pass
+# that keeps the target's .fractal/ as it is carves these roots out
+SCOPE_EXCLUDES=()
+# safe under set -u even on bash 3.2: an empty array reads as unset
+for SCOPE_ROOT in ${SCOPE_ROOTS[@]+"${SCOPE_ROOTS[@]}"}; do
+    if [[ "$SCOPE_ROOT" == .fractal || "$SCOPE_ROOT" == *"/.fractal" || "$SCOPE_ROOT" == *".fractal/"* ]]; then
+        SCOPE_EXCLUDES+=(":(exclude)$SCOPE_ROOT")
+    fi
+done
 
 # ------ leaked seed check
 
-# a node seed the target tracks without owning it -- leaked there by a hand
-# merge -- collides with that node's live seed on every later PREPARE merge;
-# the user node owns no seed at all (its own dir is self-ignored), a node
-# owns its own and its descendants'; this merge removes the merging node's
-# own copy, the rest need a hand git rm
-ROOT_BRANCH="${BRANCH%%.*}"
-TARGET_IS_USER=$(fractal config _get user --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo false)
-SEED_DIR_RE='^(.*\.fractal/[^/]+)/'
-TRACKED_SEEDS=""
-# read NUL-delimited so a path with spaces stays one entry and a non-ASCII
-# name is never C-quoted by core.quotePath into a dir that matches no branch
-while IFS= read -r -d '' TRACKED_PATH; do
-    [[ "$TRACKED_PATH" =~ $SEED_DIR_RE ]] || continue
-    TRACKED_SEEDS+="${BASH_REMATCH[1]}"$'\n'
-done < <(git -C "$PARENT_WORKTREE_DIR" ls-files -z -- ":(glob)**/.fractal/$ROOT_BRANCH.*/**")
+# a node seed the user node's branch tracks is a leak -- the root owns no seed
+# (its own dir is self-ignored) and every node seed is stripped on the way up
+# -- and it collides with that node's live seed on every later PREPARE merge; a
+# node target is not judged, since its branch legitimately carries other nodes'
+# seeds (its ancestors' by fork, its descendants' by PREPARE merges, a
+# sibling's by the advance); this merge removes the merging node's own copy,
+# the rest need a hand git rm; the user node's seed is self-ignored, so a root
+# checked out in a linked worktree carries no config there to probe -- the
+# caller's flag settles it, and a failed probe is said, not read as false
+if [[ "$USER_TARGET" -eq 1 ]]; then
+    TARGET_IS_USER=true
+elif ! TARGET_IS_USER=$(fractal config _get user --path="$PARENT_WORKTREE_DIR" 2>/dev/null); then
+    echo "Warning: could not read $PARENT_BRANCH's node config; treating it as a node target" >&2
+    TARGET_IS_USER=false
+fi
+SEED_DIR_RE='^((.*/)?\.fractal/[^/]+)/'
 LEAKED_REMAINING=""
 LEAKED_REMOVED=""
-while IFS= read -r SEED_DIR; do
-    [[ -n "$SEED_DIR" ]] || continue
-    SEED_NAME="${SEED_DIR##*/}"
-    if [[ "$TARGET_IS_USER" != "true" ]] \
-        && [[ "$SEED_NAME" == "$PARENT_BRANCH" || "$SEED_NAME" == "$PARENT_BRANCH".* ]]; then
-        continue
-    fi
-    if [[ "$SEED_NAME" == "$BRANCH" || "$SEED_NAME" == "$BRANCH".* ]]; then
-        LEAKED_REMOVED+="$SEED_DIR "
-    else
-        LEAKED_REMAINING+="$SEED_DIR "
-    fi
-done < <(printf '%s' "$TRACKED_SEEDS" | sort -u)
+REMEDY_DIRS=""
+if [[ "$TARGET_IS_USER" == "true" ]]; then
+    TRACKED_SEEDS=""
+    # HEAD, not the index: a --continue's index carries the operator's hand
+    # squash, which always stages the merging node's own seed, and a leak is by
+    # definition something the target committed; ls-tree takes no pathspec
+    # magic, so the tree's dotted seeds are picked out in the loop; read
+    # NUL-delimited so a path with spaces stays one entry and a non-ASCII name
+    # is never C-quoted by core.quotePath into a dir that matches no branch
+    while IFS= read -r -d '' TRACKED_PATH; do
+        [[ "$TRACKED_PATH" =~ $SEED_DIR_RE ]] || continue
+        # the user node's branch is its tree's root, so its nodes are named
+        # <target>.<...>; a --base merge into another tree's root judges that
+        # root, plus the merging node's own seed and descendants (its tree's names)
+        [[ "${BASH_REMATCH[1]##*/}" == "$PARENT_BRANCH".* || "${BASH_REMATCH[1]}" == "$SEED_PREFIX/$BRANCH" ||
+            "${BASH_REMATCH[1]##*/}" == "$BRANCH".* ]] || continue
+        TRACKED_SEEDS+="${BASH_REMATCH[1]}"$'\n'
+    done < <(git -C "$PARENT_WORKTREE_DIR" ls-tree -r -z --name-only HEAD)
+    while IFS= read -r SEED_DIR; do
+        [[ -n "$SEED_DIR" ]] || continue
+        SEED_NAME="${SEED_DIR##*/}"
+        # exactly what the strip removes: the node's seed at its own prefix and
+        # its descendants' at any depth -- a same-named copy under another
+        # prefix (the node re-created at a new project path) stays for the remedy
+        if [[ "$SEED_DIR" == "$SEED_PREFIX/$BRANCH" || "$SEED_NAME" == "$BRANCH".* ]]; then
+            LEAKED_REMOVED+="$SEED_DIR, "
+        else
+            LEAKED_REMAINING+="$SEED_DIR, "
+            REMEDY_DIRS+=" $(printf '%q' "$SEED_DIR")"
+        fi
+    done < <(printf '%s' "$TRACKED_SEEDS" | sort -u)
+fi
 if [[ -n "$LEAKED_REMOVED" ]]; then
-    echo "Warning: $PARENT_BRANCH tracks $BRANCH's own seed, leaked by an earlier merge:" \
-        "${LEAKED_REMOVED% }; this merge removes it" >&2
+    echo "Warning: $PARENT_BRANCH tracks seeds of $BRANCH or its descendants, leaked by an" \
+        "earlier merge: ${LEAKED_REMOVED%, }; this merge removes them" >&2
 fi
 if [[ -n "$LEAKED_REMAINING" ]]; then
+    # rm -r, not --cached: the copy on the user node's disk is never a live seed
+    # (live seeds sit in each node's own worktree), and a copy left on disk
+    # would collide with the node's next squash
     echo "Warning: $PARENT_BRANCH tracks node seed directories leaked by an earlier merge:" \
-        "${LEAKED_REMAINING% }" >&2
-    echo "Remove them with: git -C $PARENT_WORKTREE_DIR rm -r --cached ${LEAKED_REMAINING% }" >&2
+        "${LEAKED_REMAINING%, }" >&2
+    echo "Remove them with: git -C $PARENT_Q rm -r --$REMEDY_DIRS" \
+        "&& git -C $PARENT_Q commit -m 'drop leaked node seeds'" >&2
 fi
 
 if [[ "$CONTINUE" -eq 0 ]]; then
@@ -169,6 +212,51 @@ if [[ "$CONTINUE" -eq 0 ]]; then
     if [[ -n "$(git -C "$PARENT_WORKTREE_DIR" status --porcelain --untracked-files=no)" ]]; then
         echo "Error: parent worktree $PARENT_BRANCH has uncommitted changes;" \
             "commit or stash them before merging $BRANCH" >&2
+        exit 1
+    fi
+    # refuse when the squash would write over a file that exists on the
+    # target's disk untracked: git treats an ignored file as expendable, so the
+    # squash would overwrite it -- a private local.env, or the user node's own
+    # live seed, self-ignored on the target but committable from a child -- and
+    # the tail would then commit or delete it; mirrors git's own refusal for
+    # untracked files, extended to ignored ones. Judged from the merge-base, as
+    # the squash itself diffs, over every path the node added or changed
+    # (--no-renames so a moved file's destination is probed), skipping paths
+    # HEAD tracks (they return to HEAD's content in the restore): a path
+    # untracked with 'git rm -r' has no disk copy and is no collision, one
+    # untracked with '--cached' (fractal untrack's remedy for the root's live
+    # seed) is; scope roots are not carved out -- a --meta node's root is
+    # HEAD-tracked on its target -- and neither is the node's own seed: an
+    # ignored copy of it on the target's disk would be overwritten and then
+    # deleted by the restore; a file sitting where the squash creates a
+    # directory counts too, so the prefixes are probed like the advance does,
+    # stopping at a prefix HEAD tracks (a file the node replaced with a
+    # directory is the squash's own type change, not a collision)
+    MERGE_BASE=$(git -C "$PARENT_WORKTREE_DIR" merge-base HEAD "$BRANCH" 2>/dev/null || echo HEAD)
+    COLLIDING=""
+    while IFS= read -r -d '' CHANGED_PATH; do
+        if git -C "$PARENT_WORKTREE_DIR" cat-file -e "HEAD:$CHANGED_PATH" 2>/dev/null; then
+            continue
+        fi
+        if [[ -e "$PARENT_WORKTREE_DIR/$CHANGED_PATH" || -L "$PARENT_WORKTREE_DIR/$CHANGED_PATH" ]]; then
+            COLLIDING+="$CHANGED_PATH, "
+            continue
+        fi
+        PREFIX="$CHANGED_PATH"
+        while [[ "$PREFIX" == */* ]]; do
+            PREFIX="${PREFIX%/*}"
+            git -C "$PARENT_WORKTREE_DIR" cat-file -e "HEAD:$PREFIX" 2>/dev/null && break
+            if [[ -e "$PARENT_WORKTREE_DIR/$PREFIX" && ! -d "$PARENT_WORKTREE_DIR/$PREFIX" ]]; then
+                COLLIDING+="$PREFIX, "
+                break
+            fi
+        done
+    done < <(git -C "$PARENT_WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=AM \
+        "$MERGE_BASE" "$BRANCH")
+    if [[ -n "$COLLIDING" ]]; then
+        echo "Error: merging $BRANCH into $PARENT_BRANCH would overwrite untracked files in" \
+            "$PARENT_BRANCH's worktree: ${COLLIDING%, }; move them aside or drop them from" \
+            "$BRANCH before merging" >&2
         exit 1
     fi
 else
@@ -190,6 +278,16 @@ else
             "resolve and stage them (git add), then re-run with --continue" >&2
         exit 1
     fi
+    # a hand-resolved squash is fully staged by contract; an unstaged edit to a
+    # tracked .fractal/ path would be rewritten by the restore below
+    if ! git -C "$PARENT_WORKTREE_DIR" diff --quiet; then
+        UNSTAGED=$(git -C "$PARENT_WORKTREE_DIR" diff --name-only -z | tr '\0' '\n')
+        echo "Error: unstaged changes remain in $PARENT_BRANCH's worktree: ${UNSTAGED//$'\n'/, };" \
+            "save any copy you need, then stage (git add) the ones that belong to the resolution" \
+            "and discard the rest (git -C $PARENT_Q checkout -- <path>) -- the merge restores" \
+            "every .fractal/ path to $PARENT_BRANCH's HEAD -- and re-run with --continue" >&2
+        exit 1
+    fi
     SQUASH_SHA=$(awk '/^commit /{print $2; exit}' "$SQUASH_MSG_FILE")
     if [[ -n "$SQUASH_SHA" ]] \
         && ! git -C "$PARENT_WORKTREE_DIR" merge-base --is-ancestor \
@@ -198,13 +296,43 @@ else
             "not come from $BRANCH; commit or abort it before merging this node" >&2
         exit 1
     fi
+    # the squash must cover the branch's whole offering: SQUASH_MSG lists every
+    # commit it took, so a commit the node made after the hand squash (an
+    # iteration, a nested merge) is one the advance would write over
+    UNSQUASHED=$(comm -23 <(git -C "$PARENT_WORKTREE_DIR" rev-list HEAD.."$BRANCH" | sort) \
+        <(awk '/^commit /{print $2}' "$SQUASH_MSG_FILE" | sort))
+    if [[ -n "$UNSQUASHED" ]]; then
+        echo "Error: $BRANCH has commits newer than the squash in progress in" \
+            "$PARENT_BRANCH's worktree; redo the squash ('git -C $PARENT_Q reset --hard HEAD" \
+            "&& git -C $PARENT_Q merge --squash $BRANCH'), resolve and stage the conflicts," \
+            "then re-run with --continue" >&2
+        exit 1
+    fi
 fi
+
+# ------ scratch
+
+# scratch for the tail's NUL-separated listings and the advance's private
+# index, made before the event opens and the restore trap arms so a failure
+# here leaves nothing to clean up
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 # ------ squash-merge
 
 # log the merge on the target (it survives the merged child);
 # event_start resolves active run lineage, so an idle target's
-# row carries none (best-effort -- never block a merge)
+# row carries none (best-effort -- never block a merge); the trap is armed
+# before the row opens, since bash runs it only once the substitution has
+# returned the id -- an interrupt during the start still closes the row
+EVENT_ID=""
+end_merge_event() {
+    if [[ "$EVENT_ID" =~ ^[0-9]+$ ]]; then
+        fractal event _end "$EVENT_ID" --status="$1" \
+            --path="$PARENT_WORKTREE_DIR" 2>/dev/null || true
+    fi
+}
+trap 'end_merge_event failed; exit 1' INT TERM
 EVENT_ID=$(fractal event _start merge \
     --metadata="$BRANCH -> $PARENT_BRANCH" \
     --path="$PARENT_WORKTREE_DIR" 2>/dev/null || true)
@@ -212,23 +340,45 @@ EVENT_ID=$(fractal event _start merge \
 if [[ -z "$EVENT_ID" ]]; then
     echo "Warning: merge event for $BRANCH -> $PARENT_BRANCH was not recorded" >&2
 fi
-end_merge_event() {
-    if [[ -n "$EVENT_ID" ]]; then
-        fractal event _end "$EVENT_ID" --status="$1" \
-            --path="$PARENT_WORKTREE_DIR" 2>/dev/null || true
-    fi
-}
 
 # fail after the squash is staged: record the event, restore or preserve the
 # target, and exit -- a fresh merge owns the staged state and resets it away,
 # while a --continue's staged state is the operator's own conflict
 # resolution, which a reset --hard would destroy; arguments are joined with
 # spaces into the message, so long messages split across lines like echo's
+# restored means clean and out of the squash: reset's own exit status lies
+# when a ref lock fails it after the index and worktree are already written
+target_restored() {
+    [[ -z "$(git -C "$PARENT_WORKTREE_DIR" status --porcelain --untracked-files=no)" ]] || return 1
+    SQUASH_MARKER=$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path SQUASH_MSG)
+    [[ "$SQUASH_MARKER" = /* ]] || SQUASH_MARKER="$PARENT_WORKTREE_DIR/$SQUASH_MARKER"
+    [[ ! -f "$SQUASH_MARKER" ]]
+}
+# the squash markers are git's own state, cleared by the commit the no-op
+# arms skip and left behind by a reset -- they fake a squash still in
+# progress, and a bare git commit would prefill the stale squash message;
+# rm -rf: a stale marker may be a directory -- so a path git failed to
+# answer (an empty word: a failed substitution in a for list does not trip
+# set -e) is skipped, never resolved to the worktree root
+clear_squash_markers() {
+    for MARKER in "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path SQUASH_MSG)" \
+        "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path MERGE_MSG)" \
+        "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path AUTO_MERGE)"; do
+        [[ -n "$MARKER" ]] || continue
+        [[ "$MARKER" = /* ]] || MARKER="$PARENT_WORKTREE_DIR/$MARKER"
+        rm -rf -- "$MARKER"
+    done
+}
 fail_target() {
     end_merge_event failed
     if [[ "$CONTINUE" -eq 0 ]]; then
-        git -C "$PARENT_WORKTREE_DIR" reset --hard HEAD || true
-        echo "Error: $*; the parent worktree has been restored" >&2
+        git -C "$PARENT_WORKTREE_DIR" reset -q --hard HEAD || true
+        if target_restored; then
+            echo "Error: $*; the parent worktree has been restored" >&2
+        else
+            echo "Error: $*; the parent worktree could NOT be restored -- run" \
+                "'git -C $PARENT_Q reset --hard HEAD' before merging again" >&2
+        fi
     else
         echo "Error: $*; the staged squash is left in place --" \
             "fix and re-run with --continue" >&2
@@ -254,11 +404,37 @@ fail_target() {
 # forever; the squash already landed on the target, so a failure here must
 # never fail the merge
 skip_advance() {
-    echo "Warning: skipped advancing $BRANCH's merge-base ($1);" \
+    echo "Warning: skipped advancing $BRANCH's merge-base ($*);" \
         "a later re-merge may re-diff from the fork point" >&2
+    ADVANCING=0
+}
+# the target is settled when this fires (a landed squash, or a no-op arm), so
+# the merge is complete whatever the advance managed: finish an interrupted
+# worktree update -- NEW_HEAD is set only once the clobber guard passed and
+# the reset began, so repeating it is safe -- else leave the child at its old
+# commit; warn only when an advance was underway, close the event as
+# completed, print the arm's summary, and exit 0 -- the merge succeeded, only
+# the advance was cut short
+ADVANCING=0
+CHILD_OLD=""
+NEW_HEAD=""
+SUMMARY=""
+advance_trap() {
+    if [[ "$ADVANCING" -eq 1 ]]; then
+        if [[ -z "$NEW_HEAD" ]] || ! git -C "$WORKTREE_DIR" reset -q --hard "$NEW_HEAD" 2>/dev/null; then
+            [[ -z "$CHILD_OLD" ]] || git -C "$WORKTREE_DIR" reset -q --hard "$CHILD_OLD" 2>/dev/null || true
+            skip_advance "interrupted; check that its worktree is clean"
+        fi
+    fi
+    end_merge_event completed
+    [[ -z "$SUMMARY" ]] || echo "$SUMMARY"
+    exit 0
 }
 advance_merge_base() {
-    CHILD_HEAD=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD)
+    if ! CHILD_HEAD=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null); then
+        skip_advance "reading $BRANCH's worktree failed"
+        return 0
+    fi
     if [[ "$CHILD_HEAD" != "$BRANCH" ]]; then
         skip_advance "its worktree is on $CHILD_HEAD, not $BRANCH"
         return 0
@@ -267,8 +443,18 @@ advance_merge_base() {
         skip_advance "its worktree has uncommitted changes"
         return 0
     fi
-    CHILD_OLD=$(git -C "$WORKTREE_DIR" rev-parse HEAD)
-    TARGET_HEAD=$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD)
+    # the commit law's excludes hide edits to tracked files of those shapes
+    # (a force-added lock or status file), which reset --hard would overwrite
+    if ! git -C "$WORKTREE_DIR" diff --quiet HEAD; then
+        skip_advance "its worktree has uncommitted changes"
+        return 0
+    fi
+    ADVANCING=1
+    if ! CHILD_OLD=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
+        || ! TARGET_HEAD=$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD 2>/dev/null); then
+        skip_advance "reading the commits to record failed"
+        return 0
+    fi
     # the child's seed entries as its (clean) index holds them, in the
     # index-info shape update-index reads; a file, not a variable, because a
     # NUL-separated listing cannot ride a bash variable
@@ -290,27 +476,76 @@ advance_merge_base() {
         skip_advance "building the post-squash tree failed"
         return 0
     fi
-    if ! NEW_HEAD=$(git -C "$WORKTREE_DIR" commit-tree "$TREE" -p "$CHILD_OLD" -p "$TARGET_HEAD" \
+    if ! ADVANCE_HEAD=$(git -C "$WORKTREE_DIR" commit-tree "$TREE" -p "$CHILD_OLD" -p "$TARGET_HEAD" \
         -m "merge $PARENT_BRANCH (post-squash)"); then
         skip_advance "recording the post-squash commit failed"
         return 0
     fi
-    # reset --hard moves the branch and the worktree together and takes the
-    # index lock first, so a lock another process holds leaves the ref in place
-    if ! git -C "$WORKTREE_DIR" reset -q --hard "$NEW_HEAD"; then
-        skip_advance "updating $BRANCH's worktree failed"
+    # reset --hard writes every path the target tracks, over an untracked or
+    # ignored file of the same name too (a private local.env a sibling landed
+    # on the target); a collision skips the advance and keeps the node's copy;
+    # the disk is probed rather than the untracked listing compared, so a
+    # case-only alias on a case-insensitive filesystem, a directory sitting
+    # where the target adds a file, and a file sitting where it adds a
+    # directory all count -- the worktree is clean at CHILD_OLD, so anything
+    # on disk at a path that tree lacks is untracked or ignored
+    # on a case-insensitive filesystem a hit may be a tracked case-variant
+    # (the target replaced Readme.md with README.md), which reset renames
+    # correctly -- not a collision; icase,literal so the path matches only
+    # itself under case folding
+    # likewise a hit the child tracks at or under that path (the target turned
+    # a directory into a file) and a prefix it tracks (a file into a directory)
+    # are type changes reset performs, not collisions
+    IGNORE_CASE=$(git -C "$WORKTREE_DIR" config --get core.ignorecase 2>/dev/null || echo false)
+    CLOBBERED=""
+    while IFS= read -r -d '' ADDED_PATH; do
+        if [[ -e "$WORKTREE_DIR/$ADDED_PATH" || -L "$WORKTREE_DIR/$ADDED_PATH" ]]; then
+            [[ -z "$(git -C "$WORKTREE_DIR" ls-files -- ":(literal)$ADDED_PATH")" ]] || continue
+            if [[ "$IGNORE_CASE" == true ]] \
+                && [[ -n "$(git -C "$WORKTREE_DIR" ls-files -- ":(icase,literal)$ADDED_PATH")" ]]; then
+                continue
+            fi
+            CLOBBERED+="$ADDED_PATH, "
+            continue
+        fi
+        PREFIX="$ADDED_PATH"
+        while [[ "$PREFIX" == */* ]]; do
+            PREFIX="${PREFIX%/*}"
+            git -C "$WORKTREE_DIR" cat-file -e "$CHILD_OLD:$PREFIX" 2>/dev/null && break
+            if [[ -e "$WORKTREE_DIR/$PREFIX" && ! -d "$WORKTREE_DIR/$PREFIX" ]]; then
+                CLOBBERED+="$PREFIX, "
+                break
+            fi
+        done
+    done < <(git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=A "$CHILD_OLD" "$ADVANCE_HEAD")
+    if [[ -n "$CLOBBERED" ]]; then
+        skip_advance "its worktree holds untracked files $PARENT_BRANCH now tracks:" \
+            "${CLOBBERED%, }; move them aside, and the next merge that lands work advances it"
         return 0
     fi
+    # reset --hard writes the index and worktree before it moves the ref, so a
+    # ref lock or an interrupt after the checkout leaves the target's tree
+    # against the old HEAD -- roll the worktree back to it before skipping;
+    # NEW_HEAD is published to the trap only here, once the guard has passed
+    NEW_HEAD="$ADVANCE_HEAD"
+    if ! git -C "$WORKTREE_DIR" reset -q --hard "$NEW_HEAD"; then
+        git -C "$WORKTREE_DIR" reset -q --hard "$CHILD_OLD" || true
+        NEW_HEAD=""
+        skip_advance "updating $BRANCH's worktree failed; check that its worktree is clean"
+        return 0
+    fi
+    ADVANCING=0
 }
 
 # a conflict only under .fractal/ has a known answer: the restore below makes
 # the target's HEAD authoritative for every .fractal/ path outside the node's
-# scope roots and the node's own seed is always stripped, so resolve such
+# scope roots and the node's own seed is stripped from a user-node target, so resolve such
 # entries the same way and let the tail run -- a copy of the node's seed the
 # target's history carried and later purged is the case, and its squash would
 # otherwise conflict before any strip could run; any other conflict stays the
 # operator's (return 1 leaves the conflict path to report it)
 SEED_PATH_RE='(^|/)\.fractal/'
+RESOLVED=""
 resolve_seed_conflicts() {
     UNMERGED=()
     # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
@@ -326,6 +561,13 @@ resolve_seed_conflicts() {
             [[ "$UNMERGED_PATH" == "$SCOPE_ROOT"/* ]] && return 1
         done
     done
+    # a resolved path outside the node's own machinery is an adjudication the
+    # no-op arm must record like a restored one, or the same conflict and
+    # warning return on every merge; own and descendant seeds are stripped
+    for UNMERGED_PATH in "${UNMERGED[@]}"; do
+        [[ "$UNMERGED_PATH" == "$SEED_PREFIX/$BRANCH"/* || "$UNMERGED_PATH" == *".fractal/$BRANCH."*/* ]] \
+            || RESOLVED+="$UNMERGED_PATH"$'\n'
+    done
     for UNMERGED_PATH in "${UNMERGED[@]}"; do
         if git -C "$PARENT_WORKTREE_DIR" cat-file -e "HEAD:$UNMERGED_PATH" 2>/dev/null; then
             git -C "$PARENT_WORKTREE_DIR" restore --staged --worktree --source=HEAD --quiet \
@@ -337,6 +579,19 @@ resolve_seed_conflicts() {
     RESOLVED_LIST=$(printf '%s, ' "${UNMERGED[@]}")
     echo "Warning: resolved ${#UNMERGED[@]} conflicting path(s) under .fractal/ to" \
         "$PARENT_BRANCH's own content: ${RESOLVED_LIST%, }" >&2
+}
+
+# git commit is the only step below that moves the target's HEAD, so an
+# interrupt trap that finds it moved has found a landed squash: finish it like
+# any other (advance, event completed, summary, exit 0) instead of reporting a
+# restore or a squash left in place
+TARGET_BEFORE=$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD)
+finish_landed() {
+    [[ "$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD)" != "$TARGET_BEFORE" ]] || return 0
+    SUMMARY="Squash-merged $BRANCH into $PARENT_BRANCH"
+    trap 'advance_trap' INT TERM
+    advance_merge_base
+    advance_trap
 }
 
 if [[ "$CONTINUE" -eq 0 ]]; then
@@ -356,17 +611,27 @@ if [[ "$CONTINUE" -eq 0 ]]; then
     # restore parent on interrupt so a half-merge never lands -- a signal
     # between the squash-stage and commit would otherwise leave a staged
     # index the parent absorbs into its next commit
-    trap '
-        git -C "$PARENT_WORKTREE_DIR" reset --hard HEAD || true
+    restore_trap() {
+        finish_landed
         end_merge_event failed
-        echo "Error: merge of $BRANCH was interrupted;" \
-            "the parent worktree has been restored" >&2
+        git -C "$PARENT_WORKTREE_DIR" reset -q --hard HEAD || true
+        if target_restored; then
+            echo "Error: merge of $BRANCH was interrupted;" \
+                "the parent worktree has been restored" >&2
+        else
+            echo "Error: merge of $BRANCH was interrupted; the parent worktree could NOT be" \
+                "restored -- run 'git -C $PARENT_Q reset --hard HEAD' before merging again" >&2
+        fi
         exit 1
-    ' INT TERM
+    }
+    trap 'restore_trap' INT TERM
 
     # squash-merge; reset on conflict (stdout silenced so the merge summary
-    # below stays the single user-facing line; conflict diagnostics ride stderr)
-    if ! git -C "$PARENT_WORKTREE_DIR" merge --squash "$BRANCH" >/dev/null; then
+    # below stays the single user-facing line; stderr captured and replayed
+    # only on failure, where it carries git's abort reason -- on success it
+    # carries only git's own "went well" notice)
+    if ! SQUASH_STDERR=$(git -C "$PARENT_WORKTREE_DIR" merge --squash "$BRANCH" 2>&1 >/dev/null); then
+        [[ -z "$SQUASH_STDERR" ]] || echo "$SQUASH_STDERR" >&2
         # distinguish a real content conflict (unmerged index entries) from a
         # merge that aborted before staging anything (an untracked-file collision,
         # or a racing writer holding the parent index); only the conflict resets
@@ -376,11 +641,25 @@ if [[ "$CONTINUE" -eq 0 ]]; then
         if [[ -z "$CONFLICTED" ]] || ! resolve_seed_conflicts; then
             end_merge_event failed
             if [[ -n "$CONFLICTED" ]]; then
-                git -C "$PARENT_WORKTREE_DIR" reset --hard HEAD
+                git -C "$PARENT_WORKTREE_DIR" reset -q --hard HEAD
                 echo "Error: merging $BRANCH into $PARENT_BRANCH produced conflicts;" \
                     "the parent worktree has been restored; redo the squash there by" \
                     "hand ('git merge --squash $BRANCH'), resolve and stage the" \
                     "conflicts, then finish with --continue" >&2
+            elif ! target_restored; then
+                # git can die after writing the index (a stale or unwritable
+                # SQUASH_MSG); the target was clean before the squash, so what
+                # is staged is the squash's: reset it and clear the markers
+                git -C "$PARENT_WORKTREE_DIR" reset -q --hard HEAD || true
+                clear_squash_markers
+                if target_restored; then
+                    echo "Error: merging $BRANCH into $PARENT_BRANCH failed after staging;" \
+                        "the parent worktree has been restored; resolve and retry" >&2
+                else
+                    echo "Error: merging $BRANCH into $PARENT_BRANCH failed after staging; the" \
+                        "parent worktree could NOT be restored -- run 'git -C $PARENT_Q reset" \
+                        "--hard HEAD' before merging again" >&2
+                fi
             else
                 echo "Error: merging $BRANCH into $PARENT_BRANCH failed before staging" \
                     "anything (untracked files in the parent would be overwritten, or" \
@@ -393,6 +672,7 @@ else
     # the interrupt trap in a --continue never resets: the staged squash is
     # the operator's hand-resolved state, recoverable by re-running
     trap '
+        finish_landed
         end_merge_event failed
         echo "Error: merge --continue of $BRANCH was interrupted;" \
             "the staged squash is left in place; re-run with --continue" >&2
@@ -402,10 +682,6 @@ fi
 
 # ------ .fractal/ on the target
 
-# scratch for the tail's NUL-separated listings and the advance's private index
-TMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TMP_DIR"' EXIT
-
 # the squash never changes .fractal/ on the target: restore every .fractal dir
 # at any depth to HEAD (a sub-project descendant's seed sits under
 # <project>/.fractal/), minus a scope root under it -- a --meta node's scope
@@ -413,19 +689,19 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 # work; every step is guarded like the other armed-window commands: a set -e
 # exit here would bypass the restore trap and leave the squash staged for the
 # parent's next commit to absorb silently
-RESTORE_SPEC=(":(glob)**/.fractal/**")
 # safe under set -u even on bash 3.2: an empty array reads as unset
-for SCOPE_ROOT in ${SCOPE_ROOTS[@]+"${SCOPE_ROOTS[@]}"}; do
-    if [[ "$SCOPE_ROOT" == *".fractal/"* ]]; then
-        RESTORE_SPEC+=(":(exclude)$SCOPE_ROOT")
-    fi
-done
+RESTORE_SPEC=(":(glob)**/.fractal/**" ${SCOPE_EXCLUDES[@]+"${SCOPE_EXCLUDES[@]}"})
 # name what the restore drops outside the node's own machinery -- an edit
 # to the target's estate or a profile is visible, not silent -- captured
-# before the restore erases it from the index; --no-renames so a rename
-# lists as its two halves
-if ! DROPPED=$(git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only --no-renames HEAD -- \
-    "${RESTORE_SPEC[@]}" ":(exclude)$SEED_PREFIX/$BRANCH" ":(exclude,glob)**/.fractal/$BRANCH.*/**"); then
+# before the restore erases it from the index, split by fate: a path the
+# target tracks goes back to its content, a path it lacks is removed (the
+# node's branch history keeps its copy); --no-renames so a rename lists as
+# its two halves
+DROPPED_SPEC=("${RESTORE_SPEC[@]}" ":(exclude)$SEED_PREFIX/$BRANCH" ":(exclude,glob)**/.fractal/$BRANCH.*/**")
+if ! RESTORED=$(git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
+    --diff-filter=a HEAD -- "${DROPPED_SPEC[@]}" | tr '\0' '\n') \
+    || ! REMOVED=$(git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
+        --diff-filter=A HEAD -- "${DROPPED_SPEC[@]}" | tr '\0' '\n'); then
     fail_target "listing $BRANCH's changes under .fractal/ failed"
 fi
 # one command drops added paths from index and disk and returns modified,
@@ -437,17 +713,25 @@ if ! git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet --no-renames HEAD -- "$
         fail_target "restoring $PARENT_BRANCH's .fractal/ after the squash of $BRANCH failed"
     fi
 fi
-if [[ -n "$DROPPED" ]]; then
-    echo "Warning: $BRANCH's squash changed paths under .fractal/ that the merge left as" \
-        "they are: ${DROPPED//$'\n'/, }" >&2
+if [[ -n "$RESTORED" ]]; then
+    echo "Warning: $BRANCH's squash changed paths under .fractal/ that the merge restored to" \
+        "$PARENT_BRANCH's content: ${RESTORED//$'\n'/, }" >&2
 fi
-# strip the node's own seed and its descendants' from the staged merge to
-# avoid orphaning them in the target; after the restore because it is the only
-# pass that removes a copy of this node's seed the target already tracks (a
-# leaked one), which the restore would otherwise put back from HEAD (--quiet:
-# drop git rm's per-file "rm '...'" lines so the merge summary below stays the
-# single user-facing line)
-if ! git -C "$PARENT_WORKTREE_DIR" rm -rf --quiet --ignore-unmatch -- "${OWN_SEED_SPEC[@]}"; then
+if [[ -n "$REMOVED" ]]; then
+    echo "Warning: $BRANCH's squash added paths under .fractal/ that the merge removed, since" \
+        "$PARENT_BRANCH does not track them: ${REMOVED//$'\n'/, }; $BRANCH's branch history" \
+        "keeps its copy" >&2
+fi
+# strip the node's own seed and its descendants' from the user node's branch:
+# the restore already dropped what the squash added, so this pass matters for
+# a copy the target already tracks -- on the user node such a copy can only be
+# a leak, while a node target tracks its descendants' seeds by PREPARE's
+# no-ff merges and deleting that copy would reach the child's live seed on its
+# next merge of the parent (the parent's own upward squash strips them);
+# --quiet: drop git rm's per-file "rm '...'" lines so the merge summary below
+# stays the single user-facing line
+if [[ "$TARGET_IS_USER" == "true" ]] \
+    && ! git -C "$PARENT_WORKTREE_DIR" rm -rf --quiet --ignore-unmatch -- "${OWN_SEED_SPEC[@]}"; then
     fail_target "stripping $BRANCH's seed from the staged merge failed"
 fi
 
@@ -459,24 +743,22 @@ fi
 # the very conflict the operator just resolved on the next merge
 if git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet; then
     trap - INT TERM
-    # the squash markers are git's own state, cleared by the commit both arms
-    # skip -- left behind they fake a squash still in progress, and a bare
-    # git commit would prefill the stale squash message
-    for MARKER in "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path SQUASH_MSG)" \
-        "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path MERGE_MSG)" \
-        "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path AUTO_MERGE)"; do
-        [[ "$MARKER" = /* ]] || MARKER="$PARENT_WORKTREE_DIR/$MARKER"
-        rm -f "$MARKER"
-    done
+    clear_squash_markers
     if [[ "$CONTINUE" -eq 0 ]]; then
-        end_merge_event completed
-        echo "Nothing to merge: $BRANCH has no changes for $PARENT_BRANCH"
-        exit 0
+        SUMMARY="Nothing to merge: $BRANCH has no changes for $PARENT_BRANCH"
+        trap 'advance_trap' INT TERM
+        # paths the restore dropped are an adjudication too: the advance moves
+        # the child past them, or every later merge re-offers them
+        [[ -z "$RESTORED$REMOVED$RESOLVED" ]] || advance_merge_base
+    else
+        SUMMARY="Nothing to commit for $PARENT_BRANCH: the resolution kept its own"
+        SUMMARY+=" content for every change $BRANCH offered"
+        trap 'advance_trap' INT TERM
+        advance_merge_base
     fi
-    advance_merge_base
     end_merge_event completed
-    echo "Nothing to commit for $PARENT_BRANCH: the resolution kept its own" \
-        "content for every change $BRANCH offered"
+    trap - INT TERM
+    echo "$SUMMARY"
     exit 0
 fi
 
@@ -489,19 +771,45 @@ fi
 # which stages the target's own regenerated state; a failed listing or check
 # fails closed, and a refusal restores the target like a conflict
 if [[ "$IGNORE_SCOPE" -eq 0 ]]; then
-    if ! git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames HEAD >"$TMP_DIR/footprint"; then
+    # after the restore every staged .fractal/ path is the merge's own -- a
+    # scope-root edit or the seed strip's deletion -- so the check judges the rest
+    if ! git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames HEAD -- . \
+        ":(exclude,glob)**/.fractal/**" >"$TMP_DIR/footprint"; then
         fail_target "listing the paths of $BRANCH's squash failed"
+    fi
+    # the worktree-root .gitattributes is admitted only as init's own edit --
+    # HEAD's content followed by exactly the two lines the wiki tool appends --
+    # the same whole-change rule fractal commit applies (mirrors
+    # fractal.core.commit._attributes_is_init_edit); any other added or
+    # removed line makes it an ordinary out-of-scope path
+    STAGED_ATTRIBUTES=$(git -C "$PARENT_WORKTREE_DIR" show :.gitattributes 2>/dev/null || true)
+    HEAD_ATTRIBUTES=$(git -C "$PARENT_WORKTREE_DIR" show HEAD:.gitattributes 2>/dev/null || true)
+    ATTRIBUTES_FLAG=()
+    ADDED_ATTRIBUTES="${STAGED_ATTRIBUTES#"$HEAD_ATTRIBUTES"}"
+    if [[ "$STAGED_ATTRIBUTES" == "$HEAD_ATTRIBUTES"* ]] \
+        && [[ -z "$HEAD_ATTRIBUTES" || "$ADDED_ATTRIBUTES" == $'\n'* ]] \
+        && [[ "$(printf '%s\n' "$ADDED_ATTRIBUTES" | grep -v '^$' || true)" == $'# Wiki index merge driver\n**/_index.md merge=wiki' ]]; then
+        ATTRIBUTES_FLAG=(--attributes-ok)
     fi
     # exit 1 is the check's own answer (paths out of scope), anything else an
     # error; stderr is captured and replayed only on an error, since the CLI
     # closes every non-zero exit with a FAILED line that would read as noise
     SCOPE_RC=0
-    OUT_OF_SCOPE=$(fractal node _scope --path="$WORKTREE_DIR" \
+    OUT_OF_SCOPE=$(fractal node _scope --path="$WORKTREE_DIR" ${ATTRIBUTES_FLAG[@]+"${ATTRIBUTES_FLAG[@]}"} \
         <"$TMP_DIR/footprint" 2>"$TMP_DIR/scope-err") || SCOPE_RC=$?
-    if [[ "$SCOPE_RC" -eq 1 ]]; then
+    if [[ "$SCOPE_RC" -eq 1 && "$CONTINUE" -eq 0 ]]; then
         fail_target "the squash of $BRANCH changes paths outside its scope:" \
             "${OUT_OF_SCOPE//$'\n'/, }; widen the scope (fractal node config set" \
-            "scope=<dirs> --path=$WORKTREE_DIR) or rerun with --ignore-scope"
+            "scope=<dirs> --path=$WORKTREE_Q, then fractal commit 'widen scope'" \
+            "--path=$WORKTREE_Q) or rerun with --ignore-scope"
+    elif [[ "$SCOPE_RC" -eq 1 ]]; then
+        # a node commit after the hand squash refuses --continue, so widening
+        # the scope means redoing the squash
+        fail_target "the squash of $BRANCH changes paths outside its scope:" \
+            "${OUT_OF_SCOPE//$'\n'/, }; re-run with --continue --ignore-scope to land them, or" \
+            "widen the scope (fractal node config set scope=<dirs> --path=$WORKTREE_Q, then" \
+            "fractal commit 'widen scope' --path=$WORKTREE_Q) and redo the squash (git -C" \
+            "$PARENT_Q reset --hard HEAD && git -C $PARENT_Q merge --squash $BRANCH)"
     elif [[ "$SCOPE_RC" -ne 0 ]]; then
         cat "$TMP_DIR/scope-err" >&2
         fail_target "checking the scope of $BRANCH's squash failed"
@@ -551,21 +859,22 @@ fi
 # and are cleared like the no-op above
 if git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet; then
     trap - INT TERM
-    for MARKER in "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path SQUASH_MSG)" \
-        "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path MERGE_MSG)" \
-        "$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path AUTO_MERGE)"; do
-        [[ "$MARKER" = /* ]] || MARKER="$PARENT_WORKTREE_DIR/$MARKER"
-        rm -f "$MARKER"
-    done
+    clear_squash_markers
     if [[ "$CONTINUE" -eq 0 ]]; then
-        end_merge_event completed
-        echo "Nothing to merge: $BRANCH has no changes for $PARENT_BRANCH"
-        exit 0
+        SUMMARY="Nothing to merge: $BRANCH has no changes for $PARENT_BRANCH"
+        trap 'advance_trap' INT TERM
+        # paths the restore dropped are an adjudication too: the advance moves
+        # the child past them, or every later merge re-offers them
+        [[ -z "$RESTORED$REMOVED$RESOLVED" ]] || advance_merge_base
+    else
+        SUMMARY="Nothing to commit for $PARENT_BRANCH: the resolution kept its own"
+        SUMMARY+=" content for every change $BRANCH offered"
+        trap 'advance_trap' INT TERM
+        advance_merge_base
     fi
-    advance_merge_base
     end_merge_event completed
-    echo "Nothing to commit for $PARENT_BRANCH: the resolution kept its own" \
-        "content for every change $BRANCH offered"
+    trap - INT TERM
+    echo "$SUMMARY"
     exit 0
 fi
 
@@ -574,8 +883,13 @@ fi
 if ! git -C "$PARENT_WORKTREE_DIR" commit -q -m "merge $BRANCH"; then
     fail_target "failed to commit the squash-merge of $BRANCH"
 fi
-trap - INT TERM
+# the squash has landed: from here an interrupt must neither leave the child
+# half checked out nor the event open, so the restore trap gives way to the
+# advance trap until the event closes
+SUMMARY="Squash-merged $BRANCH into $PARENT_BRANCH"
+trap 'advance_trap' INT TERM
 
 advance_merge_base
 end_merge_event completed
-echo "Squash-merged $BRANCH into $PARENT_BRANCH"
+trap - INT TERM
+echo "$SUMMARY"
