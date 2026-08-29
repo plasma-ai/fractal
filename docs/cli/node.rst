@@ -308,9 +308,9 @@ node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a
 paused ancestor or tree-wide pause latch; a foreign tmux session already
 holding the node's session name; a node whose recorded process group is
 still alive (identity-verified, so a recycled group id never blocks); and a
-stored config the launch re-validation rejects.
-Continuing from ``killed`` surfaces the recorded kill attribution as a
-notice. An uncapped start is allowed but warns loudly.
+stored config the launch re-validation rejects. Continuing from ``killed``
+surfaces the recorded kill attribution as a notice. An uncapped start is
+allowed but warns loudly.
 
 .. code-block:: console
 
@@ -500,17 +500,16 @@ the rest, a same-named copy of the node's seed under another project prefix
 (the node re-created at a different project path) included, get a second
 warning with a ``git -C <target worktree> rm -r -- <dirs> && git -C <target
 worktree> commit -m 'drop leaked node seeds'`` remedy line that removes them
-from the tree and from the root worktree's disk (the copies are never
-live seeds; those sit in each node's own worktree). A node target is
-not judged: its branch legitimately carries other nodes' seeds (its
-ancestors' by fork, its descendants' by PREPARE merges, a sibling's by the
-merge-base advance). The check reads the committed tree, so a ``--continue``
-never reports the hand-staged seed. Whether the target is the user node is
-read from the repo's record of the target branch, so a root checked out in
-a linked worktree is still stripped and leak-checked; a direct ``merge.sh``
-call that cannot read the target's node config warns ``could not read
-<target>'s node config; treating it as a node target`` instead of silently
-treating it as a node.
+from the tree and from the root worktree's disk (the copies are never live
+seeds; those sit in each node's own worktree). A node target is not judged:
+its branch legitimately carries other nodes' seeds (its ancestors' by fork,
+its descendants' by PREPARE merges, a sibling's by the merge-base advance).
+The check reads the committed tree, so a ``--continue`` never reports the
+hand-staged seed. Whether the target is the user node is read from the repo's
+record of the target branch, so a root checked out in a linked worktree is
+still stripped and leak-checked; a direct ``merge.sh`` call that cannot read
+the target's node config warns ``could not read <target>'s node config;
+treating it as a node target`` instead of silently treating it as a node.
 
 Conflicts only under ``.fractal/`` outside the node's scope roots resolve to
 the target's content — a warning names them — and the merge continues; any
@@ -707,20 +706,19 @@ reason, ``run exhausted: <reason>`` on a ``completed`` run that ended on its
 iteration cap and ``final iteration failed`` on a drained finish whose last
 iteration died (a clean drained finish stays bare), ``orphaned`` for a
 registered node whose worktree is gone, ``model drop`` for an unresolved
-served-model divergence, ``iteration gap <span>`` for numbers that advanced with
-no recorded row, and ``PAUSED: billing`` while the newest launches carry the
-dead-credits signature. ``end_reason`` is ``detail``'s typed counterpart, a
-closed vocabulary naming a settled row's landing: ``goal_met``,
+served-model divergence, ``iteration gap <span>`` for numbers that advanced
+with no recorded row, and ``PAUSED: billing`` while the newest launches carry
+the dead-credits signature. ``end_reason`` is ``detail``'s typed counterpart,
+a closed vocabulary naming a settled row's landing: ``goal_met``,
 ``run_exhausted``, or ``final_iteration_failed`` on a ``completed`` row;
 ``cost_budget``, ``timeout``, ``setup_abort``, ``final_iteration_failed``, or
 ``other`` (recorded but unmapped) on an ``exited`` row; null when no reason is
 recorded (e.g. a reconcile-healed crash) and on every other status. ``spend``
-is the current run's subtree cost at the
-scope ``max_cost`` is enforced at, blank for a node that has never run. Blank
-limit columns mean unlimited. ``last`` is the age of each node's newest
-activity, with a ``!`` suffix flagging an active node quiet past
-``max(step_timeout, 5m)``. On a TTY, statuses render bracketed
-(``[active]``); machine output stays unbracketed.
+is the current run's subtree cost at the scope ``max_cost`` is enforced at,
+blank for a node that has never run. Blank limit columns mean unlimited.
+``last`` is the age of each node's newest activity, with a ``!`` suffix
+flagging an active node quiet past ``max(step_timeout, 5m)``. On a TTY,
+statuses render bracketed (``[active]``); machine output stays unbracketed.
 
 ``--all``
    Include retired nodes.
@@ -742,9 +740,9 @@ activity, with a ``!`` suffix flagging an active node quiet past
    Trust each child's real state: relabel a crashed active node — its loop
    runtime (the tmux session, or a headless or bare loop's recorded process
    group) provably gone — as ``exited``, a booting idle node as ``active``,
-   and drop nodes whose worktree is gone. This view is read-only;
-   the plain listing instead persists the crash heal and flags worktree-less
-   rows as ``orphan`` (or ``<status> (orphaned)`` when settled).
+   and drop nodes whose worktree is gone. This view is read-only; the plain
+   listing instead persists the crash heal and flags worktree-less rows as
+   ``orphan`` (or ``<status> (orphaned)`` when settled).
 
 ``--count``
    Print only the number of matching nodes (mutually exclusive with the
@@ -937,7 +935,8 @@ with the node).
 
 .. code-block:: console
 
-   $ fractal node cost remaining [NODE] [--run <id> | --iter <id> | --step <id>]
+   $ fractal node cost remaining [NODE]
+         [--run <id> | --iter <id> | --step <id>]
 
 Print the remaining budget: ``max_cost`` minus the run's **subtree** spend —
 the node's own steps plus every descendant run chained beneath it. ``--iter``
@@ -996,8 +995,7 @@ in :doc:`/configuration`.
 
 Print one config value. Unknown keys refuse with the valid-keys list.
 Booleans render as ``true``/``false``, list values (``scope`` and
-``clone_dirs``) one item per line, and an unset key prints nothing
-(exit 0).
+``clone_dirs``) one item per line, and an unset key prints nothing (exit 0).
 
 ``config set``
 ~~~~~~~~~~~~~~
@@ -1014,14 +1012,13 @@ than 0); cost keys a non-negative number — the ceilings (``max_cost``,
 ``max_iter_cost``, ``max_step_cost``) must additionally be positive, with
 ``0`` refused by the merged validation, while ``reserve_budget`` may be
 ``0``; the list keys ``scope`` and ``clone_dirs`` a comma- or space-joined
-list of repo-relative roots (stored in canonical form; ``.`` is a legal
-scope root but never a ``clone_dirs`` entry); every other key
-stores a literal string. The merged result is validated — cost positivity
-and ordering, reserve range, duration suffixes, pacing exclusivity — before
-anything is written; ``init``'s additional flag
-checks (the agent registry, provider support, the base worktree) do not run
-here. Multi-key sets are checked upfront, so no earlier key lands when a
-later one is rejected.
+list of repo-relative roots (stored in canonical form; ``.`` is a legal scope
+root but never a ``clone_dirs`` entry); every other key stores a literal
+string. The merged result is validated — cost positivity and ordering,
+reserve range, duration suffixes, pacing exclusivity — before anything is
+written; ``init``'s additional flag checks (the agent registry, provider
+support, the base worktree) do not run here. Multi-key sets are checked
+upfront, so no earlier key lands when a later one is rejected.
 
 A *change* to the init-fixed keys ``root``, ``user``, and ``project`` always
 refuses: ``<key> is fixed at init and cannot be set.`` (Re-setting the

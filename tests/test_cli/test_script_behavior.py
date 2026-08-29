@@ -1,6 +1,6 @@
 """Script-internal behavior of the node lifecycle shells (``_scripts/``).
 
-Drives ``fractal/_scripts/{init,start,resume,merge,delete}.sh`` against repos
+Drives ``fractal/_scripts/{init,start,resume,kill,merge,delete}.sh`` against repos
 built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 
 - **``init.sh`` worktree resolution** parses ``git worktree list --porcelain``
@@ -79,12 +79,11 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   never re-offered, and so does one whose only conflict resolved itself on
   a foreign ``.fractal/`` path (an edit to the node's own seed is no
   adjudication and leaves the child put); into a node target that tracks
-  the child's seed from a
-  PREPARE fold, the advance strips the target's copy before grafting the
-  live seed, so a seed file the child dropped never comes back; and once
-  the squash commit is on the target an interrupt finishes or rolls back
-  the child's update, closes the event, and reports the landed squash with
-  exit 0 rather than failing a complete merge.
+  the child's seed from a PREPARE fold, the advance strips the target's
+  copy before grafting the live seed, so a seed file the child dropped never
+  comes back; and once the squash commit is on the target an interrupt
+  finishes or rolls back the child's update, closes the event, and reports
+  the landed squash with exit 0 rather than failing a complete merge.
 - **``merge.sh`` interrupts once the target is settled** are judged by the
   target, not the step in flight: a SIGINT while ``git commit`` runs its
   post-commit hook (the ref moved, the child not yet reaped) finds a landed
@@ -206,7 +205,9 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   state that merge-up regenerates on the target.
 
 Each test builds its own fresh repo (the merge/delete edges are destructive) and
-shells the scripts directly with the CLI env so ``fractal`` resolves.
+shells the scripts directly with the CLI env so ``fractal`` resolves; the
+``fractal node merge`` and ``fractal destroy`` sections run the verb itself, since
+the lock, signal relay, and user-target verdict around the script are their surface.
 """
 
 from __future__ import annotations
@@ -288,7 +289,6 @@ __all__ = [
     'test_merge_into_a_node_target_never_judges_its_ancestors_seed',
     'test_merge_into_a_node_target_keeps_its_tracked_descendant_seed',
     'test_merge_into_a_node_target_resolves_a_conflict_on_its_own_seed',
-    'test_merge_remedies_quote_a_path_with_a_space',
     'test_merge_warnings_print_a_non_ascii_path_readably',
     'test_merge_refuses_a_squash_outside_the_nodes_scope',
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
@@ -310,7 +310,6 @@ __all__ = [
     'test_destroy_removes_the_merge_lock_with_the_worktrees_dir',
     'test_delete_warns_on_unmerged_commits',
     'test_delete_does_not_warn_after_squash_merge',
-    'test_delete_does_not_warn_after_squash_merge_then_target_advances',
     'test_delete_warns_on_unmerged_non_ascii_work',
     'test_delete_warns_on_unmerged_wiki_page_work',
     'test_delete_does_not_warn_on_merge_regenerated_wiki_state',
@@ -383,9 +382,9 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
     parent_wt = repo / '.worktrees' / 'main.parent'
     parent_skills = parent_wt / '.fractal' / 'main.parent' / 'skills'
     seed_skills = _scripts_dir().parent / '_node' / 'skills'
-    assert sorted(p.name for p in parent_skills.iterdir()) == sorted(
-        p.name for p in seed_skills.iterdir()
-    )
+    parent_names = sorted(p.name for p in parent_skills.iterdir())
+    seed_names = sorted(p.name for p in seed_skills.iterdir())
+    assert parent_names == seed_names
 
     # the parent curates its set: appends guidance to one skill, drops another
     sentinel = 'Parent-curated guidance.'
@@ -439,7 +438,14 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
     kin_md = (kin_skills / 'fractal' / 'SKILL.md').read_text(encoding='utf-8')
     assert revised not in kin_md
     reseed = _run(
-        parent_wt, 'node', 'init', 'kin', '--reset', '--agent', 'claude', '--local'
+        parent_wt,
+        'node',
+        'init',
+        'kin',
+        '--reset',
+        '--agent',
+        'claude',
+        '--local',
     )
     assert reseed.returncode == 0, reseed.stderr
     kin_md = (kin_skills / 'fractal' / 'SKILL.md').read_text(encoding='utf-8')
@@ -490,7 +496,14 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     # seed dir), folds it in for real, and deletes it
     node_dir = parent / '.fractal' / 'main.parent'
     spawn = _run(
-        repo, 'node', 'init', 'c', '--agent', 'claude', '--local', _NODE=str(node_dir)
+        repo,
+        'node',
+        'init',
+        'c',
+        '--agent',
+        'claude',
+        '--local',
+        _NODE=str(node_dir),
     )
     assert spawn.returncode == 0, spawn.stderr
     child = repo / '.worktrees' / 'main.parent.c'
@@ -636,7 +649,8 @@ def test_resume_reselects_the_recorded_backend(
     tmux.chmod(0o755)
 
     env = _cli_env()
-    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
     env['RESUME_CAPTURE'] = f'{capture}'
     resume_sh = _scripts_dir() / 'resume.sh'
     real_bash = shutil.which('bash') or 'bash'
@@ -655,7 +669,8 @@ def test_resume_reselects_the_recorded_backend(
         assert not capture.exists()
         return
     assert result.returncode == 0, (result.stdout, result.stderr)
-    expected = [f'{_scripts_dir() / "start.sh"}', f'{repo}']
+    start_sh = _scripts_dir() / 'start.sh'
+    expected = [f'{start_sh}', f'{repo}']
     if headless:
         expected.append('--headless')
     expected.append('--resume')
@@ -703,30 +718,21 @@ def test_headless_relaunch_vets_the_recorded_group(
         )
         ps.chmod(0o755)
     env = _cli_env()
-    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
     # a live group whose record postdates its leader, i.e. the node's own
     leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
     pgid_file = node_dir / '.pgid'
     try:
         pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
         args = ['--headless'] if script == 'start.sh' else []
-        result = subprocess.run(
-            ['bash', f'{_scripts_dir() / script}', f'{repo}', *args],
-            cwd=f'{repo}',
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        result = _script(script, repo, f'{repo}', *args, env=env)
         assert result.returncode != 0, (result.stdout, result.stderr)
         assert message in result.stderr, result.stderr
         assert pgid_file.read_text(encoding='utf-8') == f'{leader.pid}\n'
         assert leader.poll() is None
     finally:
-        try:
-            os.killpg(leader.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        leader.wait()
+        _reap_group(leader)
 
 
 # ------ start.sh: the headless backend record
@@ -754,14 +760,9 @@ def test_headless_handoff_failure_records_no_backend(
     )
     shim.chmod(0o755)
     env = _cli_env()
-    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
-    result = subprocess.run(
-        ['bash', f'{_scripts_dir() / "start.sh"}', f'{repo}', '--headless'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    result = _script('start.sh', repo, f'{repo}', '--headless', env=env)
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert 'launch refused' in result.stderr, result.stderr
     assert not (node_dir / '.headless').exists()
@@ -795,14 +796,9 @@ def test_tmux_relaunch_failure_keeps_the_backend_record(
     )
     tmux.chmod(0o755)
     env = _cli_env()
-    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
-    result = subprocess.run(
-        ['bash', f'{_scripts_dir() / "start.sh"}', f'{repo}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    result = _script('start.sh', repo, f'{repo}', env=env)
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert (node_dir / '.headless').read_text(encoding='utf-8') == 'headless\n'
 
@@ -837,19 +833,14 @@ def test_kill_reaps_only_the_recorded_group_for_a_headless_node(
     )
     tmux.chmod(0o755)
     env = _cli_env()
-    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
     # a live group whose record postdates its leader, i.e. the node's own
     leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
     pgid_file = node_dir / '.pgid'
     pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
     try:
-        result = subprocess.run(
-            ['bash', f'{_scripts_dir() / "kill.sh"}', f'{repo}'],
-            cwd=f'{repo}',
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        result = _script('kill.sh', repo, f'{repo}', env=env)
         assert result.returncode == 0, (result.stdout, result.stderr)
         # the recorded group drew the TERM and the record handle is dropped
         assert leader.wait(timeout=10) != 0
@@ -857,11 +848,7 @@ def test_kill_reaps_only_the_recorded_group_for_a_headless_node(
         # tmux was never consulted -- the collision session survives
         assert not capture.exists()
     finally:
-        try:
-            os.killpg(leader.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        leader.wait()
+        _reap_group(leader)
 
 
 # ------ delete.sh: the per-backend running guard
@@ -898,14 +885,9 @@ def test_delete_running_guard_is_per_backend(
     tmux.write_text(f"#!/bin/sh\nprintf '%s\\n' '{session}'\n", encoding='utf-8')
     tmux.chmod(0o755)
     env = _cli_env()
-    env['PATH'] = f'{bindir}{os.pathsep}{env["PATH"]}'
-    result = subprocess.run(
-        ['bash', f'{_scripts_dir() / "delete.sh"}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    result = _script('delete.sh', repo, f'{worktree}', env=env)
 
     if headless:
         # the name belongs to another repo's session -- the delete proceeds
@@ -953,14 +935,7 @@ def test_merge_preserves_a_target_edit_that_lands_during_the_merge(
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{shim}{os.pathsep}{path}'
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    result = _script('merge.sh', repo, f'{worktree}', env=env)
 
     # the merge refused, and the edit that landed in the window survives intact --
     # neither committed into a squash nor wiped by a recovery reset --hard
@@ -989,27 +964,14 @@ def test_merge_re_merges_an_iterating_child_without_conflict(
     (worktree / 'f.txt').write_text('line1\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child v1')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{worktree}')
     assert first.returncode == 0, first.stderr
 
     # second iteration: the child re-touches the same file and squash-merges again
     (worktree / 'f.txt').write_text('line1\nline2\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child v2')
-    second = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    second = _script('merge.sh', repo, f'{worktree}')
 
     # the re-merge diffs only the new work, so it lands without a spurious
     # conflict and the target carries the child's later content
@@ -1045,12 +1007,7 @@ def test_merge_re_merge_of_a_merged_node_is_a_no_op(
     repo = _init_tree(tmp_path / 'noopremergerepo')
     # a legacy baseline that force-tracked the derived cache past its ignore
     wiki_dir = repo / 'wiki'
-    subprocess.run(
-        ['wiki', 'update', f'--path={wiki_dir}'],
-        capture_output=True,
-        check=True,
-        env=_cli_env(),
-    )
+    _wiki_update(wiki_dir)
     _git(repo, 'add', '-A')
     _git(repo, 'add', '-f', '--', 'wiki/.wiki/cache')
     _git(repo, 'commit', '-m', 'legacy baseline tracks the cache')
@@ -1065,33 +1022,16 @@ def test_merge_re_merge_of_a_merged_node_is_a_no_op(
         encoding='utf-8',
     )
     wiki_dir = worktree / 'wiki'
-    subprocess.run(
-        ['wiki', 'update', f'--path={wiki_dir}'],
-        capture_output=True,
-        check=True,
-        env=_cli_env(),
-    )
+    _wiki_update(wiki_dir)
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child wiki page')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{worktree}')
     assert first.returncode == 0, (first.stdout, first.stderr)
     merged_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
     # the advance converged the child to the target, so only a fresh refresh
     # -- a page touched, its mtime re-embedded -- makes the cache differ again
     os.utime(page, None)
-    subprocess.run(
-        ['wiki', 'update', f'--path={wiki_dir}'],
-        capture_output=True,
-        check=True,
-        env=_cli_env(),
-    )
+    _wiki_update(wiki_dir)
     foreign = worktree / '.fractal' / 'main.other' / 'x.md'
     if dropped:
         foreign.parent.mkdir()
@@ -1110,13 +1050,7 @@ def test_merge_re_merge_of_a_merged_node_is_a_no_op(
     assert churn.returncode == 1, churn.stderr
 
     # the re-merge stages only the cache churn, which the refresh reverts
-    second = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    second = _script('merge.sh', repo, f'{worktree}')
 
     assert second.returncode == 0, (second.stdout, second.stderr)
     assert 'Nothing to merge' in second.stdout
@@ -1156,13 +1090,7 @@ def test_merge_re_merge_offering_only_the_seed_is_a_no_op(
     repo = _init_tree(tmp_path / 'seednoopremergerepo')
     # settle the wiki so the merge's index refresh stages nothing of its own:
     # the seed must be the squash's whole offering to no-op before the refresh
-    settle = subprocess.run(
-        ['wiki', 'update', '--path', f'{repo}/wiki'],
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
-    assert settle.returncode == 0, settle.stderr
+    _wiki_update(repo / 'wiki')
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-m', 'settle wiki')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -1173,25 +1101,12 @@ def test_merge_re_merge_offering_only_the_seed_is_a_no_op(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{worktree}')
     assert first.returncode == 0, (first.stdout, first.stderr)
     merged_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
 
     # the re-merge stages only the seed, which the strip empties back out
-    second = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    second = _script('merge.sh', repo, f'{worktree}')
 
     assert second.returncode == 0, (second.stdout, second.stderr)
     assert 'Nothing to merge' in second.stdout
@@ -1224,14 +1139,7 @@ def test_merge_no_op_marker_clearing_never_touches_the_target_root(
     # the scaffolding lands first, so the re-merge offers only the seed
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'settle node scaffolding')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{worktree}')
     assert first.returncode == 0, (first.stdout, first.stderr)
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
     bindir = _git_shim(
@@ -1244,13 +1152,7 @@ def test_merge_no_op_marker_clearing_never_touches_the_target_root(
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
-    second = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    second = _script('merge.sh', repo, f'{worktree}', env=env)
 
     # the no-op exits 0 with the target whole: its git dir, tracked files,
     # and the user node's estate all in place, and its HEAD unmoved
@@ -1278,20 +1180,13 @@ def test_merge_sibling_wiki_work_lands_without_conflict(
     repo = _init_tree(tmp_path / 'siblingrepo')
     # settle the wiki so each sibling inherits committed settings and the
     # merges' shared surface is only the generated link block
-    settle = subprocess.run(
-        ['wiki', 'update', '--path', f'{repo}/wiki'],
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
-    assert settle.returncode == 0, settle.stderr
+    _wiki_update(repo / 'wiki')
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-m', 'settle wiki')
     # both siblings fork from the same tip, then work and merge in turn
     for name in ('alpha', 'beta'):
         init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
         assert init.returncode == 0, init.stderr
-    merge_sh = _scripts_dir() / 'merge.sh'
     for name in ('alpha', 'beta'):
         worktree = repo / '.worktrees' / f'main.{name}'
         (worktree / 'wiki' / f'{name}.md').write_text(
@@ -1299,21 +1194,10 @@ def test_merge_sibling_wiki_work_lands_without_conflict(
             encoding='utf-8',
         )
         wiki_dir = worktree / 'wiki'
-        subprocess.run(
-            ['wiki', 'update', f'--path={wiki_dir}'],
-            capture_output=True,
-            check=True,
-            env=_cli_env(),
-        )
+        _wiki_update(wiki_dir)
         _git(worktree, 'add', '-A')
         _git(worktree, 'commit', '-m', f'{name} wiki page')
-        result = subprocess.run(
-            ['bash', f'{merge_sh}', f'{worktree}'],
-            cwd=f'{repo}',
-            capture_output=True,
-            text=True,
-            env=_cli_env(),
-        )
+        result = _script('merge.sh', repo, f'{worktree}')
         assert result.returncode == 0, (result.stdout, result.stderr)
 
     # both pages are on the target, and the derived cache never entered
@@ -1362,14 +1246,7 @@ def test_failed_merge_restore_removes_the_staged_child_additions(
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{stub}{os.pathsep}{path}'
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    result = _script('merge.sh', repo, f'{worktree}', env=env)
 
     # the merge failed and restored: the child's staged addition is gone,
     # the pre-existing untracked scratch file survives, and the parent
@@ -1412,20 +1289,14 @@ def test_merge_leaves_the_target_clean_when_scratch_creation_fails(
     stub.mkdir()
     mktemp_stub = stub / 'mktemp'
     mktemp_stub.write_text(
-        '#!/usr/bin/env bash\necho "mktemp: refused" >&2\nexit 1\n', encoding='utf-8'
+        '#!/usr/bin/env bash\necho "mktemp: refused" >&2\nexit 1\n',
+        encoding='utf-8',
     )
     mktemp_stub.chmod(0o755)
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{stub}{os.pathsep}{path}'
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    result = _script('merge.sh', repo, f'{worktree}', env=env)
 
     # the merge failed before the squash: HEAD unmoved, nothing staged or left
     # on disk, and no squash state to fake a merge in progress
@@ -1463,14 +1334,7 @@ def test_merge_advances_the_merge_base_past_a_refused_estate_file(
     # the node parks a refused estate file -- the law never lets it commit
     estate = worktree / '.fractal' / 'main.task'
     (estate / '.env').write_text('SECRET=1\n', encoding='utf-8')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{worktree}')
     assert first.returncode == 0, first.stderr
 
     # the advance happened despite the parked file: no skip warning, and the
@@ -1489,13 +1353,7 @@ def test_merge_advances_the_merge_base_past_a_refused_estate_file(
     (worktree / 'f.txt').write_text('line1\nline2\n', encoding='utf-8')
     _git(worktree, 'add', 'f.txt')
     _git(worktree, 'commit', '-m', 'child v2')
-    second = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    second = _script('merge.sh', repo, f'{worktree}')
 
     # the re-merge diffs only the new work -- no spurious conflict on the
     # already-merged file -- and the target carries the later content
@@ -1523,14 +1381,7 @@ def test_merge_skips_the_merge_base_advance_for_dirty_tracked_work(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child v1')
     (worktree / 'f.txt').write_text('line1\nuncommitted\n', encoding='utf-8')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge lands, but the advance is skipped and warned about: the
     # parent's merge commit is no ancestor of the child
@@ -1585,14 +1436,7 @@ def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     check = _run(worktree, 'commit', '--check')
     assert check.returncode == 0, (check.stdout, check.stderr)
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed either way
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -1653,14 +1497,7 @@ def test_merge_advance_records_the_target_tree_on_the_child(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'skipped advancing' not in result.stderr, result.stderr
 
@@ -1687,13 +1524,7 @@ def test_merge_advance_records_the_target_tree_on_the_child(
     (worktree / 'f.txt').write_text('child v2\n', encoding='utf-8')
     _git(worktree, 'add', 'f.txt')
     _git(worktree, 'commit', '-m', 'child v2')
-    second = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    second = _script('merge.sh', repo, f'{worktree}')
 
     # the re-merge lands the new work and leaves the target's README alone
     assert second.returncode == 0, (second.stdout, second.stderr)
@@ -1740,14 +1571,7 @@ def test_merge_advance_keeps_the_childs_own_seed_intact(
         name: _git(worktree, 'rev-parse', f'HEAD:.fractal/{name}').stdout.strip()
         for name in ('main.task', 'main.task.sub')
     }
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'skipped advancing' not in result.stderr, result.stderr
     # the stale copy is named as this node's own leak, the one the merge removes
@@ -1760,16 +1584,13 @@ def test_merge_advance_keeps_the_childs_own_seed_intact(
     # the advanced branch and the worktree carry the child's own seed trees,
     # byte for byte
     for name, tree in seed_trees.items():
-        assert (
-            _git(worktree, 'rev-parse', f'HEAD:.fractal/{name}').stdout.strip() == tree
-        )
+        advanced = _git(worktree, 'rev-parse', f'HEAD:.fractal/{name}').stdout.strip()
+        assert advanced == tree
     live = (worktree / '.fractal' / 'main.task' / 'NODE.md').read_text(encoding='utf-8')
     assert live == '# live contract\n'
     # and the target tracks neither the stale copy nor the descendant seed
-    tracked = _git(
-        repo, 'ls-files', '.fractal/main.task', '.fractal/main.task.sub'
-    ).stdout
-    assert tracked.strip() == ''
+    listing = _git(repo, 'ls-files', '.fractal/main.task', '.fractal/main.task.sub')
+    assert listing.stdout.strip() == ''
     assert not (repo / '.fractal' / 'main.task').exists()
 
 
@@ -1799,7 +1620,14 @@ def test_merge_advance_into_a_node_target_takes_the_live_seed(
     # seed dir), which settles its own scaffolding
     node_dir = parent / '.fractal' / 'main.p'
     spawn = _run(
-        repo, 'node', 'init', 'c', '--agent', 'claude', '--local', _NODE=str(node_dir)
+        repo,
+        'node',
+        'init',
+        'c',
+        '--agent',
+        'claude',
+        '--local',
+        _NODE=str(node_dir),
     )
     assert spawn.returncode == 0, spawn.stderr
     child = repo / '.worktrees' / 'main.p.c'
@@ -1815,14 +1643,7 @@ def test_merge_advance_into_a_node_target_takes_the_live_seed(
     _git(child, 'add', 'c.txt')
     _git(child, 'commit', '-m', 'drop a skill, add work')
     live_seed = _git(child, 'rev-parse', 'HEAD:.fractal/main.p.c').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{child}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{child}')
 
     # the work landed on the parent, whose fold-tracked copy of the seed is
     # left as it was
@@ -1830,9 +1651,8 @@ def test_merge_advance_into_a_node_target_takes_the_live_seed(
     assert 'skipped advancing' not in result.stderr, result.stderr
     assert _git(parent, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.p.c'
     assert (parent / 'c.txt').read_text(encoding='utf-8') == 'child work\n'
-    assert (
-        parent / '.fractal' / 'main.p.c' / 'skills' / 'radio' / 'SKILL.md'
-    ).is_file()
+    parent_copy = parent / '.fractal' / 'main.p.c' / 'skills' / 'radio' / 'SKILL.md'
+    assert parent_copy.is_file()
     # the advance moved the child onto the parent's tree with its own live
     # seed grafted back -- the dropped file stays dropped -- and left it clean
     subject = _git(child, 'log', '-1', '--format=%s').stdout.strip()
@@ -1867,14 +1687,7 @@ def test_merge_advance_brings_the_targets_profiles_to_the_child(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'skipped advancing' not in result.stderr, result.stderr
 
@@ -1921,20 +1734,12 @@ def test_merge_skips_the_advance_when_the_child_index_is_locked(
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
     # another git process holds the lock for the whole merge (--git-path
     # resolves the per-worktree index and the shared branch ref alike)
-    lock_path = pathlib.Path(
-        _git(worktree, 'rev-parse', '--git-path', lock).stdout.strip()
-    )
+    lock_word = _git(worktree, 'rev-parse', '--git-path', lock).stdout.strip()
+    lock_path = pathlib.Path(lock_word)
     if not lock_path.is_absolute():
         lock_path = worktree / lock_path
     lock_path.touch()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
     lock_path.unlink()
 
     # the merge landed and warned; the child's ref never moved, and its
@@ -1991,18 +1796,13 @@ def test_merge_skips_the_advance_when_reading_the_child_worktree_fails(
     env = _cli_env()
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    result = _script('merge.sh', repo, f'{worktree}', env=env)
 
     # the shim failed exactly the advance's read; the merge landed and was
     # reported, the skip named the failed read, and the child never moved
-    assert len(reads.read_text(encoding='utf-8').splitlines()) == 2
+    recorded = reads.read_text(encoding='utf-8').splitlines()
+    read_count = len(recorded)
+    assert read_count == 2, recorded
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'Squash-merged main.task into main' in result.stdout, result.stdout
     assert 'skipped advancing' in result.stderr, result.stderr
@@ -2072,14 +1872,7 @@ def test_merge_skips_the_advance_over_a_private_ignored_file(
     (sibling / landed).write_text('A-secret\n', encoding='utf-8')
     _git(sibling, 'add', '-f', landed)
     _git(sibling, 'commit', '-m', 'track a secret')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{sibling}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{sibling}')
     assert first.returncode == 0, (first.stdout, first.stderr)
     # the second holds its own private copy, ignored, beside committed work
     (worktree / private).parent.mkdir(parents=True, exist_ok=True)
@@ -2088,13 +1881,7 @@ def test_merge_skips_the_advance_over_a_private_ignored_file(
     _git(worktree, 'add', 'b.txt')
     _git(worktree, 'commit', '-m', 'b work')
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed; the advance was skipped naming the path in the way,
     # and the private copy and the child's HEAD are untouched
@@ -2141,14 +1928,7 @@ def test_merge_skips_the_advance_over_a_path_the_target_renamed_onto(
     _git(worktree, 'add', 'b.txt')
     _git(worktree, 'commit', '-m', 'b work')
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed; the advance was skipped naming the rename's
     # destination, and the private copy and the child's HEAD are untouched
@@ -2193,14 +1973,7 @@ def test_merge_advance_moves_a_tracked_case_variant(tmp_path: pathlib.Path) -> N
     (worktree / 'b.txt').write_text('b work\n', encoding='utf-8')
     _git(worktree, 'add', 'b.txt')
     _git(worktree, 'commit', '-m', 'b work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the advance ran: the child is on the post-squash commit, tracking and
     # holding the target's spelling with the target's content
@@ -2261,14 +2034,7 @@ def test_merge_advance_performs_a_type_change_the_target_made(
     _git(worktree, 'add', 'b.txt')
     _git(worktree, 'commit', '-m', 'b work')
     assert _git(worktree, 'ls-files', 'out').stdout.split() == [before]
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed and the advance ran: the child is on the post-squash
     # commit holding the target's shape, and nothing leaked onto stderr
@@ -2303,14 +2069,7 @@ def test_merge_fresh_no_op_advances_past_dropped_fractal_paths(
     # the scaffolding lands first, so the foreign write is the only offering
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'settle node scaffolding')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{worktree}')
     assert first.returncode == 0, (first.stdout, first.stderr)
     foreign = worktree / '.fractal' / 'main.other' / 'f'
     foreign.parent.mkdir()
@@ -2318,13 +2077,7 @@ def test_merge_fresh_no_op_advances_past_dropped_fractal_paths(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'write into a foreign seed')
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    second = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    second = _script('merge.sh', repo, f'{worktree}')
 
     # nothing landed, the drop was warned about, and the child converged:
     # its HEAD is the advance and the foreign write is gone from its tree
@@ -2339,13 +2092,7 @@ def test_merge_fresh_no_op_advances_past_dropped_fractal_paths(
     assert _git(worktree, 'status', '--porcelain').stdout == ''
 
     # the next merge offers nothing and warns of nothing
-    third = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    third = _script('merge.sh', repo, f'{worktree}')
     assert third.returncode == 0, (third.stdout, third.stderr)
     assert 'Nothing to merge' in third.stdout, third.stdout
     assert 'the merge removed' not in third.stderr, third.stderr
@@ -2389,14 +2136,7 @@ def test_merge_fresh_no_op_advances_past_a_resolved_foreign_conflict(
     # the scaffolding lands first, so the seed edit is the only offering
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'settle node scaffolding')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{worktree}')
     assert first.returncode == 0, (first.stdout, first.stderr)
     # the node edits the seed file alone, while the root drops its leaked
     # copy with the printed remedy
@@ -2408,13 +2148,7 @@ def test_merge_fresh_no_op_advances_past_a_resolved_foreign_conflict(
         _git(repo, 'commit', '-m', 'drop leaked node seeds')
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    second = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    second = _script('merge.sh', repo, f'{worktree}')
 
     # nothing landed; the child converged past the resolved foreign path, or
     # stayed put for its own seed
@@ -2436,13 +2170,7 @@ def test_merge_fresh_no_op_advances_past_a_resolved_foreign_conflict(
     assert _git(worktree, 'status', '--porcelain').stdout == ''
 
     # the next merge offers nothing and resolves nothing
-    third = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    third = _script('merge.sh', repo, f'{worktree}')
     assert third.returncode == 0, (third.stdout, third.stderr)
     assert 'Nothing to merge' in third.stdout, third.stdout
     assert 'resolved' not in third.stderr, third.stderr
@@ -2472,16 +2200,9 @@ def test_merge_continue_finishes_a_hand_resolved_squash(
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
-    merge_sh = _scripts_dir() / 'merge.sh'
 
     # without a squash in progress the continue refuses
-    premature = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    premature = _script('merge.sh', repo, f'{worktree}', '--continue')
     assert premature.returncode != 0, premature.stdout
     assert 'no squash merge is in progress' in premature.stderr
 
@@ -2492,13 +2213,7 @@ def test_merge_continue_finishes_a_hand_resolved_squash(
     (worktree / 'tracked.txt').write_text('child line\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child edits tracked')
-    conflicted = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    conflicted = _script('merge.sh', repo, f'{worktree}')
     assert conflicted.returncode != 0, conflicted.stdout
     assert '--continue' in conflicted.stderr
 
@@ -2515,13 +2230,7 @@ def test_merge_continue_finishes_a_hand_resolved_squash(
     (repo / 'tracked.txt').write_text('resolved line\n', encoding='utf-8')
     _git(repo, 'add', 'tracked.txt')
 
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}', '--continue')
 
     # the continue commits the resolution like a clean merge, with the seed
     # stripped from the commit and the working tree both -- and the seed the
@@ -2562,32 +2271,19 @@ def test_merge_continue_finishes_a_target_only_resolution(
     repo = _init_tree(tmp_path / 'ourssrepo')
     # settle the wiki so the merge's index refresh stages nothing of its own:
     # the resolution's empty staged diff is what this test turns on
-    settle = subprocess.run(
-        ['wiki', 'update', '--path', f'{repo}/wiki'],
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
-    assert settle.returncode == 0, settle.stderr
+    _wiki_update(repo / 'wiki')
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-m', 'settle wiki')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
-    merge_sh = _scripts_dir() / 'merge.sh'
 
     # a first clean merge lands the node's inherited scaffolding on the target
     # (and leaves its worktree clean), so the conflicting file below is the
     # node's whole contribution from there on
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'settle node scaffolding')
-    settled = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    settled = _script('merge.sh', repo, f'{worktree}')
     assert settled.returncode == 0, (settled.stdout, settled.stderr)
 
     # resolving that one file to the target's content leaves nothing to commit
@@ -2597,13 +2293,7 @@ def test_merge_continue_finishes_a_target_only_resolution(
     (worktree / 'tracked.txt').write_text('child line\n', encoding='utf-8')
     _git(worktree, 'add', 'tracked.txt')
     _git(worktree, 'commit', '-m', 'child edits tracked')
-    conflicted = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    conflicted = _script('merge.sh', repo, f'{worktree}')
     assert conflicted.returncode != 0, conflicted.stdout
 
     # the operator redoes the squash and keeps the target's own content
@@ -2616,13 +2306,7 @@ def test_merge_continue_finishes_a_target_only_resolution(
     _git(repo, 'checkout', '--ours', '--', 'tracked.txt')
     _git(repo, 'add', 'tracked.txt')
 
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}', '--continue')
 
     # the resolution stands: no merge commit, the target's content intact
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -2643,13 +2327,7 @@ def test_merge_continue_finishes_a_target_only_resolution(
         text=True,
     )
     assert ancestor.returncode == 0, ancestor.stderr
-    again = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    again = _script('merge.sh', repo, f'{worktree}')
     assert again.returncode == 0, (again.stdout, again.stderr)
     # the resolution reached the node too: it holds the target's content
     assert (worktree / 'tracked.txt').read_text(encoding='utf-8') == 'parent line\n'
@@ -2689,7 +2367,6 @@ def test_merge_continue_lands_the_resolution_on_the_node(
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
-    merge_sh = _scripts_dir() / 'merge.sh'
 
     # both sides edit the tracked file so the merge conflicts, and the node
     # adds a file of its own
@@ -2700,13 +2377,7 @@ def test_merge_continue_lands_the_resolution_on_the_node(
     (worktree / 'added.txt').write_text('node added\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'node edits tracked, adds a file')
-    conflicted = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    conflicted = _script('merge.sh', repo, f'{worktree}')
     assert conflicted.returncode != 0, conflicted.stdout
 
     # the operator redoes the squash by hand and adjudicates: the conflicting
@@ -2723,13 +2394,7 @@ def test_merge_continue_lands_the_resolution_on_the_node(
         _git(repo, 'rm', '--cached', '--quiet', 'added.txt')
         (repo / 'added.txt').unlink()
 
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}', '--continue')
 
     # the resolution stands on the target...
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -2739,16 +2404,14 @@ def test_merge_continue_lands_the_resolution_on_the_node(
     # ...and the node holds the same content (or absence) for every path it
     # offered, so a re-merge has nothing to undo
     for name in ('tracked.txt', 'added.txt'):
-        target_copy = (
-            (repo / name).read_text(encoding='utf-8')
-            if (repo / name).is_file()
-            else None
-        )
-        node_copy = (
-            (worktree / name).read_text(encoding='utf-8')
-            if (worktree / name).is_file()
-            else None
-        )
+        # the target's copy, or its absence
+        target_copy = None
+        if (repo / name).is_file():
+            target_copy = (repo / name).read_text(encoding='utf-8')
+        # the node's copy, or its absence
+        node_copy = None
+        if (worktree / name).is_file():
+            node_copy = (worktree / name).read_text(encoding='utf-8')
         assert node_copy == target_copy, (name, result.stderr)
 
 
@@ -2773,7 +2436,14 @@ def test_merge_continue_restores_a_foreign_seed_edit_the_hand_squash_carries(
     _git(parent, 'commit', '-m', 'settle p estate')
     node_dir = parent / '.fractal' / 'main.p'
     spawn = _run(
-        repo, 'node', 'init', 'c', '--agent', 'claude', '--local', _NODE=str(node_dir)
+        repo,
+        'node',
+        'init',
+        'c',
+        '--agent',
+        'claude',
+        '--local',
+        _NODE=str(node_dir),
     )
     assert spawn.returncode == 0, spawn.stderr
     child = repo / '.worktrees' / 'main.p.c'
@@ -2787,17 +2457,11 @@ def test_merge_continue_restores_a_foreign_seed_edit_the_hand_squash_carries(
     parent_contract = contract.read_text(encoding='utf-8')
     (child / 'tracked.txt').write_text('child line\n', encoding='utf-8')
     (child / '.fractal' / 'main.p' / 'NODE.md').write_text(
-        parent_contract + '\nChild line.\n', encoding='utf-8'
+        parent_contract + '\nChild line.\n',
+        encoding='utf-8',
     )
     _git(child, 'commit', '-a', '-m', 'c edits tracked and the contract')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    conflicted = subprocess.run(
-        ['bash', f'{merge_sh}', f'{child}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    conflicted = _script('merge.sh', repo, f'{child}')
     assert conflicted.returncode != 0, conflicted.stdout
     assert '--continue' in conflicted.stderr
     # the operator redoes the squash by hand, resolves, and stages -- the
@@ -2814,13 +2478,7 @@ def test_merge_continue_restores_a_foreign_seed_edit_the_hand_squash_carries(
     staged = _git(parent, 'diff', '--cached', '--name-only').stdout
     assert '.fractal/main.p/NODE.md' in staged, staged
 
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{child}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{child}', '--continue')
 
     # the resolution landed with the contract back at the parent's content,
     # the restore named in the warning, and nothing under .fractal/ committed
@@ -2864,14 +2522,7 @@ def test_merge_continue_refuses_unstaged_target_edits(
     (worktree / 'tracked.txt').write_text('child line\n', encoding='utf-8')
     _git(worktree, 'add', 'tracked.txt')
     _git(worktree, 'commit', '-m', 'child edits tracked')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    conflicted = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    conflicted = _script('merge.sh', repo, f'{worktree}')
     assert conflicted.returncode != 0, conflicted.stdout
 
     # the operator redoes the squash, resolves and stages the conflict, and
@@ -2885,13 +2536,7 @@ def test_merge_continue_refuses_unstaged_target_edits(
     (repo / 'tracked.txt').write_text('resolved line\n', encoding='utf-8')
     _git(repo, 'add', 'tracked.txt')
     profile.write_text('v1\nOPERATOR EDIT\n', encoding='utf-8')
-    refused = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    refused = _script('merge.sh', repo, f'{worktree}', '--continue')
 
     # refused naming the path, with the edit and the staged squash intact
     assert refused.returncode != 0, (refused.stdout, refused.stderr)
@@ -2909,13 +2554,7 @@ def test_merge_continue_refuses_unstaged_target_edits(
 
     # staged, the same squash lands
     _git(repo, 'add', '.fractal/profiles/p/NODE.md')
-    landed = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    landed = _script('merge.sh', repo, f'{worktree}', '--continue')
     assert landed.returncode == 0, (landed.stdout, landed.stderr)
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
     assert (repo / 'tracked.txt').read_text(encoding='utf-8') == 'resolved line\n'
@@ -2945,14 +2584,7 @@ def test_merge_continue_refuses_commits_newer_than_the_squash(
     (worktree / 'tracked.txt').write_text('child line\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child edits tracked')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    conflicted = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    conflicted = _script('merge.sh', repo, f'{worktree}')
     assert conflicted.returncode != 0, conflicted.stdout
 
     # the operator redoes the squash and resolves; the node commits again
@@ -2968,13 +2600,7 @@ def test_merge_continue_refuses_commits_newer_than_the_squash(
     (worktree / 'later.txt').write_text('later work\n', encoding='utf-8')
     _git(worktree, 'add', 'later.txt')
     _git(worktree, 'commit', '-m', 'later work')
-    refused = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    refused = _script('merge.sh', repo, f'{worktree}', '--continue')
 
     # refused naming the redo, with the staged resolution and squash intact
     assert refused.returncode != 0, (refused.stdout, refused.stderr)
@@ -2996,13 +2622,7 @@ def test_merge_continue_refuses_commits_newer_than_the_squash(
     assert redo.returncode != 0, redo.stdout
     (repo / 'tracked.txt').write_text('resolved line\n', encoding='utf-8')
     _git(repo, 'add', 'tracked.txt')
-    landed = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    landed = _script('merge.sh', repo, f'{worktree}', '--continue')
     assert landed.returncode == 0, (landed.stdout, landed.stderr)
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
     assert (repo / 'tracked.txt').read_text(encoding='utf-8') == 'resolved line\n'
@@ -3041,14 +2661,7 @@ def test_merge_continue_refuses_unresolved_conflicts(tmp_path: pathlib.Path) -> 
         text=True,
     )
     assert redo.returncode != 0, redo.stdout
-    merge_sh = _scripts_dir() / 'merge.sh'
-    refused = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    refused = _script('merge.sh', repo, f'{worktree}', '--continue')
 
     # refused with the remedy, the conflict and the squash state untouched
     assert refused.returncode != 0, (refused.stdout, refused.stderr)
@@ -3125,20 +2738,20 @@ def test_merge_leaves_the_targets_fractal_dir_as_it_is(
     # the parent tracks its own estate, with both wikis settled so the merge's
     # index refresh regenerates nothing of its own
     for wiki_dir in (parent / 'wiki', parent / '.fractal' / 'main.parent' / 'memory'):
-        settle = subprocess.run(
-            ['wiki', 'update', f'--path={wiki_dir}'],
-            capture_output=True,
-            text=True,
-            env=_cli_env(),
-        )
-        assert settle.returncode == 0, settle.stderr
+        _wiki_update(wiki_dir)
     _git(parent, 'add', '-A')
     _git(parent, 'commit', '-m', 'settle parent estate')
     node_dir = parent / '.fractal' / 'main.parent'
     # a child the parent folded in with a real merge (as its PREPARE step
     # does), so the parent tracks a descendant's seed of its own
     folded = _run(
-        parent, 'node', 'init', 'c2', '--agent', 'claude', _NODE=str(node_dir)
+        parent,
+        'node',
+        'init',
+        'c2',
+        '--agent',
+        'claude',
+        _NODE=str(node_dir),
     )
     assert folded.returncode == 0, folded.stderr
     descendant = repo / '.worktrees' / 'main.parent.c2'
@@ -3146,7 +2759,13 @@ def test_merge_leaves_the_targets_fractal_dir_as_it_is(
     _git(descendant, 'commit', '-m', 'descendant seed')
     _git(parent, 'merge', '--no-ff', '--no-edit', 'main.parent.c2')
     spawn = _run(
-        parent, 'node', 'init', 'child', '--agent', 'claude', _NODE=str(node_dir)
+        parent,
+        'node',
+        'init',
+        'child',
+        '--agent',
+        'claude',
+        _NODE=str(node_dir),
     )
     assert spawn.returncode == 0, spawn.stderr
     child = repo / '.worktrees' / 'main.parent.child'
@@ -3157,30 +2776,23 @@ def test_merge_leaves_the_targets_fractal_dir_as_it_is(
     foreign.write_text('# foreign contract\n', encoding='utf-8')
     script = estate / 'scripts' / 'test.sh'
     script.write_text(
-        script.read_text(encoding='utf-8') + 'echo edited\n', encoding='utf-8'
+        script.read_text(encoding='utf-8') + 'echo edited\n',
+        encoding='utf-8',
     )
     _git(child, 'rm', '--quiet', '.fractal/main.parent/plans/.gitkeep')
     (estate / 'memory' / 'note.md').write_text(
-        '# note\n\nchild memory.\n', encoding='utf-8'
+        '# note\n\nchild memory.\n',
+        encoding='utf-8',
     )
     # ...beside real work
     (child / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(child, 'add', '-A')
     _git(child, 'commit', '-m', 'child edits the estate')
-    script_before = _git(
-        parent, 'show', 'HEAD:.fractal/main.parent/scripts/test.sh'
-    ).stdout
-    memory_before = _git(
-        parent, 'rev-parse', 'HEAD:.fractal/main.parent/memory'
-    ).stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{child}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    shown = _git(parent, 'show', 'HEAD:.fractal/main.parent/scripts/test.sh')
+    script_before = shown.stdout
+    memory_tree = _git(parent, 'rev-parse', 'HEAD:.fractal/main.parent/memory')
+    memory_before = memory_tree.stdout.strip()
+    result = _script('merge.sh', repo, f'{child}')
     assert result.returncode == 0, (result.stdout, result.stderr)
 
     # the real work landed and nothing under .fractal/ changed: the foreign
@@ -3188,17 +2800,15 @@ def test_merge_leaves_the_targets_fractal_dir_as_it_is(
     # is still tracked, and the memory tree is the same
     assert (parent / 'f.txt').read_text(encoding='utf-8') == 'child work\n'
     assert not (parent / '.fractal' / 'main.other').exists()
-    assert (parent / '.fractal' / 'main.parent' / 'scripts' / 'test.sh').read_text(
-        encoding='utf-8'
-    ) == script_before
+    parent_script = parent / '.fractal' / 'main.parent' / 'scripts' / 'test.sh'
+    assert parent_script.read_text(encoding='utf-8') == script_before
     tracked = _git(parent, 'ls-files', '.fractal').stdout
     assert '.fractal/main.other/NODE.md' not in tracked
     assert '.fractal/main.parent/plans/.gitkeep' in tracked
     assert '.fractal/main.parent/memory/note.md' not in tracked
     assert '.fractal/main.parent.c2/NODE.md' in tracked
-    memory_after = _git(
-        parent, 'rev-parse', 'HEAD:.fractal/main.parent/memory'
-    ).stdout.strip()
+    memory_tree = _git(parent, 'rev-parse', 'HEAD:.fractal/main.parent/memory')
+    memory_after = memory_tree.stdout.strip()
     assert memory_after == memory_before
     assert _git(parent, 'status', '--porcelain').stdout == ''
     # the warnings name every dropped path by fate: the paths the parent
@@ -3315,14 +2925,7 @@ def test_merge_refuses_over_any_untracked_file_the_squash_would_overwrite(
     _git(worktree, 'add', '-f', added, 'docs')
     _git(worktree, 'commit', '-m', 'child writes over the root')
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # refused naming the path in the way; the live file, HEAD, and index are
     # untouched, no squash state is left behind, and the root still answers
@@ -3370,34 +2973,30 @@ def test_merge_refuses_over_a_seed_file_the_root_untracked_but_kept(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'settle node scaffolding')
     # the node edits the root's notes...
-    (worktree / '.fractal' / 'main' / 'memory' / 'notes.md').write_text(
-        'child edit\n', encoding='utf-8'
-    )
+    child_notes = worktree / '.fractal' / 'main' / 'memory' / 'notes.md'
+    child_notes.write_text('child edit\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child edits the root notes')
     # ...while the root untracks its seed with the printed remedy, which
     # keeps the live copy on disk
     untrack = _run(repo, 'untrack')
     assert untrack.returncode == 0, untrack.stderr
-    remedy = next(
+    remedy_line = next(
         line for line in untrack.stdout.splitlines() if 'git rm -r --cached' in line
-    ).split('with: ', 1)[1]
+    )
+    remedy = remedy_line.split('with: ', 1)[1]
     removed = subprocess.run(
-        ['bash', '-c', remedy], cwd=f'{repo}', capture_output=True, text=True
+        ['bash', '-c', remedy],
+        cwd=f'{repo}',
+        capture_output=True,
+        text=True,
     )
     assert removed.returncode == 0, (removed.stdout, removed.stderr)
     _git(repo, 'commit', '-m', 'untrack the root seed')
     assert notes.read_text(encoding='utf-8') == 'root notes v1\n'
     assert _git(repo, 'status', '--porcelain').stdout == ''
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # refused naming the live path; the file, HEAD, and index are untouched
     assert result.returncode != 0, (result.stdout, result.stderr)
@@ -3444,7 +3043,14 @@ def test_merge_refuses_over_an_ignored_copy_of_the_nodes_own_seed(
         _git(repo, 'add', 'app')
         _git(repo, 'commit', '-m', 'add app wiki')
     init = _run(
-        repo, 'node', 'init', 'feature', *project, '--agent', 'claude', '--local'
+        repo,
+        'node',
+        'init',
+        'feature',
+        *project,
+        '--agent',
+        'claude',
+        '--local',
     )
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.feature'
@@ -3463,14 +3069,7 @@ def test_merge_refuses_over_an_ignored_copy_of_the_nodes_own_seed(
     _git(worktree, 'add', work)
     _git(worktree, 'commit', '-m', 'feature work')
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # refused naming the copy; the copy, HEAD, and index are untouched and no
     # squash state was left behind
@@ -3510,7 +3109,14 @@ def test_merge_lands_a_meta_nodes_edit_to_the_targets_seed(
     _git(parent, 'add', '-A')
     _git(parent, 'commit', '-m', 'settle parent estate')
     meta = _run(
-        repo, 'node', 'init', 'fix', '--meta', 'main.parent', '--agent', 'claude'
+        repo,
+        'node',
+        'init',
+        'fix',
+        '--meta',
+        'main.parent',
+        '--agent',
+        'claude',
     )
     assert meta.returncode == 0, meta.stderr
     fix = repo / '.worktrees' / 'main.fix'
@@ -3525,14 +3131,7 @@ def test_merge_lands_a_meta_nodes_edit_to_the_targets_seed(
     profile.write_text('# q\n', encoding='utf-8')
     _git(fix, 'add', '-A')
     _git(fix, 'commit', '-m', 'tune the target contract')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{fix}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{fix}')
 
     # the edit is on the target and the meta node's own seed is not; nothing
     # was restored, and only the profile outside the scope root was removed
@@ -3541,9 +3140,8 @@ def test_merge_lands_a_meta_nodes_edit_to_the_targets_seed(
     assert 'added paths under .fractal/ that the merge removed' in result.stderr
     assert '.fractal/profiles/q/NODE.md' in result.stderr, result.stderr
     assert 'leaked by an earlier merge' not in result.stderr, result.stderr
-    landed = (parent / '.fractal' / 'main.parent' / 'NODE.md').read_text(
-        encoding='utf-8'
-    )
+    parent_contract = parent / '.fractal' / 'main.parent' / 'NODE.md'
+    landed = parent_contract.read_text(encoding='utf-8')
     assert landed.endswith('Tuned by the meta node.\n')
     assert not (parent / '.fractal' / 'main.fix').exists()
     assert _git(parent, 'ls-files', '.fractal/profiles').stdout == ''
@@ -3552,22 +3150,14 @@ def test_merge_lands_a_meta_nodes_edit_to_the_targets_seed(
     # a later edit on both sides of the scope root is the operator's conflict
     # -- work, not machinery the merge resolves to the target's content -- so
     # the merge refuses and restores the target
-    (parent / '.fractal' / 'main.parent' / 'NODE.md').write_text(
-        landed + 'Tuned by the parent.\n', encoding='utf-8'
-    )
+    parent_contract.write_text(landed + 'Tuned by the parent.\n', encoding='utf-8')
     _git(parent, 'add', '.fractal/main.parent/NODE.md')
     _git(parent, 'commit', '-m', 'parent tunes its contract')
     contract.write_text(landed + 'Tuned again by the meta node.\n', encoding='utf-8')
     _git(fix, 'add', '-A')
     _git(fix, 'commit', '-m', 'tune the target contract again')
     parent_head = _git(parent, 'rev-parse', 'HEAD').stdout.strip()
-    conflicted = subprocess.run(
-        ['bash', f'{merge_sh}', f'{fix}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    conflicted = _script('merge.sh', repo, f'{fix}')
     assert conflicted.returncode != 0, (conflicted.stdout, conflicted.stderr)
     assert 'produced conflicts' in conflicted.stderr, conflicted.stderr
     assert _git(parent, 'rev-parse', 'HEAD').stdout.strip() == parent_head
@@ -3611,14 +3201,7 @@ def test_merge_lands_a_fractal_scoped_nodes_profile_edit(
     node_copy.write_text('v2\n', encoding='utf-8')
     commit = _run(worktree, 'commit', 'set the profile to v2')
     assert commit.returncode == 0, commit.stderr
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the edit is on the target with nothing restored, and the node's worktree
     # keeps it after the advance
@@ -3672,14 +3255,7 @@ def test_merge_lands_a_multi_root_scope_with_a_profile_root(
     (worktree / 'docs' / 'a.md').write_text('# a\n', encoding='utf-8')
     commit = _run(worktree, 'commit', 'edit the profile and the docs')
     assert commit.returncode == 0, commit.stderr
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # both roots landed with nothing restored, removed, or refused
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -3730,6 +3306,7 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
+    node_copy_path = worktree / '.fractal' / seed / 'memory' / 'x.md'
     # the target purges its copy or edits it, while the node edits its own
     if target_edit is None:
         _git(repo, 'rm', '-r', '--quiet', f'.fractal/{seed}')
@@ -3737,21 +3314,11 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     else:
         copy.write_text(target_edit, encoding='utf-8')
         _git(repo, 'commit', '-a', '-m', 'target edits the seed copy')
-    (worktree / '.fractal' / seed / 'memory' / 'x.md').write_text(
-        'child v2\n',
-        encoding='utf-8',
-    )
+    node_copy_path.write_text('child v2\n', encoding='utf-8')
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed clean with the work on the target
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -3770,9 +3337,7 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     else:
         assert copy.read_text(encoding='utf-8') == target_edit
         assert f'.fractal/{seed}/memory/x.md' in tracked
-    live = (worktree / '.fractal' / seed / 'memory' / 'x.md').read_text(
-        encoding='utf-8'
-    )
+    live = node_copy_path.read_text(encoding='utf-8')
     assert live == node_copy
 
 
@@ -3811,14 +3376,7 @@ def test_merge_removes_an_own_seed_leaked_after_the_fork(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child edits its contract and works')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the leak was named as the node's own, the add/add conflict resolved to
     # the root's content, and the merge landed the work with the copy gone
@@ -3879,14 +3437,7 @@ def test_merge_refuses_a_mixed_conflict(tmp_path: pathlib.Path) -> None:
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child edits its seed and tracked')
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # refused as a whole: nothing resolved, the target restored
     assert result.returncode != 0, (result.stdout, result.stderr)
@@ -3908,13 +3459,7 @@ def test_merge_refuses_a_mixed_conflict(tmp_path: pathlib.Path) -> None:
     _git(repo, 'rm', '-f', '--quiet', '.fractal/main.task/memory/x.md')
     (repo / 'tracked.txt').write_text('resolved line\n', encoding='utf-8')
     _git(repo, 'add', 'tracked.txt')
-    landed = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    landed = _script('merge.sh', repo, f'{worktree}', '--continue')
     assert landed.returncode == 0, (landed.stdout, landed.stderr)
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
     assert (repo / 'tracked.txt').read_text(encoding='utf-8') == 'resolved line\n'
@@ -3924,13 +3469,18 @@ def test_merge_refuses_a_mixed_conflict(tmp_path: pathlib.Path) -> None:
 
 
 @pytest.mark.parametrize(
-    argnames='target',
-    argvalues=['main', 'main.parent'],
-    ids=['user-target', 'node-target'],
+    argnames=('target', 'repo_dir'),
+    argvalues=[
+        ('main', 'leakedrepo'),
+        ('main.parent', 'leakedrepo'),
+        ('main', 'with space/repo'),
+    ],
+    ids=['user-target', 'node-target', 'user-target-space-path'],
 )
 def test_merge_warns_about_leaked_seed_dirs_on_the_target(
     tmp_path: pathlib.Path,
     target: str,
+    repo_dir: str,
 ) -> None:
     """A foreign node's seed the user node tracks draws a warning with a runnable remedy.
 
@@ -3942,12 +3492,15 @@ def test_merge_warns_about_leaked_seed_dirs_on_the_target(
     and commit remedy (not ``--cached``: a copy left on disk would collide
     with the node's next squash) and still lands, leaving them for the
     operator. The printed line runs as it is, and once it has the node's next
-    merge lands without a collision refusal. A node target is never judged:
-    its branch legitimately carries other nodes' seeds -- its ancestors' by
-    fork, its descendants' by PREPARE merges, a sibling's by the advance --
-    so the same foreign seed there draws no warning at all.
+    merge lands without a collision refusal. A remedy is copy-paste material,
+    and an unquoted path with a space splits into two words in the shell it
+    is pasted into, so the line carries a ``printf %q`` quoted path and runs
+    as printed through ``bash -c``. A node target is never judged: its branch
+    legitimately carries other nodes' seeds -- its ancestors' by fork, its
+    descendants' by PREPARE merges, a sibling's by the advance -- so the same
+    foreign seed there draws no warning at all.
     """
-    repo = _init_tree(tmp_path / 'leakedrepo')
+    repo = _init_tree(tmp_path / repo_dir)
     if target == 'main':
         target_dir = repo
     else:
@@ -3967,14 +3520,7 @@ def test_merge_warns_about_leaked_seed_dirs_on_the_target(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed; the leak is the operator's to remove, so it stays tracked
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -3998,6 +3544,9 @@ def test_merge_warns_about_leaked_seed_dirs_on_the_target(
     assert '--cached' not in remedy, remedy
     assert '&& git -C' in remedy, remedy
     assert "commit -m 'drop leaked node seeds'" in remedy, remedy
+    if ' ' in repo_dir:
+        # the remedy escapes the space so it pastes back as one word
+        assert 'with\\ space/repo' in remedy, remedy
     # the remedy runs as printed and drops the leak from the index and disk
     removed = subprocess.run(
         ['bash', '-c', remedy.removeprefix('Remove them with: ')],
@@ -4014,13 +3563,7 @@ def test_merge_warns_about_leaked_seed_dirs_on_the_target(
     (worktree / 'g.txt').write_text('more child work\n', encoding='utf-8')
     _git(worktree, 'add', 'g.txt')
     _git(worktree, 'commit', '-m', 'more child work')
-    again = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    again = _script('merge.sh', repo, f'{worktree}')
     assert again.returncode == 0, (again.stdout, again.stderr)
     assert 'would overwrite untracked files' not in again.stderr, again.stderr
     assert 'leaked by an earlier merge' not in again.stderr, again.stderr
@@ -4053,7 +3596,15 @@ def test_merge_leaves_a_same_named_seed_under_another_prefix_for_the_remedy(
     # the node first lives under the sub-project; a hand merge leaks its seed
     # onto the root, and the node is deleted
     init = _run(
-        repo, 'node', 'init', 'task', '--path', 'sub', '--agent', 'claude', '--local'
+        repo,
+        'node',
+        'init',
+        'task',
+        '--path',
+        'sub',
+        '--agent',
+        'claude',
+        '--local',
     )
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
@@ -4075,14 +3626,7 @@ def test_merge_leaves_a_same_named_seed_under_another_prefix_for_the_remedy(
     _git(worktree, 'commit', '-m', 'child work')
     live = worktree / '.fractal' / 'main.task' / 'NODE.md'
     live_before = live.read_bytes()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed; the copy under the old prefix is named for the hand
     # remedy, never claimed as removed, and stays tracked on the root
@@ -4145,14 +3689,7 @@ def test_merge_warns_about_its_own_seed_leaked_onto_another_trees_root(
     _git(repo, 'commit', '-m', 'leaked seed copy')
     tracked = _git(repo, 'ls-files', '.fractal').stdout
     assert '.fractal/main.task/NODE.md' in tracked, tracked
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the leak was named as this merge's own removal, and it is gone
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -4203,14 +3740,7 @@ def test_merge_collision_guard_skips_a_seed_the_target_dropped_since_the_fork(
     _git(repo, 'rm', '-r', '--cached', '--quiet', '.fractal/main.other')
     _git(repo, 'commit', '-m', 'drop the leaked seed from the index')
     assert leaked.is_file()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed with no refusal and no warning; the copy is untouched
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -4248,14 +3778,7 @@ def test_merge_collision_guard_skips_a_prefix_the_target_tracks(
     (worktree / 'out' / 'x').write_text('x\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'out: file to directory')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed the type change: no refusal, the directory in place
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -4290,7 +3813,14 @@ def test_merge_into_a_node_target_never_judges_its_ancestors_seed(
     # caller's seed dir), so the chain forks seed by seed
     node_dir = parent / '.fractal' / 'main.p'
     spawn = _run(
-        repo, 'node', 'init', 'c', '--agent', 'claude', '--local', _NODE=str(node_dir)
+        repo,
+        'node',
+        'init',
+        'c',
+        '--agent',
+        'claude',
+        '--local',
+        _NODE=str(node_dir),
     )
     assert spawn.returncode == 0, spawn.stderr
     child = repo / '.worktrees' / 'main.p.c'
@@ -4298,21 +3828,21 @@ def test_merge_into_a_node_target_never_judges_its_ancestors_seed(
     _git(child, 'commit', '-m', 'settle c estate')
     node_dir = child / '.fractal' / 'main.p.c'
     spawn = _run(
-        repo, 'node', 'init', 'd', '--agent', 'claude', '--local', _NODE=str(node_dir)
+        repo,
+        'node',
+        'init',
+        'd',
+        '--agent',
+        'claude',
+        '--local',
+        _NODE=str(node_dir),
     )
     assert spawn.returncode == 0, spawn.stderr
     grandchild = repo / '.worktrees' / 'main.p.c.d'
     (grandchild / 'd.txt').write_text('grandchild work\n', encoding='utf-8')
     _git(grandchild, 'add', '-A')
     _git(grandchild, 'commit', '-m', 'grandchild work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{grandchild}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{grandchild}')
 
     # no leak warning; the work landed and the ancestor seed is still tracked
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -4348,7 +3878,14 @@ def test_merge_into_a_node_target_keeps_its_tracked_descendant_seed(
     _git(parent, 'commit', '-m', 'settle parent estate')
     node_dir = parent / '.fractal' / 'main.parent'
     spawn = _run(
-        repo, 'node', 'init', 'c', '--agent', 'claude', '--local', _NODE=str(node_dir)
+        repo,
+        'node',
+        'init',
+        'c',
+        '--agent',
+        'claude',
+        '--local',
+        _NODE=str(node_dir),
     )
     assert spawn.returncode == 0, spawn.stderr
     child = repo / '.worktrees' / 'main.parent.c'
@@ -4363,14 +3900,7 @@ def test_merge_into_a_node_target_keeps_its_tracked_descendant_seed(
     _git(child, 'add', 'f.txt')
     _git(child, 'commit', '-m', 'child work')
     (child / 'wip.txt').write_text('mid-iteration\n', encoding='utf-8')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{child}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{child}')
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'skipped advancing' in result.stderr, result.stderr
 
@@ -4411,7 +3941,14 @@ def test_merge_into_a_node_target_resolves_a_conflict_on_its_own_seed(
     _git(parent, 'commit', '-m', 'settle p estate')
     node_dir = parent / '.fractal' / 'main.p'
     spawn = _run(
-        repo, 'node', 'init', 'c', '--agent', 'claude', '--local', _NODE=str(node_dir)
+        repo,
+        'node',
+        'init',
+        'c',
+        '--agent',
+        'claude',
+        '--local',
+        _NODE=str(node_dir),
     )
     assert spawn.returncode == 0, spawn.stderr
     child = repo / '.worktrees' / 'main.p.c'
@@ -4423,20 +3960,12 @@ def test_merge_into_a_node_target_resolves_a_conflict_on_its_own_seed(
     forked = contract.read_text(encoding='utf-8')
     contract.write_text(forked + '\nParent line.\n', encoding='utf-8')
     _git(parent, 'commit', '-a', '-m', 'p edits its contract')
-    (child / '.fractal' / 'main.p' / 'NODE.md').write_text(
-        forked + '\nChild line.\n', encoding='utf-8'
-    )
+    child_contract_path = child / '.fractal' / 'main.p' / 'NODE.md'
+    child_contract_path.write_text(forked + '\nChild line.\n', encoding='utf-8')
     (child / 'c.txt').write_text('child work\n', encoding='utf-8')
     _git(child, 'add', '-A')
     _git(child, 'commit', '-m', 'c edits the contract and works')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{child}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{child}')
 
     # the conflict resolved to the parent's content and the work landed, the
     # parent's seed tracked and untouched by the commit
@@ -4458,59 +3987,9 @@ def test_merge_into_a_node_target_resolves_a_conflict_on_its_own_seed(
     assert 'skipped advancing' not in result.stderr, result.stderr
     subject = _git(child, 'log', '-1', '--format=%s').stdout.strip()
     assert subject == 'merge main.p (post-squash)', (subject, result.stderr)
-    child_contract = (child / '.fractal' / 'main.p' / 'NODE.md').read_text(
-        encoding='utf-8'
-    )
+    child_contract = child_contract_path.read_text(encoding='utf-8')
     assert child_contract == parent_contract
     assert _git(child, 'status', '--porcelain').stdout == ''
-
-
-def test_merge_remedies_quote_a_path_with_a_space(tmp_path: pathlib.Path) -> None:
-    """The leaked-seed remedy the merge prints quotes its path for the paste back.
-
-    A remedy is copy-paste material, and an unquoted path with a space splits
-    into two words in the shell it is pasted into. The leaked-seed line
-    carries a ``printf %q`` quoted path, so it runs as printed through
-    ``bash -c`` and removes the leak.
-    """
-    repo = _init_tree(tmp_path / 'with space' / 'repo')
-    leaked = repo / '.fractal' / 'main.other' / 'NODE.md'
-    leaked.parent.mkdir(parents=True)
-    leaked.write_text('# leaked contract\n', encoding='utf-8')
-    _git(repo, 'add', '-A')
-    _git(repo, 'commit', '-m', 'leaked seed copy')
-    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
-    assert init.returncode == 0, init.stderr
-    worktree = repo / '.worktrees' / 'main.task'
-    (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
-    _git(worktree, 'add', '-A')
-    _git(worktree, 'commit', '-m', 'child work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
-    assert result.returncode == 0, (result.stdout, result.stderr)
-
-    # the leaked-seed remedy escapes the space and runs as printed
-    remedy = next(
-        line
-        for line in result.stderr.splitlines()
-        if line.startswith('Remove them with: ')
-    )
-    assert 'with\\ space/repo' in remedy, remedy
-    removed = subprocess.run(
-        ['bash', '-c', remedy.removeprefix('Remove them with: ')],
-        cwd=f'{tmp_path}',
-        capture_output=True,
-        text=True,
-    )
-    assert removed.returncode == 0, (removed.stdout, removed.stderr)
-    assert _git(repo, 'ls-files', '.fractal').stdout == ''
-    assert not (repo / '.fractal' / 'main.other').exists()
 
 
 def test_merge_warnings_print_a_non_ascii_path_readably(
@@ -4539,14 +4018,7 @@ def test_merge_warnings_print_a_non_ascii_path_readably(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child writes a foreign seed')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the removed warning names the path readably
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -4627,22 +4099,14 @@ def test_merge_refuses_a_squash_outside_the_nodes_scope(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work in and out of scope')
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', *flags],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}', *flags)
 
     if lands:
         # the in-scope work and init's .gitattributes edit are tracked, and
         # the stray path landed as offered
         assert result.returncode == 0, (result.stdout, result.stderr)
-        assert (
-            _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
-        )
+        subject = _git(repo, 'log', '-1', '--format=%s').stdout.strip()
+        assert subject == 'merge main.task'
         tracked = _git(repo, 'ls-files', '.gitattributes', 'docs/a.md').stdout.split()
         assert tracked == ['.gitattributes', 'docs/a.md']
         if stray is not None:
@@ -4695,7 +4159,15 @@ def test_merge_admits_init_attributes_over_a_targets_own_lines(
     _git(repo, 'add', '.gitattributes')
     _git(repo, 'commit', '-m', 'own attributes')
     init = _run(
-        repo, 'node', 'init', 'task', '--scope', 'docs', '--agent', 'claude', '--local'
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'docs',
+        '--agent',
+        'claude',
+        '--local',
     )
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
@@ -4705,14 +4177,7 @@ def test_merge_admits_init_attributes_over_a_targets_own_lines(
     # the seed and the in-scope work
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work with init scaffolding')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the scoped landing succeeded, and the target's .gitattributes is its
     # original followed by init's two lines, once
@@ -4744,7 +4209,15 @@ def test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_ref
     """
     repo = _init_tree(tmp_path / 'crossprojectrepo')
     init = _run(
-        repo, 'node', 'init', 'a', '--scope', 'src', '--agent', 'claude', '--local'
+        repo,
+        'node',
+        'init',
+        'a',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
     )
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.a'
@@ -4761,17 +4234,10 @@ def test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_ref
     (worktree / 'src' / 'x.py').write_text('x = 1\n', encoding='utf-8')
     _git(worktree, 'add', 'src')
     _git(worktree, 'commit', '-m', 'child work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
-    # the merge landed the work and removed the leak, with the warning and no
-    # scope refusal
+    # the merge landed the work and removed the leak, with the warning
+    # and no scope refusal
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'tracks seeds of main.a or its descendants' in result.stderr, result.stderr
     assert 'app/.fractal/main.a.b; this merge removes them' in result.stderr, (
@@ -4795,7 +4261,15 @@ def test_merge_continue_refuses_a_squash_outside_the_nodes_scope(
     """
     repo = _init_tree(tmp_path / 'scopecontinuerepo')
     init = _run(
-        repo, 'node', 'init', 'task', '--scope', 'docs', '--agent', 'claude', '--local'
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'docs',
+        '--agent',
+        'claude',
+        '--local',
     )
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
@@ -4807,23 +4281,16 @@ def test_merge_continue_refuses_a_squash_outside_the_nodes_scope(
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
     # the operator squashes by hand and hands the tail to the continue
     _git(repo, 'merge', '--squash', 'main.task')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    refused = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    refused = _script('merge.sh', repo, f'{worktree}', '--continue')
 
     # refused with the path named, the staged squash left in place
     assert refused.returncode != 0, (refused.stdout, refused.stderr)
     assert 'outside its scope' in refused.stderr, refused.stderr
     assert 'outside.txt' in refused.stderr, refused.stderr
     assert 'staged squash is left in place' in refused.stderr, refused.stderr
-    # both remedies name the continue arm: land as it is, or widen the
-    # scope and redo the squash (a node commit after the hand squash
-    # refuses --continue)
+    # both remedies name the continue arm: land as it is, or widen
+    # the scope and redo the squash (a node commit after the hand
+    # squash refuses --continue)
     assert '--continue --ignore-scope' in refused.stderr, refused.stderr
     assert 'redo the squash' in refused.stderr, refused.stderr
     assert 'merge --squash main.task' in refused.stderr, refused.stderr
@@ -4837,13 +4304,7 @@ def test_merge_continue_refuses_a_squash_outside_the_nodes_scope(
     assert staged.returncode != 0, 'the staged squash was discarded'
 
     # the override lands the same staged squash
-    landed = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}', '--continue', '--ignore-scope'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    landed = _script('merge.sh', repo, f'{worktree}', '--continue', '--ignore-scope')
     assert landed.returncode == 0, (landed.stdout, landed.stderr)
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
     assert (repo / 'docs' / 'a.md').is_file()
@@ -4911,14 +4372,7 @@ def test_merge_bounds_a_sub_project_node_to_its_project(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'work in and out of the project')
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    refused = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    refused = _script('merge.sh', repo, f'{worktree}')
 
     # refused naming exactly the paths outside the boundaries -- not the
     # in-scope ones, nor init's .gitattributes edit; the target restored
@@ -4935,13 +4389,7 @@ def test_merge_bounds_a_sub_project_node_to_its_project(
     _git(worktree, 'rm', '--quiet', *strays)
     _git(worktree, 'commit', '-m', 'drop the stray files')
     seed_tree = _git(worktree, 'rev-parse', 'HEAD:app/.fractal/main.feature').stdout
-    landed = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    landed = _script('merge.sh', repo, f'{worktree}')
     assert landed.returncode == 0, (landed.stdout, landed.stderr)
     tracked = _git(repo, 'ls-files', '.gitattributes', *inside).stdout.split()
     assert tracked == ['.gitattributes', *inside]
@@ -5010,14 +4458,7 @@ def test_merge_strips_a_nested_descendant_seed_from_a_no_ff_parent(
         path: _git(parent, 'rev-parse', f'HEAD:{path}').stdout.strip()
         for path in ('.fractal/main.a', 'app/.fractal/main.a.b')
     }
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{parent}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{parent}')
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'skipped advancing' not in result.stderr, result.stderr
 
@@ -5057,20 +4498,12 @@ def test_merge_reports_the_target_restored_past_a_ref_lock(
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
     # another git process holds the target's ref for the whole merge, so the
     # squash stages but its commit cannot move the branch
-    lock_path = pathlib.Path(
-        _git(repo, 'rev-parse', '--git-path', 'refs/heads/main.lock').stdout.strip()
-    )
+    resolved = _git(repo, 'rev-parse', '--git-path', 'refs/heads/main.lock')
+    lock_path = pathlib.Path(resolved.stdout.strip())
     if not lock_path.is_absolute():
         lock_path = repo / lock_path
     lock_path.touch()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
     lock_path.unlink()
 
     # the merge failed at the commit and reports the target restored -- which
@@ -5112,14 +4545,7 @@ def test_merge_resets_a_squash_git_aborted_after_staging(
     # a stale squash marker git cannot write: a directory in its place
     marker = repo / '.git' / 'SQUASH_MSG'
     marker.mkdir()
-    merge_sh = _scripts_dir() / 'merge.sh'
-    result = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge failed once the squash was staged and reports the target
     # restored -- which it is: HEAD unmoved, nothing staged or on disk, the
@@ -5135,13 +4561,7 @@ def test_merge_resets_a_squash_git_aborted_after_staging(
     assert not (repo / 'f.txt').exists()
 
     # the next merge lands
-    again = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    again = _script('merge.sh', repo, f'{worktree}')
     assert again.returncode == 0, (again.stdout, again.stderr)
     assert 'Squash-merged' in again.stdout
     assert (repo / 'f.txt').read_text(encoding='utf-8') == 'child work\n'
@@ -5312,10 +4732,12 @@ def test_merge_interrupt_after_a_skipped_advance_warns_once(
     # the landed squash is reported, the skip's one warning names the path in
     # the way, and the private copy and the child's HEAD are untouched
     calls = (bindir / 'calls').read_text(encoding='utf-8').splitlines()
-    assert sum('event _end' in call for call in calls) == 2, calls
+    end_calls = sum('event _end' in call for call in calls)
+    assert end_calls == 2, calls
     assert proc.returncode == 0, (stdout, stderr)
     assert 'Squash-merged main.task into main' in stdout, (stdout, stderr)
-    assert stderr.count('skipped advancing') == 1, stderr
+    skips = stderr.count('skipped advancing')
+    assert skips == 1, stderr
     assert 'now tracks: local.env;' in stderr, stderr
     assert 'interrupted' not in stderr, stderr
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
@@ -5351,13 +4773,7 @@ def test_merge_interrupt_in_a_no_op_merges_event_close_reports_the_no_op(
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'settle node scaffolding')
     merge_sh = _scripts_dir() / 'merge.sh'
-    first = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    first = _script('merge.sh', repo, f'{worktree}')
     assert first.returncode == 0, (first.stdout, first.stderr)
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
     child_head = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
@@ -5392,7 +4808,8 @@ def test_merge_interrupt_in_a_no_op_merges_event_close_reports_the_no_op(
     # the no-op is reported as the single stdout line, with no advance
     # warning; neither side moved, and both merge events closed completed
     calls = (bindir / 'calls').read_text(encoding='utf-8').splitlines()
-    assert sum('event _end' in call for call in calls) == 2, calls
+    end_calls = sum('event _end' in call for call in calls)
+    assert end_calls == 2, calls
     assert proc.returncode == 0, (stdout, stderr)
     assert stdout == 'Nothing to merge: main.task has no changes for main\n', stderr
     assert 'skipped advancing' not in stderr, stderr
@@ -5555,7 +4972,8 @@ def test_merge_serializes_concurrent_sibling_merges(tmp_path: pathlib.Path) -> N
         # unlocked second merge to boot the CLI, run its preflight, and reach
         # its own squash
         time.sleep(5)
-        assert procs[1].poll() is None, procs[1].communicate()
+        second_exit = procs[1].poll()
+        assert second_exit is None, (second_exit, procs[1].communicate(timeout=30))
         assert not ready_b.exists(), 'the second squash ran while the first was parked'
         release_a.touch()
         outputs = [proc.communicate(timeout=180) for proc in procs]
@@ -5674,9 +5092,9 @@ def test_merge_interrupt_after_the_squash_finishes_the_merge(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
-    # the shim marks the advance's reset and parks it at a gate, then execs
-    # the real git it fronts (only a reset --hard onto a full sha is the
-    # advance's)
+    # the shim marks the advance's reset and parks it at a gate, then
+    # execs the real git it fronts (only a reset --hard onto a full sha
+    # is the advance's)
     ready = tmp_path / 'gate_ready'
     release = tmp_path / 'gate_release'
     bindir = _git_shim(
@@ -5771,14 +5189,7 @@ def test_merge_footprint_refusal_quotes_a_path_with_a_space(
     _git(scoped, 'add', '-A')
     _git(scoped, 'commit', '-m', 'work in and out of scope')
     if direct:
-        merge_sh = _scripts_dir() / 'merge.sh'
-        result = subprocess.run(
-            ['bash', f'{merge_sh}', f'{scoped}'],
-            cwd=f'{repo}',
-            capture_output=True,
-            text=True,
-            env=_cli_env(),
-        )
+        result = _script('merge.sh', repo, f'{scoped}')
     else:
         result = _run(repo, 'node', 'merge', f'--path={scoped}')
 
@@ -5834,14 +5245,7 @@ def test_merge_into_a_root_checked_out_in_a_linked_worktree(
     linked = tmp_path / 'main-wt'
     _git(repo, 'worktree', 'add', f'{linked}', 'main')
     if direct:
-        merge_sh = _scripts_dir() / 'merge.sh'
-        result = subprocess.run(
-            ['bash', f'{merge_sh}', f'{worktree}'],
-            cwd=f'{repo}',
-            capture_output=True,
-            text=True,
-            env=_cli_env(),
-        )
+        result = _script('merge.sh', repo, f'{worktree}')
         # the failed probe is said, and the target is merged as a node: the
         # squash lands and the leaked copy stays tracked
         assert result.returncode == 0, (result.stdout, result.stderr)
@@ -5928,14 +5332,7 @@ def test_delete_warns_on_unmerged_commits(tmp_path: pathlib.Path) -> None:
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child feature work')
 
-    delete_sh = _scripts_dir() / 'delete.sh'
-    result = subprocess.run(
-        ['bash', f'{delete_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('delete.sh', repo, f'{worktree}')
 
     # the delete proceeds (destructive by design) but warns about the unmerged work
     assert result.returncode == 0, result.stderr
@@ -5943,13 +5340,28 @@ def test_delete_warns_on_unmerged_commits(tmp_path: pathlib.Path) -> None:
     assert not worktree.exists()
 
 
-def test_delete_does_not_warn_after_squash_merge(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    argnames='target_advances',
+    argvalues=[False, True],
+    ids=['target-still', 'target-advances'],
+)
+def test_delete_does_not_warn_after_squash_merge(
+    tmp_path: pathlib.Path,
+    target_advances: bool,
+) -> None:
     """A squash-merged node deletes without a false unmerged-work warning.
 
     ``merge.sh`` squashes (no ancestry) and strips the node's ``.fractal/`` seed,
     so a commit-count check flags a just-merged branch as unmerged. The warning
     must instead see that the branch's work already lives in the target and stay
-    silent on the normal merge-then-delete path.
+    silent on the normal merge-then-delete path -- even after the target moves
+    on: a sibling/parent keeps iterating, so the target advances in *other*
+    paths, and a symmetric ``diff TARGET BRANCH`` then false-fires -- it sees
+    the target's later, unrelated commits as work the branch lacks -- and cries
+    wolf on the normal multi-child workflow. Scoping the check to the paths the
+    branch itself changed keeps the warning silent: the target already matches
+    the branch on ``feature.txt``, and its advance in a different path is not
+    the branch's unmerged work.
     """
     repo = _init_tree(tmp_path / 'squashrepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -5959,77 +5371,18 @@ def test_delete_does_not_warn_after_squash_merge(tmp_path: pathlib.Path) -> None
     (worktree / 'feature.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child feature work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    merge = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    merge = _script('merge.sh', repo, f'{worktree}')
     assert merge.returncode == 0, merge.stderr
+    if target_advances:
+        # the target moves on in an unrelated path (a later iteration / sibling merge)
+        (repo / 'other.txt').write_text('later target work\n', encoding='utf-8')
+        _git(repo, 'add', '-A')
+        _git(repo, 'commit', '-m', 'target advances elsewhere')
 
-    delete_sh = _scripts_dir() / 'delete.sh'
-    result = subprocess.run(
-        ['bash', f'{delete_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('delete.sh', repo, f'{worktree}')
 
-    # the work is preserved in main (squashed), so no false unmerged warning
-    assert result.returncode == 0, result.stderr
-    assert 'not merged' not in result.stderr, (result.stdout, result.stderr)
-    assert not worktree.exists()
-
-
-def test_delete_does_not_warn_after_squash_merge_then_target_advances(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A squash-merged node deletes silently even after the target moves on.
-
-    After a child squash-merges (no ancestry), a sibling/parent keeps iterating,
-    so the target advances in *other* paths. A symmetric ``diff TARGET BRANCH``
-    then false-fires -- it sees the target's later, unrelated commits as work the
-    branch lacks -- and cries wolf on the normal multi-child workflow. Scoping the
-    check to the paths the branch itself changed keeps the warning silent: the
-    target already matches the branch on ``feature.txt``, and its advance in a
-    different path is not the branch's unmerged work.
-    """
-    repo = _init_tree(tmp_path / 'advancerepo')
-    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
-    assert init.returncode == 0, init.stderr
-    worktree = repo / '.worktrees' / 'main.task'
-    # real work on the child, then squash it into main via merge.sh (strips .fractal)
-    (worktree / 'feature.txt').write_text('child work\n', encoding='utf-8')
-    _git(worktree, 'add', '-A')
-    _git(worktree, 'commit', '-m', 'child feature work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    merge = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
-    assert merge.returncode == 0, merge.stderr
-    # the target moves on in an unrelated path (a later iteration / sibling merge)
-    (repo / 'other.txt').write_text('later target work\n', encoding='utf-8')
-    _git(repo, 'add', '-A')
-    _git(repo, 'commit', '-m', 'target advances elsewhere')
-
-    delete_sh = _scripts_dir() / 'delete.sh'
-    result = subprocess.run(
-        ['bash', f'{delete_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
-
-    # the child's work is in main on its own paths, so the target's later advance
-    # in another path must not resurrect a false unmerged warning
+    # the work is preserved in main (squashed) on its own paths, so neither the
+    # merge nor the target's later advance in another path draws a false warning
     assert result.returncode == 0, result.stderr
     assert 'not merged' not in result.stderr, (result.stdout, result.stderr)
     assert not worktree.exists()
@@ -6059,28 +5412,14 @@ def test_delete_warns_on_unmerged_non_ascii_work(tmp_path: pathlib.Path) -> None
     (worktree / 'café.md').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child feature work')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    merge = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    merge = _script('merge.sh', repo, f'{worktree}')
     assert merge.returncode == 0, merge.stderr
     # the child keeps iterating on the page; the parent never absorbs it
     (worktree / 'café.md').write_text('child work\nmore child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child iterates on the page')
 
-    delete_sh = _scripts_dir() / 'delete.sh'
-    result = subprocess.run(
-        ['bash', f'{delete_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('delete.sh', repo, f'{worktree}')
 
     # the unmerged iteration is real work -- the quoting of its file name
     # must not swallow the warning
@@ -6108,22 +5447,11 @@ def test_delete_warns_on_unmerged_wiki_page_work(tmp_path: pathlib.Path) -> None
         encoding='utf-8',
     )
     wiki_dir = worktree / 'wiki'
-    subprocess.run(
-        ['wiki', 'update', f'--path={wiki_dir}'],
-        capture_output=True,
-        check=True,
-    )
+    _wiki_update(wiki_dir)
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child wiki page')
 
-    delete_sh = _scripts_dir() / 'delete.sh'
-    result = subprocess.run(
-        ['bash', f'{delete_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('delete.sh', repo, f'{worktree}')
 
     # the page is unmerged work -- the generated-state excludes must not
     # swallow the warning
@@ -6155,24 +5483,13 @@ def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
         encoding='utf-8',
     )
     wiki_dir = worktree / 'wiki'
-    subprocess.run(
-        ['wiki', 'update', f'--path={wiki_dir}'],
-        capture_output=True,
-        check=True,
-    )
+    _wiki_update(wiki_dir)
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child wiki page')
     # a dirty worktree makes the merge skip the merge-base advance (the
     # mid-iteration path), so the delete still diffs from the fork point
     (worktree / 'scratch.tmp').write_text('wip\n', encoding='utf-8')
-    merge_sh = _scripts_dir() / 'merge.sh'
-    merge = subprocess.run(
-        ['bash', f'{merge_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    merge = _script('merge.sh', repo, f'{worktree}')
     assert merge.returncode == 0, merge.stderr
     # the target's wiki moves on (a sibling page lands and refreshes the
     # index), so its regenerated `_index.md`/`.wiki` bytes now differ from
@@ -6182,22 +5499,11 @@ def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
         encoding='utf-8',
     )
     wiki_dir = repo / 'wiki'
-    subprocess.run(
-        ['wiki', 'update', f'--path={wiki_dir}'],
-        capture_output=True,
-        check=True,
-    )
+    _wiki_update(wiki_dir)
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-m', 'sibling wiki page')
 
-    delete_sh = _scripts_dir() / 'delete.sh'
-    result = subprocess.run(
-        ['bash', f'{delete_sh}', f'{worktree}'],
-        cwd=f'{repo}',
-        capture_output=True,
-        text=True,
-        env=_cli_env(),
-    )
+    result = _script('delete.sh', repo, f'{worktree}')
 
     # the branch's page is in main; its index/.wiki bytes differ only because
     # the tool regenerated them on the target -- no false unmerged warning
@@ -6212,6 +5518,36 @@ def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
 def _scripts_dir() -> pathlib.Path:
     """Bundled ``_scripts/`` directory (resolved lazily, not at import)."""
     return pathlib.Path(fractal.__file__).resolve().parent / '_scripts'
+
+
+def _script(
+    name: str,
+    repo: pathlib.Path,
+    *args: str,
+    env: Optional[dict[str, str]] = None,
+) -> subprocess.CompletedProcess:
+    """Run ``_scripts/<name>`` from ``repo`` with the CLI env, capturing output."""
+    if env is None:
+        env = _cli_env()
+    script = _scripts_dir() / name
+    return subprocess.run(
+        ['bash', f'{script}', *args],
+        cwd=f'{repo}',
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _wiki_update(wiki_dir: pathlib.Path) -> None:
+    """Refresh the wiki at ``wiki_dir`` with the CLI env, raising on failure."""
+    subprocess.run(
+        ['wiki', 'update', f'--path={wiki_dir}'],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_cli_env(),
+    )
 
 
 def _init_tree(root: pathlib.Path) -> pathlib.Path:

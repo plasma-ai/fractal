@@ -74,7 +74,7 @@ _SPEND_PRECISION = 2
 
 # recorded reason heads of a launch that could not exec: a spawn that never
 # started, and a wrapper that ran and exited 127 (the 'command not found'
-# convention). Both are the class the loop's billing breaker refuses to arm
+# convention); both are the class the loop's billing breaker refuses to arm
 # on, so the census mirror must disqualify both too
 _CANNOT_EXEC_REASONS = ('agent launch failed', 'agent error (exit 127)')
 
@@ -346,9 +346,8 @@ class Node:
             return None
         if self.tmux_session not in sessions:
             return False
-        # the listed name vouches only after the identity check clears it --
-        # a foreign vouch would keep a dead loop active until the foreign
-        # session ends
+        # the listed name vouches only after the identity check clears it -- a
+        # foreign vouch would keep a dead loop active until the foreign session ends
         return not self._session_is_foreign(self.tmux_session, socket=socket)
 
     def _session_is_foreign(
@@ -439,8 +438,7 @@ class Node:
             return _group_alive(self.node_dir / PGID_FILE)
         alive = self._tmux_session_exists()
         if not (self.node_dir / SOCKET_FILE).exists():
-            # a bare launch is judged by its own group; an unknown group
-            # stays unknown
+            # a bare launch is judged by its own group; an unknown group stays unknown
             if alive is False:
                 group = _group_alive(self.node_dir / PGID_FILE)
                 if group is not False:
@@ -893,7 +891,7 @@ class Node:
         owner = f'branch {branch!r}' if branch is not None else 'this checkout'
         raise RuntimeError(
             f'This repository carries several fractal trees ({trees}) and'
-            f' {owner} belongs to none of them — name the tree to act on.'
+            f' {owner} belongs to none of them -- name the tree to act on.'
         )
 
     def exists(self: Node) -> bool:
@@ -967,13 +965,14 @@ class Node:
                     f'Charter pin does not resolve to a commit: {declared!r}'
                     ' (stale seed).'
                 )
-            if pin is not None and not (
-                pin.lower().startswith(declared) or declared.startswith(pin.lower())
-            ):
-                raise ValueError(
-                    f'Charter pin {declared!r} does not match --pin {pin!r}'
-                    ' (stale seed).'
-                )
+            if pin is not None:
+                lowered = pin.lower()
+                overlaps = lowered.startswith(declared) or declared.startswith(lowered)
+                if not overlaps:
+                    raise ValueError(
+                        f'Charter pin {declared!r} does not match --pin {pin!r}'
+                        ' (stale seed).'
+                    )
         # docket rows must exist at the pin -- an enumerated surface that
         # moved or never existed is exactly the stale-docket class
         anchor = pin or (pins[0] if pins else 'HEAD')
@@ -1244,11 +1243,10 @@ class Node:
             # branch from the target node; the scope is set once the parent is
             # known, since it is spelled relative to the child's own project
             base = meta
-        # the base is also the squash-merge target: merge.sh squashes inside
-        # the base's checked-out worktree, so a worktree-less base (a typo,
-        # or a branch nothing has checked out) would only fail at merge time,
-        # long after init printed its success -- refuse now, naming the
-        # requirement
+        # the base is also the squash-merge target: merge.sh squashes inside the
+        # base's checked-out worktree, so a worktree-less base (a typo, or a
+        # branch nothing has checked out) would only fail at merge time, long
+        # after init printed its success -- refuse now, naming the requirement
         if base and fractal.util.git.find_worktree(self.repo_dir, base) is None:
             raise ValueError(
                 f'Base branch {base!r} has no checked-out worktree.'
@@ -1699,7 +1697,7 @@ class Node:
         if '/' in branch:
             raise ValueError(
                 f'Cannot initialize a user node on branch {branch!r}:'
-                " branch names containing '/' are not supported — switch"
+                " branch names containing '/' are not supported -- switch"
                 ' to a slash-free branch and re-run init.'
             )
         # a dotted root branch is fine on its own -- the root's branch is the
@@ -1716,7 +1714,7 @@ class Node:
             if nested or nests_other:
                 raise ValueError(
                     f'Cannot initialize a user node on branch {branch!r}: it'
-                    f' collides with the tree rooted at {other.branch!r} —'
+                    f' collides with the tree rooted at {other.branch!r} --'
                     " '.' is the node hierarchy separator, so one reads as a"
                     ' node inside the other and every subtree scope would cross'
                     ' between them. Switch to a branch that is not dot-nested'
@@ -1743,7 +1741,7 @@ class Node:
             if existing != path:
                 raise ValueError(
                     f'A fractal already exists on branch {branch!r} for project'
-                    f' {existing!r}; one branch maps to a single project —'
+                    f' {existing!r}; one branch maps to a single project --'
                     ' use a separate branch.'
                 )
         # derive the project name from the repo dir (dashes -> _, validated as an
@@ -1810,7 +1808,7 @@ class Node:
                     f'Another active fractal already uses the tmux name'
                     f' {repo_name!r} (session {clash!r}). Two fractals sharing a'
                     f' repository basename collide on node sessions and'
-                    f' `node kill` — rename this repository directory or stop'
+                    f' `node kill` -- rename this repository directory or stop'
                     f' that fractal first.'
                 )
         # write the project cache first so node_dir resolves under <project>/
@@ -2215,18 +2213,14 @@ class Node:
                     )
                 # a first-start node has no tmux session of its own, so this
                 # exact name belongs to another fractal sharing the repo name;
-                # the check also stops a headless launch racing a tmux boot --
-                # a headless launch owns no session, so a provably foreign one
-                # never blocks it (mirrors resume.sh); it still refuses its
-                # own tmux boot racing the .pgid record, or a pane the probe
-                # cannot attribute
+                # the check also stops a headless launch racing a tmux boot -- a
+                # headless launch owns no session, so a provably foreign one never
+                # blocks it (mirrors resume.sh); it still refuses its own tmux
+                # boot racing the .pgid record, or a pane the probe cannot attribute
                 session = self.tmux_session
                 sessions = fractal.util.tmux.probe()
-                if (
-                    sessions is not None
-                    and session in sessions
-                    and not (headless and self._session_is_foreign(session))
-                ):
+                listed = (sessions is not None) and (session in sessions)
+                if listed and not (headless and self._session_is_foreign(session)):
                     if headless:
                         raise RuntimeError(
                             f'Cannot start: the tmux session {session!r} is'
@@ -2449,7 +2443,12 @@ class Node:
             command_args = ['bash', '-c', wrapper, 'bash', f'{pgid_file}', *loop_args]
             # the banner names the launch kind, so a post-mortem reads which
             # relaunch produced each appended tail
-            kind = 'resume' if resume else 'continue' if continue_run else 'start'
+            if resume:
+                kind = 'resume'
+            elif continue_run:
+                kind = 'continue'
+            else:
+                kind = 'start'
             if drain:
                 kind += ' drain'
             marker = self.node_dir / HEADLESS_FILE
@@ -2734,10 +2733,8 @@ class Node:
         with worktree.lock(self.repo_dir):
             # re-read under the lock -- a rival verb or the settling loop
             # may have moved this node since the caller enumerated it
-            if (
-                self._signal_guard('finish', 'finish', fan_out=fan_out, locked=True)
-                is None
-            ):
+            guard = self._signal_guard('finish', 'finish', fan_out=fan_out, locked=True)
+            if guard is None:
                 return
             event_id = self.record.event_start('finish', metadata=reason or '')
             self.record.signal_set('finish', reason or '')
@@ -3176,10 +3173,8 @@ class Node:
         with worktree.lock(self.repo_dir):
             # re-read under the lock -- a rival verb or the settling loop
             # may have moved this node since the caller enumerated it
-            if (
-                self._signal_guard('pause', 'pause', fan_out=fan_out, locked=True)
-                is None
-            ):
+            guard = self._signal_guard('pause', 'pause', fan_out=fan_out, locked=True)
+            if guard is None:
                 return False
             # the signal lands before the abort so the loop reclassifies
             # the killed step as paused, never as a failed step (a failure
@@ -3356,6 +3351,17 @@ class Node:
             return self.config.get('root')
         return None
 
+    def _merge_target(self: Node) -> str:
+        """Return the merge target as ``merge.sh`` resolves it, or ``''``.
+
+        The ``base`` config wins; otherwise a dotted branch merges into its
+        parent, and an undotted, base-less branch has no target.
+        """
+        target = self.config.get('base') or ''
+        if not target and '.' in self.branch:
+            target, *_ = self.branch.rsplit('.', 1)
+        return target
+
     def merge(
         self: Node,
         *,
@@ -3417,9 +3423,7 @@ class Node:
         # target as merge.sh does (base config, else the dotted parent),
         # reconciled so a crashed-but-active target never wedges the merge,
         # and leave a target that does not resolve to merge.sh's own errors
-        target_branch = self.config.get('base') or ''
-        if not target_branch and '.' in self.branch:
-            target_branch, *_ = self.branch.rsplit('.', 1)
+        target_branch = self._merge_target()
         target_worktree = fractal.util.git.find_worktree(self.repo_dir, target_branch)
         if target_worktree is not None:
             target = self.__class__(target_worktree)
@@ -3566,9 +3570,7 @@ class Node:
 
         """
         if target is None:
-            target = self.config.get('base') or ''
-            if not target and '.' in self.branch:
-                target, *_ = self.branch.rsplit('.', 1)
+            target = self._merge_target()
         if not target:
             return ''
         repo_dir = self.repo_dir
@@ -3590,7 +3592,7 @@ class Node:
         # a scope root that is, or lies under, a .fractal dir is work the merge
         # lands (a --meta node's scope is the target's own seed dir), so exclude
         # only the node's own seed and its descendants' instead of the whole
-        # .fractal/ (mirrors delete.sh; '.' collapses as in commit.scope_boundaries)
+        # .fractal/ (mirrors delete.sh; '.' collapses as commit.scope_boundaries)
         roots = self.config.get('scope') or []
         if any(not pathlib.PurePosixPath(root).parts for root in roots):
             roots = []
@@ -3629,6 +3631,8 @@ class Node:
         cmd = ['diff', '--quiet', target, self.branch, '--', *specs]
         if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is not None:
             return ''
+        # word for word the line delete.sh prints: the CLI drops the script's
+        # copy by equality, so the two must never drift apart
         return (
             f'Warning: {self.branch} has commits not merged into {target};'
             ' deleting discards them (merge first to keep them)'
@@ -3642,9 +3646,7 @@ class Node:
         same teardown -- the judgment :meth:`delete` threads into
         ``delete.sh``; empties are dropped.
         """
-        target = self.config.get('base') or ''
-        if not target and '.' in self.branch:
-            target, *_ = self.branch.rsplit('.', 1)
+        target = self._merge_target()
         warnings = [self.unmerged_warning()]
         for _, descendant in self._live_descendants():
             warnings.append(descendant.unmerged_warning(target=target))
@@ -3971,9 +3973,9 @@ class Node:
             # a repo with no fractal still runs the script (its no-op report)
             node = trees[0] if trees else Node(path)
         else:
-            # anchor the named tree explicitly, never by inference -- a scoped
-            # teardown keyed to the wrong tree's DB would guard and prune a
-            # healthy sibling
+            # anchor the named tree explicitly, never by inference -- a
+            # scoped teardown keyed to the wrong tree's DB would guard
+            # and prune a healthy sibling
             node = Node.resolve_user(path, name=name)
             if node is None:
                 raise RuntimeError(f'No tree found on branch {name!r}.')
@@ -4197,12 +4199,9 @@ class Node:
                 pgid_file = descendant.node_dir / PGID_FILE
                 if alive is None:
                     settled = ('completed', 'stopped', 'exited', 'killed', 'retired')
-                    if (
-                        row['status'] in settled
-                        and not descendant.headless
-                        and not (descendant.node_dir / SOCKET_FILE).exists()
-                        and not pgid_file.exists()
-                    ):
+                    socketed = (descendant.node_dir / SOCKET_FILE).exists()
+                    evidence = descendant.headless or socketed or pgid_file.exists()
+                    if row['status'] in settled and not evidence:
                         continue
                     raise RuntimeError(
                         f'Cannot {verb}: the runtime probe gave no answer for'
@@ -4249,9 +4248,8 @@ class Node:
         # parked node so its open rows close -- before the lock (each kill
         # takes the same flock); best-effort per node (mirrors kill's sweep,
         # claim retry included -- a resume's launch claim in flight resolves
-        # within the budget, and an exhausted one warns so the script's
-        # paused re-check abort is attributable), the script's paused
-        # re-check backstops
+        # within the budget, and an exhausted one warns so the script's paused
+        # re-check abort is attributable), the script's paused re-check backstops
         for tree in trees:
             if not tree.exists():
                 continue
@@ -4357,9 +4355,9 @@ class Node:
             # the completed landings are different facts: an exhausted
             # iteration budget records its cap, while a goal-met finish
             # leaves the run reason-less (or carries a cap-overshoot note,
-            # which is still done-conditions-met) -- name the run-out and a
-            # dead final iteration so a census never reads either as a clean
-            # done-conditions-met end
+            # which is still done-conditions-met) -- name the run-out and
+            # a dead final iteration so a census never reads either as a
+            # clean done-conditions-met end
             rows = self.record.runs(limit=1)
             if rows and rows[0]['status'] == 'completed':
                 reason = rows[0]['metadata'] or ''
@@ -4422,14 +4420,13 @@ class Node:
                 return 'timeout'
             if reason.startswith('setup failed x'):
                 return 'setup_abort'
-            if reason.startswith('Reached max iterations') and reason.endswith(
-                'final iteration failed'
-            ):
+            exhausted = reason.startswith('Reached max iterations')
+            if exhausted and reason.endswith('final iteration failed'):
                 return 'final_iteration_failed'
             return 'other' if reason else None
-        # completed: the run-out and the dead final iteration are named so
-        # neither reads as a clean done-conditions-met end (mirrors
-        # status_detail's discrimination)
+        # completed: the run-out and the dead final iteration are named
+        # so neither reads as a clean done-conditions-met end (mirrors
+        # the status_detail discrimination)
         if reason.startswith('Reached max iterations'):
             return 'run_exhausted'
         if reason.endswith('final iteration failed'):
@@ -4462,9 +4459,9 @@ class Node:
         for row in self.record.steps(run_id=runs[0]['run_id']):
             # bookkeeping rows are not launches: the never-run tail booked
             # after a failure, and any still-open row
-            if row['ended_at'] is None or (
-                row['status'] == 'stopped' and row['metadata'].startswith('failed on')
-            ):
+            never_ran = row['metadata'].startswith('failed on')
+            booked = (row['status'] == 'stopped') and never_ran
+            if (row['ended_at'] is None) or booked:
                 continue
             # a cannot-exec launch books failed/instant with no cost, but is
             # not billing-shaped -- either recorded reason (retry-marker safe:
@@ -4657,15 +4654,11 @@ class Node:
             for row, node in self._live_descendants(max_depth=max_depth):
                 current = _base_status(row.get('status'))
                 if current in ('active', 'idle'):
-                    # the batched listing settles a tmux loop it names; anything
-                    # else (unlisted, headless, or no tmux answer) confirms
-                    # through the node's own liveness law -- recorded socket or
-                    # process group
-                    if (
-                        sessions is not None
-                        and not node.headless
-                        and node.tmux_session in sessions
-                    ):
+                    # the batched listing settles a tmux loop it names; anything else
+                    # (unlisted, headless, or no tmux answer) confirms through the
+                    # node's own liveness law -- recorded socket or process group
+                    listed = (sessions is not None) and (node.tmux_session in sessions)
+                    if listed and not node.headless:
                         alive: Optional[bool] = True
                     else:
                         alive = node._loop_alive()
@@ -4675,10 +4668,9 @@ class Node:
                         # a started child holds 'idle' until its loop stamps
                         # 'active' after preflight, but its session is already
                         # live -- read the boot window as 'active', so a
-                        # finishing ancestor's drain never completes over a
-                        # child started seconds earlier; a sessionless idle node
-                        # (spawned, never started) stays idle and never blocks a
-                        # drain
+                        # finishing ancestor's drain never completes over a child
+                        # started seconds earlier; a sessionless idle node (spawned,
+                        # never started) stays idle and never blocks a drain
                     elif current == 'idle' and alive:
                         row = {**row, 'status': 'active'}
                 rows.append(row)
@@ -5759,11 +5751,11 @@ class Node:
         # --current forks the node's live loop session (forking agents only)
         if current:
             if not backend.can_fork:
-                # the refusal outranks the live check; route it through the
-                # backend's one no-fork raise site (its message carries the
-                # remedy and citations), surfaced as today's error type -- the
-                # placeholder session steers the doomed build past
-                # the fork-without-a-session guard
+                # the refusal outranks the live check; route it through
+                # the backend's one no-fork raise site (its message
+                # carries the remedy and citations), surfaced as today's
+                # error type -- the placeholder session steers the doomed
+                # build past the fork-without-a-session guard
                 try:
                     backend.invocation(prompt, session=live or '-', fork=True)
                 except NotImplementedError as e:

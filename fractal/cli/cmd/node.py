@@ -200,7 +200,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
     wait = typer.Option(None, '--wait', help=wait_help)
     # max cost option
     max_cost_help = (
-        'Maximum cost in USD per run — runs are isolated, so each launch'
+        'Maximum cost in USD per run -- runs are isolated, so each launch'
         ' arms the cap anew; after a budget-ended run, `node start'
         ' --continue` refuses without an explicit --max-cost.'
     )
@@ -362,14 +362,10 @@ def node_init(app: typer.Typer) -> typer.Typer:
                 parent = node
             effective_agent = agent or parent.agent_effective()
             tracked = True
-            # the probe needs an initialized node to anchor the agent
-            # registry's database: the resolve_init target falls back to the
-            # repo root, which carries no config (and so no tree root to
-            # resolve the database through) whenever the checkout sits off
-            # the tree's root branch -- the operator's own branch, while
-            # nodes run; an unprobed agent reads as tracked, exactly like the
-            # unregistered backend below: unknown spend earns the warning,
-            # and this advisory must never fail a spawn that already succeeded
+            # the probe anchors the agent registry's database on an initialized
+            # node, and the resolve_init target (the repo root, off the tree's
+            # root branch) may carry no config -- an unprobed agent reads as
+            # tracked, and this advisory never fails a spawn that succeeded
             if effective_agent and parent.exists():
                 # an unregistered backend reads as tracked -- unknown
                 # spend earns the warning, never a block
@@ -379,7 +375,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
                     tracked = True
             if tracked:
                 typer.echo(
-                    'Warning: no --max-cost/--max-iters — this node can run'
+                    'Warning: no --max-cost/--max-iters -- this node can run'
                     ' and spend without bound.',
                     err=True,
                 )
@@ -395,8 +391,8 @@ def node_start(app: typer.Typer) -> typer.Typer:
     # continue flag
     continue_help = (
         'Continue a stopped/exited node (further iterations): the launch'
-        ' restores the worktree — uncommitted project files refuse without'
-        ' --clean — and a budget-ended run refuses without an explicit'
+        ' restores the worktree -- uncommitted project files refuse without'
+        ' --clean -- and a budget-ended run refuses without an explicit'
         ' --max-cost.'
     )
     continue_ = typer.Option(False, '--continue', help=continue_help)
@@ -405,7 +401,7 @@ def node_start(app: typer.Typer) -> typer.Typer:
     clean = typer.Option(False, '--clean', help=clean_help)
     # drain flag
     drain_help = (
-        'With --continue: run a drain — the harness forbids spawns and'
+        'With --continue: run a drain -- the harness forbids spawns and'
         ' re-arms from this run and tells every seat it is draining.'
     )
     drain = typer.Option(False, '--drain', help=drain_help)
@@ -448,13 +444,13 @@ def node_start(app: typer.Typer) -> typer.Typer:
         budget refuses a bare ``--continue``: pass ``--max-cost`` to arm
         the next run explicitly.
 
-        The backend is sticky. With neither flag nor FRACTAL_HEADLESS
+        The backend is sticky. With neither flag nor ``FRACTAL_HEADLESS``
         set, a relaunch reuses the backend the node last launched with;
-        the flags and the exported FRACTAL_HEADLESS (true/false, matched
-        case-insensitively; anything else refuses) force and re-record
-        it. Seats always export the parent's backend in
-        FRACTAL_HEADLESS, so a delegated child start follows its parent
-        unless the seat overrides.
+        the flags and the exported ``FRACTAL_HEADLESS`` (true/false,
+        matched case-insensitively; anything else refuses) force and
+        re-record it. Seats always export the parent's backend in
+        ``FRACTAL_HEADLESS``, so a delegated child start follows its
+        parent unless the seat overrides.
         """
         require_non_negative(max_cost=max_cost)
         if clean and not continue_:
@@ -684,7 +680,8 @@ def node_merge(app: typer.Typer) -> typer.Typer:
                 )
                 typer.confirm(prompt, abort=True)
         output, notices = node.merge(
-            continue_merge=continue_, ignore_scope=ignore_scope
+            continue_merge=continue_,
+            ignore_scope=ignore_scope,
         )
         if output:
             typer.echo(output)
@@ -739,8 +736,8 @@ def node_delete(app: typer.Typer) -> typer.Typer:
         # doomed worktree) land before any warning about discarded work, which
         # would otherwise describe a deletion that never happens
         node.guard_delete()
-        # the unmerged-work warnings ahead of the point of no return, while
-        # the branches still exist to merge
+        # print the unmerged-work warnings ahead of the point of no
+        # return, while the branches still exist to merge
         unmerged = node.unmerged_warnings()
         for warning in unmerged:
             typer.echo(warning, err=True)
@@ -1235,7 +1232,7 @@ def node_update(app: typer.Typer) -> typer.Typer:
     title = typer.Option(None, '--title', help=title_help)
     # max cost option
     max_cost_help = (
-        'Child maximum cost in USD per run — runs are isolated, so each'
+        'Child maximum cost in USD per run -- runs are isolated, so each'
         ' launch arms the cap anew; after a budget-ended run, `node start'
         ' --continue` refuses without an explicit --max-cost.'
     )
@@ -1486,7 +1483,8 @@ def node_scope(app: typer.Typer) -> typer.Typer:
         """
         node = resolve_node(path)
         raw = sys.stdin.buffer.read()
-        paths = filter(None, os.fsdecode(raw).split('\0'))
+        decoded = os.fsdecode(raw)
+        paths = filter(None, decoded.split('\0'))
         bounds = scope_boundaries(node)
         offending = out_of_scope(paths, bounds, attributes_ok=attributes_ok)
         if offending:

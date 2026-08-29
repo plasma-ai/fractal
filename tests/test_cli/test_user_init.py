@@ -41,7 +41,7 @@ __all__ = [
 ]
 
 
-# ------ tests
+# ------ init
 
 
 def test_init_prefers_the_environments_wiki_over_a_broken_shim(
@@ -223,7 +223,8 @@ def test_init_warns_about_an_unstamped_wiki_index(
             'updated: 2026-01-01T00:00:00Z\n'
         )
     (wiki / '_index.md').write_text(
-        f'---\nname: wiki\n{stamps}---\n\n# wiki\n\n***\n', encoding='utf-8'
+        f'---\nname: wiki\n{stamps}---\n\n# wiki\n\n***\n',
+        encoding='utf-8',
     )
     _git(repo, 'add', 'wiki')
     _git(repo, 'commit', '-m', 'adopted wiki')
@@ -247,7 +248,9 @@ def test_init_warns_about_an_unstamped_wiki_index(
         pytest.param(None, True, id='absent'),
         pytest.param('*.png binary\n', True, id='without-the-line'),
         pytest.param(
-            '*.png binary\n**/_index.md merge=wiki\n', False, id='with-the-line'
+            '*.png binary\n**/_index.md merge=wiki\n',
+            False,
+            id='with-the-line',
         ),
     ],
 )
@@ -292,6 +295,9 @@ def test_init_warns_about_a_missing_wiki_merge_driver_line(
     )
     assert (warning in result.stderr) is warned, result.stderr
     assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+# ------ commit --init
 
 
 def test_commit_init_sweeps_the_gitattributes_edit(tmp_path: pathlib.Path) -> None:

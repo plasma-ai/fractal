@@ -146,9 +146,8 @@ Fractal's footprint
    in its branch history. On the user node's branch the merge also strips a
    copy of those seeds the branch already tracks (a leak there); a node
    target keeps a copy its PREPARE merge of the child tracks until it merges
-   upward itself.
-   The root node's own data directory is git-ignored by default
-   (``fractal track`` and ``fractal untrack`` toggle this).
+   upward itself. The root node's own data directory is git-ignored by
+   default (``fractal track`` and ``fractal untrack`` toggle this).
 
 ``.gitattributes``
    ``fractal init`` writes the ``**/_index.md merge=wiki`` rule (under a

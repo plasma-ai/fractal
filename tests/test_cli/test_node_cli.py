@@ -47,8 +47,8 @@ __all__ = [
     'test_init_uses_central_db',
     'test_init_reset_reinitializes_node',
     'test_init_rejects_negative_limits',
-    'test_init_rejects_non_positive_max_iters',
     'test_init_rejects_iter_cost_without_max_cost',
+    'test_init_rejects_non_positive_max_iters',
     'test_init_from_worktree_nests_under_that_node',
     'test_child_spawn_nests_under_parent',
     'test_child_without_base_branches_from_parent_tip',
@@ -69,7 +69,6 @@ __all__ = [
     'test_scope_lists_the_out_of_scope_paths',
     'test_scope_refuses_a_non_node_path',
     'test_list_filters_by_retired_and_depth',
-    'test_start_drain_requires_continue',
     'test_list_json_mirrors_csv_shape',
     'test_list_status_count_and_live',
     'test_list_rejects_invalid_filters',
@@ -80,6 +79,7 @@ __all__ = [
     'test_list_shows_stored_status_for_orphaned_terminal_node',
     'test_reconcile_records_orphan_event_once',
     'test_lifecycle_guard_rejects_idle_node',
+    'test_start_drain_requires_continue',
     'test_retire_unretire_round_trips_through_list',
     'test_retire_refuses_a_retired_node_and_unretire_restores_its_status',
     'test_update_rewrites_child_config',
@@ -127,21 +127,7 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> dict:
     so no test depends on another's writes.
     """
     root = tmp_path_factory.mktemp('fractal_node')
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'node@test.local')
-    _git(root, 'config', 'user.name', 'node')
-    (root / 'README.md').write_text('# node\n', encoding='utf-8')
-    # a project wiki is required for scoped/based node init
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
-        '---\nname: wiki\n---\n# wiki\n\n***\n',
-        encoding='utf-8',
-    )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
-    # fractal init creates the user node, so worker init then passes
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'node')
     task = _run(
         root,
         'node',
@@ -597,19 +583,7 @@ def test_child_without_base_branches_from_parent_tip(
     """
     root = tmp_path / 'repo'
     root.mkdir()
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'base@test.local')
-    _git(root, 'config', 'user.name', 'base')
-    (root / 'README.md').write_text('# base\n', encoding='utf-8')
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
-        '---\nname: wiki\n---\n# wiki\n\n***\n',
-        encoding='utf-8',
-    )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'base')
     assert _run(root, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
 
     # advance the parent one commit past main, in its own worktree
@@ -639,22 +613,8 @@ def test_node_init_path_records_subproject(tmp_path: pathlib.Path) -> None:
     reaches init.sh instead of being dropped for the parent's project.
     """
     root = tmp_path
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'mono@test.local')
-    _git(root, 'config', 'user.name', 'mono')
-    (root / 'README.md').write_text('# mono\n', encoding='utf-8')
-    # both wikis committed in base: the root's for the user node, the
-    # sub-project's for the child's precondition lookup
-    for wiki in (root / 'wiki', root / 'app' / 'wiki'):
-        wiki.mkdir(parents=True)
-        (wiki / '_index.md').write_text(
-            '---\nname: wiki\n---\n# wiki\n\n***\n',
-            encoding='utf-8',
-        )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
     # a root user node, then a child pointed at the sub-project
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'mono', projects=('app',))
     result = _run(root, 'node', 'init', 'sub', '--path', 'app', '--agent', 'claude')
     assert result.returncode == 0, result.stderr
     # the child records project 'app' and nests its data under it
@@ -680,21 +640,7 @@ def test_node_init_path_below_a_worktree_root_is_refused(
     sub-project and nests the child's seed under it.
     """
     root = tmp_path
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'mono@test.local')
-    _git(root, 'config', 'user.name', 'mono')
-    (root / 'README.md').write_text('# mono\n', encoding='utf-8')
-    # both wikis committed in base: the root's for the user node, the
-    # sub-project's for the child's precondition lookup
-    for wiki in (root / 'wiki', root / 'app' / 'wiki'):
-        wiki.mkdir(parents=True)
-        (wiki / '_index.md').write_text(
-            '---\nname: wiki\n---\n# wiki\n\n***\n',
-            encoding='utf-8',
-        )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'mono', projects=('app',))
     init = _run(root, 'node', 'init', 'a', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     parent = root / '.worktrees' / 'main.a'
@@ -722,7 +668,8 @@ def test_node_init_path_below_a_worktree_root_is_refused(
         ' against the repo root: --path'
     ) in rendered, refused.stderr
     # the panel folds a long path mid-word, so read the remedy with no spaces
-    assert f'--path{root / "app"}' in ''.join(rendered.split()), refused.stderr
+    remedy = root / 'app'
+    assert f'--path{remedy}' in ''.join(rendered.split()), refused.stderr
     # refused before any write: no worktree, no branch, no registry row
     assert not (root / '.worktrees' / 'main.a.c').exists()
     assert _git(root, 'branch', '--list', 'main.a.c').stdout.strip() == ''
@@ -797,17 +744,15 @@ def test_engine_system_skills_ignored(repo: dict) -> None:
     """
     task = repo['task']
     # the managed info/exclude block keeps the engine tree out of git
-    probe = subprocess.run(
-        [
-            'git',
-            '-C',
-            f'{task}',
-            'check-ignore',
-            '-q',
-            '.fractal/main.task/skills/.system/imagegen/SKILL.md',
-        ],
-        capture_output=True,
-    )
+    cmd = [
+        'git',
+        '-C',
+        f'{task}',
+        'check-ignore',
+        '-q',
+        '.fractal/main.task/skills/.system/imagegen/SKILL.md',
+    ]
+    probe = subprocess.run(cmd, capture_output=True)
     assert probe.returncode == 0
 
 
@@ -818,6 +763,7 @@ def test_engine_system_skills_ignored(repo: dict) -> None:
         (['--max-cost', '1'], False),
         (['--max-iters', '3'], False),
     ],
+    ids=['uncapped', 'max-cost', 'max-iters'],
 )
 def test_init_uncapped_priced_agent_warns(
     repo: dict,
@@ -972,19 +918,7 @@ def test_merge_delete_reaps_the_merged_child(tmp_path: pathlib.Path) -> None:
     squash it would leave behind is irreversible.
     """
     root = tmp_path
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'reap@test.local')
-    _git(root, 'config', 'user.name', 'reap')
-    (root / 'README.md').write_text('# reap\n', encoding='utf-8')
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
-        '---\nname: wiki\n---\n# wiki\n\n***\n',
-        encoding='utf-8',
-    )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'reap')
     assert _run(root, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
     # the child commits real work on its branch
     task = root / '.worktrees' / 'main.task'
@@ -1053,21 +987,17 @@ def test_merge_ignore_scope_flag_lands_an_out_of_scope_squash(
     tracked on the target.
     """
     root = tmp_path
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'scope@test.local')
-    _git(root, 'config', 'user.name', 'scope')
-    (root / 'README.md').write_text('# scope\n', encoding='utf-8')
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
-        '---\nname: wiki\n---\n# wiki\n\n***\n',
-        encoding='utf-8',
-    )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'scope')
     init = _run(
-        root, 'node', 'init', 'task', '--scope', 'docs', '--agent', 'claude', '--local'
+        root,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'docs',
+        '--agent',
+        'claude',
+        '--local',
     )
     assert init.returncode == 0, init.stderr
     # work in and out of scope, committed with raw git (fractal commit would
@@ -1123,19 +1053,7 @@ def test_delete_warns_of_unmerged_work_before_the_point_of_no_return(
     teardown names the deleted tip.
     """
     root = tmp_path
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'warn@test.local')
-    _git(root, 'config', 'user.name', 'warn')
-    (root / 'README.md').write_text('# warn\n', encoding='utf-8')
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
-        '---\nname: wiki\n---\n# wiki\n\n***\n',
-        encoding='utf-8',
-    )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'warn')
     init = _run(root, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     # the child commits work main never absorbs
@@ -1148,8 +1066,8 @@ def test_delete_warns_of_unmerged_work_before_the_point_of_no_return(
         ' them (merge first to keep them)'
     )
     if not force:
-        # declined at the prompt: the warning came first, and nothing was
-        # torn down
+        # declined at the prompt: the warning came first, and
+        # nothing was torn down
         declined = _run(root, 'node', 'delete', f'--path={task}', stdin='n\n')
         assert declined.returncode != 0, declined.stdout
         assert declined.stderr.count(unmerged) == 1, declined.stderr
@@ -1163,9 +1081,8 @@ def test_delete_warns_of_unmerged_work_before_the_point_of_no_return(
 
     # the warning reads once, and the teardown names the deleted tip
     assert result.stderr.count(unmerged) == 1, result.stderr
-    deleted = re.search(
-        r'Deleted branch: main\.task \(was [0-9a-f]{7,}\)', result.stdout
-    )
+    pattern = r'Deleted branch: main\.task \(was [0-9a-f]{7,}\)'
+    deleted = re.search(pattern, result.stdout)
     assert deleted, result.stdout
     assert not task.exists()
     assert _git(root, 'branch', '--list', 'main.task').stdout.strip() == ''
@@ -1192,26 +1109,21 @@ def test_delete_warns_of_a_descendants_unmerged_work_before_the_prompt(
     with every warning in view and each reads once, before any removal.
     """
     root = tmp_path
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'warn@test.local')
-    _git(root, 'config', 'user.name', 'warn')
-    (root / 'README.md').write_text('# warn\n', encoding='utf-8')
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
-        '---\nname: wiki\n---\n# wiki\n\n***\n',
-        encoding='utf-8',
-    )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'warn')
     init = _run(root, 'node', 'init', 'alpha', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     alpha = root / '.worktrees' / 'main.alpha'
     _git(alpha, 'add', '-A')
     _git(alpha, 'commit', '-m', 'seed alpha')
     init = _run(
-        root, 'node', 'init', 'gamma', '--agent', 'claude', '--local', f'--path={alpha}'
+        root,
+        'node',
+        'init',
+        'gamma',
+        '--agent',
+        'claude',
+        '--local',
+        f'--path={alpha}',
     )
     assert init.returncode == 0, init.stderr
     # the grandchild commits work nobody merges; alpha itself has none
@@ -1224,8 +1136,8 @@ def test_delete_warns_of_a_descendants_unmerged_work_before_the_prompt(
         ' discards them (merge first to keep them)'
     )
     if not force:
-        # declined at the prompt: the grandchild's warning came first, and
-        # the whole subtree still stands
+        # declined at the prompt: the grandchild's warning came
+        # first, and the whole subtree still stands
         declined = _run(root, 'node', 'delete', 'main.alpha', stdin='n\n')
         assert declined.returncode != 0, declined.stdout
         assert declined.stderr.count(unmerged) == 1, declined.stderr
@@ -1266,19 +1178,7 @@ def test_delete_refuses_a_locked_worktree_before_any_unmerged_warning(
     commits the refused deletion leaves exactly where they are.
     """
     root = tmp_path
-    _git(root, 'init', '-b', 'main')
-    _git(root, 'config', 'user.email', 'lock@test.local')
-    _git(root, 'config', 'user.name', 'lock')
-    (root / 'README.md').write_text('# lock\n', encoding='utf-8')
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
-        '---\nname: wiki\n---\n# wiki\n\n***\n',
-        encoding='utf-8',
-    )
-    _git(root, 'add', '-A')
-    _git(root, 'commit', '-m', 'init')
-    assert _run(root, 'init').returncode == 0
+    _init_tree(root, 'lock')
     init = _run(root, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     # the child commits work main never absorbs, and its worktree is locked
@@ -1329,7 +1229,11 @@ def test_delete_refuses_a_locked_worktree_before_any_unmerged_warning(
         ),
         pytest.param(b'', [], 0, b'', id='empty'),
         pytest.param(
-            b'bad\xff.txt\0src/a.py\0', [], 1, b'bad\xff.txt\n', id='undecodable-name'
+            b'bad\xff.txt\0src/a.py\0',
+            [],
+            1,
+            b'bad\xff.txt\n',
+            id='undecodable-name',
         ),
     ],
 )
@@ -1340,19 +1244,20 @@ def test_scope_lists_the_out_of_scope_paths(
     returncode: int,
     stdout: bytes,
 ) -> None:
-    """``node _scope`` answers merge.sh's footprint check by exit code and listing.
+    """``node _scope`` answers ``merge.sh``'s footprint check by exit code and listing.
 
     The check reads NUL-separated repo-relative paths and judges them by the
     node's commit boundaries (``task`` is scoped to ``src``): nothing out of
     scope exits 0 with an empty listing, otherwise exit 1 with exactly the
     offending paths, sorted one per line. The worktree-root ``.gitattributes``
-    is admitted only under ``--attributes-ok``, which merge.sh passes when the
+    is admitted only under ``--attributes-ok``, which ``merge.sh`` passes when the
     target's staged copy is init's own edit. The listing is raw bytes, so a
     name that is not valid UTF-8 round-trips to git's own bytes instead of
     failing the check.
     """
+    task = repo['task']
     result = subprocess.run(
-        [_fractal_bin(), 'node', '_scope', f'--path={repo["task"]}', *flags],
+        [_fractal_bin(), 'node', '_scope', f'--path={task}', *flags],
         input=stdin,
         capture_output=True,
         env=_cli_env(),
@@ -1365,7 +1270,7 @@ def test_scope_lists_the_out_of_scope_paths(
 def test_scope_refuses_a_non_node_path(tmp_path: pathlib.Path) -> None:
     """``node _scope --path`` at a non-node is a usage error, never an answer.
 
-    merge.sh reads exit 1 as the check's own answer (paths out of scope) and
+    ``merge.sh`` reads exit 1 as the check's own answer (paths out of scope) and
     any other non-zero exit as an error, so a path with no node behind it
     must exit 2 -- typer's usage error -- rather than pass or refuse the
     squash.
@@ -1413,26 +1318,13 @@ def test_list_filters_by_retired_and_depth(repo: dict) -> None:
     assert _run(docs, 'node', 'unretire').returncode == 0
 
 
-def test_start_drain_requires_continue(repo: dict) -> None:
-    """The CLI refuses ``--drain`` without ``--continue`` rather than no-op.
-
-    ``--drain`` only means anything on a continued run; accepting it on a
-    fresh start would let an operator believe a wind-down was armed while
-    the node spawns freely.
-    """
-    task = repo['task']
-    refused = _run(task, 'node', 'start', '--drain')
-    assert refused.returncode != 0
-    assert '--drain requires --continue' in refused.stderr
-
-
 def test_list_json_mirrors_csv_shape(repo: dict) -> None:
     """``list --json`` emits typed row objects with the CSV's column set.
 
     One object per node, keys in the CSV header's order, so a scripted
     consumer never rebuilds accounting from comma-split text (a comma in
-    one node's title corrupted a whole census once). ``--json`` and
-    ``--csv`` are mutually exclusive.
+    one node's title would shift every column of a comma-split census).
+    ``--json`` and ``--csv`` are mutually exclusive.
     """
     root = repo['root']
     header = _run(root, 'node', 'list', '--csv').stdout.splitlines()[0]
@@ -1738,6 +1630,19 @@ def test_lifecycle_guard_rejects_idle_node(
     assert result.returncode == 2
     assert message in result.stderr
     assert result.stdout.strip() == ''
+
+
+def test_start_drain_requires_continue(repo: dict) -> None:
+    """The CLI refuses ``--drain`` without ``--continue`` rather than no-op.
+
+    ``--drain`` only means anything on a continued run; accepting it on a
+    fresh start would let an operator believe a wind-down was armed while
+    the node spawns freely.
+    """
+    task = repo['task']
+    refused = _run(task, 'node', 'start', '--drain')
+    assert refused.returncode != 0
+    assert '--drain requires --continue' in refused.stderr
 
 
 def test_retire_unretire_round_trips_through_list(repo: dict) -> None:
@@ -2114,7 +2019,8 @@ def test_cost_breakdown_rows_sum_to_spent_with_a_deleted_descendant(
         '--csv',
     )
     assert breakdown.returncode == 0, breakdown.stderr
-    rows = breakdown.stdout.strip().splitlines()[1:]  # drop the header
+    # drop the header
+    rows = breakdown.stdout.strip().splitlines()[1:]
     spends = [float(row.rsplit(',', 1)[1]) for row in rows]
     spent = _run(parent_wt, 'node', 'cost', 'spent', '--run', str(p_run))
     total = float(spent.stdout.strip().removeprefix('$'))
@@ -2158,7 +2064,8 @@ def test_cost_family_answers_for_a_deleted_target(repo: dict) -> None:
     # breakdown leads with the deleted target's own row and sums to spent
     breakdown = _run(root, 'node', 'cost', 'breakdown', 'main.gone', '--csv')
     assert breakdown.returncode == 0, breakdown.stderr
-    rows = breakdown.stdout.strip().splitlines()[1:]  # drop the header
+    # drop the header
+    rows = breakdown.stdout.strip().splitlines()[1:]
     assert rows[0].startswith('main.gone (deleted),')
     spends = [float(row.rsplit(',', 1)[1]) for row in rows]
     assert sum(spends) == pytest.approx(2.5)
@@ -2424,6 +2331,31 @@ def _orphan_activity_rows(activity: str, branch: str) -> list[str]:
     """Activity CSV lines recording ``branch``'s orphan event."""
     lines = activity.splitlines()
     return [line for line in lines if 'orphan' in line and branch in line]
+
+
+def _init_tree(
+    root: pathlib.Path,
+    identity: str,
+    *,
+    projects: tuple[str, ...] = (),
+) -> None:
+    """Build a repo with committed project wikis and run ``fractal init`` in it."""
+    _git(root, 'init', '-b', 'main')
+    _git(root, 'config', 'user.email', f'{identity}@test.local')
+    _git(root, 'config', 'user.name', identity)
+    (root / 'README.md').write_text(f'# {identity}\n', encoding='utf-8')
+    # a project wiki is required for scoped/based node init; a sub-project's
+    # wiki backs its child's precondition lookup
+    for wiki in (root / 'wiki', *(root / project / 'wiki' for project in projects)):
+        wiki.mkdir(parents=True)
+        (wiki / '_index.md').write_text(
+            '---\nname: wiki\n---\n# wiki\n\n***\n',
+            encoding='utf-8',
+        )
+    _git(root, 'add', '-A')
+    _git(root, 'commit', '-m', 'init')
+    # fractal init creates the user node, so worker init then passes
+    assert _run(root, 'init').returncode == 0
 
 
 def _record_step_cost(node: Node, *, run_id: int, cost: float) -> None:

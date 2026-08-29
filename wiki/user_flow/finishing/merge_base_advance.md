@@ -35,18 +35,12 @@ not a collision — the update renames it — and neither is a path the node tra
 at, under, or above the hit — the target turned a file into a directory or back,
 a type change the update performs) — move it aside, and the next merge that
 lands work advances it (a fresh merge offering nothing exits at "Nothing to
-merge" before the advance, unless the restore dropped a `.fractal/` change
-outside the node's own seed and its descendants' — the paths the restore
-warnings name — or a `.fractal/` conflict outside them resolved to the target's
-content (the node edited a foreign seed copy the target has since removed),
-either of which still advances the merge-base so the node converges and the
-warning does not repeat; a node whose only offering is an edit to its own seed
-exits without advancing, and its next work merge advances it); a failed worktree
-update rolls the worktree back before skipping. A git read that fails during the
-advance (the node's worktree stops answering) skips it with a warning rather
-than failing the landed merge, and an edit to a tracked file the commit law's
-excludes hide (a force-added lock or status file) counts as dirt, so the update
-never overwrites it.
+merge" before the advance; the cases that still advance are under Nothing to
+merge below); a failed worktree update rolls the worktree back before skipping.
+A git read that fails during the advance (the node's worktree stops answering)
+skips it with a warning rather than failing the landed merge, and an edit to a
+tracked file the commit law's excludes hide (a force-added lock or status file)
+counts as dirt, so the update never overwrites it.
 
 ## A resolution lands on the node
 

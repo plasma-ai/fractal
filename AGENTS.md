@@ -358,9 +358,9 @@ feature area for context.
   When a `desc` value exceeds ~100 characters, use a YAML block scalar (`|`)
   with indented continuation lines.
 - **Leaf pages vs. folders.** Use a standalone `.md` page (e.g.,
-  `user_flow/finishing.md`) when the topic doesn't need child pages. Use a
-  folder with `_index.md` when it needs sub-pages. If a leaf page grows too
-  large, consider converting it to a folder with child pages.
+  `user_flow/teardown.md`) when the topic doesn't need child pages. Use a folder
+  with `_index.md` when it needs sub-pages. If a leaf page grows too large,
+  consider converting it to a folder with child pages.
 
 ## Code Style
 

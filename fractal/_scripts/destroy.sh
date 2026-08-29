@@ -4,6 +4,7 @@ set -euo pipefail
 # Destroy one fractal tree, or the repo's whole fractal with --all
 # ----------------------------------------------------------------
 
+# ------ argument parsing
 usage() {
     cat <<USAGE
 Usage: destroy.sh <repo> [options]
@@ -70,7 +71,7 @@ WORKTREES_DIR="$REPO/.worktrees"
 # ------ derive the user node's data directory
 # the user branch's node dir nests under the .worktrees/.project/<branch>
 # project prefix (mirrors Node.node_dir); read the cache BEFORE the teardown
-# below removes it. the caller names the user branch (the checkout may sit
+# below removes it; the caller names the user branch (the checkout may sit
 # on another one); a standalone run falls back to the current branch
 if [[ -z "$BRANCH" ]]; then
     BRANCH=$(git -C "$REPO" rev-parse --abbrev-ref HEAD)
@@ -88,9 +89,8 @@ else
     WIKI_REL="$PROJECT/wiki"
 fi
 
-# find active worktrees -- worktree dirs are named by branch, so the
-# <branch>.* scope matches only the tree's own nodes and leaves sibling
-# trees standing
+# find active worktrees -- worktree dirs are named by branch, so the <branch>.*
+# scope matches only the tree's own nodes and leaves sibling trees standing
 WORKTREES=()
 if [[ -d "$WORKTREES_DIR" ]]; then
     for SUBDIR in "$WORKTREES_DIR"/*/; do
@@ -209,12 +209,14 @@ if [[ ${#WORKTREES[@]} -gt 0 ]]; then
 
         # abort if removal fails -- the rm -rf below would orphan the git
         # worktree registration, which git worktree prune can't clean
+        # 2>/dev/null: git's own fatal line would double the Error: below
         if ! git -C "$REPO" worktree remove --force "$WORKTREE" 2>/dev/null; then
             echo "Error: failed to remove worktree: $WORKTREE" >&2
             exit 1
         fi
-        # >/dev/null: drop git's own "Deleted branch ... (was <sha>)"
-        # so only the script's message below shows (no duplicate line)
+        # >/dev/null: drop git's own "Deleted branch ... (was <sha>)" so only
+        # the script's message below shows; 2>&1 || true: a branch already
+        # gone is not a failure
         git -C "$REPO" branch -D "$WT_BRANCH" >/dev/null 2>&1 || true
         echo "Deleted $WORKTREE ($WT_BRANCH)"
     done
@@ -225,10 +227,9 @@ fi
 # reads to re-derive NODE_DIR, so tearing the cache down first would strand
 # this dir (config + central DB) on a crash between the two removals while a
 # rerun reports nothing-to-destroy
-# an --all sweep removes every tree's data dir, not just the anchor's; the
-# caller named them (guarded expansion: an empty array reads as unset under
-# set -u on bash 3.2)
+# an --all sweep clears every data dir the caller named, not just the anchor's
 NODE_DIRS=("$NODE_DIR")
+# safe under set -u even on bash 3.2: an empty array reads as unset
 for ROOT_DIR in ${ROOT_DIRS[@]+"${ROOT_DIRS[@]}"}; do
     [[ "$REPO/$ROOT_DIR" == "$NODE_DIR" ]] && continue
     NODE_DIRS+=("$REPO/$ROOT_DIR")
@@ -238,12 +239,12 @@ for DIR in "${NODE_DIRS[@]}"; do
     [[ -d "$DIR" ]] || continue
     HAD_NODE=true
     rm -rf "$DIR"
-    # also strip the seed from git when it was tracked (fractal track
-    # committed it on the top-level branch); --cached leaves the already-removed
-    # tree alone and --ignore-unmatch makes this a no-op in the default
-    # git-excluded case, paralleling how merge.sh strips tracked child seeds
-    # (--quiet: drop git rm's per-file "rm '...'" lines so the removal
-    # message below stays the single user-facing line)
+    # also strip the seed from git when it was tracked (fractal track committed
+    # it on the top-level branch); --cached leaves the already-removed tree
+    # alone and --ignore-unmatch makes this a no-op in the default git-excluded
+    # case, paralleling how merge.sh strips tracked child seeds (--quiet: drop
+    # git rm's per-file "rm '...'" lines so the removal message below stays the
+    # single user-facing line)
     git -C "$REPO" rm -r --cached --quiet --ignore-unmatch -- "$DIR"
     # drop the containing .fractal/ when this was its last node
     rmdir "$(dirname "$DIR")" 2>/dev/null || true

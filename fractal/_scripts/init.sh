@@ -289,9 +289,9 @@ if [[ -z "$ROOT" ]]; then
     exit 1
 fi
 
-# reject a sub-1s duration: it passes the per-flag format check above but
-# the loop's duration validation rejects < 1s at launch, so catch it here at the init
-# boundary rather than letting a bad value abort only when the loop starts
+# reject a sub-1s duration: it passes the per-flag format check above but the
+# loop's duration validation rejects < 1s at launch, so catch it here at the
+# init boundary rather than letting a bad value abort only when the loop starts
 reject_subsecond() {
     local VALUE="$1"
     local LABEL="$2"
@@ -414,10 +414,10 @@ if [[ "$INHERIT_SKILLS" == true && ! -d "$PARENT_NODE_DIR/skills" ]]; then
     echo "Error: --inherit=skills: parent has no skills dir at $PARENT_NODE_DIR/skills/" >&2
     exit 1
 fi
-# an explicit steps dir must carry step files -- fail loudly (before any
-# worktree is created) rather than seeding an empty steps/; globbed with the
-# dir quoted so a metacharacter in its name stays literal (compgen -G would
-# pattern-expand it)
+# an explicit steps dir must carry step files -- fail loudly (before
+# any worktree is created) rather than seeding an empty steps/;
+# globbed with the dir quoted so a metacharacter in its name stays
+# literal (compgen -G would pattern-expand it)
 if [[ -n "$STEPS" ]]; then
     STEPS_MATCH=("$STEPS/"*.md)
     if [[ ! -e "${STEPS_MATCH[0]}" ]]; then
@@ -470,7 +470,7 @@ if [[ -f "$WORKTREES_DIR/.project/$BRANCH" ]]; then
     EXISTING_PROJECT=$(cat "$WORKTREES_DIR/.project/$BRANCH")
     if [[ "$EXISTING_PROJECT" != "$PROJECT_PATH" ]]; then
         echo "Error: branch '$BRANCH' already maps to project '$EXISTING_PROJECT';" \
-            "one branch maps to a single project — use a separate branch" >&2
+            "one branch maps to a single project -- use a separate branch" >&2
         exit 1
     fi
 fi
@@ -612,9 +612,9 @@ fi
 if [[ "$RESET" == true ]]; then
     rm -rf "$NODE_DIR/scripts"
 fi
-# seed only the mutable, per-node scripts (setup/test/lint);
-# skip the underscore-prefixed machinery
-# inherit the parent's live scripts when requested, else the package seed
+# seed only the mutable, per-node scripts (setup/test/lint),
+# skipping the underscore-prefixed machinery; inherit the parent's
+# live scripts when requested, else the package seed
 if [[ "$INHERIT_SCRIPTS" == true ]]; then
     SCRIPTS_SRC="$PARENT_NODE_DIR/scripts"
 else
@@ -639,7 +639,7 @@ if [[ "$RESET" == true ]]; then
 fi
 # inherit the parent's live skill set when requested, else the package seed
 # -- the copy is wholesale (a skill absent at the source is never copied; no
-# union across sources). An existing child skill dir is never touched, so a
+# union across sources); an existing child skill dir is never touched, so a
 # parent edit reaches an existing child only through --reset
 if [[ "$INHERIT_SKILLS" == true ]]; then
     SKILLS_SRC="$PARENT_NODE_DIR/skills"

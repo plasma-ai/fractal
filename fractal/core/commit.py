@@ -33,7 +33,7 @@ _STAGE_EXCLUDES = (
     # virtualenvs -- the dir entry and, for per-file listings, its contents
     ':!**/.venv',
     ':!**/.venv/**',
-    # the central DB and its sidecars (registry.db is the legacy spelling)
+    # the central DB and its sidecars, under either filename
     ':!**/.db',
     ':!**/.db-*',
     ':!**/registry.db',
@@ -130,7 +130,7 @@ def commit(
         if prefixed or re.match(r'iteration\b', lowered):
             raise RuntimeError(
                 f'Commit message {message!r} starts with the branch name or'
-                f" an 'iteration' label — the tool wraps the message as"
+                f" an 'iteration' label -- the tool wraps the message as"
                 f" '{node.branch}: iteration <run>.<iter> (<message>)'."
                 f' Re-commit with a bare lowercase summary.'
             )
@@ -211,11 +211,10 @@ def commit(
                 output.append(stream.strip())
 
     # stage relevant paths; closure so the post-hook retry can re-use it
-    # the record pass's notices ride the commit output -- a force-add past
-    # a host ignore rule, and any non-record file it refused, must be said
-    # out loud rather than inferred from the diff; the hook retry re-stages
-    # through this same closure, so the latest pass's notices are the ones
-    # reported
+    # the record pass's notices ride the commit output -- a force-add past a
+    # host ignore rule, and any non-record file it refused, must be said out
+    # loud rather than inferred from the diff; the hook retry re-stages through
+    # this same closure, so the latest pass's notices are the ones reported
     record_notices: list[str] = []
 
     def _stage_changes() -> None:
@@ -289,8 +288,8 @@ def commit(
             f'Warning: {skipped} path(s) skipped by ignore rules (see git check-ignore)'
         )
         output.append(skip_warning)
-    # an oversized staged file is usually an artifact staged by accident, but
-    # large commits are also legitimate -- so the size guard warns and never blocks
+    # an oversized staged file is usually an artifact staged by accident, but a
+    # large commit is also legitimate -- so the size guard warns and never blocks
     cmd = ['diff', '--cached', '--name-only', '--diff-filter=d', '-z']
     raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
     staged = os.fsdecode(raw)
@@ -598,7 +597,7 @@ def out_of_scope(
     sibling dir slip through as "in scope".
 
     Args:
-        paths: Repo-relative paths (empty entries are ignored).
+        paths: Repo-relative paths.
         bounds: The node's commit boundaries; empty roots mean unbounded,
             so nothing is out of scope.
         attributes_ok: Admit the worktree-root ``.gitattributes``: the
@@ -614,8 +613,6 @@ def out_of_scope(
         return []
     offending = []
     for path in sorted(set(paths)):
-        if not path:
-            continue
         # in scope: under any commit scope dir
         if any(path.startswith(f'{root}/') for root in bounds.roots):
             continue
@@ -773,7 +770,7 @@ _TOOL_STATE_FILES = ('.gitkeep',)
 
 
 def _is_committable(relpath: str, estate: str) -> bool:
-    """Whether an estate-relative path is content a node may commit.
+    """Return whether an estate-relative path is content a node may commit.
 
     One law governs both estate staging paths, because both decide what
     a node's own directory folds into git history: anything a node
@@ -801,9 +798,8 @@ def _is_committable(relpath: str, estate: str) -> bool:
         return False
     # a dot-named directory is machine or agent state (an agent config dir,
     # a parked .ssh/) unless it is the estate's own tool state
-    if any(
-        part.startswith('.') and part not in _TOOL_STATE_DIRS for part in parts[1:-1]
-    ):
+    dot_dirs = [part for part in parts[1:-1] if part.startswith('.')]
+    if any(part not in _TOOL_STATE_DIRS for part in dot_dirs):
         return False
     # the leaf is either named tool state or a record at a text suffix, so
     # no pass can stage a key, a certificate, an archive, or a binary
@@ -813,7 +809,7 @@ def _is_committable(relpath: str, estate: str) -> bool:
 
 
 def _is_refused_estate(relpath: str, fractal_prefix: str) -> bool:
-    """Whether a worktree path is estate content no staging pass may commit.
+    """Return whether a worktree path is estate content no staging pass may commit.
 
     Args:
         relpath: The file's worktree-relative path.
@@ -863,10 +859,10 @@ def _stage(
     worktree = node.worktree
     # settle the estate content law before any sweep, and withhold what it
     # refuses by name: what a node's own directory folds into history must
-    # not turn on whether a host rule happens to fence it. Naming refused
+    # not turn on whether a host rule happens to fence it; naming refused
     # paths (never a whole estate) keeps the sweeps whole -- an exclude
     # matching an ignored path fails the add outright, and an ignored path
-    # is already outside the sweep anyway.
+    # is already outside the sweep anyway
     denied = _estate_denied(node, fractal_prefix)
     withheld = [f':(exclude,literal){path}' for path in denied]
     # heal a baseline that force-tracked the wiki tool's self-ignored derived
@@ -915,7 +911,7 @@ def _stage(
 
 
 def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
-    """The estate directories the content law governs.
+    """Return the estate directories the content law governs.
 
     A self-ignored seed dir (the user node's untracked-by-design state)
     is not an estate the law speaks for, so it is left alone.
@@ -939,7 +935,7 @@ def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
 
 
 def _estate_denied(node: Node, fractal_prefix: str) -> list[str]:
-    """Estate content the law refuses to let a plain add stage.
+    """Return the estate content the law refuses to let a plain add stage.
 
     The plain adds would otherwise take anything a node parked in its
     estate -- a dotenv, a key, a downloaded credential -- the moment no
@@ -1015,9 +1011,9 @@ def _stage_records(node: Node, fractal_prefix: str, denied: list[str]) -> list[s
         # a broad foreign line shadows the block while barring the very same
         # artifact) plus the repo's committed per-directory .gitignore files
         # (repo content a node can see and fix; an estate cache's self-ignore
-        # rides here). The machine-local layers -- info/exclude beyond the
+        # rides here); the machine-local layers -- info/exclude beyond the
         # template's rules, core.excludesFile -- are deliberately absent:
-        # their holds are exactly what the force pass overrides.
+        # their holds are exactly what the force pass overrides
         assets = pathlib.Path(__file__).parent.parent / '_assets'
         template = assets / 'git' / 'exclude'
         cmd = [
@@ -1196,21 +1192,23 @@ def _hook_retry(
         # is meaningless for a byte-guarded seed page and vice versa
         details = []
         if broken:
+            listing = ', '.join(broken)
             details.append(
-                f'wiki pages with broken structure: {", ".join(broken)}'
+                f'wiki pages with broken structure: {listing}'
                 ' (hook rewrites of wiki pages must preserve wikilinks,'
-                ' frontmatter, and *** separators — give mdformat the'
+                ' frontmatter, and *** separators -- give mdformat the'
                 ' wikilink-aware plugin (additional_dependencies:'
                 ' [mdformat-wiki] on its hook, dropping mdformat-frontmatter'
-                ' if present — both register a frontmatter renderer and'
+                ' if present -- both register a frontmatter renderer and'
                 ' whichever is discovered first wins), or keep formatters'
                 ' off the wiki paths)'
             )
         if byte_gated:
+            listing = ', '.join(byte_gated)
             details.append(
-                f'byte-guarded pages: {", ".join(byte_gated)}'
+                f'byte-guarded pages: {listing}'
                 ' (seed and machine pages must never be rewritten by hooks'
-                ' — keep formatters off the .fractal/ paths)'
+                ' -- keep formatters off the .fractal/ paths)'
             )
         detail = '; '.join(details)
         raise RuntimeError(
@@ -1223,9 +1221,8 @@ def _hook_retry(
     # frontmatter values behind an intact fence, damage `wiki update` then
     # propagates into parent link rows and lint.sh only soft-warns -- so
     # lint every wiki root the hook touched, blaming the hook only for the
-    # roots that linted clean before its rewrite (a pre-existing failure
-    # keeps the pipeline's soft-warn tolerance instead of dead-ending every
-    # commit)
+    # roots that linted clean before its rewrite (a pre-existing failure keeps
+    # the pipeline's soft-warn tolerance instead of dead-ending every commit)
     notices: list[str] = []
     if retry:
         roots = set()
@@ -1300,7 +1297,7 @@ def _structure_preserved(
     tree_after: str,
     path: str,
 ) -> bool:
-    r"""Whether a hook's rewrite of a guarded page preserved wiki structure.
+    r"""Return whether a hook's rewrite of a guarded page preserved wiki structure.
 
     Compares the authored bytes against the rewrite on the invariants a
     structure-blind formatter breaks -- the wikilink opener count
@@ -1369,7 +1366,7 @@ def _lints_clean_at(
     wiki_cli: str,
     env: dict[str, str],
 ) -> bool:
-    """Whether the wiki root under ``root`` linted clean at ``tree``.
+    """Return whether the wiki root under ``root`` linted clean at ``tree``.
 
     Materializes the tree's root into a temp dir (``git archive``) and lints
     it there, so a pre-existing failure -- one the pipeline soft-warns on

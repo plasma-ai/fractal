@@ -162,13 +162,12 @@ def cli(**kwargs: Any) -> None:
     app.add_typer(event_app, hidden=True)
     # run app -- and make every failure unmistakable: errors already ride
     # stderr with a non-zero exit, but a decorative parse-error frame read
-    # through `tail -1` is indistinguishable from a success frame (the
-    # phantom-send class: a night of failed sends that looked delivered), so
-    # the LAST line of every failed command names the failure and exit code
+    # through `tail -1` is indistinguishable from a success frame, so the
+    # LAST line of every failed command names the failure and exit code
     try:
         app()
-    except SystemExit as exit_:
-        code = exit_.code
+    except SystemExit as e:
+        code = e.code
         if isinstance(code, int) and code != 0:
             line = f'FAILED (exit {code})'
             if sys.stderr.isatty():

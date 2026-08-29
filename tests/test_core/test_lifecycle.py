@@ -19,8 +19,9 @@ from typing import NoReturn, Optional
 
 import pytest
 
+import fractal.core.node
 from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, LOCK_FILE, PGID_FILE
-from fractal.core.node import Node, _group_alive
+from fractal.core.node import Node
 from tests._helpers import _git, _stub_run_script
 
 from .conftest import (
@@ -102,11 +103,11 @@ __all__ = [
     'test_merge_restores_parent_when_index_refresh_fails',
     'test_merge_refuses_when_parent_worktree_is_dirty',
     'test_merge_ignore_scope_lands_an_out_of_scope_squash',
+    'test_merge_refuses_settled_child_into_a_running_target',
+    'test_merge_event_survives_child_delete',
     'test_meta_node_scope_is_spelled_from_its_own_project',
     'test_meta_init_refuses_a_target_project_with_whitespace',
     'test_delete_judges_a_meta_nodes_unmerged_work_over_its_targets_seed',
-    'test_merge_refuses_settled_child_into_a_running_target',
-    'test_merge_event_survives_child_delete',
 ]
 
 
@@ -125,14 +126,16 @@ def test_full_run_lifecycle(node_with_db: Node) -> None:
     iter_id = node.record.iter_start(run_id=run_id, iter=1)
     assert isinstance(iter_id, int)
 
-    # start and end steps with cost
+    # start and end steps with cost -- the two step costs the rollups must sum
+    plan_cost = 0.50
+    execute_cost = 1.25
     step_1 = node.record.step_start(
         iter_id=iter_id,
         run_id=run_id,
         step=1,
         step_name='PLAN',
     )
-    node.record.step_cost(step_id=step_1, cost=0.50)
+    node.record.step_cost(step_id=step_1, cost=plan_cost)
     node.record.step_end(step_id=step_1, status='completed', exit_code=0)
 
     step_2 = node.record.step_start(
@@ -141,31 +144,31 @@ def test_full_run_lifecycle(node_with_db: Node) -> None:
         step=2,
         step_name='EXECUTE',
     )
-    node.record.step_cost(step_id=step_2, cost=1.25)
+    node.record.step_cost(step_id=step_2, cost=execute_cost)
     node.record.step_end(step_id=step_2, status='completed', exit_code=0)
 
     # verify step rows
     steps = node.db.read('steps', where={'run_id': run_id})
     assert len(steps) == 2
     costs = {row['step_name']: row['cost'] for row in steps}
-    assert costs['PLAN'] == 0.50
-    assert costs['EXECUTE'] == 1.25
+    assert costs['PLAN'] == plan_cost
+    assert costs['EXECUTE'] == execute_cost
 
     # per-step cost is queryable by step_id (powers the --max-step-cost warning)
-    assert node.cost.spent(step_id=step_1) == 0.50
-    assert node.cost.spent(step_id=step_2) == 1.25
+    assert node.cost.spent(step_id=step_1) == plan_cost
+    assert node.cost.spent(step_id=step_2) == execute_cost
 
     # end iteration -- cost rolls up from steps (derived, not stored)
     node.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
     iters = node.db.read('iters', where={'iter_id': iter_id})
-    assert node.cost.spent(iter_id=iter_id) == 1.75
+    assert node.cost.spent(iter_id=iter_id) == plan_cost + execute_cost
     assert iters[0]['status'] == 'completed'
     assert iters[0]['ended_at'] is not None
 
     # end run -- cost rolls up from steps; duration derived from started/ended
     node.record.run_end(run_id=run_id, status='completed', exit_code=0)
     runs = node.db.read('runs', where={'run_id': run_id})
-    assert node.cost.spent(run_id=run_id, max_depth=0) == 1.75
+    assert node.cost.spent(run_id=run_id, max_depth=0) == plan_cost + execute_cost
     assert runs[0]['status'] == 'completed'
     assert runs[0]['ended_at'] is not None
 
@@ -529,9 +532,8 @@ def test_headless_start_vets_a_same_named_session(
         if cmd[0] == 'ps':
             if attribution == 'no-answer':
                 return subprocess.CompletedProcess(cmd, 1, '', '')
-            return subprocess.CompletedProcess(
-                cmd, 0, f'bash start.sh {worktree} --resume\n', ''
-            )
+            stdout = f'bash start.sh {worktree} --resume\n'
+            return subprocess.CompletedProcess(cmd, 0, stdout, '')
         return real_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr('fractal.core.node.subprocess.run', fake_run)
@@ -563,11 +565,10 @@ def test_launch_headless_refuses_a_rival_claim(
     pgid_file.write_text('', encoding='utf-8')
     # the arm-specific wording carries the guidance: resume advises waiting
     # out the parking loop, start reports the second-launch refusal
-    match = (
-        'still running or parking.*a rival launch claimed the record'
-        if resume
-        else 'already exists: a rival launch claimed the record'
-    )
+    if resume:
+        match = 'still running or parking.*a rival launch claimed the record'
+    else:
+        match = 'already exists: a rival launch claimed the record'
     with pytest.raises(RuntimeError, match=match):
         node._launch_headless(resume=resume)
     # the rival's claim survives for its own pid write; no backend recorded
@@ -592,6 +593,7 @@ def test_launch_headless_re_vets_the_record_inside_the_lock(
     # the winner's live group, its pid landed after the loser's vet
     leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
     calls: list[pathlib.Path] = []
+    real_group_alive = fractal.core.node._group_alive
 
     def stale_then_real(probed: pathlib.Path) -> Optional[bool]:
         calls.append(probed)
@@ -599,7 +601,7 @@ def test_launch_headless_re_vets_the_record_inside_the_lock(
         # the winner has since replaced
         if len(calls) == 1:
             return False
-        return _group_alive(probed)
+        return real_group_alive(probed)
 
     monkeypatch.setattr('fractal.core.node._group_alive', stale_then_real)
     pgid_file.write_text(f'{leader.pid}\n', encoding='utf-8')
@@ -951,7 +953,7 @@ def test_signal_rejects_active_node_without_run(
     node_with_db: Node,
     signal: str,
 ) -> None:
-    """finish/stop reject an active node that has no run, rather than no-op.
+    """``finish``/``stop`` reject an active node that has no run, rather than no-op.
 
     The loop starts a run before marking itself active, so an active node with
     zero runs only happens if the status was set directly. ``signal_set`` would
@@ -1587,7 +1589,7 @@ def test_signals_recurse_to_active_descendants(
     monkeypatch: pytest.MonkeyPatch,
     signal: str,
 ) -> None:
-    """stop/finish reach every active descendant, not just the target node."""
+    """``stop``/``finish`` reach every active descendant, not just the target node."""
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
     # signal the parent -- the active child is signaled too (shell hooks stubbed)
     _stub_run_script(monkeypatch, Node)
@@ -1714,7 +1716,7 @@ def test_signals_reach_deep_through_inactive_intermediate(
     monkeypatch: pytest.MonkeyPatch,
     signal: str,
 ) -> None:
-    """stop/finish reach an active grandchild past a non-active child.
+    """``stop``/``finish`` reach an active grandchild past a non-active child.
 
     The flat ``nodes`` registry is authoritative: a non-active intermediate
     must not hide the active grandchild below it. A parent->child (non-flat)
@@ -1831,7 +1833,7 @@ def test_graceful_sweep_reaches_a_descendant_that_appears_mid_sweep(
 
 
 def test_merge_lifecycle(git_repo: pathlib.Path) -> None:
-    """Init, commit, squash-merge, and verify parent has changes."""
+    """A squash-merge lands the child's commit on the parent and keeps its worktree."""
     project_dir, branch = _init_and_commit(git_repo, 'feature')
 
     # squash-merge back to parent
@@ -1942,9 +1944,9 @@ def test_merge_excludes_merged_node_seed(git_repo: pathlib.Path) -> None:
     tracked = _git(git_repo, 'ls-files', f'.fractal/{branch}')
     assert tracked.stdout.strip() == ''
 
-    # re-merging re-stages the seed (the parent still lacks it), strips it, and
-    # finds nothing new -- the strip degrades to the clean no-op path, not an
-    # empty-commit crash
+    # re-merging re-stages the seed (the parent still lacks it), strips
+    # it, and finds nothing new -- the strip degrades to the clean no-op
+    # path, not an empty-commit crash
     output, _ = child_node.merge()
     assert 'Nothing to merge' in output
 
@@ -2130,153 +2132,6 @@ def test_merge_ignore_scope_lands_an_out_of_scope_squash(
     assert (git_repo / 'outside.txt').is_file()
 
 
-@pytest.mark.parametrize(
-    argnames=('path', 'branch', 'scope'),
-    argvalues=[
-        pytest.param(
-            '.worktrees/main.q', 'main.q.m', ['.fractal/main.q'], id='from-the-target'
-        ),
-        pytest.param(None, 'main.m', ['app/.fractal/main.q'], id='from-the-repo-root'),
-    ],
-)
-def test_meta_node_scope_is_spelled_from_its_own_project(
-    git_repo: pathlib.Path,
-    path: Optional[str],
-    branch: str,
-    scope: list[str],
-) -> None:
-    """A meta node's scope names the target's seed dir from the meta node's project.
-
-    Scope roots resolve against a node's own project, so a meta node whose
-    target is a sub-project node spells the target's seed dir bare when it
-    shares the target's project (initialized from the target's worktree) and
-    with the target's project prefix when it sits at the repo root. Either
-    way its edit to the target's contract lands through the merge, which
-    carves the scope root out of the ``.fractal/`` restore. A meta node in a
-    third project could not reach the target's seed at all, so its init
-    refuses naming both projects.
-    """
-    # committed sub-project wikis -- the base-ref precondition for their nodes
-    for project in ('app', 'lib'):
-        index = git_repo / project / 'wiki' / '_index.md'
-        index.parent.mkdir(parents=True)
-        index.write_text(
-            f'---\nname: {project}\n---\n# {project}\n\n***\n', encoding='utf-8'
-        )
-    _git(git_repo, 'add', 'app', 'lib')
-    _git(git_repo, 'commit', '-m', 'add project wikis')
-    Node(git_repo).init(agent='claude', user=True)
-    Node(git_repo).init(name='q', path='app')
-    target = git_repo / '.worktrees' / 'main.q'
-    # the target tracks its own estate, so the meta node forks with it
-    _git(target, 'add', '-A')
-    _git(target, 'commit', '-m', 'settle q estate')
-    Node(git_repo).init(name='m', meta='main.q', path=path)
-    meta = git_repo / '.worktrees' / branch
-    assert Node(meta).config.get('scope') == scope
-    assert Node(meta).config.get('base') == 'main.q'
-
-    # the meta node's edit to the target's contract lands on the target
-    contract = meta / 'app' / '.fractal' / 'main.q' / 'NODE.md'
-    contract.write_text(
-        contract.read_text(encoding='utf-8') + '\nTuned by the meta node.\n',
-        encoding='utf-8',
-    )
-    _git(meta, 'add', '-A')
-    _git(meta, 'commit', '-m', 'tune the target contract')
-    output, notices = Node(meta).merge()
-    assert 'Squash-merged' in output
-    assert 'changed paths under .fractal/' not in notices, notices
-    landed = (target / 'app' / '.fractal' / 'main.q' / 'NODE.md').read_text(
-        encoding='utf-8'
-    )
-    assert landed.endswith('Tuned by the meta node.\n')
-    assert _git(target, 'status', '--porcelain').stdout == ''
-
-    # a third project cannot spell a path to the target's seed
-    with pytest.raises(ValueError, match='outside this node'):
-        Node(git_repo).init(name='far', meta='main.q', path='lib')
-
-
-def test_meta_init_refuses_a_target_project_with_whitespace(
-    git_repo: pathlib.Path,
-) -> None:
-    """A meta node whose scope root would carry whitespace is refused at init.
-
-    The scope list key splits on whitespace, so a root spelled through a
-    sub-project directory with a space would land as two roots, and the meta
-    node's edits to its target's seed would fall outside its scope for the
-    merge to revert. The refusal lands before anything is created: no
-    worktree, branch, project-cache entry, or registry row.
-    """
-    project = 'sub proj'
-    index = git_repo / project / 'wiki' / '_index.md'
-    index.parent.mkdir(parents=True)
-    index.write_text('---\nname: sub\n---\n# sub\n\n***\n', encoding='utf-8')
-    _git(git_repo, 'add', project)
-    _git(git_repo, 'commit', '-m', 'add project wiki')
-    Node(git_repo).init(agent='claude', user=True)
-    Node(git_repo).init(name='q', path=project)
-    with pytest.raises(ValueError, match='contains whitespace'):
-        Node(git_repo).init(name='m', meta='main.q')
-    assert not (git_repo / '.worktrees' / 'main.m').exists()
-    assert not (git_repo / '.worktrees' / '.project' / 'main.m').exists()
-    assert _git(git_repo, 'branch', '--list', 'main.m').stdout.strip() == ''
-    assert [row['node'] for row in Node(git_repo).child_list()] == ['main.q']
-
-
-def test_delete_judges_a_meta_nodes_unmerged_work_over_its_targets_seed(
-    git_repo: pathlib.Path,
-) -> None:
-    """A meta node's unlanded edits to its target's seed warn at delete.
-
-    The unmerged check leaves ``.fractal/`` out as the seed the merge strips,
-    but a meta node's scope root is its target's seed dir -- the one path
-    under ``.fractal/`` the merge lands -- so all of a meta node's work would
-    otherwise be discarded with no warning. With a scope root under
-    ``.fractal/`` only the node's own seed (and its descendants') is left
-    out: the CLI's pre-prompt judgment and ``delete.sh``'s own agree that an
-    unlanded edit to the target's contract is work, and both go quiet once
-    the merge lands it.
-    """
-    Node(git_repo).init(agent='claude', user=True)
-    Node(git_repo).init(name='p')
-    target = git_repo / '.worktrees' / 'main.p'
-    # the target tracks its own estate, so the meta nodes fork with it
-    _git(target, 'add', '-A')
-    _git(target, 'commit', '-m', 'settle p estate')
-    for name in ('fix', 'tune'):
-        Node(git_repo).init(name=name, meta='main.p')
-        meta = git_repo / '.worktrees' / f'main.{name}'
-        _git(meta, 'add', '-A')
-        _git(meta, 'commit', '-m', f'seed {name}')
-        # the node's own seed is never work
-        assert Node(meta).unmerged_warning() == ''
-        contract = meta / '.fractal' / 'main.p' / 'NODE.md'
-        contract.write_text(
-            contract.read_text(encoding='utf-8') + f'\nTuned by {name}.\n',
-            encoding='utf-8',
-        )
-        _git(meta, 'add', '-A')
-        _git(meta, 'commit', '-m', f'{name}: tune the target contract')
-    unmerged = (
-        'Warning: main.fix has commits not merged into main.p; deleting'
-        ' discards them (merge first to keep them)'
-    )
-    fix = git_repo / '.worktrees' / 'main.fix'
-    assert Node(fix).unmerged_warning() == unmerged
-    # delete.sh makes the same judgment on its own path
-    _, notices = Node(fix).delete()
-    assert notices.count(unmerged) == 1, notices
-    # landed, the edit is no longer work to warn about
-    tune = git_repo / '.worktrees' / 'main.tune'
-    output, _ = Node(tune).merge()
-    assert 'Squash-merged' in output
-    assert Node(tune).unmerged_warning() == ''
-    _, notices = Node(tune).delete()
-    assert 'not merged' not in notices, notices
-
-
 def test_merge_refuses_settled_child_into_a_running_target(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2345,6 +2200,155 @@ def test_merge_event_survives_child_delete(git_repo: pathlib.Path) -> None:
     assert [row['metadata'] for row in survived] == [f'{branch} -> main']
     deletes = parent.db.read('events', where={'event': 'delete'})
     assert [row['metadata'] for row in deletes] == [branch]
+
+
+# ------ meta nodes
+
+
+@pytest.mark.parametrize(
+    argnames=('path', 'branch', 'scope'),
+    argvalues=[
+        pytest.param(
+            '.worktrees/main.q',
+            'main.q.m',
+            ['.fractal/main.q'],
+            id='from-the-target',
+        ),
+        pytest.param(None, 'main.m', ['app/.fractal/main.q'], id='from-the-repo-root'),
+    ],
+)
+def test_meta_node_scope_is_spelled_from_its_own_project(
+    git_repo: pathlib.Path,
+    path: Optional[str],
+    branch: str,
+    scope: list[str],
+) -> None:
+    """A meta node's scope names the target's seed dir from the meta node's project.
+
+    Scope roots resolve against a node's own project, so a meta node whose
+    target is a sub-project node spells the target's seed dir bare when it
+    shares the target's project (initialized from the target's worktree) and
+    with the target's project prefix when it sits at the repo root. Either
+    way its edit to the target's contract lands through the merge, which
+    carves the scope root out of the ``.fractal/`` restore. A meta node in a
+    third project could not reach the target's seed at all, so its init
+    refuses naming both projects.
+    """
+    # committed sub-project wikis -- the base-ref precondition for their nodes
+    for project in ('app', 'lib'):
+        index = git_repo / project / 'wiki' / '_index.md'
+        index.parent.mkdir(parents=True)
+        index.write_text(
+            f'---\nname: {project}\n---\n# {project}\n\n***\n',
+            encoding='utf-8',
+        )
+    _git(git_repo, 'add', 'app', 'lib')
+    _git(git_repo, 'commit', '-m', 'add project wikis')
+    Node(git_repo).init(agent='claude', user=True)
+    Node(git_repo).init(name='q', path='app')
+    target = git_repo / '.worktrees' / 'main.q'
+    # the target tracks its own estate, so the meta node forks with it
+    _git(target, 'add', '-A')
+    _git(target, 'commit', '-m', 'settle q estate')
+    Node(git_repo).init(name='m', meta='main.q', path=path)
+    meta = git_repo / '.worktrees' / branch
+    assert Node(meta).config.get('scope') == scope
+    assert Node(meta).config.get('base') == 'main.q'
+
+    # the meta node's edit to the target's contract lands on the target
+    contract = meta / 'app' / '.fractal' / 'main.q' / 'NODE.md'
+    tuned = contract.read_text(encoding='utf-8') + '\nTuned by the meta node.\n'
+    contract.write_text(tuned, encoding='utf-8')
+    _git(meta, 'add', '-A')
+    _git(meta, 'commit', '-m', 'tune the target contract')
+    output, notices = Node(meta).merge()
+    assert 'Squash-merged' in output
+    assert 'changed paths under .fractal/' not in notices, notices
+    tuned_contract = target / 'app' / '.fractal' / 'main.q' / 'NODE.md'
+    landed = tuned_contract.read_text(encoding='utf-8')
+    assert landed.endswith('Tuned by the meta node.\n')
+    assert _git(target, 'status', '--porcelain').stdout == ''
+
+    # a third project cannot spell a path to the target's seed
+    with pytest.raises(ValueError, match='outside this node'):
+        Node(git_repo).init(name='far', meta='main.q', path='lib')
+
+
+def test_meta_init_refuses_a_target_project_with_whitespace(
+    git_repo: pathlib.Path,
+) -> None:
+    """A meta node whose scope root would carry whitespace is refused at init.
+
+    The scope list key splits on whitespace, so a root spelled through a
+    sub-project directory with a space would land as two roots, and the meta
+    node's edits to its target's seed would fall outside its scope for the
+    merge to revert. The refusal lands before anything is created: no
+    worktree, branch, project-cache entry, or registry row.
+    """
+    project = 'sub proj'
+    index = git_repo / project / 'wiki' / '_index.md'
+    index.parent.mkdir(parents=True)
+    index.write_text('---\nname: sub\n---\n# sub\n\n***\n', encoding='utf-8')
+    _git(git_repo, 'add', project)
+    _git(git_repo, 'commit', '-m', 'add project wiki')
+    Node(git_repo).init(agent='claude', user=True)
+    Node(git_repo).init(name='q', path=project)
+    with pytest.raises(ValueError, match='contains whitespace'):
+        Node(git_repo).init(name='m', meta='main.q')
+    assert not (git_repo / '.worktrees' / 'main.m').exists()
+    assert not (git_repo / '.worktrees' / '.project' / 'main.m').exists()
+    assert _git(git_repo, 'branch', '--list', 'main.m').stdout.strip() == ''
+    assert [row['node'] for row in Node(git_repo).child_list()] == ['main.q']
+
+
+def test_delete_judges_a_meta_nodes_unmerged_work_over_its_targets_seed(
+    git_repo: pathlib.Path,
+) -> None:
+    """A meta node's unlanded edits to its target's seed warn at delete.
+
+    The unmerged check leaves ``.fractal/`` out as the seed the merge strips,
+    but a meta node's scope root is its target's seed dir -- the one path
+    under ``.fractal/`` the merge lands -- so all of a meta node's work would
+    otherwise be discarded with no warning. With a scope root under
+    ``.fractal/`` only the node's own seed (and its descendants') is left
+    out: the CLI's pre-prompt judgment and ``delete.sh``'s own agree that an
+    unlanded edit to the target's contract is work, and both go quiet once
+    the merge lands it.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    Node(git_repo).init(name='p')
+    target = git_repo / '.worktrees' / 'main.p'
+    # the target tracks its own estate, so the meta nodes fork with it
+    _git(target, 'add', '-A')
+    _git(target, 'commit', '-m', 'settle p estate')
+    for name in ('fix', 'tune'):
+        Node(git_repo).init(name=name, meta='main.p')
+        meta = git_repo / '.worktrees' / f'main.{name}'
+        _git(meta, 'add', '-A')
+        _git(meta, 'commit', '-m', f'seed {name}')
+        # the node's own seed is never work
+        assert Node(meta).unmerged_warning() == ''
+        contract = meta / '.fractal' / 'main.p' / 'NODE.md'
+        tuned = contract.read_text(encoding='utf-8') + f'\nTuned by {name}.\n'
+        contract.write_text(tuned, encoding='utf-8')
+        _git(meta, 'add', '-A')
+        _git(meta, 'commit', '-m', f'{name}: tune the target contract')
+    unmerged = (
+        'Warning: main.fix has commits not merged into main.p; deleting'
+        ' discards them (merge first to keep them)'
+    )
+    fix = git_repo / '.worktrees' / 'main.fix'
+    assert Node(fix).unmerged_warning() == unmerged
+    # delete.sh makes the same judgment on its own path
+    _, notices = Node(fix).delete()
+    assert notices.count(unmerged) == 1, notices
+    # landed, the edit is not work to warn about
+    tune = git_repo / '.worktrees' / 'main.tune'
+    output, _ = Node(tune).merge()
+    assert 'Squash-merged' in output
+    assert Node(tune).unmerged_warning() == ''
+    _, notices = Node(tune).delete()
+    assert 'not merged' not in notices, notices
 
 
 # ------ helpers

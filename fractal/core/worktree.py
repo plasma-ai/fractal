@@ -211,7 +211,7 @@ def ensure_git_repo(path: PathLike) -> None:
         if sha:
             return
     # init a fresh repo on the project-named branch; an existing repo with an
-    # unborn branch (a prior init whose commit failed) skips init and just births it
+    # unborn branch (a prior init whose commit failed) skips init and births it
     if git_dir is None:
         name = derive_project_name(target)
         fractal.util.git.run(['init', '-b', name], cwd=target)
@@ -404,7 +404,7 @@ def clone_cache_dirs(
         # config reaches here -- and a skip beats cloning an unrelated tree
         path = pathlib.PurePosixPath(rel)
         if path.is_absolute() or '..' in path.parts or not path.parts:
-            logger.info('Cache clone skipped for %s: not a repo-relative dir', rel)
+            logger.info(f'Cache clone skipped for {rel}: not a repo-relative dir')
             continue
         source = repo_dir / rel
         target = worktree_dir / rel
@@ -419,22 +419,21 @@ def clone_cache_dirs(
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(temp, ignore_errors=True)
             result = subprocess.run(
-                ['cp', '-c', '-R', str(source), str(temp)],
+                ['cp', '-c', '-R', f'{source}', f'{temp}'],
                 capture_output=True,
                 text=True,
             )
             if result.returncode != 0:
                 shutil.rmtree(temp, ignore_errors=True)
-                logger.info(
-                    'Cache clone skipped for %s: %s', rel, result.stderr.strip()
-                )
+                error = result.stderr.strip()
+                logger.info(f'Cache clone skipped for {rel}: {error}')
                 continue
             temp.rename(target)
         except OSError as error:
             shutil.rmtree(temp, ignore_errors=True)
-            logger.info('Cache clone skipped for %s: %s', rel, error)
+            logger.info(f'Cache clone skipped for {rel}: {error}')
             continue
-        logger.info('Cloned cache dir %s into %s', rel, worktree_dir)
+        logger.info(f'Cloned cache dir {rel} into {worktree_dir}')
 
 
 def exclude_strip(repo_dir: pathlib.Path) -> None:
@@ -524,11 +523,10 @@ def ensure_project_wiki(
     else:
         wiki_dir = worktree / path / 'wiki'
     if (wiki_dir / '_index.md').exists():
-        # an adopted index that lacks the tool's frontmatter stamps is
-        # flagged, not rewritten (init leaves tracked files alone): siblings
-        # forking from an unstamped index each stamp their own copy, and
-        # their merges then conflict on the created: line the merge driver
-        # cannot regenerate
+        # an adopted index that lacks the tool's frontmatter stamps is flagged,
+        # not rewritten (init leaves tracked files alone): siblings forking
+        # from an unstamped index each stamp their own copy, and their merges
+        # then conflict on the created: line the merge driver cannot regenerate
         index = (wiki_dir / '_index.md').read_text(encoding='utf-8')
         if not re.search(r'^created:', index, flags=re.MULTILINE):
             wiki_rel = wiki_dir.relative_to(worktree)
@@ -560,7 +558,7 @@ def ensure_project_wiki(
     if foreign and any(wiki_dir.iterdir()):
         relative = wiki_dir.relative_to(worktree)
         raise RuntimeError(
-            f'{relative}/ already exists and is not a project wiki —'
+            f'{relative}/ already exists and is not a project wiki --'
             ' adopting it would rewrite its files in place. Move the'
             ' directory aside and re-run init, or adopt it deliberately'
             f' first: wiki init --path={relative}'
@@ -579,7 +577,7 @@ def ensure_project_wiki(
         executable = fractal.util.system.console_script('wiki')
     except RuntimeError as e:
         raise RuntimeError(
-            "No 'wiki' executable found — install fractal's plasma-wiki"
+            "No 'wiki' executable found -- install fractal's plasma-wiki"
             ' dependency into its environment and re-run init.'
         ) from e
     cmd = [executable, 'init', name, f'--path={wiki_dir}', f'--settings={settings}']
@@ -587,7 +585,7 @@ def ensure_project_wiki(
     if result.returncode != 0:
         error = result.stderr.strip()
         raise RuntimeError(
-            f'wiki init failed (exit {result.returncode}): {error!r} —'
+            f'wiki init failed (exit {result.returncode}): {error!r} --'
             ' fix the cause and re-run init (a partial init is repaired'
             ' in place)'
         )
@@ -618,13 +616,13 @@ def verify_hook_formatters(repo_dir: pathlib.Path) -> None:
     if 'mdformat-wiki' in config or FRACTAL_FOLDER in config:
         return
     logger.warning(
-        'Note: this repo runs pre-commit hooks — structure-preserving'
+        'Note: this repo runs pre-commit hooks -- structure-preserving'
         ' reformats of wiki pages are auto-retried, structure-breaking ones'
         ' fail loud with the pages restored, and any hook rewrite of other'
         ' node-data pages (.fractal/ seeds) is refused outright. Give'
         ' mdformat the wikilink-aware plugin (additional_dependencies:'
         ' [mdformat-wiki] on its hook, dropping mdformat-frontmatter if'
-        ' present — both register a frontmatter renderer and whichever is'
+        ' present -- both register a frontmatter renderer and whichever is'
         ' discovered first wins), or keep formatters off the wiki paths.'
     )
 
@@ -659,7 +657,11 @@ def run_script(
     # mid-squash with the squash left staged
     cmd = ['bash', f'{script_path}', *args]
     with subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
     ) as process:
         try:
             stdout, stderr = process.communicate()
