@@ -1,9 +1,8 @@
 """Test the ``fractal.cli.utils`` module.
 
-The helpers are pinned where they surface: ``parse_reserve_budget`` in
-``test_reserve_budget``, node resolution in ``test_signal_guards``, and
-the ``command`` error wrapper behaviorally across the ``test_cli``
-suites (its interrupt line here). ``StreamRenderer``'s piped-stream
+The helpers are pinned where they surface: node resolution in
+``test_signal_guards``, and the ``command`` error wrapper behaviorally
+across the ``test_cli`` suites (its interrupt line here). ``StreamRenderer``'s piped-stream
 ordering lives here (its per-provider event rendering is pinned in
 ``test_impl``), as does ``resolve_headless``'s flag > env >
 recorded-backend cascade.

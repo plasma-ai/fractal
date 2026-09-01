@@ -117,6 +117,66 @@ DEFAULT_RESERVE_FRACTION = 0.10
 # stored; the two sites MUST round identically, so both quote this constant
 RESERVE_PRECISION = 4
 
+# signed 64-bit ceiling for SQLite INTEGER columns; an integer cap at or above
+# this raises a raw "int too large to convert" from the adapter downstream
+SQLITE_INT_MAX = 2**63
+
+
+def parse_reserve_budget(
+    value: Optional[str],
+    max_cost: Optional[float],
+    *,
+    default: str = f'{DEFAULT_RESERVE_FRACTION:.0%}',
+) -> Optional[float]:
+    """Resolve a ``--reserve-budget`` value to a USD amount.
+
+    The value is a USD number or ``N%`` of ``max_cost``; when omitted it falls
+    back to ``default`` (``10%`` of ``max_cost``), so a budget reserves a cleanup
+    buffer by default, and with no ``max_cost`` there is no reserve. The reserve
+    is not enforced -- it only moves when the node enters reserve mode (the budget
+    is treated as drained ``reserve_budget`` USD before ``max_cost`` is reached).
+
+    Args:
+        value: The raw ``--reserve-budget`` string (USD or ``N%``), or ``None``
+            to take ``default``.
+        max_cost: The node's ``--max-cost`` in USD; required when ``value`` is an
+            explicit reserve.
+        default: Reserve applied when ``value`` is ``None`` (USD or ``N%``).
+
+    Returns:
+        The reserve in USD -- ``default`` applied to ``max_cost`` when ``value``
+        is ``None``, or ``None`` when neither ``value`` nor ``max_cost`` is set.
+
+    Raises:
+        ValueError: If an explicit value is given without ``max_cost``,
+            is not a number, is negative, or is >= 99% of ``max_cost``.
+
+    """
+    if value is None:
+        if max_cost is None:
+            return None
+        value = default
+    if max_cost is None:
+        raise ValueError('--reserve-budget requires --max-cost.')
+    if max_cost <= 0:
+        raise ValueError('--max-cost must be greater than 0.')
+    value = value.strip()
+    try:
+        if value.endswith('%'):
+            reserve = float(value[:-1]) / 100 * max_cost
+        else:
+            reserve = float(value)
+    except ValueError:
+        raise ValueError('--reserve-budget must be a number or N%.') from None
+    if reserve < 0:
+        raise ValueError('--reserve-budget must be >= 0.')
+    if reserve >= 0.99 * max_cost:
+        raise ValueError('--reserve-budget must be < 99% of --max-cost.')
+    # money materializes at display precision -- a bare percent product
+    # (10% of $6) would otherwise persist binary noise into config.json
+    # and every echo that quotes it
+    return round(reserve, RESERVE_PRECISION)
+
 
 class Config:
     """Read/write surface for a node's ``config.json``.
@@ -253,7 +313,9 @@ class Config:
         the loop cannot enforce once the per-iter budget drains), an
         out-of-range reserve, a broken ``step <= iter <= run`` cost
         ordering, a non-integer or degenerate integer cap (a non-positive
-        ``max_iters`` reads as unlimited in the loop), a non-bool mode flag
+        ``max_iters`` reads as unlimited in the loop, and a cap at or past
+        the SQLite signed 64-bit ceiling raises raw from the adapter
+        mid-write), a non-bool mode flag
         (the loop's ``bool()`` coercion reads a hand-edited ``"false"``
         string as ``True``), a bare-number or zero-truncating duration
         (which bricks the loop at launch or at its mid-run re-reads), an
@@ -298,6 +360,11 @@ class Config:
                 continue
             if type(int_value) is not int:
                 raise ValueError(f'{int_key} must be an integer.')
+            # an integer cap lands in a SQLite INTEGER column; at or past the
+            # signed 64-bit ceiling the adapter raises raw mid-write (and can
+            # desync config from the DB), so refuse it up front
+            if int_value >= SQLITE_INT_MAX:
+                raise ValueError(f'{int_key} must be < {SQLITE_INT_MAX}.')
             if int_key == 'max_iters':
                 if int_value <= 0:
                     raise ValueError('max_iters must be greater than 0.')

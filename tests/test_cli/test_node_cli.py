@@ -60,6 +60,7 @@ __all__ = [
     'test_init_uncapped_priced_agent_warns',
     'test_init_uncapped_unpriced_agent_stays_quiet',
     'test_init_uncapped_warning_reads_the_spawning_parents_agent',
+    'test_init_uncapped_warning_reads_a_template_preset_cap',
     'test_init_blind_seeds_no_subs_and_start_sweeps',
     'test_merge_delete_reaps_the_merged_child',
     'test_merge_ignore_scope_flag_lands_an_out_of_scope_squash',
@@ -407,25 +408,26 @@ def test_init_reset_reinitializes_node(repo: dict) -> None:
 
 
 @pytest.mark.parametrize(
-    argnames='flag',
+    argnames=('flag', 'error'),
     argvalues=[
-        '--max-iters',
-        '--max-depth',
-        '--max-children',
-        '--max-cost',
-        '--max-iter-cost',
+        ('--max-iters', 'max_iters must be greater than 0'),
+        ('--max-depth', 'max_depth must be >= 0'),
+        ('--max-children', 'max_children must be >= 0'),
+        ('--max-cost', 'max_cost must be greater than 0'),
+        ('--max-iter-cost', 'max_iter_cost must be greater than 0'),
     ],
 )
-def test_init_rejects_negative_limits(repo: dict, flag: str) -> None:
-    """``init`` rejects every negative numeric cap (``BadParameter``, exit 2).
+def test_init_rejects_negative_limits(repo: dict, flag: str, error: str) -> None:
+    """``init`` rejects every negative numeric cap (exit 2, naming the key).
 
-    The CLI boundary refuses negative limits uniformly -- unbounded is expressed
-    by omitting the flag, never a negative sentinel -- matching ``update`` and
-    ``list``. Rejection happens before any node is created.
+    The refusal runs in core on the merged config -- a negative cap from a
+    template preset refuses exactly like the flag -- so the message names
+    the config key. Unbounded is expressed by omitting the flag, never a
+    negative sentinel, and rejection happens before any node is created.
     """
     result = _run(repo['root'], 'node', 'init', 'neg', '--agent', 'claude', flag, '-1')
     assert result.returncode == 2, result.stderr
-    assert flag in (result.stdout + result.stderr)
+    assert error in (result.stdout + result.stderr)
 
 
 @pytest.mark.parametrize('flag', ['--max-iter-cost', '--max-step-cost'])
@@ -434,14 +436,14 @@ def test_init_rejects_iter_cost_without_max_cost(repo: dict, flag: str) -> None:
 
     A node always carries its own ``max_cost`` (``start`` refuses without a
     positive one), so an iter/step cap alone would build a node that can never
-    start. The CLI rejects it up front (``BadParameter``, exit 2, naming
-    ``--max-cost``) and creates no node, rather than letting it wedge at launch;
+    start. The merged-config validation rejects it up front (exit 2, naming
+    ``max_cost``) and creates no node, rather than letting it wedge at launch;
     pairing the cap with a ``--max-cost`` succeeds.
     """
     root = repo['root']
     rejected = _run(root, 'node', 'init', 'capless', '--agent', 'claude', flag, '5')
     assert rejected.returncode == 2, rejected.stderr
-    assert '--max-cost' in (rejected.stdout + rejected.stderr)
+    assert 'max_cost' in (rejected.stdout + rejected.stderr)
     # the rejected init created nothing -- no worktree for the would-be node
     assert not (root / '.worktrees' / 'main.capless').exists()
     # the same cap with a run ceiling is accepted
@@ -464,11 +466,11 @@ def test_init_rejects_iter_cost_without_max_cost(repo: dict, flag: str) -> None:
 
 @pytest.mark.parametrize(argnames='value', argvalues=['0', '-3'])
 def test_init_rejects_non_positive_max_iters(repo: dict, value: str) -> None:
-    """``init`` rejects a non-positive ``--max-iters`` (``BadParameter``, exit 2).
+    """``init`` rejects a non-positive ``--max-iters`` (exit 2).
 
     A non-positive cap reads as unlimited in the loop, so 0 would build a
-    node that iterates without bound instead of never -- the CLI refuses it
-    with the config setter's phrasing before any node is created.
+    node that iterates without bound instead of never -- the merged-config
+    validation refuses it before any node is created.
     """
     root = repo['root']
     result = _run(
@@ -821,6 +823,61 @@ def test_init_uncapped_warning_reads_the_spawning_parents_agent(repo: dict) -> N
     assert '--max-cost' not in spawn.stderr
     # clean up so the shared module fixture is left as other tests expect
     assert _run(root, 'node', 'delete', 'main.coparent', '--force').returncode == 0
+
+
+def test_init_uncapped_warning_reads_a_template_preset_cap(repo: dict) -> None:
+    """A template preset cap silences the uncapped-spend warning.
+
+    The warning's flag-only view would call a preset-capped node unbounded,
+    so the CLI reads the merged caps back from the child's stored config: a
+    node capped by its template draws no warning (and carries the preset
+    cap), while a template with no caps still warns.
+    """
+    root = repo['root']
+    # commit a capped and a capless template -- template bytes deploy from
+    # the fork commit, never the working copy
+    for folder, preset in (('capped', '{"max_cost": 5}'), ('bare', '{}')):
+        config = root / 'templates' / folder / 'config.json'
+        config.parent.mkdir(parents=True)
+        config.write_text(preset + '\n', encoding='utf-8')
+    _git(root, 'add', 'templates')
+    _git(root, 'commit', '-m', 'add templates')
+    try:
+        spawn = _run(
+            root,
+            'node',
+            'init',
+            'presetcap',
+            '--agent',
+            'claude',
+            '--template',
+            'templates/capped',
+        )
+        assert spawn.returncode == 0, spawn.stderr
+        assert '--max-cost' not in spawn.stderr
+        node = root / '.worktrees' / 'main.presetcap'
+        assert _config(node, 'max_cost') == '5'
+        bare = _run(
+            root,
+            'node',
+            'init',
+            'barecap',
+            '--agent',
+            'claude',
+            '--template',
+            'templates/bare',
+        )
+        assert bare.returncode == 0, bare.stderr
+        warnings = [
+            line
+            for line in bare.stderr.splitlines()
+            if '--max-cost' in line and '--max-iters' in line
+        ]
+        assert len(warnings) == 1, bare.stderr
+    finally:
+        # clean up so the shared module fixture is left as other tests expect
+        for worker in ('main.presetcap', 'main.barecap'):
+            _run(root, 'node', 'delete', worker, '--force')
 
 
 def test_init_blind_seeds_no_subs_and_start_sweeps(

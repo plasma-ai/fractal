@@ -1,9 +1,12 @@
 """Unit tests for ``--reserve-budget`` parsing (USD or percent of max_cost).
 
-``parse_reserve_budget`` is the CLI boundary that resolves ``--reserve-budget``
-to a USD amount: a bare number is taken as-is, ``N%`` is a fraction of
-``--max-cost``. It enforces the option's contract -- max_cost is required, the
-value is non-negative, and a reserve >= 99% of max_cost is refused.
+``parse_reserve_budget`` is the shared resolver that turns a
+``--reserve-budget`` value into a USD amount: a bare number is taken
+as-is, ``N%`` is a fraction of the ceiling. Node init calls it on the
+merged config (flag > template preset > default) and ``node update`` on
+the effective cap; both rely on its contract -- max_cost is required for
+an explicit value, the value is non-negative, and a reserve >= 99% of
+max_cost is refused.
 """
 
 from __future__ import annotations
@@ -11,9 +14,8 @@ from __future__ import annotations
 from typing import Optional
 
 import pytest
-import typer
 
-from fractal.cli.utils import parse_reserve_budget
+from fractal.core.config import parse_reserve_budget
 
 __all__ = [
     'test_parse_reserve_budget_resolves',
@@ -87,6 +89,6 @@ def test_parse_reserve_budget_rejects(
     max_cost: Optional[float],
     message: str,
 ) -> None:
-    """Invalid reserve budgets raise ``BadParameter`` with a pointed message."""
-    with pytest.raises(typer.BadParameter, match=message):
+    """Invalid reserve budgets raise ``ValueError`` with a pointed message."""
+    with pytest.raises(ValueError, match=message):
         parse_reserve_budget(value, max_cost)

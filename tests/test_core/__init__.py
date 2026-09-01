@@ -23,6 +23,7 @@ from .test_radio import *
 from .test_reconcile import *
 from .test_record import *
 from .test_render import *
+from .test_reserve_budget import *
 from .test_session import *
 from .test_teardown import *
 from .test_time import *

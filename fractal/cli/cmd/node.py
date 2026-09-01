@@ -12,7 +12,6 @@ import typer
 from fractal.cli.utils import (
     StreamRenderer,
     command,
-    parse_reserve_budget,
     print_json,
     print_rows,
     require_non_negative,
@@ -21,9 +20,10 @@ from fractal.cli.utils import (
     resolve_node,
     resolve_target,
 )
-from fractal.constants import STATUSES
+from fractal.constants import STATUSES, WORKTREES_FOLDER
 from fractal.core.agent import seed_agents
 from fractal.core.commit import out_of_scope, scope_boundaries
+from fractal.core.config import parse_reserve_budget
 from fractal.core.loop import Loop
 from fractal.core.node import Node
 
@@ -287,31 +287,9 @@ def node_init(app: typer.Typer) -> typer.Typer:
         author its Instructions and Completion Requirements sections,
         then ``fractal node start <name>``.
         """
-        # a per-iter/step cap with no run ceiling can't be enforced
-        # (once the per-iter budget drains, later steps run unbounded)
-        # -- reject at creation so the operator fixes it now, not at
-        # runtime; no cost flags at all is allowed and runs uncapped
-        if max_cost is None:
-            if max_iter_cost is not None:
-                raise typer.BadParameter('--max-iter-cost requires --max-cost.')
-            if max_step_cost is not None:
-                raise typer.BadParameter('--max-step-cost requires --max-cost.')
-        # max_iters must be positive like the config setter enforces -- a
-        # non-positive cap reads as unlimited in the loop, so 0 would build
-        # a node that iterates without bound instead of never
-        if max_iters is not None and max_iters <= 0:
-            raise typer.BadParameter('--max-iters must be greater than 0.')
-        require_non_negative(
-            max_iters=max_iters,
-            max_depth=max_depth,
-            max_children=max_children,
-            max_descendants=max_descendants,
-            step_retries=step_retries,
-            max_cost=max_cost,
-            max_iter_cost=max_iter_cost,
-            max_step_cost=max_step_cost,
-        )
-        reserve_budget = parse_reserve_budget(reserve_budget, max_cost)
+        # the cap and reserve checks live in Node.init, which runs them on
+        # the merged values (flag > template preset > inherited > default) --
+        # a flag-only check here would miss every preset-supplied cap
         node, path = resolve_init_target(path)
         output = node.init(
             name=name,
@@ -365,6 +343,17 @@ def node_init(app: typer.Typer) -> typer.Typer:
             parent = Node.resolve_caller()
             if parent is None or parent.repo_dir != node.repo_dir:
                 parent = node
+            # a template preset can cap or re-agent what the flags left unset
+            # -- the child's stored config holds the merged values, so read
+            # them back rather than warn a preset-capped node it is unbounded
+            if template is not None:
+                child_branch = f'{parent.branch}.{name}'
+                child = Node(node.repo_dir / WORKTREES_FOLDER / child_branch)
+                if child.exists():
+                    max_cost = child.config.get('max_cost')
+                    max_iters = child.config.get('max_iters')
+                    if agent is None:
+                        agent = child.config.get('agent')
             effective_agent = agent or parent.agent_effective()
             tracked = True
             # the probe anchors the agent registry's database on an initialized
@@ -378,7 +367,7 @@ def node_init(app: typer.Typer) -> typer.Typer:
                     tracked = parent.agent(effective_agent).tracks_cost(model)
                 except ValueError:
                     tracked = True
-            if tracked:
+            if tracked and max_cost is None and max_iters is None:
                 typer.echo(
                     'Warning: no --max-cost/--max-iters -- this node can run'
                     ' and spend without bound.',
@@ -1318,9 +1307,9 @@ def node_update(app: typer.Typer) -> typer.Typer:
         parent = target.parent
         if parent is None:
             raise typer.BadParameter(f'Parent worktree not found: {target.branch}.')
-        # resolve an explicit reserve to USD against the effective cap -- the
-        # N% grammar is CLI surface and never enters core; the default-mode
-        # reserve retune is core's (child_retune)
+        # resolve an explicit reserve to USD against the effective cap
+        # through core's resolver (the default-mode reserve retune is core's
+        # own, in child_retune)
         new_reserve = None
         if reserve_budget is not None:
             if max_cost is not None:

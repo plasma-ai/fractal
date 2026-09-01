@@ -8,6 +8,7 @@ nested worktrees, bad durations).
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
@@ -60,7 +61,11 @@ __all__ = [
     'test_init_template_deploys_every_surface_from_the_commit',
     'test_init_template_reads_the_fork_commit',
     'test_init_template_include_exclude_recorded_and_honored',
+    'test_init_template_preset_fills_unset_flags',
+    'test_init_template_preset_reserve_resolves_against_the_merged_ceiling',
     'test_init_template_refusals_leave_nothing_behind',
+    'test_init_template_preset_refuses_disallowed_keys',
+    'test_init_template_preset_caps_refuse_like_flags',
     'test_init_template_resolves_the_same_path_from_any_cwd',
     'test_reset_without_template_drops_the_provenance',
     'test_pin_without_a_template_still_validates',
@@ -1133,6 +1138,108 @@ def test_init_template_include_exclude_recorded_and_honored(
     assert 'exclude' not in data
 
 
+def test_init_template_preset_fills_unset_flags(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The config preset fills unset flags: flag > preset > inherited > default.
+
+    A template's ``config.json`` presets run config for every spawn it
+    seeds: an explicit flag still wins, the preset beats the value
+    ``--inherit=config`` would copy from the parent, and a key nobody sets
+    keeps the package default. The flag checks run on the merged values, so a
+    flag ``--max-iter-cost`` is legal against a preset ``max_cost``, and
+    the registry row records the preset cap the parent's budget law must
+    see.
+    """
+
+    def node_dir(branch: str) -> pathlib.Path:
+        return git_repo / '.worktrees' / branch / '.fractal' / branch
+
+    Node(git_repo).init(agent='claude', user=True)
+    preset = {'model': 'sonnet', 'max_cost': 10, 'sync': False}
+    _commit_template(
+        git_repo,
+        'templates/crew',
+        {
+            'config.json': json.dumps(preset) + '\n',
+            'steps/01-GO.md': '# go\n',
+        },
+    )
+    crew = f'{git_repo}/templates/crew'
+    # a parent whose preferences rival the preset's
+    Node(git_repo).init(name='mgr', model='opus', step_timeout='10m')
+    monkeypatch.setenv('_NODE', str(node_dir('main.mgr')))
+    # a flag --max-iter-cost is accepted against the preset ceiling
+    Node(git_repo).init(
+        name='sub',
+        template=crew,
+        inherit=['config'],
+        max_iter_cost=2.0,
+    )
+    sub = Node(git_repo / '.worktrees' / 'main.mgr.sub')
+    # the preset beats the parent's inherited model; the parent still
+    # fills the keys the preset lacks; nobody set detached, so it stays
+    # at the package default (null)
+    assert sub.config.get('model') == 'sonnet'
+    assert sub.config.get('step_timeout') == '10m'
+    assert sub.config.get('max_cost') == 10
+    assert sub.config.get('max_iter_cost') == 2.0
+    assert sub.config.get('sync') is False
+    assert sub.config.get('detached') is None
+    # the registry row carries the preset cap, not a blank
+    rows = Node(git_repo).db.read('nodes', where={'node': 'main.mgr.sub'})
+    assert [row['max_cost'] for row in rows] == [10]
+    # an explicit flag beats the preset
+    Node(git_repo).init(name='pinned', template=crew, model='haiku')
+    pinned = Node(git_repo / '.worktrees' / 'main.mgr.pinned')
+    assert pinned.config.get('model') == 'haiku'
+    assert pinned.config.get('max_cost') == 10
+
+
+def test_init_template_preset_reserve_resolves_against_the_merged_ceiling(
+    git_repo: pathlib.Path,
+) -> None:
+    """``--reserve-budget`` resolves against the merged ``max_cost``.
+
+    The reserve resolves after the preset merge, so a percent flag is a
+    fraction of the preset ceiling, an absent flag takes the 10% default
+    of that same ceiling (a null preset key reads as unset, exactly like
+    config.json's own nulls), a preset ``reserve_budget`` (already USD)
+    lands as written, and the flag still beats it.
+    """
+
+    def reserve_of(branch: str) -> float:
+        node = Node(git_repo / '.worktrees' / branch)
+        return node.config.get('reserve_budget')
+
+    Node(git_repo).init(agent='claude', user=True)
+    _commit_template(
+        git_repo,
+        'templates/capped',
+        {'config.json': json.dumps({'max_cost': 8, 'reserve_budget': None}) + '\n'},
+    )
+    capped = f'{git_repo}/templates/capped'
+    _commit_template(
+        git_repo,
+        'templates/funded',
+        {'config.json': json.dumps({'max_cost': 8, 'reserve_budget': 1.5}) + '\n'},
+    )
+    funded = f'{git_repo}/templates/funded'
+    # a percent flag resolves against the preset ceiling
+    Node(git_repo).init(name='pct', template=capped, reserve_budget='25%')
+    assert reserve_of('main.pct') == 2.0
+    # no flag: the default 10% of the preset ceiling
+    Node(git_repo).init(name='dflt', template=capped)
+    assert reserve_of('main.dflt') == 0.8
+    # a preset reserve is already USD and lands as written
+    Node(git_repo).init(name='preset', template=funded)
+    assert reserve_of('main.preset') == 1.5
+    # the flag beats the preset reserve
+    Node(git_repo).init(name='flag', template=funded, reserve_budget='25%')
+    assert reserve_of('main.flag') == 2.0
+
+
 def test_init_template_refusals_leave_nothing_behind(
     git_repo: pathlib.Path,
 ) -> None:
@@ -1207,6 +1314,64 @@ def test_init_template_refusals_leave_nothing_behind(
     ):
         Node(git_repo).init(name='task', template=crew, exclude=['steps/99-NOPE.md'])
     # nothing landed -- no worktree, no registry row
+    assert not (git_repo / '.worktrees' / 'main.task').exists()
+    assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+
+
+def test_init_template_preset_refuses_disallowed_keys(
+    git_repo: pathlib.Path,
+) -> None:
+    """A preset key outside the allowlist refuses at init by name.
+
+    A preset may carry only budget, limit, duration, model, and mode keys:
+    an identity or immutable key (``scope``, ``title``, ``root``) belongs
+    to the spawn, and an unknown key is a typo that would otherwise
+    silently preset nothing -- each refusal names the key, and nothing is
+    created.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    disallowed = [
+        ({'scope': ['src']}, "may not set 'scope'"),
+        ({'title': 'Crew'}, "may not set 'title'"),
+        ({'root': 'main'}, "may not set 'root'"),
+        ({'max_costt': 5}, "Unknown template preset key: 'max_costt'"),
+    ]
+    for preset, match in disallowed:
+        _commit_template(
+            git_repo,
+            'templates/crew',
+            {'config.json': json.dumps(preset) + '\n'},
+        )
+        with pytest.raises(ValueError, match=match):
+            Node(git_repo).init(name='task', template=f'{git_repo}/templates/crew')
+    assert not (git_repo / '.worktrees' / 'main.task').exists()
+    assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+
+
+def test_init_template_preset_caps_refuse_like_flags(
+    git_repo: pathlib.Path,
+) -> None:
+    """A degenerate preset cap refuses exactly as the matching flag does.
+
+    The cap checks run on the merged values, so a preset ``max_iters`` of
+    0 (unlimited in the loop, never never-run), a negative preset cap, and
+    a preset per-iteration cap with no run ceiling anywhere all refuse
+    before any worktree exists, with the flag checks' own wording.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    degenerate = [
+        ({'max_iters': 0}, 'max_iters must be greater than 0'),
+        ({'max_depth': -1}, 'max_depth must be >= 0'),
+        ({'max_iter_cost': 1.0}, 'max_iter_cost requires max_cost'),
+    ]
+    for preset, match in degenerate:
+        _commit_template(
+            git_repo,
+            'templates/crew',
+            {'config.json': json.dumps(preset) + '\n'},
+        )
+        with pytest.raises(ValueError, match=match):
+            Node(git_repo).init(name='task', template=f'{git_repo}/templates/crew')
     assert not (git_repo / '.worktrees' / 'main.task').exists()
     assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import pathlib
 import subprocess
 import tarfile
@@ -13,10 +14,40 @@ import tomli_w
 import fractal.util
 from fractal.constants import CONFIG_FILE, FRACTAL_FOLDER, WORKTREES_FOLDER
 
+from .config import KEYS
+
 __all__ = []
 
 #: per-node template provenance file in the node's data directory
 TEMPLATE_FILE = '_template.toml'
+
+#: config keys a template preset may carry -- the budget, limit, duration,
+#: model, and mode subset of a node's config keys; identity and immutable
+#: keys (title, scope, base, ...) refuse at init by name
+PRESET_KEYS = (
+    'agent',
+    'provider',
+    'model',
+    'effort',
+    'max_iters',
+    'max_depth',
+    'max_children',
+    'max_descendants',
+    'timeout',
+    'iter_timeout',
+    'step_timeout',
+    'step_retries',
+    'step_retry_backoff',
+    'interval',
+    'sleep',
+    'wait',
+    'max_cost',
+    'max_iter_cost',
+    'max_step_cost',
+    'reserve_budget',
+    'sync',
+    'detached',
+)
 
 
 def locate(
@@ -192,6 +223,62 @@ def materialize(
             ' template folder.'
         )
     return root
+
+
+def read_preset(
+    bundle: pathlib.Path,
+    *,
+    path: str,
+) -> dict[str, Any]:
+    """Read the config preset from a materialized bundle.
+
+    The preset is the template's ``config.json`` -- a subset of a node's
+    own config keys, typed the same way -- and fills each init flag the
+    spawn left unset. Only budget, limit, duration, model, and mode keys
+    (:data:`PRESET_KEYS`) may appear: identity and immutable keys belong
+    to the spawn, and an unknown key is a typo that would otherwise
+    silently preset nothing.
+
+    Args:
+        bundle: The bundle root.
+        path: Worktree-relative template folder path (POSIX), for messages.
+
+    Returns:
+        The preset mapping, with null (unset) values dropped.
+
+    Raises:
+        ValueError: If the preset is not valid JSON, is not a JSON
+            object, or carries a key outside :data:`PRESET_KEYS`.
+
+    """
+    # the file always exists -- its presence is what marked the folder a
+    # template in materialize -- but its content is external input
+    text = (bundle / CONFIG_FILE).read_text(encoding='utf-8')
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f'Template preset {path}/{CONFIG_FILE} is not valid JSON: {e}'
+        ) from e
+    if not isinstance(data, dict):
+        raise ValueError(
+            f'Template preset {path}/{CONFIG_FILE} does not hold a JSON object.'
+        )
+    # identity and immutable keys are the spawn's own, and an unknown key
+    # would silently preset nothing -- both refuse by name
+    for key in data:
+        if key in PRESET_KEYS:
+            continue
+        if key in KEYS:
+            raise ValueError(
+                f'Template preset may not set {key!r}: identity and'
+                ' immutable keys are never preset -- a preset carries only'
+                ' budget, limit, duration, model, and mode keys.'
+            )
+        raise ValueError(f'Unknown template preset key: {key!r}.')
+    # null is config.json's spelling for unset: the key defers to the
+    # inherit-or-default source, exactly as an omitted key does
+    return {key: value for key, value in data.items() if value is not None}
 
 
 def trim(
