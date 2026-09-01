@@ -134,10 +134,11 @@ node at ``--path``.
        filling each run-config flag the spawn left unset (a flag wins over
        the preset; the preset beats an inherited value). Every template
        refusal — an untracked folder, a symlink, a credential-named file
-       under ``agents/``, a broken ``steps/`` contract, an unfilled
-       ``{{slot}}``, a truncated charter — fires before any worktree
-       exists. One notice appended to the init output names the ``@<ref>``
-       form when the root branch holds a different copy of the folder.
+       anywhere in the folder, a file a seed surface would silently skip,
+       a broken ``steps/`` contract, an unfilled ``{{slot}}``, a
+       truncated charter — fires before any worktree exists. One notice
+       appended to the init output names the ``@<ref>`` form when the
+       root branch holds a different copy of the folder.
    * - ``--include <path>``
      - whole template
      - Deploy only these template-relative paths (repeatable; a directory
@@ -171,7 +172,9 @@ node at ``--path``.
        ``docket: <path>`` line must resolve at the pin (``--pin`` when
        given, else the charter's own, else the fork commit) — a stale or
        truncated seed dies at init, not at the commission's first seat.
-       Also fills the ``{{pin}}`` slot.
+       Also fills the ``{{pin}}`` slot; a ``pin`` supplied through
+       ``--set``/``--values`` must agree with ``--pin``, and a differing
+       pair refuses.
    * - ``--agent <command>``
      - nearest ancestor's
      - Agent command, validated against the agent registry (a typo refuses).
@@ -956,7 +959,10 @@ worktree — a node may not edit its own seed.
    Re-point the node at another template folder: the new path and the
    commit read (the node branch's own tip unless ``@<ref>`` names one) land
    in ``_template.toml``, and the node reseeds from it — memory and config
-   stay intact, so a moved template is followed with one command.
+   stay intact, so a moved template is followed with one command. One
+   notice names the ``@<root>`` form when the root branch holds a
+   different copy of the folder (a plain or ``--ref`` reseed stays
+   silent).
 
 ``--force`` / ``-f``
    Reseed even while the node is active or paused.

@@ -68,7 +68,8 @@ __all__ = [
     'test_init_template_preset_reserve_resolves_against_the_merged_ceiling',
     'test_init_template_refusals_leave_nothing_behind',
     'test_init_template_refuses_a_boundary_path',
-    'test_init_template_refuses_agent_credentials',
+    'test_init_template_refuses_credential_named_files',
+    'test_init_template_refuses_files_the_seed_would_skip',
     'test_init_template_preset_refuses_disallowed_keys',
     'test_init_template_preset_caps_refuse_like_flags',
     'test_init_template_resolves_the_same_path_from_any_cwd',
@@ -1162,11 +1163,11 @@ def test_init_template_listing_trims_before_the_contract_checks(
     """The contract checks judge the effective set, not the whole folder.
 
     The listing trims the bundle first, so an excluded offender cannot
-    refuse the init: dropping the width-conflicting step makes a mixed
-    ``steps/`` legal, and excluding ``steps/`` outright clears the rival
-    source ``--inherit=steps`` refuses. The checks still judge what
-    deploys: a ``steps/`` whose survivors carry no step files refuses
-    rather than deploying an empty surface.
+    refuse the init: dropping the width-conflicting step and the stray
+    note makes a mixed ``steps/`` legal, and excluding ``steps/``
+    outright clears the rival source ``--inherit=steps`` refuses. The
+    checks still judge what deploys: a ``steps/`` whose survivors carry
+    no step files refuses rather than deploying an empty surface.
     """
 
     def node_dir(branch: str) -> pathlib.Path:
@@ -1184,8 +1185,13 @@ def test_init_template_listing_trims_before_the_contract_checks(
         },
     )
     mixed = f'{git_repo}/templates/mixed'
-    # excluding the width-conflicting step makes the mixed profile legal
-    Node(git_repo).init(name='lean', template=mixed, exclude=['steps/0-SCOUT.md'])
+    # excluding the width-conflicting step and the stray note (a file
+    # the seed would skip) makes the mixed profile legal
+    Node(git_repo).init(
+        name='lean',
+        template=mixed,
+        exclude=['steps/0-SCOUT.md', 'steps/notes.txt'],
+    )
     lean_steps = node_dir('main.lean') / 'steps'
     assert sorted(f.name for f in lean_steps.glob('*.md')) == ['01-STRIKE.md']
     # a steps/ whose survivors carry no step files still refuses
@@ -1461,23 +1467,26 @@ def test_init_template_refuses_a_boundary_path(
     assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
 
 
-def test_init_template_refuses_agent_credentials(
+def test_init_template_refuses_credential_named_files(
     git_repo: pathlib.Path,
 ) -> None:
-    """A credential under a template's ``agents/`` refuses at init by name.
+    """A credential-named file anywhere in a template refuses at init.
 
-    ``agents/`` deploys into the node's live agent dirs, so a committed
-    OAuth store (``auth.json``), a dot-file (claude's
-    ``.credentials.json``, an ``.env``), and a generic key shape
-    (``*.pem``) each refuse before any worktree exists, naming the file
-    -- nothing deploys, whatever commit carried the leak.
+    A committed OAuth store (``auth.json``) and a generic key shape
+    (``*.pem``) refuse wherever they sit -- under ``agents/`` or any
+    other surface -- while a dot-file (claude's ``.credentials.json``,
+    an ``.env``) refuses only under ``agents/``, the one subtree that
+    deploys into live agent dirs. Each refusal names the file, fires
+    before any worktree exists, and nothing deploys, whatever commit
+    carried the leak.
     """
     Node(git_repo).init(agent='claude', user=True)
     offending = [
         ('oauth', 'agents/codex/auth.json', 'credential-named file'),
-        ('dotcred', 'agents/claude/.credentials.json', 'dot-file'),
-        ('dotenv', 'agents/claude/.env', 'dot-file'),
+        ('dotcred', 'agents/claude/.credentials.json', 'dot-file under agents/'),
+        ('dotenv', 'agents/claude/.env', 'dot-file under agents/'),
         ('keyfile', 'agents/deploy/signing.pem', 'credential-named file'),
+        ('scriptkey', 'scripts/deploy.pem', 'credential-named file'),
     ]
     for folder, name, kind in offending:
         path = f'templates/{folder}'
@@ -1488,12 +1497,82 @@ def test_init_template_refuses_agent_credentials(
         )
         with pytest.raises(
             ValueError,
-            match=rf"carries a {kind} under agents/: '{re.escape(f'{path}/{name}')}'",
+            match=rf"carries a {kind}: '{re.escape(f'{path}/{name}')}'",
         ):
             Node(git_repo).init(name='task', template=f'{git_repo}/{path}')
     # nothing landed -- no worktree, no registry row
     assert not (git_repo / '.worktrees' / 'main.task').exists()
     assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+
+
+def test_init_template_refuses_files_the_seed_would_skip(
+    git_repo: pathlib.Path,
+) -> None:
+    """A file inside a seed surface that the copy loops skip refuses at init.
+
+    Each surface deploys a fixed shape -- top-level ``*.md`` steps,
+    top-level non-underscore scripts, whole skill directories, per-agent
+    directories -- so a stray outside it (a note or nested file in
+    ``steps/``, underscore machinery or a nested file in ``scripts/``, a
+    loose file in ``skills/`` or ``agents/``) would deploy nothing, print
+    success, and drift on every later diff: each refuses naming the
+    file, and nothing lands. A root-level extra beside the surfaces is
+    documentation -- the seed still deploys, and the extra reaches no
+    node surface.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    step = {'steps/01-GO.md': '# go\n'}
+    offending = [
+        (
+            'straynote',
+            {**step, 'steps/notes.txt': 'not a step\n'},
+            r'steps/ has a file the seed would skip: notes\.txt',
+        ),
+        (
+            'nestedstep',
+            {**step, 'steps/extra/02-GO.md': '# nested\n'},
+            r'steps/ has a file the seed would skip: extra/02-GO\.md',
+        ),
+        (
+            'machinery',
+            {**step, 'scripts/_helper.sh': 'echo hidden\n'},
+            r'scripts/ has a file the seed would skip: _helper\.sh',
+        ),
+        (
+            'nestedscript',
+            {**step, 'scripts/lib/util.sh': 'echo nested\n'},
+            r'scripts/ has a file the seed would skip: lib/util\.sh',
+        ),
+        (
+            'looseskill',
+            {**step, 'skills/README.md': '# loose\n'},
+            r'skills/ has a loose file outside a skill directory: README\.md',
+        ),
+        (
+            'looseagent',
+            {**step, 'agents/claude': '# loose\n'},
+            r'agents/ has a loose file, not an agent directory: claude',
+        ),
+    ]
+    for folder, files, match in offending:
+        path = f'templates/{folder}'
+        _commit_template(git_repo, path, {'config.json': '{}\n', **files})
+        with pytest.raises(ValueError, match=match):
+            Node(git_repo).init(name='task', template=f'{git_repo}/{path}')
+    # nothing landed -- no worktree, no registry row
+    assert not (git_repo / '.worktrees' / 'main.task').exists()
+    assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+    # a root-level extra outside the surfaces stays allowed: the seed
+    # deploys, and the extra reaches no node surface
+    _commit_template(
+        git_repo,
+        'templates/documented',
+        {'config.json': '{}\n', **step, 'README.md': '# about this crew\n'},
+    )
+    Node(git_repo).init(name='task', template=f'{git_repo}/templates/documented')
+    node_dir = git_repo / '.worktrees' / 'main.task' / '.fractal' / 'main.task'
+    assert (node_dir / 'steps' / '01-GO.md').is_file()
+    assert not (node_dir / 'README.md').exists()
 
 
 def test_init_template_preset_refuses_disallowed_keys(
@@ -1748,9 +1827,10 @@ def test_init_template_fills_slots_from_values_set_and_pin(
     """The slot pass renders the seed once, from merged values (later win).
 
     ``--set`` beats the ``--values`` sheet, ``--pin`` supplies ``pin``
-    last -- beating a rival ``--set pin=`` -- and the charter gate reads
-    the rendered text: a stale pin fill dies at init, a coherent one
-    deploys with every ``{{slot}}`` filled and ``$VAR``/shell text
+    and refuses beside a rival ``--set pin=`` that disagrees (an
+    agreeing pair is one instruction and passes), and the charter gate
+    reads the rendered text: a stale pin fill dies at init, a coherent
+    one deploys with every ``{{slot}}`` filled and ``$VAR``/shell text
     intact, and the merged map -- an unused sheet key included (one
     sheet may cover several templates) -- is recorded in
     ``_template.toml``.
@@ -1780,20 +1860,31 @@ def test_init_template_fills_slots_from_values_set_and_pin(
             sets=[f'pin={stale}', 'mission=x'],
         )
     assert not (git_repo / '.worktrees' / 'main.v1').exists()
-    # a coherent fill deploys: the sheet fills, --set overrides it, and
-    # --pin supplies pin -- beating a rival --set pin= (a resolvable but
-    # wrong revision must reach neither the charter nor the record)
+    # a rival --set pin= that disagrees with --pin refuses: one
+    # commission pin, two spellings (a resolvable but wrong revision
+    # must reach neither the charter nor the record)
     rival = _git(git_repo, 'rev-parse', 'HEAD~1').stdout.strip()
     sheet = tmp_path / 'fills.toml'
     sheet.write_text(
         'mission = "from the sheet"\nextra = "unused"\n',
         encoding='utf-8',
     )
+    with pytest.raises(ValueError, match='pin supplied twice'):
+        Node(git_repo).init(
+            name='v1',
+            template=steward,
+            values=sheet,
+            sets=['mission=prove it', f'pin={rival}'],
+            pin=head,
+        )
+    assert not (git_repo / '.worktrees' / 'main.v1').exists()
+    # a coherent fill deploys: the sheet fills, --set overrides it, and
+    # --pin supplies pin, agreeing with the --set spelling
     Node(git_repo).init(
         name='v1',
         template=steward,
         values=sheet,
-        sets=['mission=prove it', f'pin={rival}'],
+        sets=['mission=prove it', f'pin={head}'],
         pin=head,
     )
     node_dir = git_repo / '.worktrees' / 'main.v1' / '.fractal' / 'main.v1'

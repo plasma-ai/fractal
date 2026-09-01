@@ -64,11 +64,12 @@ PRESET_KEYS = (
     'detached',
 )
 
-#: credential file names refused under a template's agents/ subtree --
+#: credential file names refused anywhere in a template --
 #: codex and grok symlink their OAuth stores into the node's agent dir as
 #: auth.json (opencode's global store shares the name), omp relocates
 #: credentials.json into its node dir, and the rest are the generic key shapes;
 #: a dot-file (claude's .credentials.json among them) refuses beside these
+#: under agents/, the one subtree that deploys into live agent dirs
 CREDENTIAL_NAMES = (
     'auth.json',
     'credentials.json',
@@ -193,10 +194,11 @@ def collect_values(
     """Merge the slot values a spawn supplies (later sources win).
 
     The sources, in winning order: the ``--values`` fill sheet (a TOML
-    file of string values), the repeatable ``--set KEY=VALUE`` pairs,
-    and ``--pin``, which supplies ``pin``. Every key must follow the
-    slot-name grammar -- a key the slot pass could never match would
-    otherwise sit unused while its slot refuses as unfilled.
+    file of string values) and the repeatable ``--set KEY=VALUE`` pairs;
+    ``--pin`` supplies ``pin`` and must agree with any ``pin`` those
+    sources carry -- one commission pin, two spellings. Every key must
+    follow the slot-name grammar -- a key the slot pass could never
+    match would otherwise sit unused while its slot refuses as unfilled.
 
     Args:
         values: The ``--values`` fill-sheet path, or ``None``.
@@ -209,7 +211,8 @@ def collect_values(
     Raises:
         ValueError: If the fill sheet is missing, is not valid TOML, or
             holds a non-string value; if a ``--set`` pair has no ``=``;
-            or if any key breaks the slot-name grammar.
+            if any key breaks the slot-name grammar; or if ``--pin``
+            disagrees with a ``pin`` from ``--set``/``--values``.
 
     """
     collected: dict[str, str] = {}
@@ -245,8 +248,15 @@ def collect_values(
                 ' (a slot name is lowercase [a-z_][a-z0-9_]*).'
             )
         collected[key] = value
-    # --pin supplies the pin slot last, beside its fill-sheet-gate role
+    # --pin supplies the pin slot, beside its fill-sheet-gate role -- a
+    # rival fill that disagrees refuses rather than silently losing
     if pin is not None:
+        merged = collected.get('pin')
+        if merged is not None and merged != pin:
+            raise ValueError(
+                f'pin supplied twice: --pin {pin!r} and --set/--values'
+                f' pin={merged!r} disagree.'
+            )
         collected['pin'] = pin
     return collected
 
@@ -277,9 +287,9 @@ def materialize(
     Raises:
         ValueError: If the folder is untracked at the commit, the commit
             is unknown, the path is not a template folder, the folder
-            carries a symlink, or its ``agents/`` subtree carries a
-            dot-file or a credential-named file
-            (:data:`CREDENTIAL_NAMES`).
+            carries a symlink or a credential-named file
+            (:data:`CREDENTIAL_NAMES`), or its ``agents/`` subtree
+            carries a dot-file.
 
     """
     archive = subprocess.run(
@@ -316,33 +326,37 @@ def materialize(
                     f' {member.name!r}; a template is self-contained --'
                     ' commit the target file in its place.'
                 )
-            # agents/ deploys into the node's live agent dirs, where a
-            # leaked credential would do harm -- refuse a dot-file or a
-            # credential-named entry (CREDENTIAL_NAMES, casefolded) by
-            # name, whatever commit carried it; the other surfaces hold
-            # no agent credentials and pass through the estate law when
-            # committed (the archive lists the path's ancestors too --
-            # only the subtree under agents/ is judged)
+            # a leaked credential would do harm wherever it deploys --
+            # refuse a credential-named entry (CREDENTIAL_NAMES,
+            # casefolded) anywhere in the folder, whatever commit carried
+            # it; a dot-file refuses only under agents/, the one subtree
+            # that deploys into live agent dirs (a template's own tracked
+            # dot-files elsewhere are not credentials by name; the
+            # archive lists the path's ancestors too -- only the members
+            # under the path are judged)
             relfile = pathlib.PurePosixPath(member.name)
             if not relfile.is_relative_to(path):
                 continue
             parts = relfile.relative_to(path).parts
-            if len(parts) < 2 or parts[0] != 'agents':
+            # the member at the path itself (a --template naming a file)
+            # is judged as a non-folder below, not by name here
+            if not parts:
                 continue
-            if any(part.startswith('.') for part in parts[1:]):
-                raise ValueError(
-                    f'Template folder {path!r} carries a dot-file under'
-                    f' agents/: {member.name!r}; dot-files hold live agent'
-                    ' state and credentials, never template content.'
-                )
+            if len(parts) >= 2 and parts[0] == 'agents':
+                if any(part.startswith('.') for part in parts[1:]):
+                    raise ValueError(
+                        f'Template folder {path!r} carries a dot-file under'
+                        f' agents/: {member.name!r}; dot-files hold live agent'
+                        ' state and credentials, never template content.'
+                    )
             if member.isfile():
                 name = parts[-1].casefold()
                 if any(fnmatch.fnmatchcase(name, shape) for shape in CREDENTIAL_NAMES):
                     raise ValueError(
                         f'Template folder {path!r} carries a credential-named'
-                        f' file under agents/: {member.name!r}; credentials'
-                        ' never deploy from a template -- a node links its own'
-                        ' at seed time.'
+                        f' file: {member.name!r}; credentials never deploy'
+                        ' from a template -- a node links its own at seed'
+                        ' time.'
                     )
         bundle.extractall(dest, filter='data')
     root = dest / pathlib.PurePosixPath(path)
@@ -497,6 +511,89 @@ def trim(
     return warnings
 
 
+def vet(bundle: pathlib.Path) -> None:
+    """Refuse effective-set files the seed's copy loops would skip.
+
+    The copy loops deploy a fixed shape per surface: ``steps/`` copies
+    top-level ``*.md`` files, ``scripts/`` copies top-level files
+    skipping underscore-prefixed machinery, ``skills/`` copies per
+    skill directory, and ``agents/`` deploys per registered agent
+    directory. A file outside those shapes would deploy nothing, print
+    success, and drift on every later diff -- refused here, post-trim,
+    so an excluded stray can neither refuse the seed nor slip past it.
+    Root-level extras outside the surfaces (a ``README.md`` beside
+    them) are documentation and pass.
+
+    Args:
+        bundle: The bundle root.
+
+    Raises:
+        ValueError: If ``steps/`` or ``scripts/`` holds a file the copy
+            loop would skip, ``skills/`` holds a loose file outside a
+            skill directory, or ``agents/`` holds an unknown or loose
+            entry.
+
+    """
+    from .agent import supported
+
+    # steps: the copy loop deploys top-level *.md files only
+    steps_dir = bundle / 'steps'
+    if steps_dir.is_dir():
+        for entry in sorted(steps_dir.rglob('*')):
+            if not entry.is_file():
+                continue
+            if entry.parent == steps_dir and entry.suffix == '.md':
+                continue
+            relname = entry.relative_to(steps_dir).as_posix()
+            raise ValueError(
+                f'Template steps/ has a file the seed would skip:'
+                f' {relname} (steps deploy as top-level *.md files).'
+            )
+    # scripts: top-level regular files, underscore machinery skipped
+    scripts_dir = bundle / 'scripts'
+    if scripts_dir.is_dir():
+        for entry in sorted(scripts_dir.rglob('*')):
+            if not entry.is_file():
+                continue
+            if entry.parent == scripts_dir and not entry.name.startswith('_'):
+                continue
+            relname = entry.relative_to(scripts_dir).as_posix()
+            raise ValueError(
+                f'Template scripts/ has a file the seed would skip:'
+                f' {relname} (scripts deploy as top-level, non-underscore'
+                ' files).'
+            )
+    # skills: whole skill directories -- a loose file deploys nowhere
+    skills_dir = bundle / 'skills'
+    if skills_dir.is_dir():
+        for entry in sorted(skills_dir.iterdir()):
+            if entry.is_dir():
+                continue
+            raise ValueError(
+                f'Template skills/ has a loose file outside a skill'
+                f' directory: {entry.name} (skills deploy per directory).'
+            )
+    # agents: an entry deploys only as a registered agent's directory --
+    # an unknown name (a typo) refuses like a credential, and a loose
+    # file in a directory's place refuses beside it
+    agents_dir = bundle / 'agents'
+    if agents_dir.is_dir():
+        supported_agents = ', '.join(supported())
+        for entry in sorted(agents_dir.iterdir()):
+            if entry.name not in supported():
+                raise ValueError(
+                    f'Template agents/ names an unknown agent:'
+                    f' {entry.name!r}'
+                    f' (supported: {supported_agents}).'
+                )
+            if not entry.is_dir():
+                raise ValueError(
+                    f'Template agents/ has a loose file, not an agent'
+                    f' directory: {entry.name} (per-agent files live'
+                    ' under agents/<agent>/).'
+                )
+
+
 def fill(
     bundle: pathlib.Path,
     *,
@@ -570,6 +667,44 @@ def fill(
             ) from e
         if rendered != text:
             entry.write_bytes(rendered.encode('utf-8'))
+
+
+def root_notice(
+    *,
+    repo_dir: pathlib.Path,
+    root: str,
+    path: str,
+    commit: str,
+) -> Optional[str]:
+    """One notice when the root branch's copy differs from the commit read.
+
+    The same tree-id comparison for every verb that reads a fresh folder
+    choice (init, and a reseed re-point): a parent deep in the tree
+    carries the root's copy only as of its last merge, so the notice
+    names the ``@<root>`` form that reads the root's current copy. A
+    path absent on the root is no notice.
+
+    Args:
+        repo_dir: Main repo root (both revisions resolve there).
+        root: The tree's root branch.
+        path: Worktree-relative template folder path (POSIX).
+        commit: The commit the folder was read at.
+
+    Returns:
+        The notice line, or ``None`` when the copies match or the root
+        does not carry the folder.
+
+    """
+    cmd = ['rev-parse', '-q', '--verify', f'{root}:{path}']
+    root_tree = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
+    cmd = ['rev-parse', '-q', '--verify', f'{commit}:{path}']
+    read_tree = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
+    if root_tree is None or root_tree == read_tree:
+        return None
+    return (
+        f'Notice: template {path!r} differs on the root branch; pass'
+        f" --template={path}@{root} to read the root's copy."
+    )
 
 
 def write_provenance(
@@ -736,8 +871,11 @@ def diff(
             relfile = entry.relative_to(bundle).as_posix()
             parts = relfile.split('/')
             # map the bundle file to its live counterpart; anything else
-            # (the config preset, stray root files) deploys nowhere
-            if relfile == 'NODE.md' or parts[0] in ('steps', 'scripts', 'skills'):
+            # (the config preset, stray root files -- a root file named
+            # like a surface included) deploys nowhere
+            if relfile == 'NODE.md' or (
+                len(parts) > 1 and parts[0] in ('steps', 'scripts', 'skills')
+            ):
                 target = relfile
             elif parts[0] == 'agents' and len(parts) > 2:
                 target = '/'.join([f'.{parts[1]}', *parts[2:]])

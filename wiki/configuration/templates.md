@@ -53,17 +53,20 @@ under `agents/`.
 - `steps/` seeds the step list and must satisfy the loop's discovery contract --
   at least one `*.md`, an `NN-` digit prefix on every file, one prefix width
   (see [[configuration/steps]]) -- checked at init, so a template that cannot
-  iterate refuses before any worktree exists.
-- `scripts/` seeds the setup/test/lint scripts -- regular files only, with
-  underscore-prefixed names skipped, the package seed's own copy set.
-- `skills/` seeds the skill directories wholesale.
+  iterate refuses before any worktree exists. A file the copy would skip (a
+  non-`.md` or nested entry under `steps/`) refuses the same way.
+- `scripts/` seeds the setup/test/lint scripts as top-level files, the package
+  seed's own copy set; an underscore-prefixed or nested file refuses rather than
+  silently not deploying.
+- `skills/` seeds the skill directories wholesale; a loose file directly under
+  `skills/` refuses.
 - `agents/<agent>/` files deploy into the node data directory's live agent
   config dirs (`.claude/`, `.codex/`, ... -- git-ignored, disk-only). A
   template's file beats the parent's live copy, which beats the package seed,
   and a template plus `node diff` and `node reseed` is the one versioned path
-  agent settings have. An entry must name a registered agent -- an unknown name
-  refuses at init rather than deploying nothing and drifting on every later
-  diff.
+  agent settings have. An entry must name a registered agent's directory -- an
+  unknown name or a loose file refuses at init and reseed rather than deploying
+  nothing and drifting on every later diff.
 
 A bundled surface is a rival source to inheriting the parent's:
 `--inherit=steps` (likewise `scripts` and `skills`) is refused when the template
@@ -98,7 +101,9 @@ when an uncommitted copy exists on disk.
 deep in the tree carries the root's copy only as of its last merge, so
 `--template=<path>@<root-branch>` is how a nested spawn reads the root's current
 copy; init prints one notice when the root branch's copy differs from the commit
-read, naming that form (a path absent on the root is no notice).
+read, naming that form (a path absent on the root is no notice). A
+`node reseed --template` re-point prints the same notice; a plain or `--ref`
+reseed deliberately re-reads a recorded or named version and stays silent.
 
 Template bytes come from git, so anything fractal's ignore rules keep out of
 tracking can never become template content: a `tmp/` folder at any depth, the
@@ -135,7 +140,8 @@ Values come from three sources, later ones winning:
 - `--values <file.toml>` -- a fill sheet: a flat TOML table of string values.
 - `--set KEY=VALUE` (repeatable) -- individual fills.
 - `--pin <sha>` -- supplies the `pin` slot, beside its fill-sheet-gate role (see
-  the charter bullet above).
+  the charter bullet above); a `pin` from `--set`/`--values` that disagrees with
+  `--pin` refuses, while equal spellings pass.
 
 Every file in the effective set except `config.json` and `_template.toml`
 renders through the pass. A slot with no value refuses init naming the file and
@@ -213,8 +219,9 @@ advances the record's `commit` to the commit actually read.
 - `--template <path>[@<ref>]` re-points the node at another folder, read at the
   node branch's own tip when the value names no ref: the new path and the commit
   read land in `_template.toml` while the values and listing ride along
-  unchanged -- one explicit command follows a moved template. Mutually exclusive
-  with `--ref`.
+  unchanged -- one explicit command follows a moved template. The re-point
+  prints the same root-differs notice init does when the root branch holds a
+  different copy of the folder. Mutually exclusive with `--ref`.
 - `--force` reseeds even while the node is active or paused.
 
 Reseed rewrites the live steering surface, so without `--force` it refuses over
@@ -233,13 +240,15 @@ template canon apart from ordinary work.
 
 ## The credential guard
 
-A template's `agents/` subtree deploys into live agent dirs, where a leaked
-credential would do harm, so every materialize -- init, `node diff`, and
-`node reseed` alike -- refuses a dot-file under `agents/` (dot-files hold live
-agent state and credentials, never template content) and any credential-named
-file: `auth.json`, `credentials.json`, `*.key`, `*.pem`, `*.p12`, `*.pfx`,
-`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_ecdsa_sk`, `id_ed25519_sk`, `id_dsa`,
-`*.ppk`, matched case-blind and naming the file, whatever commit carried it.
-Credentials never deploy from a template -- a node links its own at seed time.
-The guard is a name list on the read side, not a scanner: a key inlined inside a
-legitimate config file passes any name check and stays review territory.
+A leaked credential would do harm wherever it deploys, so every materialize --
+init, `node diff`, and `node reseed` alike -- refuses a credential-named file
+anywhere in the template: `auth.json`, `credentials.json`, `*.key`, `*.pem`,
+`*.p12`, `*.pfx`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_ecdsa_sk`,
+`id_ed25519_sk`, `id_dsa`, `*.ppk`, matched case-blind and naming the file,
+whatever commit carried it. A dot-file refuses only under `agents/`, the one
+subtree that deploys into live agent dirs (dot-files hold live agent state and
+credentials, never template content; a template's own tracked dot-files
+elsewhere are not credentials by name). Credentials never deploy from a template
+-- a node links its own at seed time. The guard is a name list on the read side,
+not a scanner: a key inlined inside a legitimate config file passes any name
+check and stays review territory.

@@ -1131,7 +1131,7 @@ class Node:
             Script output.
 
         """
-        from .agent import command_base, resolve, supported
+        from .agent import command_base, resolve
         from .loop import _STEP_PREFIX
         from .template import (
             collect_values,
@@ -1139,7 +1139,9 @@ class Node:
             locate,
             materialize,
             read_preset,
+            root_notice,
             trim,
+            vet,
             write_provenance,
         )
 
@@ -1421,20 +1423,12 @@ class Node:
                             f'--template carries {surface}/; it cannot be'
                             f' combined with --inherit={surface}.'
                         )
-                # an agents/ entry deploys only for a registered agent
-                # name -- an unknown name (a typo) would deploy nothing,
+                # a file the copy loops would silently skip -- a stray
+                # under steps/ or scripts/, a loose skills/ file, an
+                # unknown or loose agents/ entry -- would deploy nothing,
                 # print success, and drift on every later diff, so it
                 # refuses here like a credential
-                agents_dir = bundle / 'agents'
-                if agents_dir.is_dir():
-                    supported_agents = ', '.join(supported())
-                    for entry in sorted(agents_dir.iterdir()):
-                        if entry.name not in supported():
-                            raise ValueError(
-                                f'Template agents/ names an unknown agent:'
-                                f' {entry.name!r}'
-                                f' (supported: {supported_agents}).'
-                            )
+                vet(bundle)
                 # the slot pass: render the effective set's {{slot}}
                 # placeholders in place -- an unfilled slot or a stray {{
                 # refuses here, naming the file and the token
@@ -1453,35 +1447,12 @@ class Node:
                     )
                 # one notice when the root branch's copy differs from the
                 # commit read -- a path absent on the root is no notice
-                cmd = [
-                    'rev-parse',
-                    '-q',
-                    '--verify',
-                    f'{root}:{template_path}',
-                ]
-                root_tree = fractal.util.git.run(
-                    cmd,
-                    cwd=self.repo_dir,
-                    check=False,
+                template_notice = root_notice(
+                    repo_dir=self.repo_dir,
+                    root=root,
+                    path=template_path,
+                    commit=template_commit,
                 )
-                cmd = [
-                    'rev-parse',
-                    '-q',
-                    '--verify',
-                    f'{template_commit}:{template_path}',
-                ]
-                fork_tree = fractal.util.git.run(
-                    cmd,
-                    cwd=self.repo_dir,
-                    check=False,
-                )
-                if root_tree is not None and root_tree != fork_tree:
-                    template_notice = (
-                        f'Notice: template {template_path!r} differs on'
-                        f' the root branch; pass'
-                        f' --template={template_path}@{root} to read the'
-                        " root's copy."
-                    )
                 # record the provenance into the bundle; init.sh places
                 # it with the other bundle surfaces
                 write_provenance(
@@ -2136,7 +2107,9 @@ class Node:
         ``NODE.md``, ``config.json``, and ``memory/`` are never touched.
         ``template`` re-points the node: the new path and the commit read
         land in ``_template.toml``, while the recorded values and listing
-        ride along unchanged.
+        ride along unchanged, and the confirmation carries creation's
+        root-differs notice when the root branch holds a different copy
+        of the folder (a plain or ``ref`` reseed stays silent).
 
         Args:
             ref: Committish to read the recorded folder at (default: the
@@ -2165,7 +2138,9 @@ class Node:
             locate,
             materialize,
             read_provenance,
+            root_notice,
             trim,
+            vet,
             write_provenance,
         )
 
@@ -2241,6 +2216,7 @@ class Node:
             # with the recorded values; a listing entry the template no
             # longer carries only warns (the record may outlive the file)
             template_tmp = tempfile.mkdtemp(prefix='fractal-template-')
+            notice: Optional[str] = None
             try:
                 bundle = materialize(
                     worktree=template_worktree,
@@ -2248,12 +2224,25 @@ class Node:
                     commit=commit,
                     dest=pathlib.Path(template_tmp),
                 )
+                # a re-point reads a fresh folder choice, so it gets
+                # creation's root-differs notice; a plain or --ref reseed
+                # deliberately re-reads a recorded or named version, silently
+                if template is not None:
+                    notice = root_notice(
+                        repo_dir=self.repo_dir,
+                        root=self.config.get('root'),
+                        path=path,
+                        commit=commit,
+                    )
                 warnings = trim(
                     bundle,
                     include=record.get('include'),
                     exclude=record.get('exclude'),
                     strict=False,
                 )
+                # a file the copy loops would silently skip refuses here
+                # exactly as at init, judging the effective set
+                vet(bundle)
                 fill(
                     bundle,
                     path=path,
@@ -2330,7 +2319,10 @@ class Node:
                 self.record.event_end(event_id=event_id, status='completed')
             finally:
                 shutil.rmtree(template_tmp, ignore_errors=True)
-        return f'Node reseeded from {path}@{commit}', warnings
+        confirmation = f'Node reseeded from {path}@{commit}'
+        if notice is not None:
+            confirmation = f'{confirmation}\n{notice}'
+        return confirmation, warnings
 
     def _git_exclude(self: Node) -> None:
         """Write fractal's ignore patterns into the repo-local ``info/exclude``.

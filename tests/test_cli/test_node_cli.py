@@ -93,6 +93,7 @@ __all__ = [
     'test_reseed_bare_re_point_reads_the_node_branch_tip',
     'test_reseed_refuses_a_template_carrying_agent_credentials',
     'test_reseed_refuses_steps_breaking_the_discovery_contract',
+    'test_reseed_refuses_files_the_seed_would_skip',
     'test_reseed_refuses_a_symlinked_seed_destination',
     'test_lifecycle_guard_rejects_idle_node',
     'test_start_drain_requires_continue',
@@ -2224,7 +2225,8 @@ def test_reseed_refuses_a_missing_path_at_a_ref_and_re_points(
     A template moved on a later commit makes ``--ref`` a pathspec miss:
     the refusal names the path, the ref, and the re-point remedy. The
     re-point rewrites ``_template.toml``'s path and commit and reseeds
-    from the new folder.
+    from the new folder -- reading the root branch's own copy, so no
+    root-differs notice prints.
     """
     root = repo['root']
     _commit_template(
@@ -2267,6 +2269,8 @@ def test_reseed_refuses_a_missing_path_at_a_ref_and_re_points(
             'templates/newhome@main',
         )
         assert repointed.returncode == 0, repointed.stdout + repointed.stderr
+        # the commit read is the root's own tip, so no notice prints
+        assert 'Notice: template' not in repointed.stdout
         go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
         assert go == '# go\n'
         data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
@@ -2282,7 +2286,9 @@ def test_reseed_bare_re_point_reads_the_node_branch_tip(repo: dict) -> None:
     The default keeps the re-point on the revision the node has actually
     merged: a folder that advanced on ``main`` after the fork deploys its
     node-tip bytes, and the recorded commit is the node branch tip -- not
-    ``main``'s.
+    ``main``'s. The root branch's copy differs from the commit read, so
+    the re-point prints creation's root-differs notice, naming the
+    ``@<root>`` form.
     """
     root = repo['root']
     # both folders predate the spawn, so the node's own tip tracks them
@@ -2327,6 +2333,12 @@ def test_reseed_bare_re_point_reads_the_node_branch_tip(repo: dict) -> None:
             'templates/pointb',
         )
         assert repointed.returncode == 0, repointed.stdout + repointed.stderr
+        # the root moved past the commit read: the notice names the form
+        # that reads the root's copy
+        assert (
+            "Notice: template 'templates/pointb' differs on the root branch;"
+            " pass --template=templates/pointb@main to read the root's copy."
+        ) in repointed.stdout, repointed.stdout
         go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
         assert go == '# from b, original\n'
         data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
@@ -2385,7 +2397,7 @@ def test_reseed_refuses_a_template_carrying_agent_credentials(
         )
         assert refused.returncode == 2, refused.stdout + refused.stderr
         assert (
-            'carries a credential-named file under agents/:'
+            'carries a credential-named file:'
             " 'templates/leakcrew/agents/codex/auth.json'"
         ) in refused.stderr, refused.stderr
         # the node is untouched: the leak never reaches the agent dir, the
@@ -2457,6 +2469,77 @@ def test_reseed_refuses_steps_breaking_the_discovery_contract(repo: dict) -> Non
         assert (node_dir / '_template.toml').read_bytes() == record_bytes
     finally:
         _run(root, 'node', 'delete', 'main.renum', '--force')
+
+
+def test_reseed_refuses_files_the_seed_would_skip(repo: dict) -> None:
+    """A bundle file the copy loops would skip refuses at reseed by name.
+
+    The skip-shape vet judges every seeding bundle: a ``--ref`` at which
+    the recorded folder gained a stray ``steps/`` note refuses, a
+    re-point at a folder whose ``scripts/`` carries underscore machinery
+    refuses, and the node keeps its recorded template and its live
+    surfaces untouched.
+    """
+    root = repo['root']
+    _commit_template(
+        root,
+        'templates/skipcrew',
+        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
+    )
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'skipcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/skipcrew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.skipcrew' / '.fractal' / 'main.skipcrew'
+        record_bytes = (node_dir / '_template.toml').read_bytes()
+        # the template gains a stray note on main: the --ref read refuses
+        _commit_template(
+            root,
+            'templates/skipcrew',
+            {'steps/notes.txt': 'not a step\n'},
+        )
+        stray = _run(root, 'node', 'reseed', 'main.skipcrew', '--ref', 'main')
+        assert stray.returncode == 2, stray.stdout + stray.stderr
+        assert ('steps/ has a file the seed would skip: notes.txt') in stray.stderr, (
+            stray.stderr
+        )
+        # a re-point at a folder carrying underscore machinery refuses too
+        _commit_template(
+            root,
+            'templates/skipscripts',
+            {
+                'config.json': '{}\n',
+                'steps/01-GO.md': '# go\n',
+                'scripts/_helper.sh': 'echo hidden\n',
+            },
+        )
+        machinery = _run(
+            root,
+            'node',
+            'reseed',
+            'main.skipcrew',
+            '--template',
+            'templates/skipscripts@main',
+        )
+        assert machinery.returncode == 2, machinery.stdout + machinery.stderr
+        assert (
+            'scripts/ has a file the seed would skip: _helper.sh'
+        ) in machinery.stderr, machinery.stderr
+        # nothing rewrote: the record and the live steps stand
+        assert (node_dir / '_template.toml').read_bytes() == record_bytes
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\n'
+        assert not (node_dir / 'steps' / 'notes.txt').exists()
+    finally:
+        _run(root, 'node', 'delete', 'main.skipcrew', '--force')
 
 
 def test_reseed_refuses_a_symlinked_seed_destination(

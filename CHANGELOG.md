@@ -73,13 +73,13 @@ may include breaking changes, each listed under a Breaking heading.
 - Seed-time slots: template files may carry `{{slot}}` placeholders — lowercase
   names, filled once at init from `--values <file.toml>` (a flat TOML table of
   string values), repeatable `--set KEY=VALUE` pairs that win over the sheet,
-  and `--pin`, which fills the `{{pin}}` slot beside its fill-sheet-gate role. A
-  slot with no value and any `{{` that is not a lowercase slot refuse init
-  naming the file and the token; prompt-time `$VAR` text passes through
-  untouched, so the two namespaces stay apart. The rendered charter passes the
-  fill-sheet gate (authored sections present, `pin:` lines resolving and
-  matching `--pin`, `docket:` rows resolving at the pin — anchored at the fork
-  commit when the seed is pinless).
+  and `--pin`, which fills the `{{pin}}` slot beside its fill-sheet-gate role (a
+  `pin` supplied both ways must agree, or init refuses). A slot with no value
+  and any `{{` that is not a lowercase slot refuse init naming the file and the
+  token; prompt-time `$VAR` text passes through untouched, so the two namespaces
+  stay apart. The rendered charter passes the fill-sheet gate (authored sections
+  present, `pin:` lines resolving and matching `--pin`, `docket:` rows resolving
+  at the pin — anchored at the fork commit when the seed is pinless).
 - `node diff`: shows a node's drift from its recorded template by re-rendering
   the recorded folder at its recorded commit with its recorded values and
   diffing the effective set against the live seed surfaces — `NODE.md`,
@@ -94,17 +94,23 @@ may include breaking changes, each listed under a Breaking heading.
   `--ref` reads the recorded folder at another commit (a ref where the folder is
   absent refuses naming the re-point remedy); `--template <path>[@<ref>]`
   re-points the node, recording the new path and the commit read while the
-  values and listing ride along unchanged. The verb refuses over an active or
+  values and listing ride along unchanged, and prints the root-differs notice
+  when the root branch holds another copy. The verb refuses over an active or
   paused node without `--force` and always from the node's own worktree (a node
   may not edit its own seed), records a `reseed` event, and advances the
   recorded commit; a recorded listing entry the template no longer carries warns
   instead of refusing.
-- Template credential guard: a template's `agents/` subtree refuses any dot-file
-  and any credential-named file (`auth.json`, `credentials.json`, `*.key`,
-  `*.pem`, `*.p12`, `*.pfx`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_ecdsa_sk`,
-  `id_ed25519_sk`, `id_dsa`, `*.ppk`, matched case-blind) at every materialize —
-  init, `node diff`, and `node reseed` alike — naming the file; credentials
-  never deploy from a template — a node links its own at seed time.
+- Template content guard: a template refuses a credential-named file anywhere
+  and, under `agents/`, any dot-file; a file inside a seed surface that the seed
+  would skip — a non-step file under `steps/`, an underscore-prefixed script, a
+  loose file directly under `skills/` or `agents/` — refuses too, so every
+  template file is one the seed deploys and `node diff` never reports phantom
+  drift. The credential names refused are `auth.json`, `credentials.json`,
+  `*.key`, `*.pem`, `*.p12`, `*.pfx`, `id_rsa`, `id_ed25519`, `id_ecdsa`,
+  `id_ecdsa_sk`, `id_ed25519_sk`, `id_dsa`, and `*.ppk`, matched case-blind at
+  every materialize — init, `node diff`, and `node reseed` alike — naming the
+  file; credentials never deploy from a template — a node links its own at seed
+  time.
 
 ### Fixed
 
