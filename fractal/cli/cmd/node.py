@@ -358,7 +358,18 @@ def node_init(app: typer.Typer) -> typer.Typer:
             # the child nests under -- not the repo-root target resolve_init
             # returned (they differ once an agent spawns its own children)
             parent = Node.resolve_caller()
-            if parent is None or parent.repo_dir != node.repo_dir:
+            if parent is not None and parent.repo_dir != node.repo_dir:
+                parent = None
+            # no ambient caller but a path under .worktrees/ (a manual init
+            # from inside a worktree): parent on that worktree's node, the way
+            # init itself does, so the read-back finds the branch it composed
+            if parent is None:
+                parts = pathlib.Path(path).parts
+                if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
+                    candidate = Node(node.repo_dir / WORKTREES_FOLDER / parts[1])
+                    if candidate.exists():
+                        parent = candidate
+            if parent is None or not parent.exists():
                 parent = node
             # a template preset can cap or re-agent what the flags left unset
             # -- the child's stored config holds the merged values, so read

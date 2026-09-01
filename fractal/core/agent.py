@@ -1098,6 +1098,18 @@ class Agent:
                     # so it is never replaced
                     if target.is_symlink():
                         continue
+                    # a directory at the target would swallow the copy
+                    # (shutil.copy copies INTO a directory, nesting the
+                    # file), so a template that turned a directory into a
+                    # file refuses loudly with the old record kept
+                    if target.is_dir():
+                        relfile = path.relative_to(bundle_seed).as_posix()
+                        raise ValueError(
+                            f'Template agents/{cls.name}/{relfile} is a'
+                            f' file, but the node holds a directory at'
+                            f' .{cls.name}/{relfile}; remove the'
+                            ' directory first.'
+                        )
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy(path, target)
         # an overwrite ends here: files the bundle lacks are left alone

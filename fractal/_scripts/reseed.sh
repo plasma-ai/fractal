@@ -85,6 +85,11 @@ if [[ -d "$BUNDLE/steps" ]]; then
     for FILE in "$BUNDLE/steps/"*.md; do
         [[ -f "$FILE" ]] || continue
         BASENAME=$(basename "$FILE")
+        # refuse a symlinked destination: a plain cp would write through it
+        if [[ -L "$NODE_DIR/steps/$BASENAME" ]]; then
+            echo "Error: steps/$BASENAME is a symlink; refusing to write through it" >&2
+            exit 1
+        fi
         cp "$FILE" "$NODE_DIR/steps/$BASENAME"
     done
 fi
@@ -96,6 +101,11 @@ if [[ -d "$BUNDLE/scripts" ]]; then
         [[ -f "$SRC" ]] || continue
         BASENAME=$(basename "$SRC")
         [[ "$BASENAME" == _* ]] && continue
+        # refuse a symlinked destination: a plain cp would write through it
+        if [[ -L "$NODE_DIR/scripts/$BASENAME" ]]; then
+            echo "Error: scripts/$BASENAME is a symlink; refusing to write through it" >&2
+            exit 1
+        fi
         cp "$SRC" "$NODE_DIR/scripts/$BASENAME"
         chmod +x "$NODE_DIR/scripts/$BASENAME" 2>/dev/null || true
     done

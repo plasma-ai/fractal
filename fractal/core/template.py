@@ -79,6 +79,11 @@ CREDENTIAL_NAMES = (
     '*.pfx',
     'id_rsa',
     'id_ed25519',
+    'id_ecdsa',
+    'id_ecdsa_sk',
+    'id_ed25519_sk',
+    'id_dsa',
+    '*.ppk',
 )
 
 
@@ -500,6 +505,7 @@ def fill(
     *,
     path: str,
     values: dict[str, str],
+    remedy: Optional[str] = None,
 ) -> None:
     """Render every bundle file's ``{{slot}}`` placeholders in place.
 
@@ -515,6 +521,9 @@ def fill(
         bundle: The bundle root.
         path: Worktree-relative template folder path (POSIX), for messages.
         values: The ``slot -> value`` fill map.
+        remedy: Remedy clause for the no-value refusal (default: the
+            init flags) -- reseed and diff replay recorded values, where
+            the init flags do not exist.
 
     Raises:
         ValueError: If a file is not UTF-8 text, a slot has no value,
@@ -541,10 +550,10 @@ def fill(
             rendered = _SlotTemplate(text).substitute(values)
         except KeyError as e:
             name = e.args[0]
+            fix = remedy or (f'supply it with --set {name}=<value> or a --values file')
             raise ValueError(
                 f'Template file {path}/{relfile} has no value for slot'
-                f' {{{{{name}}}}}: supply it with --set {name}=<value>'
-                ' or a --values file.'
+                f' {{{{{name}}}}}: {fix}.'
             ) from e
         except ValueError as e:
             # name the offending token: the first {{ the grammar calls
@@ -716,7 +725,15 @@ def diff(
             exclude=record.get('exclude'),
             strict=False,
         )
-        fill(bundle, path=record['path'], values=record.get('values', {}))
+        fill(
+            bundle,
+            path=record['path'],
+            values=record.get('values', {}),
+            remedy=(
+                "add the value to the [values] table in the node's"
+                ' _template.toml, or re-init the node with --set'
+            ),
+        )
         files = sorted(entry for entry in bundle.rglob('*') if entry.is_file())
         for entry in files:
             relfile = entry.relative_to(bundle).as_posix()

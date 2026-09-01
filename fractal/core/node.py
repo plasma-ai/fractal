@@ -914,6 +914,7 @@ class Node:
         *,
         pin: Optional[str],
         fork: Optional[str] = None,
+        display: Optional[str] = None,
     ) -> None:
         """Validate a template charter's fill-sheet before any spend.
 
@@ -936,6 +937,9 @@ class Node:
             pin: The commission pin from ``--pin``, or ``None``.
             fork: The child's fork ref -- the docket anchor when neither
                 ``pin`` nor a charter ``pin:`` line supplies one.
+            display: Charter path for messages -- the repo-relative
+                template path, since the bundle's temp path is deleted
+                before the user reads a refusal.
 
         Raises:
             ValueError: On the first fill-sheet violation.
@@ -957,8 +961,8 @@ class Node:
         for heading in ('## Instructions', '## Completion Requirements'):
             if heading not in text:
                 raise ValueError(
-                    f'Template charter {charter} is missing {heading!r}'
-                    ' (truncated or stale seed).'
+                    f'Template charter {display or charter} is missing'
+                    f' {heading!r} (truncated or stale seed).'
                 )
         # every pin: line is load-bearing -- a spelling the gate cannot read
         # as a commit sha (symbolic, or truncated below git's four-hex
@@ -1127,7 +1131,7 @@ class Node:
             Script output.
 
         """
-        from .agent import command_base, resolve
+        from .agent import command_base, resolve, supported
         from .loop import _STEP_PREFIX
         from .template import (
             collect_values,
@@ -1373,9 +1377,16 @@ class Node:
                 # the parent's inherited value), so a bad key refuses
                 # before any other work
                 template_preset = read_preset(bundle, path=template_path)
-                # the bundle's steps must satisfy the loop's discovery
-                # contract, so a template that cannot iterate refuses
-                # here rather than failing the node's first iteration
+                # cut the bundle down to the effective set, so downstream
+                # only sees what the listing keeps -- every check below
+                # judges what actually deploys, so an excluded file can
+                # neither refuse the init nor slip past it
+                trim(bundle, include=include, exclude=exclude)
+                # the effective set's steps must satisfy the loop's
+                # discovery contract, so a template that cannot iterate
+                # refuses here rather than failing the node's first
+                # iteration (a steps/ kept alive by non-step survivors
+                # would deploy empty)
                 steps_dir = bundle / 'steps'
                 if steps_dir.is_dir():
                     # only regular files seed -- init.sh copies the same set
@@ -1412,9 +1423,20 @@ class Node:
                             f'--template carries {surface}/; it cannot be'
                             f' combined with --inherit={surface}.'
                         )
-                # cut the bundle down to the effective set, so downstream
-                # only sees what the listing keeps
-                trim(bundle, include=include, exclude=exclude)
+                # an agents/ entry deploys only for a registered agent
+                # name -- an unknown name (a typo) would deploy nothing,
+                # print success, and drift on every later diff, so it
+                # refuses here like a credential
+                agents_dir = bundle / 'agents'
+                if agents_dir.is_dir():
+                    supported_agents = ', '.join(supported())
+                    for entry in sorted(agents_dir.iterdir()):
+                        if entry.name not in supported():
+                            raise ValueError(
+                                f'Template agents/ names an unknown agent:'
+                                f' {entry.name!r}'
+                                f' (supported: {supported_agents}).'
+                            )
                 # the slot pass: render the effective set's {{slot}}
                 # placeholders in place -- an unfilled slot or a stray {{
                 # refuses here, naming the file and the token
@@ -1425,7 +1447,12 @@ class Node:
                 node_md = bundle / 'NODE.md'
                 if pin is not None or node_md.is_file():
                     charter = node_md if node_md.is_file() else None
-                    self._validate_charter(charter, pin=pin, fork=fork)
+                    self._validate_charter(
+                        charter,
+                        pin=pin,
+                        fork=fork,
+                        display=f'{template_path}/NODE.md',
+                    )
                 # one notice when the root branch's copy differs from the
                 # commit read -- a path absent on the root is no notice
                 cmd = [
@@ -1604,6 +1631,13 @@ class Node:
                 type(max_cost) in (int, float) and max_cost > 0
             )
             if reserve_budget is None and 'reserve_budget' in template_preset:
+                # a reserve without a ceiling is inert, so the preset obeys
+                # the same requires-max-cost rule the flag does
+                if max_cost is None:
+                    raise ValueError(
+                        'Template preset reserve_budget requires max_cost'
+                        ' (preset or --max-cost).'
+                    )
                 reserve_budget = template_preset['reserve_budget']
             elif ceiling_ok:
                 reserve_budget = parse_reserve_budget(reserve_budget, max_cost)
@@ -2130,6 +2164,7 @@ class Node:
                 worktree.
 
         """
+        from .loop import _STEP_PREFIX
         from .template import (
             fill,
             locate,
@@ -2224,7 +2259,54 @@ class Node:
                     exclude=record.get('exclude'),
                     strict=False,
                 )
-                fill(bundle, path=path, values=record.get('values', {}))
+                fill(
+                    bundle,
+                    path=path,
+                    values=record.get('values', {}),
+                    remedy=(
+                        'add the value to the [values] table in the'
+                        " node's _template.toml, or re-init the node"
+                        ' with --set'
+                    ),
+                )
+                # reseed adds and overwrites but never deletes, so the
+                # loop's discovery contract judges the post-reseed union:
+                # the bundle's steps plus the live steps the bundle does
+                # not carry -- a renumbered template (or a bad step at the
+                # ref) refuses here, before anything rewrites, rather than
+                # failing every later iteration behind a clean diff
+                steps_dir = bundle / 'steps'
+                if steps_dir.is_dir():
+                    step_files = sorted(
+                        entry for entry in steps_dir.glob('*.md') if entry.is_file()
+                    )
+                    bundle_names = {entry.name for entry in step_files}
+                    live_dir = self.node_dir / 'steps'
+                    if live_dir.is_dir():
+                        step_files += sorted(
+                            entry
+                            for entry in live_dir.glob('*.md')
+                            if entry.is_file() and entry.name not in bundle_names
+                        )
+                    widths = set()
+                    for step_file in step_files:
+                        match = _STEP_PREFIX.match(step_file.name)
+                        if match is None:
+                            raise ValueError(
+                                f'Reseed would leave steps/ with a step'
+                                f' file without an NN- prefix:'
+                                f' {step_file.name}.'
+                            )
+                        widths.add(len(match.group(1)))
+                    if len(widths) > 1:
+                        conflict = ', '.join(
+                            sorted(step_file.name for step_file in step_files)
+                        )
+                        raise ValueError(
+                            f'Reseed would leave steps/ with mixed digit'
+                            f' prefix widths: {conflict} -- delete the'
+                            ' stale files first.'
+                        )
                 # the script rewrites the file surfaces and the per-agent
                 # files from the bundle; Python owns the provenance record
                 event_id = self.record.event_start(
