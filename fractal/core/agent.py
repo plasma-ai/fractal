@@ -1085,7 +1085,7 @@ class Agent:
                     source = parent_config
             if source is None:
                 package_dir = pathlib.Path(__file__).parent.parent
-                package_seed = package_dir / '_node' / 'config' / cls.name
+                package_seed = package_dir / '_node' / 'agents' / cls.name
                 if (package_seed / cls.config_file).is_file():
                     source = package_seed / cls.config_file
         # copy the config file (an existing one is never overwritten)

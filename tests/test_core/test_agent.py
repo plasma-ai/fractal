@@ -761,7 +761,7 @@ def test_seed_falls_back_to_the_package_seed(tmp_path: pathlib.Path) -> None:
     node_dir = _node_dir(tmp_path)
     PackageSeeded.seed(node_dir)
     package_dir = pathlib.Path(fractal.__file__).parent
-    packaged = package_dir / '_node' / 'config' / 'claude' / 'settings.json'
+    packaged = package_dir / '_node' / 'agents' / 'claude' / 'settings.json'
     config = node_dir / '.claude' / 'settings.json'
     assert config.read_text(encoding='utf-8') == packaged.read_text(encoding='utf-8')
 

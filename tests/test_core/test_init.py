@@ -670,7 +670,7 @@ def test_child_inherits_agent_config_from_parent(
     edited config, propagating settings down the tree. Siblings do not inherit
     from each other, and codex's auth.json stays a symlink (never copied).
     """
-    seed_dir = pathlib.Path(fractal.core.__file__).parent.parent / '_node' / 'config'
+    seed_dir = pathlib.Path(fractal.core.__file__).parent.parent / '_node' / 'agents'
     # the single config file each agent reads from its (dot-prefixed) dir
     configs = {'claude': 'settings.json', 'codex': 'config.toml'}
 

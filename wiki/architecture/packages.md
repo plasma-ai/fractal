@@ -61,7 +61,7 @@ Three directories ship inside the package as data, not code:
 - **`_node/`** — the per-node seed copied into each new node's data directory at
   init: `NODE.md`, the step files (`steps/` — PREPARE, PLAN, EXECUTE, REVIEW,
   COMMIT), mode overlays (`modes/`), the node scripts (`scripts/` — setup, test,
-  lint), per-agent config directories (`config/`), and the node-facing skills
+  lint), per-agent config directories (`agents/`), and the node-facing skills
   (`skills/` — fractal, memory, radio, wiki).
 - **`_scripts/`** — the lifecycle shell scripts (`init.sh`, `start.sh`,
   `stop.sh`, `kill.sh`, `pause.sh`, `resume.sh`, `merge.sh`, `delete.sh`,
