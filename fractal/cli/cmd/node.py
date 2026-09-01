@@ -140,10 +140,20 @@ def node_init(app: typer.Typer) -> typer.Typer:
         'Skip these template-relative paths (repeatable; mutex with --include).'
     )
     exclude = typer.Option(None, '--exclude', help=exclude_help)
+    # values option
+    values_help = (
+        "Slot fill sheet: a TOML file of string values for the template's"
+        ' {{slot}} placeholders.'
+    )
+    values = typer.Option(None, '--values', help=values_help)
+    # set option
+    sets_help = 'Slot fill KEY=VALUE (repeatable; wins over --values).'
+    sets = typer.Option(None, '--set', help=sets_help)
     # pin option
     pin_help = (
         'Commission pin (a commit sha): must resolve, and every pin:'
-        ' declaration in the template charter must match it.'
+        ' declaration in the template charter must match it; also fills'
+        ' the {{pin}} slot.'
     )
     pin = typer.Option(None, '--pin', help=pin_help)
     # agent option
@@ -253,6 +263,8 @@ def node_init(app: typer.Typer) -> typer.Typer:
         template: Optional[str] = template,
         include: Optional[list[str]] = include,
         exclude: Optional[list[str]] = exclude,
+        values: Optional[str] = values,
+        sets: Optional[list[str]] = sets,
         pin: Optional[str] = pin,
         agent: Optional[str] = agent,
         provider: Optional[str] = provider,
@@ -302,6 +314,8 @@ def node_init(app: typer.Typer) -> typer.Typer:
             template=template,
             include=include,
             exclude=exclude,
+            values=values,
+            sets=sets,
             pin=pin,
             agent=agent,
             provider=provider,

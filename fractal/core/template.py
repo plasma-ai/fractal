@@ -5,21 +5,29 @@ from __future__ import annotations
 import io
 import json
 import pathlib
+import re
 import subprocess
 import tarfile
+import tomllib
 from typing import Any, Optional
 
 import tomli_w
 
 import fractal.util
 from fractal.constants import CONFIG_FILE, FRACTAL_FOLDER, WORKTREES_FOLDER
+from fractal.typing import PathLike
 
 from .config import KEYS
+from .render import _SlotTemplate
 
 __all__ = []
 
 #: per-node template provenance file in the node's data directory
 TEMPLATE_FILE = '_template.toml'
+
+# a slot value's key follows the slot-name grammar -- the braced group of
+# the slot pattern (fractal.core.render._SlotTemplate)
+_SLOT_NAME = re.compile(r'[a-z_][a-z0-9_]*')
 
 #: config keys a template preset may carry -- the budget, limit, duration,
 #: model, and mode subset of a node's config keys; identity and immutable
@@ -145,6 +153,73 @@ def locate(
             ' "@" separates the ref (<path>[@<ref>]).'
         )
     return relpath, ref, found
+
+
+def collect_values(
+    *,
+    values: Optional[PathLike],
+    sets: Optional[list[str]],
+    pin: Optional[str],
+) -> dict[str, str]:
+    """Merge the slot values a spawn supplies (later sources win).
+
+    The sources, in winning order: the ``--values`` fill sheet (a TOML
+    file of string values), the repeatable ``--set KEY=VALUE`` pairs,
+    and ``--pin``, which supplies ``pin``. Every key must follow the
+    slot-name grammar -- a key the slot pass could never match would
+    otherwise sit unused while its slot refuses as unfilled.
+
+    Args:
+        values: The ``--values`` fill-sheet path, or ``None``.
+        sets: The ``--set`` pairs (``KEY=VALUE``), or ``None``.
+        pin: The commission pin from ``--pin``, or ``None``.
+
+    Returns:
+        The merged ``slot -> value`` map.
+
+    Raises:
+        ValueError: If the fill sheet is missing, is not valid TOML, or
+            holds a non-string value; if a ``--set`` pair has no ``=``;
+            or if any key breaks the slot-name grammar.
+
+    """
+    collected: dict[str, str] = {}
+    # the fill sheet: a flat TOML table of string values
+    if values is not None:
+        sheet = pathlib.Path(values)
+        if not sheet.is_file():
+            raise ValueError(f'--values file does not exist: {sheet}')
+        try:
+            data = tomllib.loads(sheet.read_text(encoding='utf-8'))
+        except tomllib.TOMLDecodeError as e:
+            raise ValueError(f'--values file is not valid TOML: {sheet}: {e}') from e
+        for key, value in data.items():
+            if not _SLOT_NAME.fullmatch(key):
+                raise ValueError(
+                    f'--values key is not a slot name: {key!r}'
+                    ' (a slot name is lowercase [a-z_][a-z0-9_]*).'
+                )
+            if not isinstance(value, str):
+                raise ValueError(
+                    f'--values key {key!r} does not hold a string'
+                    ' (slot values are strings).'
+                )
+            collected[key] = value
+    # the --set pairs override the sheet
+    for pair in sets or []:
+        key, sep, value = pair.partition('=')
+        if not sep:
+            raise ValueError(f'Invalid --set value: {pair!r} (expected KEY=VALUE).')
+        if not _SLOT_NAME.fullmatch(key):
+            raise ValueError(
+                f'--set key is not a slot name: {key!r}'
+                ' (a slot name is lowercase [a-z_][a-z0-9_]*).'
+            )
+        collected[key] = value
+    # --pin supplies the pin slot last, beside its fill-sheet-gate role
+    if pin is not None:
+        collected['pin'] = pin
+    return collected
 
 
 def materialize(
@@ -348,6 +423,77 @@ def trim(
     ):
         if not any(folder.iterdir()):
             folder.rmdir()
+
+
+def fill(
+    bundle: pathlib.Path,
+    *,
+    path: str,
+    values: dict[str, str],
+) -> None:
+    """Render every bundle file's ``{{slot}}`` placeholders in place.
+
+    The slot pass: every regular file except ``config.json`` and
+    ``_template.toml`` renders through the slot grammar
+    (:class:`fractal.core.render._SlotTemplate`) -- a slot with no value
+    and any ``{{`` that is not a lowercase slot refuse naming the file
+    and the token, and a file that does not decode refuses by name
+    (templates are text). Unused values pass: one fill sheet may cover
+    several templates.
+
+    Args:
+        bundle: The bundle root.
+        path: Worktree-relative template folder path (POSIX), for messages.
+        values: The ``slot -> value`` fill map.
+
+    Raises:
+        ValueError: If a file is not UTF-8 text, a slot has no value,
+            or a ``{{`` is not a slot.
+
+    """
+    files = sorted(entry for entry in bundle.rglob('*') if entry.is_file())
+    for entry in files:
+        relfile = entry.relative_to(bundle).as_posix()
+        # the preset and the provenance record are template machinery,
+        # never a rendered seed surface
+        if relfile in (CONFIG_FILE, TEMPLATE_FILE):
+            continue
+        # byte-level read and write, so the pass never rewrites line
+        # endings: deployed bytes equal render(committed bytes, values)
+        blob = entry.read_bytes()
+        try:
+            text = blob.decode('utf-8')
+        except UnicodeDecodeError as e:
+            raise ValueError(
+                f'Template file {path}/{relfile} is not UTF-8 text; templates are text.'
+            ) from e
+        try:
+            rendered = _SlotTemplate(text).substitute(values)
+        except KeyError as e:
+            name = e.args[0]
+            raise ValueError(
+                f'Template file {path}/{relfile} has no value for slot'
+                f' {{{{{name}}}}}: supply it with --set {name}=<value>'
+                ' or a --values file.'
+            ) from e
+        except ValueError as e:
+            # name the offending token: the first {{ the grammar calls
+            # invalid, through its closing braces (or its line end)
+            invalid = next(
+                found
+                for found in _SlotTemplate.pattern.finditer(text)
+                if found.group('invalid') is not None
+            )
+            line = text[invalid.start() :].split('\n', 1)[0]
+            head, closer, _ = line.partition('}}')
+            token = f'{head}{closer}'
+            raise ValueError(
+                f'Template file {path}/{relfile} carries {token!r}, which'
+                ' is not a slot: a slot is a lowercase {{name}}, and a'
+                ' literal "{{" cannot be written.'
+            ) from e
+        if rendered != text:
+            entry.write_bytes(rendered.encode('utf-8'))
 
 
 def write_provenance(

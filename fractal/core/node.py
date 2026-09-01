@@ -913,8 +913,9 @@ class Node:
         charter: Optional[pathlib.Path],
         *,
         pin: Optional[str],
+        fork: Optional[str] = None,
     ) -> None:
-        """Validate a profile charter's fill-sheet before any spend.
+        """Validate a template charter's fill-sheet before any spend.
 
         The stale-seed gate: four commissions once shipped with stale pins,
         stale docket rows, or truncated charters, each costing the node's
@@ -926,12 +927,15 @@ class Node:
         - every ``pin: <sha>`` line in the charter resolves to a commit and
           matches ``--pin`` (prefix-wise, case-blind) when one is given --
           a ``pin:`` spelling that is not a hex sha refuses outright;
-        - every ``docket: <path>`` line resolves at the pin (the charter's
-          own when ``--pin`` is absent, else ``HEAD``).
+        - every ``docket: <path>`` line resolves at the pin (``--pin`` when
+          given, else the charter's own, else the child's fork ref).
 
         Args:
-            charter: The profile's ``NODE.md``, or ``None`` (pin-only).
+            charter: The template's rendered ``NODE.md``, or ``None``
+                (pin-only).
             pin: The commission pin from ``--pin``, or ``None``.
+            fork: The child's fork ref -- the docket anchor when neither
+                ``pin`` nor a charter ``pin:`` line supplies one.
 
         Raises:
             ValueError: On the first fill-sheet violation.
@@ -953,7 +957,7 @@ class Node:
         for heading in ('## Instructions', '## Completion Requirements'):
             if heading not in text:
                 raise ValueError(
-                    f'Profile charter {charter} is missing {heading!r}'
+                    f'Template charter {charter} is missing {heading!r}'
                     ' (truncated or stale seed).'
                 )
         # every pin: line is load-bearing -- a spelling the gate cannot read
@@ -982,7 +986,7 @@ class Node:
                     )
         # docket rows must exist at the pin -- an enumerated surface that
         # moved or never existed is exactly the stale-docket class
-        anchor = pin or (pins[0] if pins else 'HEAD')
+        anchor = pin or (pins[0] if pins else fork)
         for row in re.findall(r'^docket:\s*(\S+)\s*$', text, flags=re.M):
             cmd = ['cat-file', '-e', f'{anchor}:{row}']
             if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is None:
@@ -1003,6 +1007,8 @@ class Node:
         template: Optional[str] = None,
         include: Optional[list[str]] = None,
         exclude: Optional[list[str]] = None,
+        values: Optional[PathLike] = None,
+        sets: Optional[list[str]] = None,
         pin: Optional[str] = None,
         agent: Optional[str] = None,
         provider: Optional[str] = None,
@@ -1070,9 +1076,15 @@ class Node:
             exclude: Template-relative paths to drop from the template; a
                 directory entry covers its subtree. Mutually exclusive
                 with ``include`` and recorded in ``_template.toml``.
+            values: Slot fill sheet: a TOML file of string values the
+                template's ``{{slot}}`` placeholders render with; recorded
+                in ``_template.toml``.
+            sets: Slot fills as ``KEY=VALUE`` pairs (repeatable); a pair
+                wins over the ``values`` sheet.
             pin: Commission pin (a commit sha): must resolve, and every
                 ``pin:`` declaration in the template charter must match it
-                -- a stale seed dies at init, not at the first seat.
+                -- a stale seed dies at init, not at the first seat. Also
+                supplies the ``pin`` slot value.
             agent: Agent type.
             provider: Provider route for the agent (e.g. ``openrouter``;
                 default: the vendor-native endpoint, inherited from the
@@ -1117,7 +1129,15 @@ class Node:
         """
         from .agent import command_base, resolve
         from .loop import _STEP_PREFIX
-        from .template import locate, materialize, read_preset, trim, write_provenance
+        from .template import (
+            collect_values,
+            fill,
+            locate,
+            materialize,
+            read_preset,
+            trim,
+            write_provenance,
+        )
 
         # coerce path to a str -- downstream '.' comparisons and persisted
         # caches expect the string form
@@ -1195,14 +1215,21 @@ class Node:
         template_tmp: Optional[str] = None
         template_bundle: Optional[pathlib.Path] = None
         template_preset: dict[str, Any] = {}
+        template_values: dict[str, str] = {}
         if include and exclude:
             raise ValueError('--include cannot be combined with --exclude.')
         if (include or exclude) and template is None:
             raise ValueError('--include and --exclude require --template.')
+        if (values is not None or sets) and template is None:
+            raise ValueError('--values and --set require --template.')
         if template is not None:
             template_path, template_ref, template_worktree = locate(
                 template, repo_dir=self.repo_dir
             )
+            # merge the slot values now (later sources win: the --values
+            # sheet, then --set, then --pin), so a malformed sheet or pair
+            # dies before any other work
+            template_values = collect_values(values=values, sets=sets, pin=pin)
         # the fill-sheet gate: a pinned commission must hold together before
         # any spend (--pin alone still validates the pin itself); a template
         # charter validates once the bundle materializes below
@@ -1322,11 +1349,8 @@ class Node:
             # sha when the parent commits before worktree add); every
             # template refusal fires here, before any worktree exists
             if template is not None:
-                rev = template_ref
-                if rev is None:
-                    rev = (
-                        child_branch if pre_existing_branch else (base or parent.branch)
-                    )
+                fork = child_branch if pre_existing_branch else (base or parent.branch)
+                rev = template_ref if template_ref is not None else fork
                 cmd = ['rev-parse', '--verify', f'{rev}^{{commit}}']
                 template_commit = fractal.util.git.run(
                     cmd,
@@ -1388,15 +1412,20 @@ class Node:
                             f'--template carries {surface}/; it cannot be'
                             f' combined with --inherit={surface}.'
                         )
-                # the fill-sheet gate on the bundle's charter (--pin
-                # alone still validates the pin itself)
-                node_md = bundle / 'NODE.md'
-                if pin is not None or node_md.is_file():
-                    charter = node_md if node_md.is_file() else None
-                    self._validate_charter(charter, pin=pin)
                 # cut the bundle down to the effective set, so downstream
                 # only sees what the listing keeps
                 trim(bundle, include=include, exclude=exclude)
+                # the slot pass: render the effective set's {{slot}}
+                # placeholders in place -- an unfilled slot or a stray {{
+                # refuses here, naming the file and the token
+                fill(bundle, path=template_path, values=template_values)
+                # the fill-sheet gate on the bundle's rendered charter
+                # (--pin alone still validates the pin itself); a pinless
+                # docket anchors at the fork ref
+                node_md = bundle / 'NODE.md'
+                if pin is not None or node_md.is_file():
+                    charter = node_md if node_md.is_file() else None
+                    self._validate_charter(charter, pin=pin, fork=fork)
                 # one notice when the root branch's copy differs from the
                 # commit read -- a path absent on the root is no notice
                 cmd = [
@@ -1434,7 +1463,7 @@ class Node:
                     bundle,
                     path=template_path,
                     commit=template_commit,
-                    values={},
+                    values=template_values,
                     include=include,
                     exclude=exclude,
                 )

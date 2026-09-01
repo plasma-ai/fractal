@@ -36,6 +36,7 @@ __all__ = [
     'test_record_force_add_refuses_non_record_files',
     'test_estate_add_refuses_non_record_files_with_no_ignore_layer',
     'test_estate_commits_its_own_tool_state',
+    'test_estate_commits_the_template_provenance',
     'test_refused_estate_content_leaves_the_clean_check_quiet',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
@@ -685,6 +686,45 @@ def test_estate_commits_its_own_tool_state(tmp_path: pathlib.Path) -> None:
     assert 'NOT staged' not in result
     assert 'are not node records' not in result
     # and the tree reads back clean, so the loop's net never fires
+    node.commit(check=True)
+
+
+def test_estate_commits_the_template_provenance(tmp_path: pathlib.Path) -> None:
+    """A template-seeded node's ``_template.toml`` is an estate record.
+
+    The provenance file is the record of what seeded the node, so the
+    node's own commits must fold it into history beside ``NODE.md`` and
+    ``config.json`` -- staged by the ``--init`` baseline with no refusal
+    notice, and clean against the pipeline's own check afterwards.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    # a committed template folder -- the seed reads from git, not the disk
+    template = repo / 'templates' / 'crew'
+    (template / 'steps').mkdir(parents=True)
+    (template / 'config.json').write_text('{}\n', encoding='utf-8')
+    (template / 'steps' / '01-GO.md').write_text('# go\n', encoding='utf-8')
+    _git(repo, 'add', 'templates')
+    _git(repo, 'commit', '-m', 'template templates/crew')
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        template=f'{template}',
+    )
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    result = node.commit('configure', init=True)
+
+    # the provenance rides the baseline beside the other estate records
+    tracked = _git(project_dir, 'ls-files').stdout
+    assert '.fractal/main.task/_template.toml' in tracked
+    # ordinary content draws no refusal notice
+    assert 'NOT staged' not in result
+    assert 'are not node records' not in result
+    # and the tree reads back clean
     node.commit(check=True)
 
 

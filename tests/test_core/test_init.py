@@ -70,6 +70,9 @@ __all__ = [
     'test_reset_without_template_drops_the_provenance',
     'test_pin_without_a_template_still_validates',
     'test_init_template_seeds_and_validates_the_fill_sheet',
+    'test_init_template_fills_slots_from_values_set_and_pin',
+    'test_init_template_slot_refusals_fire_before_any_worktree',
+    'test_init_template_docket_anchor_defaults_to_the_fork_commit',
     'test_child_inherits_skills_only_on_request',
     'test_child_inherits_config_preferences_not_caps',
     'test_init_requires_resolvable_agent',
@@ -2136,3 +2139,187 @@ def test_init_template_seeds_and_validates_the_fill_sheet(
     output = Node(git_repo).init(name='v2')
     assert 'author the node' in output
     assert 'sections start blank' in output
+
+
+def test_init_template_fills_slots_from_values_set_and_pin(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    """The slot pass renders the seed once, from merged values (later win).
+
+    ``--set`` beats the ``--values`` sheet, ``--pin`` supplies ``pin``,
+    and the charter gate reads the rendered text: a stale pin fill dies
+    at init, a coherent one deploys with every ``{{slot}}`` filled and
+    ``$VAR``/shell text intact, and the merged map -- an unused sheet key
+    included (one sheet may cover several templates) -- is recorded in
+    ``_template.toml``.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    charter = (
+        '## Instructions\n\npin: {{pin}}\nmission: {{ mission }}\n\n'
+        '## Completion Requirements\n\nDone.\n'
+    )
+    _commit_template(
+        git_repo,
+        'templates/steward',
+        {
+            'config.json': '{}\n',
+            'NODE.md': charter,
+            'steps/01-GO.md': '# {{mission}} on $WORKTREE_DIR (${CURRENT_BRANCH%.*})\n',
+        },
+    )
+    steward = f'{git_repo}/templates/steward'
+    head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
+    # the gate reads the rendered charter, so a stale pin fill refuses
+    stale = 'deadbeef' * 5
+    with pytest.raises(ValueError, match='pin does not resolve'):
+        Node(git_repo).init(
+            name='v1',
+            template=steward,
+            sets=[f'pin={stale}', 'mission=x'],
+        )
+    assert not (git_repo / '.worktrees' / 'main.v1').exists()
+    # a coherent fill deploys: the sheet fills, --set overrides it, and
+    # --pin supplies pin
+    sheet = tmp_path / 'fills.toml'
+    sheet.write_text(
+        'mission = "from the sheet"\nextra = "unused"\n',
+        encoding='utf-8',
+    )
+    Node(git_repo).init(
+        name='v1',
+        template=steward,
+        values=sheet,
+        sets=['mission=prove it'],
+        pin=head,
+    )
+    node_dir = git_repo / '.worktrees' / 'main.v1' / '.fractal' / 'main.v1'
+    node_md = (node_dir / 'NODE.md').read_text(encoding='utf-8')
+    assert f'pin: {head}\n' in node_md
+    assert 'mission: prove it\n' in node_md
+    step = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+    assert step == '# prove it on $WORKTREE_DIR (${CURRENT_BRANCH%.*})\n'
+    data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+    assert data['values'] == {
+        'mission': 'prove it',
+        'extra': 'unused',
+        'pin': head,
+    }
+
+
+def test_init_template_slot_refusals_fire_before_any_worktree(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Every slot-pass refusal names what broke, before any worktree exists.
+
+    An unfilled slot and a stray ``{{`` (an uppercase name included) name
+    the file and the token, a file that does not decode refuses by name
+    (templates are text), a shapeless ``--set`` pair, a key breaking the
+    slot grammar, and a malformed ``--values`` sheet refuse outright, and
+    the fill flags require ``--template``.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    _commit_template(
+        git_repo,
+        'templates/crew',
+        {'config.json': '{}\n', 'steps/01-GO.md': '# go for {{mission}}\n'},
+    )
+    crew = f'{git_repo}/templates/crew'
+    # an unfilled slot names the file and the token
+    with pytest.raises(
+        ValueError,
+        match=r'templates/crew/steps/01-GO\.md has no value for slot'
+        r' \{\{mission\}\}',
+    ):
+        Node(git_repo).init(name='task', template=crew)
+    # an uppercase {{PIN}} is not a slot; the refusal names the residue
+    _commit_template(
+        git_repo,
+        'templates/crew',
+        {'steps/01-GO.md': '# go for {{PIN}}\n'},
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"steps/01-GO\.md carries '\{\{PIN\}\}', which is not a slot",
+    ):
+        Node(git_repo).init(name='task', template=crew)
+    # a file that does not decode refuses by name -- templates are text
+    step = git_repo / 'templates' / 'crew' / 'steps' / '01-GO.md'
+    step.write_bytes(b'\x80\x81 not utf-8\n')
+    _git(git_repo, 'add', 'templates/crew')
+    _git(git_repo, 'commit', '-m', 'binary step')
+    with pytest.raises(ValueError, match=r'steps/01-GO\.md is not UTF-8 text'):
+        Node(git_repo).init(name='task', template=crew)
+    # the value sources validate before any read: a pair without '=', a
+    # key outside the slot grammar (either source), a non-string sheet
+    # value, a sheet that does not parse, and a sheet that does not exist
+    with pytest.raises(ValueError, match=r"Invalid --set value: 'mission'"):
+        Node(git_repo).init(name='task', template=crew, sets=['mission'])
+    with pytest.raises(ValueError, match=r"--set key is not a slot name: 'MISSION'"):
+        Node(git_repo).init(name='task', template=crew, sets=['MISSION=x'])
+    sheet = tmp_path / 'fills.toml'
+    sheet.write_text('Mission = "x"\n', encoding='utf-8')
+    with pytest.raises(
+        ValueError,
+        match=r"--values key is not a slot name: 'Mission'",
+    ):
+        Node(git_repo).init(name='task', template=crew, values=sheet)
+    sheet.write_text('count = 3\n', encoding='utf-8')
+    with pytest.raises(
+        ValueError,
+        match=r"--values key 'count' does not hold a string",
+    ):
+        Node(git_repo).init(name='task', template=crew, values=sheet)
+    sheet.write_text('= broken\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='not valid TOML'):
+        Node(git_repo).init(name='task', template=crew, values=sheet)
+    with pytest.raises(ValueError, match='--values file does not exist'):
+        Node(git_repo).init(name='task', template=crew, values=tmp_path / 'no.toml')
+    # the fill flags ride the template
+    with pytest.raises(ValueError, match='--values and --set require --template'):
+        Node(git_repo).init(name='task', sets=['mission=x'])
+    # nothing landed -- no worktree, no registry row
+    assert not (git_repo / '.worktrees' / 'main.task').exists()
+    assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+
+
+def test_init_template_docket_anchor_defaults_to_the_fork_commit(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pinless charter's docket anchors at the fork commit, not ``HEAD``.
+
+    A deep spawn forks from its parent's tip, so a docket surface
+    committed there -- and absent from the main checkout's ``HEAD`` --
+    resolves without ``--pin``; a row absent at the fork still refuses,
+    naming the fork ref.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    Node(git_repo).init(name='task')
+    worktree = git_repo / '.worktrees' / 'main.task'
+    # the docket surface and the template exist on the parent's tip only
+    _commit_template(worktree, 'audited', {'target.md': '# audit me\n'})
+    charter = (
+        '## Instructions\n\nAudit the docket.\ndocket: audited/target.md\n\n'
+        '## Completion Requirements\n\nVerdict filed.\n'
+    )
+    _commit_template(
+        worktree,
+        'templates/steward',
+        {'config.json': '{}\n', 'NODE.md': charter},
+    )
+    listed = _git(git_repo, 'ls-tree', '-r', '--name-only', 'HEAD').stdout
+    assert 'audited/target.md' not in listed
+    # the pinless docket resolves at the fork (the parent's tip)
+    monkeypatch.setenv('_NODE', str(worktree / '.fractal' / 'main.task'))
+    Node(git_repo).init(name='steward', template=f'{worktree}/templates/steward')
+    assert (git_repo / '.worktrees' / 'main.task.steward').is_dir()
+    # a row absent at the fork still refuses, naming the fork ref
+    stale = charter.replace('audited/target.md', 'no/such/surface.md')
+    _commit_template(worktree, 'templates/steward', {'NODE.md': stale})
+    with pytest.raises(
+        ValueError,
+        match=r"Docket row does not resolve at main\.task: 'no/such/surface\.md'",
+    ):
+        Node(git_repo).init(name='v2', template=f'{worktree}/templates/steward')

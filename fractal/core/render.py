@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import string
 import typing
 from typing import Optional
@@ -45,6 +46,34 @@ class _VarTemplate(string.Template):
           (?P<named>[A-Za-z_][A-Za-z0-9_]*)       |
           \{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}  |
           (?P<invalid>)
+        )
+    """
+
+
+class _SlotTemplate(string.Template):
+    """``{{slot}}`` substitution for the seed-time slot pass.
+
+    Only a lowercase ``{{name}}`` (padding spaces tolerated) is a slot;
+    the ``named`` and ``escaped`` groups are made unreachable and
+    ``invalid`` catches every other ``{{``, so ``substitute`` raises
+    ``KeyError`` on a slot with no value and ``ValueError`` on any
+    ``{{`` that is not a slot -- an uppercase ``{{PIN}}`` included. No
+    includes, loops, conditionals, defaults, or escapes; ``$VAR`` text
+    and shell text such as ``${CURRENT_BRANCH%.*}`` pass through
+    untouched, so the prompt-time grammar (:class:`_VarTemplate`) is
+    undisturbed.
+    """
+
+    # the base class compiles with IGNORECASE, which would admit {{PIN}}
+    flags = re.NOFLAG
+    # spelled [ ] because the compile is always VERBOSE, which drops a
+    # bare space from the pattern
+    pattern = r"""
+        (?:
+          (?P<escaped>(?!))                             |  # unreachable: no escape
+          (?P<named>(?!))                               |  # unreachable: braced only
+          \{\{[ ]*(?P<braced>[a-z_][a-z0-9_]*)[ ]*\}\}  |
+          (?P<invalid>\{\{)
         )
     """
 
