@@ -29,7 +29,6 @@ from fractal.core.node import Node
 from fractal.typing import PathLike
 
 __all__ = [
-    'SQLITE_INT_MAX',
     'command',
     'require_non_negative',
     'require_timestamp',

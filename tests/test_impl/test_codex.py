@@ -723,10 +723,12 @@ def test_seed_carries_the_parent_instructions_file_codex(
     parent_dir = tmp_path / 'parent'
     (parent_dir / '.codex' / 'prompts').mkdir(parents=True)
     (parent_dir / '.codex' / 'config.toml').write_text(
-        'model_instructions_file = "prompts/math.md"\n', encoding='utf-8'
+        'model_instructions_file = "prompts/math.md"\n',
+        encoding='utf-8',
     )
     (parent_dir / '.codex' / 'prompts' / 'math.md').write_text(
-        'Solve carefully.\n', encoding='utf-8'
+        'Solve carefully.\n',
+        encoding='utf-8',
     )
     node_dir = tmp_path / 'node'
     (node_dir / 'skills').mkdir(parents=True)
@@ -735,7 +737,8 @@ def test_seed_carries_the_parent_instructions_file_codex(
     assert copied.read_text(encoding='utf-8') == 'Solve carefully.\n'
     # an existing file is never overwritten
     (parent_dir / '.codex' / 'prompts' / 'math.md').write_text(
-        'Updated upstream.\n', encoding='utf-8'
+        'Updated upstream.\n',
+        encoding='utf-8',
     )
     CodexAgent.seed(node_dir, parent_dir=parent_dir)
     assert copied.read_text(encoding='utf-8') == 'Solve carefully.\n'

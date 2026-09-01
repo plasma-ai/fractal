@@ -510,7 +510,8 @@ def test_stream_fails_on_error_frames_after_draining(node_with_db: Node) -> None
     # the discriminable type lets the loop book it as an agent error, not a
     # fractal-side stream error
     with pytest.raises(
-        AgentStreamError, match='sample reported an error: boom'
+        AgentStreamError,
+        match='sample reported an error: boom',
     ) as excinfo:
         backend.stream(_lines(frames), step_id=step_id, render=rendered.append)
     # the error detail is collected raw off the wire, so the message is

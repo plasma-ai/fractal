@@ -2,10 +2,10 @@
 
 The helpers are pinned where they surface: node resolution in
 ``test_signal_guards``, and the ``command`` error wrapper behaviorally
-across the ``test_cli`` suites (its interrupt line here). ``StreamRenderer``'s piped-stream
-ordering lives here (its per-provider event rendering is pinned in
-``test_impl``), as does ``resolve_headless``'s flag > env >
-recorded-backend cascade.
+across the ``test_cli`` suites (its interrupt line here).
+``StreamRenderer``'s piped-stream ordering lives here (its
+per-provider event rendering is pinned in ``test_impl``), as does
+``resolve_headless``'s flag > env > recorded-backend cascade.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ def test_renderer_keeps_piped_output_ordered_with_stderr() -> None:
 
 @pytest.fixture
 def marker_node(tmp_path: pathlib.Path) -> Node:
-    """A minimal node whose data dir holds at most the backend record."""
+    """Return a fresh minimal node whose data dir holds at most the backend record."""
     _git(tmp_path, 'init', '-b', 'main')
     _git(tmp_path, 'config', 'user.email', 'utils@test.local')
     _git(tmp_path, 'config', 'user.name', 'utils')

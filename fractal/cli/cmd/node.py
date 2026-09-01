@@ -353,49 +353,8 @@ def node_init(app: typer.Typer) -> typer.Typer:
         # (advisory, never a block); an agent with no tracked spend to meter
         # (codex without a priced model) stays quiet
         if max_cost is None and max_iters is None:
-            # resolve the effective agent the way init does: the flag, else the
-            # nearest ancestor's default walked from the calling node (_NODE)
-            # the child nests under -- not the repo-root target resolve_init
-            # returned (they differ once an agent spawns its own children)
-            parent = Node.resolve_caller()
-            if parent is not None and parent.repo_dir != node.repo_dir:
-                parent = None
-            # no ambient caller but a path under .worktrees/ (a manual init
-            # from inside a worktree): parent on that worktree's node, the way
-            # init itself does, so the read-back finds the branch it composed
-            if parent is None:
-                parts = pathlib.Path(path).parts
-                if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
-                    candidate = Node(node.repo_dir / WORKTREES_FOLDER / parts[1])
-                    if candidate.exists():
-                        parent = candidate
-            if parent is None or not parent.exists():
-                parent = node
-            # a template preset can cap or re-agent what the flags left unset
-            # -- the child's stored config holds the merged values, so read
-            # them back rather than warn a preset-capped node it is unbounded
-            if template is not None:
-                child_branch = f'{parent.branch}.{name}'
-                child = Node(node.repo_dir / WORKTREES_FOLDER / child_branch)
-                if child.exists():
-                    max_cost = child.config.get('max_cost')
-                    max_iters = child.config.get('max_iters')
-                    if agent is None:
-                        agent = child.config.get('agent')
-            effective_agent = agent or parent.agent_effective()
-            tracked = True
-            # the probe anchors the agent registry's database on an initialized
-            # node, and the resolve_init target (the repo root, off the tree's
-            # root branch) may carry no config -- an unprobed agent reads as
-            # tracked, and this advisory never fails a spawn that succeeded
-            if effective_agent and parent.exists():
-                # an unregistered backend reads as tracked -- unknown
-                # spend earns the warning, never a block
-                try:
-                    tracked = parent.agent(effective_agent).tracks_cost(model)
-                except ValueError:
-                    tracked = True
-            if tracked and max_cost is None and max_iters is None:
+            unmetered = _spend_unmetered(node, path, name, template, agent, model)
+            if unmetered:
                 typer.echo(
                     'Warning: no --max-cost/--max-iters -- this node can run'
                     ' and spend without bound.',
@@ -433,8 +392,8 @@ def node_start(app: typer.Typer) -> typer.Typer:
         ' old -> new; required when the last run ended on its budget.'
     )
     max_cost = typer.Option(None, '--max-cost', help=max_cost_help)
-    # headless flag (seat-supplied via $FRACTAL_HEADLESS; unset reuses the
-    # node's recorded backend)
+    # headless flag (seat-supplied via $FRACTAL_HEADLESS;
+    # unset reuses the node's recorded backend)
     headless_help = (
         'Run without tmux in a detached process group (default: the'
         " node's recorded backend, tmux for a node that has never run"
@@ -1418,9 +1377,8 @@ def node_update(app: typer.Typer) -> typer.Typer:
         parent = target.parent
         if parent is None:
             raise typer.BadParameter(f'Parent worktree not found: {target.branch}.')
-        # resolve an explicit reserve to USD against the effective cap
-        # through core's resolver (the default-mode reserve retune is core's
-        # own, in child_retune)
+        # resolve an explicit reserve to USD against the effective cap through core's
+        # resolver (the default-mode reserve retune is core's own, in child_retune)
         new_reserve = None
         if reserve_budget is not None:
             if max_cost is not None:
@@ -1544,7 +1502,7 @@ def node_seed(app: typer.Typer) -> typer.Typer:
     # seeds the agent dirs before the node is registered)
     node_dir_help = 'Node data directory to seed under.'
     node_dir = typer.Argument(..., help=node_dir_help)
-    # parent flag
+    # parent option
     parent_help = "Parent node's data directory, when one exists."
     parent = typer.Option(None, '--parent', help=parent_help)
     # bundle option
@@ -1615,3 +1573,68 @@ def node_scope(app: typer.Typer) -> typer.Typer:
             raise SystemExit(1)
 
     return app
+
+
+# ------ helper functions
+
+
+def _spend_unmetered(
+    node: Node,
+    path: str,
+    name: str,
+    template: Optional[str],
+    agent: Optional[str],
+    model: Optional[str],
+) -> bool:
+    """Return whether a just-initialized uncapped node has tracked spend.
+
+    Backs init's uncapped-spend advisory: resolves the parent the child
+    nests under, reads a template child's merged config back for the caps
+    and agent a preset can supply, and probes the parent's agent registry
+    for cost tracking. True means the advisory should print.
+    """
+    # resolve the effective agent the way init does: the flag, else the nearest
+    # ancestor's default walked from the calling node (_NODE) the child nests
+    # under -- not the repo-root target resolve_init returned (they differ once
+    # an agent spawns its own children)
+    parent = Node.resolve_caller()
+    if parent is not None and parent.repo_dir != node.repo_dir:
+        parent = None
+    # no ambient caller but a path under .worktrees/ (a manual init from inside
+    # a worktree): parent on that worktree's node, the way init itself does, so
+    # the read-back finds the branch it composed
+    if parent is None:
+        parts = pathlib.Path(path).parts
+        if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
+            candidate = Node(node.repo_dir / WORKTREES_FOLDER / parts[1])
+            if candidate.exists():
+                parent = candidate
+    if parent is None or not parent.exists():
+        parent = node
+    # a template preset can cap or re-agent what the flags left unset -- the
+    # child's stored config holds the merged values, so read them back rather
+    # than warn a preset-capped node it is unbounded
+    max_cost = None
+    max_iters = None
+    if template is not None:
+        child_branch = f'{parent.branch}.{name}'
+        child = Node(node.repo_dir / WORKTREES_FOLDER / child_branch)
+        if child.exists():
+            max_cost = child.config.get('max_cost')
+            max_iters = child.config.get('max_iters')
+            if agent is None:
+                agent = child.config.get('agent')
+    effective_agent = agent or parent.agent_effective()
+    tracked = True
+    # the probe anchors the agent registry's database on an initialized node,
+    # and the resolve_init target (the repo root, off the tree's root branch)
+    # may carry no config -- an unprobed agent reads as tracked, and this
+    # advisory never fails a spawn that succeeded
+    if effective_agent and parent.exists():
+        # an unregistered backend reads as tracked -- unknown spend earns the
+        # warning, never a block
+        try:
+            tracked = parent.agent(effective_agent).tracks_cost(model)
+        except ValueError:
+            tracked = True
+    return tracked and max_cost is None and max_iters is None

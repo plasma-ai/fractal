@@ -134,22 +134,22 @@ Fractal's footprint
    ``plans/`` (:doc:`/guide/plans`), a ``memory/`` wiki, a ``_template.toml``
    record of the template that seeded the node when ``node init --template``
    did (:doc:`/cli/node`), a git-ignored ``tmp/`` scratch directory, and
-   runtime markers such as the one-line ``.status`` file.
-   Agent-node data directories are tracked in git on the
-   node's own branch but never merge upward: ``fractal node merge`` returns
-   every ``.fractal/`` path on the target to the target's own HEAD (only a
-   scope root of the merging node that is, or lies under, a ``.fractal/``
-   directory lands — a ``--meta`` node's scope is the target's seed
-   directory), so the squash never adds the node's ``.fractal/<branch>/`` or
-   any descendant seed the branch carries, node machinery never lands in the
-   parent, and a node's edit to the parent's estate never rides its squash —
-   the parent's version is restored, the merge-base advance then brings the
-   parent's tree into the node's worktree, and the node's copy survives only
-   in its branch history. On the user node's branch the merge also strips a
-   copy of those seeds the branch already tracks (a leak there); a node
-   target keeps a copy its PREPARE merge of the child tracks until it merges
-   upward itself. The root node's own data directory is git-ignored by
-   default (``fractal track`` and ``fractal untrack`` toggle this).
+   runtime markers such as the one-line ``.status`` file. Agent-node data
+   directories are tracked in git on the node's own branch but never merge
+   upward: ``fractal node merge`` returns every ``.fractal/`` path on the
+   target to the target's own HEAD (only a scope root of the merging node
+   that is, or lies under, a ``.fractal/`` directory lands — a ``--meta``
+   node's scope is the target's seed directory), so the squash never adds the
+   node's ``.fractal/<branch>/`` or any descendant seed the branch carries,
+   node machinery never lands in the parent, and a node's edit to the
+   parent's estate never rides its squash — the parent's version is restored,
+   the merge-base advance then brings the parent's tree into the node's
+   worktree, and the node's copy survives only in its branch history. On the
+   user node's branch the merge also strips a copy of those seeds the branch
+   already tracks (a leak there); a node target keeps a copy its PREPARE
+   merge of the child tracks until it merges upward itself. The root node's
+   own data directory is git-ignored by default (``fractal track`` and
+   ``fractal untrack`` toggle this).
 
 ``.gitattributes``
    ``fractal init`` writes the ``**/_index.md merge=wiki`` rule (under a

@@ -105,7 +105,7 @@ node's steps), so activity totals read *below* the guard figures on a spawning
 node by design -- the gap is the children's spend, itemized by `cost breakdown`.
 And every figure is per-run: runs are isolated, and no cost command reports a
 lifetime rollup -- reconcile across runs by scoping each run
-(`cost spent --run <id>`) and summing.
+(`cost spent --run=<id>`) and summing.
 
 > [!WARNING]
 > A **small `--max-cost` on a child running an expensive `--model`** is the
@@ -176,7 +176,7 @@ pool a cheaper token rate buys more steps, not a lower bill.
    For a well-specified single-mission leaf, consider the **leaf step set**:
    trim the child to PLAN + EXECUTE + COMMIT. A leaner leaf uses a leaner
    template or `--exclude` at init
-   (`--template <path> --exclude steps/00-PREPARE.md --exclude steps/03-REVIEW.md`
+   (`--template=<path> --exclude=steps/00-PREPARE.md --exclude=steps/03-REVIEW.md`
    -- the trim is recorded, so `node diff` and `node reseed` hold it); on a
    template-less child, delete the PREPARE and REVIEW files from `steps/` before
    the config commit (the loop runs whatever `steps/` contains, in digit-prefix

@@ -61,7 +61,9 @@ under `agents/`.
   config dirs (`.claude/`, `.codex/`, ... -- git-ignored, disk-only). A
   template's file beats the parent's live copy, which beats the package seed,
   and a template plus `node diff` and `node reseed` is the one versioned path
-  agent settings have.
+  agent settings have. An entry must name a registered agent -- an unknown name
+  refuses at init rather than deploying nothing and drifting on every later
+  diff.
 
 A bundled surface is a rival source to inheriting the parent's:
 `--inherit=steps` (likewise `scripts` and `skills`) is refused when the template
@@ -236,8 +238,8 @@ credential would do harm, so every materialize -- init, `node diff`, and
 `node reseed` alike -- refuses a dot-file under `agents/` (dot-files hold live
 agent state and credentials, never template content) and any credential-named
 file: `auth.json`, `credentials.json`, `*.key`, `*.pem`, `*.p12`, `*.pfx`,
-`id_rsa`, `id_ed25519`, matched case-blind and naming the file, whatever commit
-carried it. Credentials never deploy from a template -- a node links its own at
-seed time. The guard is a name list on the read side, not a scanner: a key
-inlined inside a legitimate config file passes any name check and stays review
-territory.
+`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_ecdsa_sk`, `id_ed25519_sk`, `id_dsa`,
+`*.ppk`, matched case-blind and naming the file, whatever commit carried it.
+Credentials never deploy from a template -- a node links its own at seed time.
+The guard is a name list on the read side, not a scanner: a key inlined inside a
+legitimate config file passes any name check and stays review territory.

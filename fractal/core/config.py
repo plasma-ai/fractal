@@ -55,9 +55,8 @@ KEYS = (
 )
 
 # keys whose value is a JSON list of repo-relative subdirectories (the CLI
-# accepts a comma- or space-separated string and stores each entry in
-# canonical path form, and the read path splits a space-joined one, so both
-# forms round-trip)
+# accepts a comma- or space-separated string and stores each entry in canonical
+# path form, and the read path splits a space-joined one, so both forms round-trip)
 LIST_KEYS = (
     'scope',
     'clone_dirs',
@@ -110,6 +109,10 @@ IMMUTABLE_KEYS = ('root', 'user', 'project')
 
 # default cleanup reserve as a fraction of max_cost
 DEFAULT_RESERVE_FRACTION = 0.10
+
+# ceiling on the reserve as a fraction of max_cost -- a reserve at or past it
+# would leave the run (nearly) nothing of its own budget to spend
+MAX_RESERVE_FRACTION = 0.99
 
 # decimal places a reserve amount materializes to -- a percent product
 # rounds here so no binary float noise persists into config.json, and
@@ -170,8 +173,10 @@ def parse_reserve_budget(
         raise ValueError('--reserve-budget must be a number or N%.') from None
     if reserve < 0:
         raise ValueError('--reserve-budget must be >= 0.')
-    if reserve >= 0.99 * max_cost:
-        raise ValueError('--reserve-budget must be < 99% of --max-cost.')
+    if reserve >= MAX_RESERVE_FRACTION * max_cost:
+        raise ValueError(
+            f'--reserve-budget must be < {MAX_RESERVE_FRACTION:.0%} of --max-cost.'
+        )
     # money materializes at display precision -- a bare percent product
     # (10% of $6) would otherwise persist binary noise into config.json
     # and every echo that quotes it
@@ -315,11 +320,11 @@ class Config:
         ordering, a non-integer or degenerate integer cap (a non-positive
         ``max_iters`` reads as unlimited in the loop, and a cap at or past
         the SQLite signed 64-bit ceiling raises raw from the adapter
-        mid-write), a non-bool mode flag
-        (the loop's ``bool()`` coercion reads a hand-edited ``"false"``
-        string as ``True``), a bare-number or zero-truncating duration
-        (which bricks the loop at launch or at its mid-run re-reads), an
-        absolute or ``..`` list-key entry (a scope root that never matches
+        mid-write), a non-bool mode flag (the loop's ``bool()``
+        coercion reads a hand-edited ``"false"`` string as ``True``), a
+        bare-number or zero-truncating duration (which bricks the loop
+        at launch or at its mid-run re-reads), an absolute or
+        ``..`` list-key entry (a scope root that never matches
         the commit pipeline's relative prefix check bricks every scoped
         commit; a ``clone_dirs`` entry would reach outside the worktree it
         warms), a non-canonical list-key spelling (``./src``, ``src/`` --
@@ -403,12 +408,16 @@ class Config:
                 raise ValueError('max_iter_cost requires max_cost.')
             if max_step_cost is not None:
                 raise ValueError('max_step_cost requires max_cost.')
-        # reserve must sit in [0, 99% of max_cost)
+        # reserve must sit in [0, MAX_RESERVE_FRACTION of max_cost)
         if reserve_budget is not None:
             if reserve_budget < 0:
                 raise ValueError('reserve_budget must be >= 0.')
-            if max_cost is not None and reserve_budget >= 0.99 * max_cost:
-                raise ValueError('reserve_budget must be < 99% of max_cost.')
+            if max_cost is not None:
+                if reserve_budget >= MAX_RESERVE_FRACTION * max_cost:
+                    raise ValueError(
+                        'reserve_budget must be'
+                        f' < {MAX_RESERVE_FRACTION:.0%} of max_cost.'
+                    )
         # cost ordering: step <= iter <= run
         if max_iter_cost is not None and max_cost is not None:
             if max_iter_cost > max_cost:
@@ -486,10 +495,9 @@ class Config:
                             f'{key} must be a repo-relative subdirectory, not'
                             f' {entry!r} (no absolute or ".." paths).'
                         )
-                    # '.' names the project root: a legal scope (the commit
-                    # boundary collapses to the project) but never a cache
-                    # dir, where it would clone the entire checkout over the
-                    # worktree root
+                    # '.' names the project root: a legal scope (the commit boundary
+                    # collapses to the project) but never a cache dir, where it
+                    # would clone the entire checkout over the worktree root
                     if key == 'clone_dirs' and not rel.parts:
                         raise ValueError(
                             f'clone_dirs must name a subdirectory, not {entry!r}.'

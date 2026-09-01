@@ -136,8 +136,8 @@ node at ``--path``.
        refusal — an untracked folder, a symlink, a credential-named file
        under ``agents/``, a broken ``steps/`` contract, an unfilled
        ``{{slot}}``, a truncated charter — fires before any worktree
-       exists. One notice on stderr names the ``@<ref>`` form when the
-       root branch holds a different copy of the folder.
+       exists. One notice appended to the init output names the ``@<ref>``
+       form when the root branch holds a different copy of the folder.
    * - ``--include <path>``
      - whole template
      - Deploy only these template-relative paths (repeatable; a directory
@@ -730,11 +730,11 @@ re-rendered at its recorded commit with its recorded slot values, the
 effective set (the recorded ``include``/``exclude`` listing) is applied, and
 each file is compared against the node's live copy: ``NODE.md``, ``steps/``,
 ``scripts/``, ``skills/``, and — for each ``agents/<agent>/`` file — the
-live ``.<agent>/`` copy, all in the node's data directory. A live symlink and a file the template does not carry are never
-judged; a template file the node lacks is drift, as is unrendered ``{{``
-residue in a live copy. The recorded commit resolves as long as it is
-reachable, so a template folder moved or deleted later still diffs at the
-commit that seeded the node.
+live ``.<agent>/`` copy, all in the node's data directory. A live symlink
+and a file the template does not carry are never judged; a template file the
+node lacks is drift, as is unrendered ``{{`` residue in a live copy. The
+recorded commit resolves as long as it is reachable, so a template folder
+moved or deleted later still diffs at the commit that seeded the node.
 
 Drift prints one unified diff per file (``template/<file>`` against
 ``node/<file>``); a recorded listing entry the template no longer carries
@@ -929,7 +929,7 @@ Retuning
 .. code-block:: console
 
    $ fractal node reseed [NODE] [--ref <ref> | --template <path[@ref]>]
-         [--force]
+         [--force|-f]
 
 Rewrite a node's seed surfaces from its recorded template. The recorded
 folder is re-rendered at its recorded commit with its recorded slot values,

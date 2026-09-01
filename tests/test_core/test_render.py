@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from typing import Optional
 
 import pytest
 
@@ -76,10 +77,10 @@ _SLOT_TEMPLATES = [
 ]
 
 
-@pytest.mark.parametrize(argnames=('template', 'expected'), argvalues=_SLOT_TEMPLATES)
+@pytest.mark.parametrize(('template', 'expected'), _SLOT_TEMPLATES)
 def test_slot_template_fills_byte_for_byte(
     template: str,
-    expected: str | None,
+    expected: Optional[str],
 ) -> None:
     """``_SlotTemplate`` fills lowercase slots and touches nothing else.
 
@@ -99,8 +100,8 @@ def test_slot_template_raises_on_an_unfilled_slot() -> None:
 
 
 @pytest.mark.parametrize(
-    'residue',
-    ['{{PIN}}', '{{Pin}}', '{{9lives}}', '{{pin', '{{ }}'],
+    argnames='residue',
+    argvalues=['{{PIN}}', '{{Pin}}', '{{9lives}}', '{{pin', '{{ }}'],
 )
 def test_slot_template_refuses_every_stray_brace_pair(residue: str) -> None:
     """Any ``{{`` that is not a lowercase slot raises ``ValueError``.
@@ -119,14 +120,14 @@ def test_render_template_substitutes_static_and_passes_runtime(
     """Static vars resolve and run-scoped vars pass through to the caller.
 
     An override wins over the (absent) derived value, and ``$MAX_DESCENDANTS``
-    now substitutes -- the former envsubst gap.
+    substitutes as a static var.
     """
     node = node_with_db
     template = 'wt=$WORKTREE_DIR step=$STEP_LABEL desc=$MAX_DESCENDANTS none=$NOPE'
     rendered = node.render_template(template)
     assert f'wt={node.worktree}' in rendered  # static var -> real path
     assert 'step=$STEP_LABEL' in rendered  # run-scoped: left for the caller
-    assert '$MAX_DESCENDANTS' not in rendered  # gap fix: now substituted
+    assert '$MAX_DESCENDANTS' not in rendered  # static var -> substituted
     assert 'none=$NOPE' in rendered  # unknown placeholder passes through
     # an override wins over the (absent) derived value
     overridden = node.render_template(template, overrides={'STEP_LABEL': 'step 1 of 3'})

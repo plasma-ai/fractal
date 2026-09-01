@@ -37,8 +37,13 @@ if [[ -z "$WORKTREE_DIR" ]]; then
     exit 1
 fi
 
-if [[ -z "$BUNDLE" || ! -d "$BUNDLE" ]]; then
-    echo "Error: --bundle must name a directory" >&2
+if [[ -z "$BUNDLE" ]]; then
+    echo "Error: --bundle is required" >&2
+    exit 1
+fi
+
+if [[ ! -d "$BUNDLE" ]]; then
+    echo "Error: --bundle must name a directory: $BUNDLE" >&2
     exit 1
 fi
 
@@ -117,6 +122,14 @@ if [[ -d "$BUNDLE/skills" ]]; then
         [[ -d "$SKILL_SRC" ]] || continue
         SKILL_NAME=$(basename "$SKILL_SRC")
         mkdir -p "$NODE_DIR/skills/$SKILL_NAME"
+        # refuse a symlinked destination: a plain cp would write through it
+        while IFS= read -r REL; do
+            REL="${REL#./}"
+            if [[ -L "$NODE_DIR/skills/$SKILL_NAME/$REL" ]]; then
+                echo "Error: skills/$SKILL_NAME/$REL is a symlink; refusing to write through it" >&2
+                exit 1
+            fi
+        done < <(cd "$SKILL_SRC" && find . -type f)
         cp -RL "${SKILL_SRC}." "$NODE_DIR/skills/$SKILL_NAME/"
     done
 fi

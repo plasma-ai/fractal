@@ -58,32 +58,32 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   with the child's own and descendant seeds grafted back from its HEAD: the
   child converges to the target outside its own machinery (a file the target
   changed since the fork is never re-offered as the child's stale copy, and a
-  ``.fractal/`` page the target gained reaches the child), the seed trees are unchanged
-  byte for byte, and a child index or branch ref another process holds skips
-  the advance with the warning instead of failing the landed merge (a ref
-  lock rolls the half-written worktree back), as does a read of the child's
-  worktree git cannot answer (the landed squash is still reported and its
-  event closed, never aborted past the commit) and an edit to a tracked file
-  of a shape the commit law excludes (a force-tracked ``config.json.lock``,
-  which the law's own check reads as clean), as does a private ignored file
-  the target now tracks, which the advance would otherwise overwrite -- the
-  disk is probed, so a directory sitting where the target adds a file, a
-  file where it adds a directory, and a case-only alias count too -- with
-  rename detection off, so a target rename onto the child's private path is
-  a collision, while a disk hit the child's index tracks as a case-variant
-  is the reset's own rename, not one, and a hit at or under a path the
-  child's tree tracks, or at a prefix it tracks, is a type change the target
-  made (a file into a directory, or back) that the reset performs -- the
-  index read as text, so no NUL byte leaks onto stderr; a fresh "Nothing to
-  merge" whose restore dropped paths advances the child too, so the drop is
-  never re-offered, and so does one whose only conflict resolved itself on
-  a foreign ``.fractal/`` path (an edit to the node's own seed is no
-  adjudication and leaves the child put); into a node target that tracks
-  the child's seed from a PREPARE fold, the advance strips the target's
-  copy before grafting the live seed, so a seed file the child dropped never
-  comes back; and once the squash commit is on the target an interrupt
-  finishes or rolls back the child's update, closes the event, and reports
-  the landed squash with exit 0 rather than failing a complete merge.
+  ``.fractal/`` page the target gained reaches the child), the seed trees are
+  unchanged byte for byte, and a child index or branch ref another process
+  holds skips the advance with the warning instead of failing the landed
+  merge (a ref lock rolls the half-written worktree back), as does a read of
+  the child's worktree git cannot answer (the landed squash is still reported
+  and its event closed, never aborted past the commit) and an edit to a
+  tracked file of a shape the commit law excludes (a force-tracked
+  ``config.json.lock``, which the law's own check reads as clean), as does a
+  private ignored file the target now tracks, which the advance would
+  otherwise overwrite -- the disk is probed, so a directory sitting where the
+  target adds a file, a file where it adds a directory, and a case-only alias
+  count too -- with rename detection off, so a target rename onto the child's
+  private path is a collision, while a disk hit the child's index tracks as a
+  case-variant is the reset's own rename, not one, and a hit at or under a
+  path the child's tree tracks, or at a prefix it tracks, is a type change
+  the target made (a file into a directory, or back) that the reset performs
+  -- the index read as text, so no NUL byte leaks onto stderr; a fresh
+  "Nothing to merge" whose restore dropped paths advances the child too, so
+  the drop is never re-offered, and so does one whose only conflict resolved
+  itself on a foreign ``.fractal/`` path (an edit to the node's own seed is
+  no adjudication and leaves the child put); into a node target that tracks
+  the child's seed from a PREPARE fold, the advance strips the target's copy
+  before grafting the live seed, so a seed file the child dropped never comes
+  back; and once the squash commit is on the target an interrupt finishes or
+  rolls back the child's update, closes the event, and reports the landed
+  squash with exit 0 rather than failing a complete merge.
 - **``merge.sh`` interrupts once the target is settled** are judged by the
   target, not the step in flight: a SIGINT while ``git commit`` runs its
   post-commit hook (the ref moved, the child not yet reaped) finds a landed
@@ -156,8 +156,8 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   with no restore warning, and a child inited afterwards from the target
   deploys the landed bytes; a sibling whose scope does not cover the folder
   is refused at commit and, committing with raw git, at the merge footprint;
-  and deleting the scoped node with the edit unmerged warns of the
-  discarded work.
+  and deleting the scoped node with the edit
+  unmerged warns of the discarded work.
 - **``merge.sh`` post-refresh no-op** re-checks the staged squash after the
   target's wiki index refresh: a squash the refresh fully reverts (a re-merge
   offering only regenerated wiki state, e.g. a legacy-tracked ``.wiki/cache``)

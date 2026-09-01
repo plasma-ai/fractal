@@ -67,9 +67,8 @@ PRESET_KEYS = (
 #: credential file names refused under a template's agents/ subtree --
 #: codex and grok symlink their OAuth stores into the node's agent dir as
 #: auth.json (opencode's global store shares the name), omp relocates
-#: credentials.json into its node dir, and the rest are the generic key
-#: shapes; a dot-file (claude's .credentials.json among them) refuses
-#: beside these
+#: credentials.json into its node dir, and the rest are the generic key shapes;
+#: a dot-file (claude's .credentials.json among them) refuses beside these
 CREDENTIAL_NAMES = (
     'auth.json',
     'credentials.json',
@@ -137,18 +136,19 @@ def locate(
     if '..' in pathlib.Path(given).parts:
         raise ValueError(f'--template path may not contain ".." steps: {given!r}.')
     resolved = pathlib.Path(given).resolve()
-    # locate the containing worktree through the nearest existing ancestor,
-    # so a folder deleted from disk but tracked at the fork commit still
-    # resolves
+    # locate the containing worktree through the nearest existing ancestor, so a
+    # folder deleted from disk but tracked at the fork commit still resolves
     probe = resolved
     while not probe.is_dir() and probe.parent != probe:
         probe = probe.parent
     found = fractal.util.git.toplevel(probe, check=False)
     if found is not None:
         found = found.resolve()
-    inside = found is not None and (
-        found == repo_dir or found.parent == repo_dir / WORKTREES_FOLDER
-    )
+    inside = False
+    if found is not None:
+        main = found == repo_dir
+        nested = found.parent == repo_dir / WORKTREES_FOLDER
+        inside = main or nested
     if not inside or found is None or not resolved.is_relative_to(found):
         raise ValueError(
             f'--template path is outside this repository: {given!r};'
@@ -292,11 +292,9 @@ def materialize(
         # git exits 128 with a distinct message per missing half: the
         # pathspec miss (folder untracked at the commit) and the unknown rev
         if 'did not match any files' in stderr:
-            on_disk = (
-                ' (an uncommitted copy exists on disk)'
-                if (worktree / path).exists()
-                else ''
-            )
+            on_disk = ''
+            if (worktree / path).exists():
+                on_disk = ' (an uncommitted copy exists on disk)'
             raise ValueError(
                 f'Template folder {path!r} is not tracked at commit'
                 f' {commit}{on_disk}; commit the folder on the branch the'
@@ -304,7 +302,7 @@ def materialize(
                 ' commit.'
             )
         if 'not a valid object name' in stderr:
-            raise ValueError(f'Template ref does not resolve: {commit!r}.')
+            raise ValueError(f'Template ref does not resolve to a commit: {commit!r}.')
         raise RuntimeError(f'git archive failed: {stderr.strip()}')
     with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as bundle:
         # a template is self-contained: init.sh dereferences skill links
@@ -337,16 +335,15 @@ def materialize(
                     f' agents/: {member.name!r}; dot-files hold live agent'
                     ' state and credentials, never template content.'
                 )
-            if member.isfile() and any(
-                fnmatch.fnmatchcase(parts[-1].casefold(), shape)
-                for shape in CREDENTIAL_NAMES
-            ):
-                raise ValueError(
-                    f'Template folder {path!r} carries a credential-named'
-                    f' file under agents/: {member.name!r}; credentials'
-                    ' never deploy from a template -- a node links its own'
-                    ' at seed time.'
-                )
+            if member.isfile():
+                name = parts[-1].casefold()
+                if any(fnmatch.fnmatchcase(name, shape) for shape in CREDENTIAL_NAMES):
+                    raise ValueError(
+                        f'Template folder {path!r} carries a credential-named'
+                        f' file under agents/: {member.name!r}; credentials'
+                        ' never deploy from a template -- a node links its own'
+                        ' at seed time.'
+                    )
         bundle.extractall(dest, filter='data')
     root = dest / pathlib.PurePosixPath(path)
     if not root.is_dir():
@@ -667,14 +664,14 @@ def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
         listing = data.get(key)
         if listing is None:
             continue
-        if not isinstance(listing, list) or not all(
-            isinstance(entry, str) for entry in listing
-        ):
+        listed = isinstance(listing, list)
+        strings = listed and all(isinstance(entry, str) for entry in listing)
+        if not strings:
             raise ValueError(f'{record} {key} is not a list of paths.')
     values = data.get('values', {})
-    if not isinstance(values, dict) or not all(
-        isinstance(value, str) for value in values.values()
-    ):
+    table = isinstance(values, dict)
+    strings = table and all(isinstance(value, str) for value in values.values())
+    if not strings:
         raise ValueError(f'{record} values is not a table of strings.')
     return data
 
@@ -762,9 +759,12 @@ def diff(
             # have refused marks a hand-copied, never-rendered file
             if b'{{' in actual and b'{{' not in rendered:
                 reports.append(f'{target}: unrendered {{{{ residue in the live copy.')
+            rendered_lines = rendered.decode('utf-8').splitlines(keepends=True)
+            actual_text = actual.decode('utf-8', errors='replace')
+            actual_lines = actual_text.splitlines(keepends=True)
             lines = difflib.unified_diff(
-                rendered.decode('utf-8').splitlines(keepends=True),
-                actual.decode('utf-8', errors='replace').splitlines(keepends=True),
+                a=rendered_lines,
+                b=actual_lines,
                 fromfile=f'template/{target}',
                 tofile=f'node/{target}',
             )

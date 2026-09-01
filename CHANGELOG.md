@@ -101,10 +101,10 @@ may include breaking changes, each listed under a Breaking heading.
   instead of refusing.
 - Template credential guard: a template's `agents/` subtree refuses any dot-file
   and any credential-named file (`auth.json`, `credentials.json`, `*.key`,
-  `*.pem`, `*.p12`, `*.pfx`, `id_rsa`, `id_ed25519`, matched case-blind) at
-  every materialize — init, `node diff`, and `node reseed` alike — naming the
-  file; credentials never deploy from a template — a node links its own at seed
-  time.
+  `*.pem`, `*.p12`, `*.pfx`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_ecdsa_sk`,
+  `id_ed25519_sk`, `id_dsa`, `*.ppk`, matched case-blind) at every materialize —
+  init, `node diff`, and `node reseed` alike — naming the file; credentials
+  never deploy from a template — a node links its own at seed time.
 
 ### Fixed
 

@@ -101,7 +101,7 @@ def command_base(command: str) -> str:
     if any(char in command for char in '\'"\\'):
         raise ValueError(
             f'Unsupported agent command: {command!r} (commands split on'
-            ' whitespace only — quotes and backslashes are not supported).'
+            ' whitespace only -- quotes and backslashes are not supported).'
         )
     base_word, *_ = command.split()
     return base_word
@@ -1088,8 +1088,7 @@ class Agent:
         config_dir.mkdir(parents=True, exist_ok=True)
         # deploy the bundle's per-agent files first: the template beats the
         # parent's live copy, which stays the fallback for files the bundle lacks
-        if bundle_dir is not None and (bundle_dir / cls.name).is_dir():
-            bundle_seed = bundle_dir / cls.name
+        if bundle_dir is not None and (bundle_seed := bundle_dir / cls.name).is_dir():
             for path in sorted(bundle_seed.rglob('*')):
                 if path.is_file():
                     target = config_dir / path.relative_to(bundle_seed)
@@ -1113,8 +1112,7 @@ class Agent:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy(path, target)
         # an overwrite ends here: files the bundle lacks are left alone
-        # entirely -- no parent/package fallback, no relink, no provider
-        # extras
+        # entirely -- no parent/package fallback, no relink, no provider extras
         if overwrite:
             return
         # prefer the parent node's config so children inherit its settings; fall

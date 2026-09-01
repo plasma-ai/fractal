@@ -1228,7 +1228,8 @@ class Node:
             raise ValueError('--values and --set require --template.')
         if template is not None:
             template_path, template_ref, template_worktree = locate(
-                template, repo_dir=self.repo_dir
+                template,
+                repo_dir=self.repo_dir,
             )
             # merge the slot values now (later sources win: the --values
             # sheet, then --set, then --pin), so a malformed sheet or pair
@@ -1329,10 +1330,9 @@ class Node:
         # the child records the tree's root (inherited from the parent) so any
         # node can resolve the central database from its own config
         root = parent.config.get('root')
-        # compose the child branch and probe its pre-existing ref now: the
-        # template read below forks from the branch's own tip on a --reset,
-        # and the failure rollback must never delete a reused branch's
-        # committed history
+        # compose the child branch and probe its pre-existing ref now: the template
+        # read below forks from the branch's own tip on a --reset, and the failure
+        # rollback must never delete a reused branch's committed history
         child_branch = f'{parent.branch}.{name}'
         cmd = ['show-ref', '--verify', f'refs/heads/{child_branch}']
         pre_existing_branch = fractal.util.git.run(
@@ -1341,9 +1341,8 @@ class Node:
             check=False,
         )
         # the materialized bundle must survive until init.sh consumes it, so
-        # everything through the seeding script shares one cleanup scope --
-        # the finally below drops the bundle on success and on every refusal
-        # in between
+        # everything through the seeding script shares one cleanup scope -- the
+        # finally below drops the bundle on success and on every refusal in between
         try:
             # materialize the template at the child's fork commit -- the
             # branch's own tip when it already exists (a --reset), else the
@@ -1398,9 +1397,8 @@ class Node:
                             f'Template steps/ contains no step files'
                             f' (*.md): {template_path}'
                         )
-                    # the loop discovers steps by their NN- prefix and
-                    # fails an iteration on a missing prefix or mixed
-                    # digit widths
+                    # the loop discovers steps by their NN- prefix and fails an
+                    # iteration on a missing prefix or mixed digit widths
                     widths = set()
                     for step_file in step_files:
                         match = _STEP_PREFIX.match(step_file.name)
@@ -1525,8 +1523,7 @@ class Node:
             if step_retry_backoff is None:
                 step_retry_backoff = template_preset.get('step_retry_backoff')
             # sleep and interval are rival pacing keys (the loop rejects
-            # both set): the preset fills them only when the spawn sets
-            # neither
+            # both set): the preset fills them only when the spawn sets neither
             if sleep is None and interval is None:
                 sleep = template_preset.get('sleep')
                 interval = template_preset.get('interval')
@@ -1627,9 +1624,8 @@ class Node:
             # flag's USD-or-N% grammar needs the final max_cost (a percent
             # of a preset ceiling resolves here), while a preset reserve is
             # already a USD number, typed as config.json holds it
-            ceiling_ok = max_cost is None or (
-                type(max_cost) in (int, float) and max_cost > 0
-            )
+            usable = type(max_cost) in (int, float) and max_cost > 0
+            ceiling_ok = max_cost is None or usable
             if reserve_budget is None and 'reserve_budget' in template_preset:
                 # a reserve without a ceiling is inert, so the preset obeys
                 # the same requires-max-cost rule the flag does
@@ -1642,9 +1638,8 @@ class Node:
             elif ceiling_ok:
                 reserve_budget = parse_reserve_budget(reserve_budget, max_cost)
             else:
-                # a degenerate or junk-typed ceiling resolves no reserve --
-                # the merged validation below owns that rejection and its
-                # wording
+                # a degenerate or junk-typed ceiling resolves no reserve -- the
+                # merged validation below owns that rejection and its wording
                 reserve_budget = None
             # validate the merged run config (the one merged validator:
             # finiteness, positive ceilings, per-iter/step caps needing the
@@ -2209,11 +2204,11 @@ class Node:
             template_worktree = self.repo_dir
             rev: Optional[str] = None
             if template is not None:
-                # re-point: resolve the folder like init does; the read
-                # falls to the node branch's own tip when the value names
-                # no ref
+                # re-point: resolve the folder like init does; the read falls
+                # to the node branch's own tip when the value names no ref
                 path, template_ref, template_worktree = locate(
-                    template, repo_dir=self.repo_dir
+                    template,
+                    repo_dir=self.repo_dir,
                 )
                 rev = template_ref if template_ref is not None else self.branch
             elif ref is not None:
@@ -4682,10 +4677,9 @@ class Node:
                         f' recorded) and ps -p against {pgid_file}, then retry.'
                     )
                 if alive:
-                    group_backed = descendant.headless or (
-                        not (descendant.node_dir / SOCKET_FILE).exists()
-                        and pgid_file.exists()
-                    )
+                    no_socket = not (descendant.node_dir / SOCKET_FILE).exists()
+                    group_present = pgid_file.exists()
+                    group_backed = descendant.headless or (no_socket and group_present)
                     if group_backed:
                         # the parking loop can drop the record between the
                         # probe and this read -- a vanished record is the

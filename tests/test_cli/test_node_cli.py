@@ -1740,20 +1740,17 @@ def test_diff_reports_drift_per_surface(repo: dict) -> None:
         '# diffcrew\n\n## Instructions\n\nmission: {{mission}}\n\n'
         '## Completion Requirements\n\nDone.\n'
     )
-    _commit_template(
-        root,
-        'templates/diffcrew',
-        {
-            'config.json': '{}\n',
-            'NODE.md': charter,
-            'steps/01-PLAN.md': '# plan the work\n',
-            'steps/02-EXECUTE.md': '# execute the plan\n',
-            'scripts/probe.sh': 'echo probe\n',
-            'skills/workflow/SKILL.md': '# workflow\n',
-            'agents/claude/settings.json': '{"seeded": true}\n',
-            'agents/claude/math.md': 'think in lemmas\n',
-        },
-    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+        'steps/01-PLAN.md': '# plan the work\n',
+        'steps/02-EXECUTE.md': '# execute the plan\n',
+        'scripts/probe.sh': 'echo probe\n',
+        'skills/workflow/SKILL.md': '# workflow\n',
+        'agents/claude/settings.json': '{"seeded": true}\n',
+        'agents/claude/math.md': 'think in lemmas\n',
+    }
+    _commit_template(root, 'templates/diffcrew', files)
     spawn = _run(
         root,
         'node',
@@ -1776,10 +1773,10 @@ def test_diff_reports_drift_per_surface(repo: dict) -> None:
         assert clean.stdout.strip() == 'No drift from the recorded template.'
         assert _run(worktree, 'node', 'diff').returncode == 0
         assert (node_dir / '.codex' / 'auth.json').is_symlink()
-        # drift every surface: edit a step, drop a step, add a node-own
-        # step, edit a script, a skill file, and the agent settings, park
-        # unrendered residue in the charter, and turn a live agent file
-        # into a symlink
+        # drift every surface: edit a step, drop a step, add
+        # a node-own step, edit a script, a skill file, and the
+        # agent settings, park unrendered residue in the charter,
+        # and turn a live agent file into a symlink
         step = node_dir / 'steps' / '01-PLAN.md'
         step.write_text('# plan the work\nan added line\n', encoding='utf-8')
         (node_dir / 'steps' / '02-EXECUTE.md').unlink()
@@ -1828,15 +1825,12 @@ def test_diff_applies_the_recorded_listing_and_warns_on_a_stale_entry(
     a warning on stderr, not a refusal, and the node still diffs clean.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/leandiff',
-        {
-            'config.json': '{}\n',
-            'steps/01-GO.md': '# go\n',
-            'steps/02-SKIP.md': '# never deployed\n',
-        },
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'steps/02-SKIP.md': '# never deployed\n',
+    }
+    _commit_template(root, 'templates/leandiff', files)
     spawn = _run(
         root,
         'node',
@@ -2050,19 +2044,16 @@ def test_reseed_restores_the_seed_surfaces_and_records_the_event(
         '# reseedcrew\n\n## Instructions\n\nmission: {{mission}}\n\n'
         '## Completion Requirements\n\nDone.\n'
     )
-    _commit_template(
-        root,
-        'templates/reseedcrew',
-        {
-            'config.json': '{}\n',
-            'NODE.md': charter,
-            'steps/01-PLAN.md': '# plan the work\n',
-            'steps/02-EXECUTE.md': '# execute the plan\n',
-            'scripts/probe.sh': 'echo probe\n',
-            'skills/workflow/SKILL.md': '# workflow\n',
-            'agents/claude/settings.json': '{"seeded": true}\n',
-        },
-    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+        'steps/01-PLAN.md': '# plan the work\n',
+        'steps/02-EXECUTE.md': '# execute the plan\n',
+        'scripts/probe.sh': 'echo probe\n',
+        'skills/workflow/SKILL.md': '# workflow\n',
+        'agents/claude/settings.json': '{"seeded": true}\n',
+    }
+    _commit_template(root, 'templates/reseedcrew', files)
     spawn = _run(
         root,
         'node',
@@ -2099,19 +2090,23 @@ def test_reseed_restores_the_seed_surfaces_and_records_the_event(
         # drift every rewritable surface, plus the surfaces reseed must
         # leave alone: the charter, a node-added step
         (node_dir / 'steps' / '01-PLAN.md').write_text(
-            '# plan the work\nan added line\n', encoding='utf-8'
+            '# plan the work\nan added line\n',
+            encoding='utf-8',
         )
         (node_dir / 'steps' / '02-EXECUTE.md').unlink()
         added = node_dir / 'steps' / '03-NEW.md'
         added.write_text('# node-added\n', encoding='utf-8')
         (node_dir / 'scripts' / 'probe.sh').write_text(
-            'echo probed\n', encoding='utf-8'
+            'echo probed\n',
+            encoding='utf-8',
         )
         (node_dir / 'skills' / 'workflow' / 'SKILL.md').write_text(
-            '# workflow, reworked\n', encoding='utf-8'
+            '# workflow, reworked\n',
+            encoding='utf-8',
         )
         (node_dir / '.claude' / 'settings.json').write_text(
-            '{"seeded": false}\n', encoding='utf-8'
+            '{"seeded": false}\n',
+            encoding='utf-8',
         )
         operator_charter = '# reseedcrew\n\nOperator-steered.\n'
         (node_dir / 'NODE.md').write_text(operator_charter, encoding='utf-8')
@@ -2125,9 +2120,8 @@ def test_reseed_restores_the_seed_surfaces_and_records_the_event(
         assert execute == '# execute the plan\n'
         probe = (node_dir / 'scripts' / 'probe.sh').read_text(encoding='utf-8')
         assert probe == 'echo probe\n'
-        skill = (node_dir / 'skills' / 'workflow' / 'SKILL.md').read_text(
-            encoding='utf-8'
-        )
+        skill_md = node_dir / 'skills' / 'workflow' / 'SKILL.md'
+        skill = skill_md.read_text(encoding='utf-8')
         assert skill == '# workflow\n'
         settings = (node_dir / '.claude' / 'settings.json').read_text(encoding='utf-8')
         assert settings == '{"seeded": true}\n'
@@ -2170,15 +2164,12 @@ def test_reseed_ref_reads_another_commit_and_keeps_exclusions(
     intact.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/refreseed',
-        {
-            'config.json': '{}\n',
-            'steps/01-GO.md': '# go\n',
-            'steps/02-SKIP.md': '# never deployed\n',
-        },
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'steps/02-SKIP.md': '# never deployed\n',
+    }
+    _commit_template(root, 'templates/refreseed', files)
     spawn = _run(
         root,
         'node',
@@ -2197,14 +2188,11 @@ def test_reseed_ref_reads_another_commit_and_keeps_exclusions(
             root / '.worktrees' / 'main.refreseed' / '.fractal' / 'main.refreseed'
         )
         # the template evolves after the spawn: an edit and a new step
-        _commit_template(
-            root,
-            'templates/refreseed',
-            {
-                'steps/01-GO.md': '# go, faster\n',
-                'steps/03-NEW.md': '# gained after the spawn\n',
-            },
-        )
+        files = {
+            'steps/01-GO.md': '# go, faster\n',
+            'steps/03-NEW.md': '# gained after the spawn\n',
+        }
+        _commit_template(root, 'templates/refreseed', files)
         advanced = _git(root, 'rev-parse', 'main').stdout.strip()
         reseeded = _run(root, 'node', 'reseed', 'main.refreseed', '--ref', 'main')
         assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
@@ -2359,15 +2347,12 @@ def test_reseed_refuses_a_template_carrying_agent_credentials(
     files untouched.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/cleancrew',
-        {
-            'config.json': '{}\n',
-            'steps/01-GO.md': '# go\n',
-            'agents/claude/settings.json': '{"seeded": true}\n',
-        },
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'agents/claude/settings.json': '{"seeded": true}\n',
+    }
+    _commit_template(root, 'templates/cleancrew', files)
     spawn = _run(
         root,
         'node',
@@ -2384,15 +2369,12 @@ def test_reseed_refuses_a_template_carrying_agent_credentials(
             root / '.worktrees' / 'main.guardcrew' / '.fractal' / 'main.guardcrew'
         )
         record_bytes = (node_dir / '_template.toml').read_bytes()
-        _commit_template(
-            root,
-            'templates/leakcrew',
-            {
-                'config.json': '{}\n',
-                'steps/01-GO.md': '# go\n',
-                'agents/codex/auth.json': '{"token": "leaked"}\n',
-            },
-        )
+        files = {
+            'config.json': '{}\n',
+            'steps/01-GO.md': '# go\n',
+            'agents/codex/auth.json': '{"token": "leaked"}\n',
+        }
+        _commit_template(root, 'templates/leakcrew', files)
         refused = _run(
             root,
             'node',
@@ -2490,15 +2472,12 @@ def test_reseed_refuses_a_symlinked_seed_destination(
     -- the scripts victim never turns executable.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/linkguard',
-        {
-            'config.json': '{}\n',
-            'steps/01-GO.md': '# go\n',
-            'scripts/probe.sh': 'echo probe\n',
-        },
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'scripts/probe.sh': 'echo probe\n',
+    }
+    _commit_template(root, 'templates/linkguard', files)
     spawn = _run(
         root,
         'node',
