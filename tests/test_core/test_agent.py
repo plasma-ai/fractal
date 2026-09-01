@@ -716,7 +716,7 @@ def test_seed_agents_tolerates_an_absent_package_seed(
 def test_seed_prefers_the_parent_config_and_never_overwrites(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Children inherit the parent's live config; reseeding never clobbers."""
+    """Children inherit the parent's live config; a repeat seed never clobbers."""
     parent_dir = tmp_path / 'parent'
     (parent_dir / '.sample').mkdir(parents=True)
     parent_config = parent_dir / '.sample' / 'sample.json'

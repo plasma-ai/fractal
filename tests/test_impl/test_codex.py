@@ -693,7 +693,7 @@ def test_seed_links_auth_write_through_codex(
     assert (real_home / 'auth.json').read_text(encoding='utf-8') == (
         '{"refreshed": true}\n'
     )
-    # reseeding never re-links or clobbers
+    # a repeat seed never re-links or clobbers
     CodexAgent.seed(node_dir)
     assert link.readlink() == (real_home / 'auth.json').resolve()
     # a pre-auth seed (no credential written yet) still canonicalizes through
@@ -716,8 +716,8 @@ def test_seed_carries_the_parent_instructions_file_codex(
     Codex resolves a relative ``model_instructions_file`` against
     ``CODEX_HOME`` and fails the run when the file is missing, so the
     child's seed copies the file the parent's config names -- nested
-    directories included -- and reseeding never clobbers the child's
-    copy.
+    directories included -- and a repeat seed never clobbers the
+    child's copy.
     """
     monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'global-home'))
     parent_dir = tmp_path / 'parent'

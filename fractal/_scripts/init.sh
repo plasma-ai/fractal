@@ -517,7 +517,7 @@ fi
 # worktree holds only what the fork point tracks, so the dir is removed whole
 if [[ "$FRESH" == true && -e "$NODE_DIR" ]]; then
     echo "Warning: $BASE_REF already carries a seed for $BRANCH at $NODE_DIR" \
-        "(a copy of an earlier node of this name); reseeding it" >&2
+        "(a copy of an earlier node of this name); seeding it afresh" >&2
     rm -rf "$NODE_DIR"
 fi
 

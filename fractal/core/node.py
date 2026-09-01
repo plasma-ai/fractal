@@ -2089,6 +2089,172 @@ class Node:
         next_step = 'Next: commit the baseline: fractal commit "<message>" --init'
         return f'{headline}\n{summary}\n{next_step}'
 
+    def reseed(
+        self: Node,
+        *,
+        ref: Optional[str] = None,
+        template: Optional[str] = None,
+        force: bool = False,
+    ) -> tuple[str, list[str]]:
+        """Rewrite the node's seed surfaces from its recorded template.
+
+        Re-renders the recorded folder at its recorded commit -- or at
+        ``ref``, or from another folder with ``template`` -- and rewrites
+        ``steps/``, ``scripts/``, ``skills/``, and the per-agent files
+        from the result: files the node lacks are added and files it has
+        are overwritten, so the node matches its template's effective set
+        (an excluded file stays gone); nothing is ever deleted, and
+        ``NODE.md``, ``config.json``, and ``memory/`` are never touched.
+        ``template`` re-points the node: the new path and the commit read
+        land in ``_template.toml``, while the recorded values and listing
+        ride along unchanged.
+
+        Args:
+            ref: Committish to read the recorded folder at (default: the
+                recorded commit). Mutually exclusive with ``template``.
+            template: Template folder (``<path>[@<ref>]``) to re-point
+                the node at, read at the node branch's own tip when the
+                value names no ref.
+            force: Reseed even while the node is active or paused.
+
+        Returns:
+            Tuple of the confirmation message and the stale-listing
+            warnings.
+
+        Raises:
+            ValueError: If ``ref`` is combined with ``template``, the
+                provenance record refuses, a ref does not resolve, or
+                the folder is not tracked at the requested ref.
+            RuntimeError: If the node is active or paused (without
+                ``force``), or the caller runs from the node's own
+                worktree.
+
+        """
+        from .template import (
+            fill,
+            locate,
+            materialize,
+            read_provenance,
+            trim,
+            write_provenance,
+        )
+
+        # the two read overrides are rivals: one names a commit for the
+        # recorded folder, the other a new folder outright
+        if ref is not None and template is not None:
+            raise ValueError('--ref cannot be combined with --template.')
+        # a node may not edit its own seed: the acting node (the loop's
+        # exported _NODE, else the cwd's worktree) must be someone else --
+        # the operator outside the worktree, the parent, or another node
+        actor = self.resolve_actor()
+        if actor is not None and actor.branch == self.branch:
+            raise RuntimeError(
+                'Cannot reseed a node from its own worktree;'
+                ' a node may not edit its own seed.'
+            )
+        # the guard re-read and the rewrite stay atomic under the .worktrees
+        # flock, so a rival verb cannot land between them (the --reset guard)
+        with worktree.lock(self.repo_dir):
+            # reseed rewrites the live steering surface, so refuse over a
+            # running loop or a paused node's frozen run context unless the
+            # caller forces it
+            self._reconcile_status(locked=True)
+            if not force:
+                if self.status() == 'active':
+                    raise RuntimeError(
+                        'Cannot reseed an active node. Stop or kill it first.'
+                    )
+                if self.status() == 'paused':
+                    raise RuntimeError(
+                        'Cannot reseed a paused node. Resume or kill it first.'
+                    )
+            record = read_provenance(self.node_dir)
+            path = record['path']
+            commit = record['commit']
+            template_worktree = self.repo_dir
+            rev: Optional[str] = None
+            if template is not None:
+                # re-point: resolve the folder like init does; the read
+                # falls to the node branch's own tip when the value names
+                # no ref
+                path, template_ref, template_worktree = locate(
+                    template, repo_dir=self.repo_dir
+                )
+                rev = template_ref if template_ref is not None else self.branch
+            elif ref is not None:
+                rev = ref
+            if rev is not None:
+                cmd = ['rev-parse', '--verify', f'{rev}^{{commit}}']
+                resolved = fractal.util.git.run(
+                    cmd,
+                    cwd=self.repo_dir,
+                    check=False,
+                )
+                if resolved is None:
+                    raise ValueError(
+                        f'Template ref does not resolve to a commit: {rev!r}.'
+                    )
+                commit = resolved
+            # a --ref reads the recorded folder, which may have moved or
+            # been retired since: probe it at the ref and name the re-point
+            # remedy, which materialize's untracked-at-commit message lacks
+            if ref is not None:
+                cmd = ['rev-parse', '-q', '--verify', f'{commit}:{path}']
+                tree = fractal.util.git.run(cmd, cwd=self.repo_dir, check=False)
+                if tree is None:
+                    raise ValueError(
+                        f'Template folder {path!r} is not tracked at {ref!r};'
+                        ' the folder may have moved -- re-point the node with'
+                        ' node reseed --template <path>[@<ref>].'
+                    )
+            # materialize and render the effective set exactly as init does,
+            # with the recorded values; a listing entry the template no
+            # longer carries only warns (the record may outlive the file)
+            template_tmp = tempfile.mkdtemp(prefix='fractal-template-')
+            try:
+                bundle = materialize(
+                    worktree=template_worktree,
+                    path=path,
+                    commit=commit,
+                    dest=pathlib.Path(template_tmp),
+                )
+                warnings = trim(
+                    bundle,
+                    include=record.get('include'),
+                    exclude=record.get('exclude'),
+                    strict=False,
+                )
+                fill(bundle, path=path, values=record.get('values', {}))
+                # the script rewrites the file surfaces and the per-agent
+                # files from the bundle; Python owns the provenance record
+                event_id = self.record.event_start(
+                    'reseed',
+                    metadata=f'{path}@{commit}',
+                )
+                try:
+                    self._run_script(
+                        'reseed.sh',
+                        f'{self._root}',
+                        f'--bundle={bundle}',
+                    )
+                except Exception:
+                    self.record.event_end(event_id=event_id, status='failed')
+                    raise
+                # advance the record: the commit actually read, and the path
+                # too on a re-point; values and listing ride along unchanged
+                write_provenance(
+                    self.node_dir,
+                    path=path,
+                    commit=commit,
+                    values=record.get('values', {}),
+                    include=record.get('include'),
+                    exclude=record.get('exclude'),
+                )
+                self.record.event_end(event_id=event_id, status='completed')
+            finally:
+                shutil.rmtree(template_tmp, ignore_errors=True)
+        return f'Node reseeded from {path}@{commit}', warnings
+
     def _git_exclude(self: Node) -> None:
         """Write fractal's ignore patterns into the repo-local ``info/exclude``.
 

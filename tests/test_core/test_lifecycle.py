@@ -83,6 +83,10 @@ __all__ = [
     'test_unretire_restores_the_latest_prior_when_raced',
     'test_retire_refuses_an_already_retired_node',
     'test_retire_rejects_user',
+    'test_reseed_rejects_a_running_or_frozen_node',
+    'test_reseed_force_bypasses_the_status_guard',
+    'test_reseed_rejects_the_nodes_own_seat',
+    'test_reseed_rejects_ref_beside_template',
     'test_signals_recurse_to_active_descendants',
     'test_signals_heal_a_crashed_descendant_under_the_flock',
     'test_recursive_signals_attribute_the_propagating_node',
@@ -1578,6 +1582,70 @@ def test_retire_rejects_user(node_with_db: Node, op: str) -> None:
     node.config.set('user', True)
     with pytest.raises(RuntimeError, match='user node'):
         getattr(node, op)()
+
+
+# ------ reseed
+
+
+@pytest.mark.parametrize(
+    argnames=('status', 'remedy'),
+    argvalues=[
+        ('active', 'Stop or kill it first'),
+        ('paused', 'Resume or kill it first'),
+    ],
+)
+def test_reseed_rejects_a_running_or_frozen_node(
+    node_with_db: Node,
+    status: str,
+    remedy: str,
+) -> None:
+    """Reseed refuses a running or frozen node, naming the wind-down remedy.
+
+    Reseed rewrites the live steering surface, so it refuses over an
+    active loop or a paused node's frozen run context exactly as
+    ``init --reset`` does, before any template work (the fixture's live
+    session stub keeps the active status from healing to exited).
+    """
+    node = node_with_db
+    node.status_set(status)
+    with pytest.raises(RuntimeError, match=remedy):
+        node.reseed()
+
+
+def test_reseed_force_bypasses_the_status_guard(node_with_db: Node) -> None:
+    """``force`` skips the status guard and reads the provenance record.
+
+    On an active node the forced call falls through to the record read,
+    which refuses this recordless node -- proof the status refusal is the
+    only thing ``force`` lifts.
+    """
+    node = node_with_db
+    node.status_set('active')
+    with pytest.raises(ValueError, match='No template recorded'):
+        node.reseed(force=True)
+
+
+def test_reseed_rejects_the_nodes_own_seat(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A node may not reseed itself: the acting seat is refused.
+
+    The loop exports ``_NODE`` for the node it drives, so a reseed
+    issued from inside the node's own seat resolves back to the node and
+    refuses before any other guard.
+    """
+    node = node_with_db
+    monkeypatch.setenv('_NODE', f'{node.node_dir}')
+    with pytest.raises(RuntimeError, match='its own worktree'):
+        node.reseed()
+
+
+def test_reseed_rejects_ref_beside_template(node_with_db: Node) -> None:
+    """``ref`` and ``template`` are rival read overrides, refused together."""
+    node = node_with_db
+    with pytest.raises(ValueError, match='cannot be combined'):
+        node.reseed(ref='main', template='templates/crew')
 
 
 # ------ recursive signals

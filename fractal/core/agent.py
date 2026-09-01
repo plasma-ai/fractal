@@ -1054,6 +1054,7 @@ class Agent:
         parent_dir: Optional[pathlib.Path] = None,
         bundle_dir: Optional[pathlib.Path] = None,
         reset: bool = False,
+        overwrite: bool = False,
     ) -> None:
         """Seed the per-node agent config dir.
 
@@ -1063,7 +1064,11 @@ class Agent:
         which wins over the package seed, and an existing file is never
         overwritten -- symlinks skills, then delegates provider extras
         to ``_seed``. A backend without a package seed still gets its
-        dir and skills link, just no config file.
+        dir and skills link, just no config file. ``overwrite`` (a
+        reseed) rewrites bundle-carried files over existing ones and
+        nothing else: files the bundle lacks are left alone entirely --
+        no parent or package fallback -- and the skills and auth
+        symlinks stand.
 
         Args:
             node_dir: The node data directory to seed under.
@@ -1072,6 +1077,8 @@ class Agent:
             bundle_dir: The template bundle's ``agents/`` directory,
                 when the node is seeded from a template.
             reset: Wipe the agent dir before seeding.
+            overwrite: Rewrite bundle-carried files over existing ones
+                and touch nothing else.
 
         """
         # recreate the agent dir (wiped first on reset)
@@ -1086,8 +1093,18 @@ class Agent:
             for path in sorted(bundle_seed.rglob('*')):
                 if path.is_file():
                     target = config_dir / path.relative_to(bundle_seed)
+                    # a live symlink (the auth link) is machinery: a copy
+                    # would write through it into the linked global store,
+                    # so it is never replaced
+                    if target.is_symlink():
+                        continue
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy(path, target)
+        # an overwrite ends here: files the bundle lacks are left alone
+        # entirely -- no parent/package fallback, no relink, no provider
+        # extras
+        if overwrite:
+            return
         # prefer the parent node's config so children inherit its settings; fall
         # back to the package seed for a top-level node (parent has no agent config)
         source = None
@@ -1349,6 +1366,7 @@ def seed_agents(
     parent_dir: Optional[pathlib.Path] = None,
     bundle_dir: Optional[pathlib.Path] = None,
     reset: bool = False,
+    overwrite: bool = False,
 ) -> None:
     """Seed every registered agent's config dir plus the neutral one.
 
@@ -1358,6 +1376,8 @@ def seed_agents(
         bundle_dir: The template bundle's ``agents/`` directory, when
             the node is seeded from a template.
         reset: Wipe each agent dir before seeding.
+        overwrite: Rewrite bundle-carried files over existing ones and
+            touch nothing else (a reseed).
 
     """
     # set up each agent dir -- seed its config and symlink in skills, recreated
@@ -1369,7 +1389,11 @@ def seed_agents(
             parent_dir=parent_dir,
             bundle_dir=bundle_dir,
             reset=reset,
+            overwrite=overwrite,
         )
+    # an overwrite carries no neutral files, so the dir and its mount stand
+    if overwrite:
+        return
     # the neutral agents dir is not a provider: no config file, just the
     # skills mount (recreated with the same reset semantics)
     agents_dir = node_dir / '.agents'

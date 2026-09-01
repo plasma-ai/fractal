@@ -526,16 +526,19 @@ def write_provenance(
     include: Optional[list[str]] = None,
     exclude: Optional[list[str]] = None,
 ) -> None:
-    """Write the ``_template.toml`` provenance file into a bundle.
+    """Write the ``_template.toml`` provenance file into a directory.
 
     The file records what seeded the node: the repo-relative template
     ``path``, the ``commit`` actually read, the mutually exclusive
     ``include``/``exclude`` listing when one was given, and the
     ``[values]`` table of slot fills. The table goes last so the scalar
-    keys stay at the top level.
+    keys stay at the top level. Init writes into the bundle (init.sh
+    places the record with the other surfaces); reseed rewrites the
+    node data directory's copy in place.
 
     Args:
-        bundle: The bundle root.
+        bundle: The directory to write the record into (the bundle
+            root, or the node data directory on reseed).
         path: Worktree-relative template folder path (POSIX).
         commit: The commit the folder was read at.
         values: Slot fills to record.

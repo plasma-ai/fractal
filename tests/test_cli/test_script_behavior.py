@@ -13,11 +13,11 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   package unless the spawn passes ``--inherit=skills``, which copies the
   parent's set wholesale; the snapshot is one-shot, so a ``--reset``
   re-inherits only when the flag is passed again.
-- **``init.sh`` reseeding** treats a fresh worktree whose fork point already
-  carries files under the node's seed dir -- a PREPARE-merged copy of a
-  deleted node of the same name, or a partial leak as slight as a lone
-  ``NODE.md`` -- like ``--reset``, warning that the stale copy is reseeded
-  and removing the dir whole, so the init's own flags and charter land
+- **``init.sh`` stale-seed removal** treats a fresh worktree whose fork point
+  already carries files under the node's seed dir -- a PREPARE-merged copy of
+  a deleted node of the same name, or a partial leak as slight as a lone
+  ``NODE.md`` -- like ``--reset``, warning that the stale copy is seeded
+  afresh and removing the dir whole, so the init's own flags and charter land
   instead of the dead incarnation's and no stray file of the copy survives.
 - **``resume.sh`` backend selection** relaunches a paused headless node through
   ``start.sh --headless --resume`` and a paused tmux node through plain
@@ -232,8 +232,8 @@ __all__ = [
     'test_init_resolves_parent_worktree_under_a_space_path',
     'test_init_allows_a_repo_under_a_worktrees_path',
     'test_init_inherits_parent_skills_on_request',
-    'test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy',
-    'test_init_reseeds_over_a_partial_leaked_copy_with_a_template_charter',
+    'test_init_seeds_afresh_over_a_stale_seed_copy',
+    'test_init_seeds_afresh_over_a_partial_leaked_copy_with_a_template_charter',
     'test_resume_reselects_the_recorded_backend',
     'test_headless_relaunch_vets_the_recorded_group',
     'test_headless_handoff_failure_records_no_backend',
@@ -437,7 +437,7 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
     assert reinit.returncode != 0, reinit.stdout
     kin_md = (kin_skills / 'fractal' / 'SKILL.md').read_text(encoding='utf-8')
     assert revised not in kin_md
-    reseed = _run(
+    plain_reset = _run(
         parent_wt,
         'node',
         'init',
@@ -447,7 +447,7 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
         'claude',
         '--local',
     )
-    assert reseed.returncode == 0, reseed.stderr
+    assert plain_reset.returncode == 0, plain_reset.stderr
     kin_md = (kin_skills / 'fractal' / 'SKILL.md').read_text(encoding='utf-8')
     assert sentinel not in kin_md
     assert (kin_skills / 'radio').is_dir()
@@ -469,24 +469,24 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
     assert revised in kin_md
 
 
-# ------ init.sh: reseeding over a tracked stale seed copy
+# ------ init.sh: seeding afresh over a tracked stale seed copy
 
 
-def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
+def test_init_seeds_afresh_over_a_stale_seed_copy(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A fresh worktree whose fork point carries the node's seed is reseeded.
+    """A fresh worktree whose fork point carries the node's seed is seeded afresh.
 
     A parent that folds a child in with a real merge (as its PREPARE step
     does) tracks the child's seed on its branch. Deleted and spawned again
     under the same name, the new node forks from a tip that already carries
     ``.fractal/<branch>/config.json`` -- the dead incarnation's. Adopting
     those files as an existing seed would drop every flag of this init, so
-    the init warns naming the stale copy and reseeds like ``--reset``: the
+    the init warns naming the stale copy and seeds afresh like ``--reset``: the
     config carries the new flags, and the copy goes whole -- a stray file
     beside the seed's own does not survive either.
     """
-    repo = _init_tree(tmp_path / 'reseedrepo')
+    repo = _init_tree(tmp_path / 'staleseedrepo')
     init = _run(repo, 'node', 'init', 'parent', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     parent = repo / '.worktrees' / 'main.parent'
@@ -520,7 +520,7 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     _git(parent, 'add', '-f', '.fractal/main.parent.c/stray.txt')
     _git(parent, 'commit', '-m', 'stray file under the stale seed')
     # the same name again, with flags the stale copy does not carry, so the
-    # reseed is visible in config.json
+    # fresh seed is visible in config.json
     max_iters = 3
     again = _run(
         repo,
@@ -536,12 +536,12 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     )
     assert again.returncode == 0, again.stderr
 
-    # the init warned that it reseeded the stale copy, and the config is
-    # this init's, not the dead incarnation's
+    # the init warned that it seeded the stale copy afresh, and the config
+    # is this init's, not the dead incarnation's
     seed = child / '.fractal' / 'main.parent.c'
     assert (
         f'Warning: main.parent already carries a seed for main.parent.c at {seed}'
-        ' (a copy of an earlier node of this name); reseeding it'
+        ' (a copy of an earlier node of this name); seeding it afresh'
     ) in again.stdout, (again.stdout, again.stderr)
     config = json.loads((seed / 'config.json').read_text(encoding='utf-8'))
     assert config['agent'] == 'codex'
@@ -549,16 +549,16 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     assert not (seed / 'stray.txt').exists()
 
 
-def test_init_reseeds_over_a_partial_leaked_copy_with_a_template_charter(
+def test_init_seeds_afresh_over_a_partial_leaked_copy_with_a_template_charter(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A partial leaked copy -- a lone ``NODE.md`` -- is reseeded under a template.
+    """A lone leaked ``NODE.md`` is seeded afresh under a template.
 
     A leak need not be whole: a root tracking only ``.fractal/<branch>/NODE.md``
     carries no ``config.json`` to mark a seed, yet a fresh worktree forking
     from it holds that stale charter -- and a charter is copied only when
     absent, so a ``--template`` deployment charter would be dropped for the
-    leaked text without a word. The reseed keys on the seed dir itself, so
+    leaked text without a word. The removal keys on the seed dir itself, so
     the init warns and the template charter is the node's.
     """
     repo = _init_tree(tmp_path / 'partialleakrepo')
@@ -592,12 +592,12 @@ def test_init_reseeds_over_a_partial_leaked_copy_with_a_template_charter(
     )
     assert init.returncode == 0, init.stderr
 
-    # the init warned that it reseeded the stale copy, and the charter is
-    # the template's, not the leaked text
+    # the init warned that it seeded the stale copy afresh, and the charter
+    # is the template's, not the leaked text
     seed = repo / '.worktrees' / 'main.task' / '.fractal' / 'main.task'
     assert (
         f'Warning: main already carries a seed for main.task at {seed}'
-        ' (a copy of an earlier node of this name); reseeding it'
+        ' (a copy of an earlier node of this name); seeding it afresh'
     ) in init.stdout, (init.stdout, init.stderr)
     charter = (seed / 'NODE.md').read_text(encoding='utf-8')
     assert 'TEMPLATE CHARTER' in charter

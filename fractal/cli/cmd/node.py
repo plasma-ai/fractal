@@ -44,6 +44,7 @@ __all__ = [
     'node_attach',
     'node_status',
     'node_diff',
+    'node_reseed',
     'node_list',
     'node_activity',
     'node_approve',
@@ -948,6 +949,53 @@ def node_diff(app: typer.Typer) -> typer.Typer:
     return app
 
 
+def node_reseed(app: typer.Typer) -> typer.Typer:
+    """Register the ``reseed`` command."""
+    # node argument
+    node_help = 'Target node branch (default: this node).'
+    node = typer.Argument(None, help=node_help)
+    # ref option
+    ref_help = 'Committish to read the recorded template folder at.'
+    ref = typer.Option(None, '--ref', help=ref_help)
+    # template option
+    template_help = (
+        'Re-point the node at another template folder, read at the node'
+        ' branch tip; append @<ref> for another commit.'
+    )
+    template = typer.Option(None, '--template', help=template_help)
+    # force flag
+    force_help = 'Reseed even while the node is active or paused.'
+    force = typer.Option(False, '--force', '-f', help=force_help)
+    # path option
+    path_help = 'Worktree directory.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, 'reseed')
+    def _reseed(
+        node: Optional[str] = node,
+        ref: Optional[str] = ref,
+        template: Optional[str] = template,
+        force: bool = force,
+        path: str = path,
+    ) -> None:
+        """Rewrite a node's seed surfaces from its recorded template.
+
+        Re-renders the recorded folder at its recorded commit -- or at
+        ``--ref``, or from another folder with ``--template``, which
+        re-points the node -- and rewrites steps, scripts, skills, and
+        agent settings from the result: files the node lacks are added
+        and files it has are overwritten, never deleted. NODE.md,
+        config.json, and memory/ are never touched.
+        """
+        node = resolve_target(path, node)
+        output, warnings = node.reseed(ref=ref, template=template, force=force)
+        for warning in warnings:
+            typer.echo(f'Warning: {warning}', err=True)
+        typer.echo(output)
+
+    return app
+
+
 def node_list(app: typer.Typer) -> typer.Typer:
     """Register the ``list`` command."""
     # node argument
@@ -1494,6 +1542,9 @@ def node_seed(app: typer.Typer) -> typer.Typer:
     # reset flag
     reset_help = 'Wipe each agent dir before seeding.'
     reset = typer.Option(False, '--reset', help=reset_help)
+    # overwrite flag
+    overwrite_help = 'Rewrite bundle-carried files over existing ones (a reseed).'
+    overwrite = typer.Option(False, '--overwrite', help=overwrite_help)
 
     @command(app, '_seed')
     def _seed(
@@ -1501,8 +1552,9 @@ def node_seed(app: typer.Typer) -> typer.Typer:
         parent: Optional[str] = parent,
         bundle: Optional[str] = bundle,
         reset: bool = reset,
+        overwrite: bool = overwrite,
     ) -> None:
-        """Seed the node's agent config dirs (invoked by init.sh)."""
+        """Seed the node's agent config dirs (invoked by init.sh and reseed.sh)."""
         parent_dir = pathlib.Path(parent) if parent else None
         bundle_dir = pathlib.Path(bundle) / 'agents' if bundle else None
         seed_agents(
@@ -1510,6 +1562,7 @@ def node_seed(app: typer.Typer) -> typer.Typer:
             parent_dir=parent_dir,
             bundle_dir=bundle_dir,
             reset=reset,
+            overwrite=overwrite,
         )
 
     return app
