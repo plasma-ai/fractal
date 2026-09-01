@@ -1052,21 +1052,25 @@ class Agent:
         node_dir: pathlib.Path,
         *,
         parent_dir: Optional[pathlib.Path] = None,
+        bundle_dir: Optional[pathlib.Path] = None,
         reset: bool = False,
     ) -> None:
         """Seed the per-node agent config dir.
 
-        Creates the dir (wiping first on ``reset``), copies the config
-        file -- the parent node's live copy wins over the package seed,
-        and an existing file is never overwritten -- symlinks skills,
-        then delegates provider extras to ``_seed``. A backend without a
-        package seed still gets its dir and skills link, just no config
-        file.
+        Creates the dir (wiping first on ``reset``), deploys every file
+        the template bundle carries for this agent, copies the config
+        file -- the bundle's copy wins over the parent node's live copy,
+        which wins over the package seed, and an existing file is never
+        overwritten -- symlinks skills, then delegates provider extras
+        to ``_seed``. A backend without a package seed still gets its
+        dir and skills link, just no config file.
 
         Args:
             node_dir: The node data directory to seed under.
             parent_dir: The parent node's data directory, when one
                 exists.
+            bundle_dir: The template bundle's ``agents/`` directory,
+                when the node is seeded from a template.
             reset: Wipe the agent dir before seeding.
 
         """
@@ -1075,6 +1079,15 @@ class Agent:
         if reset and config_dir.exists():
             shutil.rmtree(config_dir)
         config_dir.mkdir(parents=True, exist_ok=True)
+        # deploy the bundle's per-agent files first: the template beats the
+        # parent's live copy, which stays the fallback for files the bundle lacks
+        if bundle_dir is not None and (bundle_dir / cls.name).is_dir():
+            bundle_seed = bundle_dir / cls.name
+            for path in sorted(bundle_seed.rglob('*')):
+                if path.is_file():
+                    target = config_dir / path.relative_to(bundle_seed)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(path, target)
         # prefer the parent node's config so children inherit its settings; fall
         # back to the package seed for a top-level node (parent has no agent config)
         source = None
@@ -1334,6 +1347,7 @@ def seed_agents(
     node_dir: pathlib.Path,
     *,
     parent_dir: Optional[pathlib.Path] = None,
+    bundle_dir: Optional[pathlib.Path] = None,
     reset: bool = False,
 ) -> None:
     """Seed every registered agent's config dir plus the neutral one.
@@ -1341,6 +1355,8 @@ def seed_agents(
     Args:
         node_dir: The node data directory to seed under.
         parent_dir: The parent node's data directory, when one exists.
+        bundle_dir: The template bundle's ``agents/`` directory, when
+            the node is seeded from a template.
         reset: Wipe each agent dir before seeding.
 
     """
@@ -1348,7 +1364,12 @@ def seed_agents(
     # each init and gitignored; a node's base agent may be overridden per step
     # (agent: frontmatter), so any node may run either agent
     for name in supported():
-        resolve(name).seed(node_dir, parent_dir=parent_dir, reset=reset)
+        resolve(name).seed(
+            node_dir,
+            parent_dir=parent_dir,
+            bundle_dir=bundle_dir,
+            reset=reset,
+        )
     # the neutral agents dir is not a provider: no config file, just the
     # skills mount (recreated with the same reset semantics)
     agents_dir = node_dir / '.agents'

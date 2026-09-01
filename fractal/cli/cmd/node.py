@@ -124,23 +124,26 @@ def node_init(app: typer.Typer) -> typer.Typer:
         ' or all.'
     )
     inherit = typer.Option(None, '--inherit', help=inherit_help)
-    # steps option
-    steps_help = (
-        'Directory of NN- prefixed step files (*.md) to seed steps/ from'
-        ' instead of the package seed; mutually exclusive with --inherit=steps.'
+    # template option
+    template_help = (
+        "Template folder: any tracked folder, read at the child's fork"
+        ' commit; append @<ref> for another commit.'
     )
-    steps = typer.Option(None, '--steps', help=steps_help)
-    # profile option
-    profile_help = (
-        'Named seed bundle under .fractal/profiles/<name>/: steps/ seeds the'
-        ' step list, NODE.md a deployment-ready charter (fill-sheet validated'
-        ' at init; mutex with --steps).'
+    template = typer.Option(None, '--template', help=template_help)
+    # include option
+    include_help = (
+        'Deploy only these template-relative paths (repeatable; mutex with --exclude).'
     )
-    profile = typer.Option(None, '--profile', help=profile_help)
+    include = typer.Option(None, '--include', help=include_help)
+    # exclude option
+    exclude_help = (
+        'Skip these template-relative paths (repeatable; mutex with --include).'
+    )
+    exclude = typer.Option(None, '--exclude', help=exclude_help)
     # pin option
     pin_help = (
         'Commission pin (a commit sha): must resolve, and every pin:'
-        ' declaration in the profile charter must match it.'
+        ' declaration in the template charter must match it.'
     )
     pin = typer.Option(None, '--pin', help=pin_help)
     # agent option
@@ -247,8 +250,9 @@ def node_init(app: typer.Typer) -> typer.Typer:
         base: Optional[str] = base,
         meta: Optional[str] = meta,
         inherit: Optional[list[str]] = inherit,
-        steps: Optional[str] = steps,
-        profile: Optional[str] = profile,
+        template: Optional[str] = template,
+        include: Optional[list[str]] = include,
+        exclude: Optional[list[str]] = exclude,
         pin: Optional[str] = pin,
         agent: Optional[str] = agent,
         provider: Optional[str] = provider,
@@ -317,8 +321,9 @@ def node_init(app: typer.Typer) -> typer.Typer:
             base=base,
             meta=meta,
             inherit=inherit,
-            steps=steps,
-            profile=profile,
+            template=template,
+            include=include,
+            exclude=exclude,
             pin=pin,
             agent=agent,
             provider=provider,
@@ -1442,6 +1447,9 @@ def node_seed(app: typer.Typer) -> typer.Typer:
     # parent flag
     parent_help = "Parent node's data directory, when one exists."
     parent = typer.Option(None, '--parent', help=parent_help)
+    # bundle option
+    bundle_help = 'Template bundle root, when the template carries agents/.'
+    bundle = typer.Option(None, '--bundle', help=bundle_help)
     # reset flag
     reset_help = 'Wipe each agent dir before seeding.'
     reset = typer.Option(False, '--reset', help=reset_help)
@@ -1450,11 +1458,18 @@ def node_seed(app: typer.Typer) -> typer.Typer:
     def _seed(
         node_dir: str = node_dir,
         parent: Optional[str] = parent,
+        bundle: Optional[str] = bundle,
         reset: bool = reset,
     ) -> None:
         """Seed the node's agent config dirs (invoked by init.sh)."""
         parent_dir = pathlib.Path(parent) if parent else None
-        seed_agents(pathlib.Path(node_dir), parent_dir=parent_dir, reset=reset)
+        bundle_dir = pathlib.Path(bundle) / 'agents' if bundle else None
+        seed_agents(
+            node_dir=pathlib.Path(node_dir),
+            parent_dir=parent_dir,
+            bundle_dir=bundle_dir,
+            reset=reset,
+        )
 
     return app
 

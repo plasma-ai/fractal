@@ -11,9 +11,11 @@ import logging
 import os
 import pathlib
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import typing
 from collections.abc import Callable, Iterator
@@ -993,8 +995,9 @@ class Node:
         base: Optional[str] = None,
         meta: Optional[str] = None,
         inherit: Optional[list[str]] = None,
-        steps: Optional[PathLike] = None,
-        profile: Optional[str] = None,
+        template: Optional[str] = None,
+        include: Optional[list[str]] = None,
+        exclude: Optional[list[str]] = None,
         pin: Optional[str] = None,
         agent: Optional[str] = None,
         provider: Optional[str] = None,
@@ -1046,17 +1049,22 @@ class Node:
                 package seed (``steps``, ``scripts``, ``skills``,
                 ``config``, or ``all``). ``config`` copies the parent's
                 preference keys only -- budget-class caps never inherit.
-            steps: Directory of step files (``*.md``, each carrying the
-                loop's ``NN-`` digit prefix at one width) to seed the
-                node's ``steps/`` from instead of the package seed;
-                mutually exclusive with inheriting ``steps``.
-            profile: Named seed bundle under
-                ``.fractal/profiles/<name>/`` -- its ``steps/`` seeds the
-                step list (like ``steps``) and its ``NODE.md`` seeds a
-                deployment-ready charter, fill-sheet-validated at init;
-                mutually exclusive with ``steps`` and inheriting them.
+            template: Template folder (``<path>[@<ref>]``): a tracked
+                folder holding ``config.json``, read at the child's fork
+                commit (or at ``<ref>``) and recorded in the node's
+                ``_template.toml``. Its surfaces (``NODE.md``, ``steps/``,
+                ``scripts/``, ``skills/``, ``agents/``) seed the node; a
+                surface it lacks falls back to the inherit-or-package
+                source.
+            include: Template-relative paths to deploy from the template,
+                dropping everything else; a directory entry covers its
+                subtree. Mutually exclusive with ``exclude`` and recorded
+                in ``_template.toml``.
+            exclude: Template-relative paths to drop from the template; a
+                directory entry covers its subtree. Mutually exclusive
+                with ``include`` and recorded in ``_template.toml``.
             pin: Commission pin (a commit sha): must resolve, and every
-                ``pin:`` declaration in the profile charter must match it
+                ``pin:`` declaration in the template charter must match it
                 -- a stale seed dies at init, not at the first seat.
             agent: Agent type.
             provider: Provider route for the agent (e.g. ``openrouter``;
@@ -1101,6 +1109,7 @@ class Node:
         """
         from .agent import command_base, resolve
         from .loop import _STEP_PREFIX
+        from .template import locate, materialize, trim, write_provenance
 
         # coerce path to a str -- downstream '.' comparisons and persisted
         # caches expect the string form
@@ -1167,65 +1176,28 @@ class Node:
                     )
             if 'all' in inherit:
                 inherit = ['steps', 'scripts', 'skills', 'config']
-        # resolve a named profile: a repo-provided seed bundle under
-        # .fractal/profiles/<name>/ -- its steps/ seeds the step list
-        # exactly like --steps, and its NODE.md seeds a deployment-ready
-        # charter whose fill-sheet is validated below, so a stale or
-        # truncated seed dies at init instead of at the node's first seat
-        charter: Optional[pathlib.Path] = None
-        if profile is not None:
-            if steps is not None:
-                raise ValueError('--profile cannot be combined with --steps.')
-            if inherit and 'steps' in inherit:
-                raise ValueError('--profile cannot be combined with --inherit=steps.')
-            profile_dir = self.repo_dir / FRACTAL_FOLDER / 'profiles' / profile
-            if not profile_dir.is_dir():
-                raise ValueError(f'No profile found at {profile_dir}.')
-            if (profile_dir / 'steps').is_dir():
-                steps = profile_dir / 'steps'
-            if (profile_dir / 'NODE.md').is_file():
-                charter = profile_dir / 'NODE.md'
-        # the fill-sheet gate: a pinned commission must hold together before
-        # any spend (--pin alone still validates the pin itself)
-        if pin is not None or charter is not None:
-            self._validate_charter(charter, pin=pin)
-        # an explicit steps dir is a rival step source to inheriting the
-        # parent's -- refuse the combination rather than pick one silently --
-        # and it must satisfy the loop's discovery contract, checked here so a
-        # bad profile refuses before any worktree is created rather than
-        # failing the node's first iteration; resolved so the arg handed to
-        # init.sh never depends on the script's inherited cwd
-        if steps is not None:
-            if inherit and 'steps' in inherit:
-                raise ValueError('--steps cannot be combined with --inherit=steps.')
-            steps = pathlib.Path(steps).resolve()
-            if not steps.exists():
-                raise ValueError(f'--steps directory does not exist: {steps}')
-            if not steps.is_dir():
-                raise ValueError(f'--steps is not a directory: {steps}')
-            # only regular files seed -- init.sh copies the same set
-            step_files = sorted(
-                entry for entry in steps.glob('*.md') if entry.is_file()
+        # resolve the template flag early: the path refusals (a machinery
+        # component, a path outside every worktree, '@' in a folder name)
+        # need no parent, so a typo dies before any other work; the read
+        # itself waits for the fork commit, resolved under the lock below
+        template_path: Optional[str] = None
+        template_ref: Optional[str] = None
+        template_worktree: Optional[pathlib.Path] = None
+        template_notice: Optional[str] = None
+        template_tmp: Optional[str] = None
+        if include and exclude:
+            raise ValueError('--include cannot be combined with --exclude.')
+        if (include or exclude) and template is None:
+            raise ValueError('--include and --exclude require --template.')
+        if template is not None:
+            template_path, template_ref, template_worktree = locate(
+                template, repo_dir=self.repo_dir
             )
-            if not step_files:
-                raise ValueError(
-                    f'--steps directory contains no step files (*.md): {steps}'
-                )
-            # the loop discovers steps by their NN- prefix and fails an
-            # iteration on a missing prefix or mixed digit widths
-            widths = set()
-            for step_file in step_files:
-                match = _STEP_PREFIX.match(step_file.name)
-                if match is None:
-                    raise ValueError(
-                        f'--steps directory has a step file without an'
-                        f' NN- prefix: {step_file.name}'
-                    )
-                widths.add(len(match.group(1)))
-            if len(widths) > 1:
-                raise ValueError(
-                    f'--steps directory mixes digit prefix widths: {steps}'
-                )
+        # the fill-sheet gate: a pinned commission must hold together before
+        # any spend (--pin alone still validates the pin itself); a template
+        # charter validates once the bundle materializes below
+        if pin is not None and template is None:
+            self._validate_charter(None, pin=pin)
         # expand --meta into --base + --scope
         if meta:
             # handle mutually exclusive flags
@@ -1442,10 +1414,6 @@ class Node:
         if inherit:
             joined = ','.join(inherit)
             args.append(f'--inherit={joined}')
-        if steps is not None:
-            args.append(f'--steps={steps}')
-        if charter is not None:
-            args.append(f'--charter={charter}')
         if agent:
             args.append(f'--agent={agent}')
         if provider:
@@ -1574,6 +1542,133 @@ class Node:
                 cwd=self.repo_dir,
                 check=False,
             )
+            # materialize the template at the child's fork commit -- the
+            # branch's own tip when it already exists (a --reset), else the
+            # base or the parent branch, which is what worktree add checks
+            # out -- so the recorded commit is exactly what deploys; every
+            # template refusal fires here, before any worktree exists
+            if template is not None:
+                rev = template_ref
+                if rev is None:
+                    rev = (
+                        child_branch if pre_existing_branch else (base or parent.branch)
+                    )
+                cmd = ['rev-parse', '--verify', f'{rev}^{{commit}}']
+                template_commit = fractal.util.git.run(
+                    cmd,
+                    cwd=self.repo_dir,
+                    check=False,
+                )
+                if template_commit is None:
+                    raise ValueError(
+                        f'Template ref does not resolve to a commit: {rev!r}.'
+                    )
+                template_tmp = tempfile.mkdtemp(prefix='fractal-template-')
+                try:
+                    bundle = materialize(
+                        worktree=template_worktree,
+                        path=template_path,
+                        commit=template_commit,
+                        dest=pathlib.Path(template_tmp),
+                    )
+                    # the bundle's steps must satisfy the loop's discovery
+                    # contract, so a template that cannot iterate refuses
+                    # here rather than failing the node's first iteration
+                    steps_dir = bundle / 'steps'
+                    if steps_dir.is_dir():
+                        # only regular files seed -- init.sh copies the same set
+                        step_files = sorted(
+                            entry for entry in steps_dir.glob('*.md') if entry.is_file()
+                        )
+                        if not step_files:
+                            raise ValueError(
+                                f'Template steps/ contains no step files'
+                                f' (*.md): {template_path}'
+                            )
+                        # the loop discovers steps by their NN- prefix and
+                        # fails an iteration on a missing prefix or mixed
+                        # digit widths
+                        widths = set()
+                        for step_file in step_files:
+                            match = _STEP_PREFIX.match(step_file.name)
+                            if match is None:
+                                raise ValueError(
+                                    f'Template steps/ has a step file without'
+                                    f' an NN- prefix: {step_file.name}'
+                                )
+                            widths.add(len(match.group(1)))
+                        if len(widths) > 1:
+                            raise ValueError(
+                                f'Template steps/ mixes digit prefix widths:'
+                                f' {template_path}'
+                            )
+                    # a bundled surface is a rival source to inheriting the
+                    # parent's -- refuse the combination rather than pick one
+                    for surface in ('steps', 'scripts', 'skills'):
+                        if (
+                            inherit
+                            and surface in inherit
+                            and (bundle / surface).is_dir()
+                        ):
+                            raise ValueError(
+                                f'--template carries {surface}/; it cannot be'
+                                f' combined with --inherit={surface}.'
+                            )
+                    # the fill-sheet gate on the bundle's charter (--pin
+                    # alone still validates the pin itself)
+                    node_md = bundle / 'NODE.md'
+                    if pin is not None or node_md.is_file():
+                        charter = node_md if node_md.is_file() else None
+                        self._validate_charter(charter, pin=pin)
+                    # cut the bundle down to the effective set, so downstream
+                    # only sees what the listing keeps
+                    trim(bundle, include=include, exclude=exclude)
+                    # one notice when the root branch's copy differs from the
+                    # commit read -- a path absent on the root is no notice
+                    cmd = [
+                        'rev-parse',
+                        '-q',
+                        '--verify',
+                        f'{root}:{template_path}',
+                    ]
+                    root_tree = fractal.util.git.run(
+                        cmd,
+                        cwd=self.repo_dir,
+                        check=False,
+                    )
+                    cmd = [
+                        'rev-parse',
+                        '-q',
+                        '--verify',
+                        f'{template_commit}:{template_path}',
+                    ]
+                    fork_tree = fractal.util.git.run(
+                        cmd,
+                        cwd=self.repo_dir,
+                        check=False,
+                    )
+                    if root_tree is not None and root_tree != fork_tree:
+                        template_notice = (
+                            f'Notice: template {template_path!r} differs on'
+                            f' the root branch; pass'
+                            f' --template={template_path}@{root} to read the'
+                            " root's copy."
+                        )
+                    # record the provenance into the bundle; init.sh places
+                    # it with the other bundle surfaces
+                    write_provenance(
+                        bundle,
+                        path=template_path,
+                        commit=template_commit,
+                        values={},
+                        include=include,
+                        exclude=exclude,
+                    )
+                except Exception:
+                    shutil.rmtree(template_tmp, ignore_errors=True)
+                    template_tmp = None
+                    raise
+                args.append(f'--bundle={bundle}')
             # init.sh creates the worktree before the registration below, so a
             # failure in between would strand a live worktree with no registry row
             # -- roll back, but only what *this* init created (a pre-existing
@@ -1619,6 +1714,10 @@ class Node:
                         created_branch=created_branch,
                     )
                 raise
+            finally:
+                # the bundle outlives init.sh, never the init call
+                if template_tmp is not None:
+                    shutil.rmtree(template_tmp, ignore_errors=True)
         # warm the child's configured cache dirs (copy-on-write clones from
         # the main checkout, see worktree.clone_cache_dirs) after the lock
         # releases -- a multi-gigabyte clone must never serialize sibling
@@ -1647,6 +1746,8 @@ class Node:
             if not line.startswith('Created ')
         )
         notices = result.stderr.strip()
+        if template_notice:
+            notices = f'{notices}\n{template_notice}' if notices else template_notice
         return f'{summary}\n{notices}' if notices else summary
 
     def _init_user(

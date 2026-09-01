@@ -16,8 +16,7 @@ SCOPE=""
 BASE=""
 META=""
 INHERIT=""
-STEPS=""
-CHARTER=""
+BUNDLE=""
 AGENT=""
 PROVIDER=""
 MODEL=""
@@ -65,10 +64,9 @@ Options:
     --inherit=<surfaces>               Seed surfaces from the parent node instead of the
                                        package seed (comma-separated; repeatable): steps,
                                        scripts, skills, config, all
-    --steps=<dir>                      Seed steps/ from the NN- prefixed step files
-                                       (*.md) in <dir> instead of the package seed
-    --charter=<file>                   Seed NODE.md from a profile charter instead of
-                                       the package seed's placeholder
+    --bundle=<dir>                     Seed surfaces from a materialized template
+                                       bundle; each surface the bundle carries
+                                       overrides its inherit-or-package source
     --agent=<agent>                    Agent type
                                        (currently claude, codex, grok, opencode, or omp)
     --provider=<provider>              Provider route for the agent (e.g. openrouter)
@@ -239,8 +237,7 @@ for arg in "$@"; do
             ;;
         --meta=*) META="${arg#*=}" ;;
         --inherit=*) INHERIT="${INHERIT:+$INHERIT,}${arg#*=}" ;;
-        --steps=*) STEPS="${arg#*=}" ;;
-        --charter=*) CHARTER="${arg#*=}" ;;
+        --bundle=*) BUNDLE="${arg#*=}" ;;
         --sync) SYNC=true ;;
         --no-sync) SYNC=false ;;
         --detached) DETACHED=true ;;
@@ -414,17 +411,6 @@ if [[ "$INHERIT_SKILLS" == true && ! -d "$PARENT_NODE_DIR/skills" ]]; then
     echo "Error: --inherit=skills: parent has no skills dir at $PARENT_NODE_DIR/skills/" >&2
     exit 1
 fi
-# an explicit steps dir must carry step files -- fail loudly (before
-# any worktree is created) rather than seeding an empty steps/;
-# globbed with the dir quoted so a metacharacter in its name stays
-# literal (compgen -G would pattern-expand it)
-if [[ -n "$STEPS" ]]; then
-    STEPS_MATCH=("$STEPS/"*.md)
-    if [[ ! -e "${STEPS_MATCH[0]}" ]]; then
-        echo "Error: --steps: no step files at $STEPS/" >&2
-        exit 1
-    fi
-fi
 
 # branch = <parent>.<name>
 BRANCH="$PARENT_BRANCH.$NAME"
@@ -547,11 +533,11 @@ MEMORY_DIR="$NODE_DIR/memory"
 if [[ "$RESET" == true ]]; then
     rm -f "$NODE_DIR/NODE.md"
 fi
-# a profile charter seeds a deployment-ready NODE.md; the package seed's
+# a template charter seeds a deployment-ready NODE.md; the package seed's
 # placeholder charter otherwise
 if [[ ! -f "$NODE_DIR/NODE.md" ]]; then
-    if [[ -n "$CHARTER" ]]; then
-        cp "$CHARTER" "$NODE_DIR/NODE.md"
+    if [[ -n "$BUNDLE" && -f "$BUNDLE/NODE.md" ]]; then
+        cp "$BUNDLE/NODE.md" "$NODE_DIR/NODE.md"
     else
         cp "$NODE_SEED_DIR/NODE.md" "$NODE_DIR/NODE.md"
     fi
@@ -561,10 +547,10 @@ fi
 if [[ "$RESET" == true ]]; then
     rm -rf "$NODE_DIR/steps"
 fi
-# seed from an explicit --steps dir when given, else the parent's live steps
-# when requested, else the package seed
-if [[ -n "$STEPS" ]]; then
-    STEPS_SRC="$STEPS"
+# seed from the template bundle when it carries steps, else the parent's
+# live steps when requested, else the package seed
+if [[ -n "$BUNDLE" && -d "$BUNDLE/steps" ]]; then
+    STEPS_SRC="$BUNDLE/steps"
 elif [[ "$INHERIT_STEPS" == true ]]; then
     STEPS_SRC="$PARENT_NODE_DIR/steps"
 else
@@ -613,9 +599,12 @@ if [[ "$RESET" == true ]]; then
     rm -rf "$NODE_DIR/scripts"
 fi
 # seed only the mutable, per-node scripts (setup/test/lint),
-# skipping the underscore-prefixed machinery; inherit the parent's
-# live scripts when requested, else the package seed
-if [[ "$INHERIT_SCRIPTS" == true ]]; then
+# skipping the underscore-prefixed machinery; the template bundle's
+# scripts when it carries them, else the parent's live scripts when
+# requested, else the package seed
+if [[ -n "$BUNDLE" && -d "$BUNDLE/scripts" ]]; then
+    SCRIPTS_SRC="$BUNDLE/scripts"
+elif [[ "$INHERIT_SCRIPTS" == true ]]; then
     SCRIPTS_SRC="$PARENT_NODE_DIR/scripts"
 else
     SCRIPTS_SRC="$NODE_SEED_DIR/scripts"
@@ -637,11 +626,14 @@ fi
 if [[ "$RESET" == true ]]; then
     rm -rf "$NODE_DIR/skills"
 fi
-# inherit the parent's live skill set when requested, else the package seed
-# -- the copy is wholesale (a skill absent at the source is never copied; no
-# union across sources); an existing child skill dir is never touched, so a
-# parent edit reaches an existing child only through --reset
-if [[ "$INHERIT_SKILLS" == true ]]; then
+# the template bundle's skills when it carries them, else the parent's live
+# skill set when requested, else the package seed -- the copy is wholesale
+# (a skill absent at the source is never copied; no union across sources);
+# an existing child skill dir is never touched, so a parent edit reaches an
+# existing child only through --reset
+if [[ -n "$BUNDLE" && -d "$BUNDLE/skills" ]]; then
+    SKILLS_SRC="$BUNDLE/skills"
+elif [[ "$INHERIT_SKILLS" == true ]]; then
     SKILLS_SRC="$PARENT_NODE_DIR/skills"
 else
     SKILLS_SRC="$NODE_SEED_DIR/skills"
@@ -658,6 +650,17 @@ if [[ -d "$SKILLS_SRC" ]]; then
     done
 fi
 
+if [[ "$RESET" == true ]]; then
+    rm -f "$NODE_DIR/_template.toml"
+fi
+# the bundle's provenance record (template path, commit, values); the rm arm
+# above drops it on a --reset that names no template, the forget-unless-
+# repassed rule config flags have
+if [[ -n "$BUNDLE" && ! -f "$NODE_DIR/_template.toml" ]]; then
+    cp "$BUNDLE/_template.toml" "$NODE_DIR/_template.toml"
+    echo "Created $NODE_DIR/_template.toml"
+fi
+
 # set up each agent dir -- seed its config and symlink in skills, recreated
 # each init and gitignored; a node's base agent may be overridden per step
 # (agent: frontmatter), so any node may run any agent; the seeding (config
@@ -666,6 +669,9 @@ fi
 SEED_ARGS=("$NODE_DIR" "--parent=$PARENT_NODE_DIR")
 if [[ "$RESET" == true ]]; then
     SEED_ARGS+=("--reset")
+fi
+if [[ -n "$BUNDLE" && -d "$BUNDLE/agents" ]]; then
+    SEED_ARGS+=("--bundle=$BUNDLE")
 fi
 fractal node _seed "${SEED_ARGS[@]}"
 
@@ -737,10 +743,10 @@ fi
 echo ""
 echo "Initialized $WORKTREE_DIR"
 
-# surface the next steps: a profile charter arrives deployment-ready, so
+# surface the next steps: a template charter arrives deployment-ready, so
 # only the placeholder charter asks to be authored -- telling the operator
 # to fill in seeded sections invites overwriting a pinned commission
-if [[ -n "$CHARTER" ]]; then
+if [[ -n "$BUNDLE" && -f "$BUNDLE/NODE.md" ]]; then
     echo ""
     echo "Next: review the seeded task in $NODE_DIR/NODE.md,"
     echo "then start the loop: fractal node start $BRANCH"
