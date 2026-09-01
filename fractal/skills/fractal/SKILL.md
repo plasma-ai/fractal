@@ -47,14 +47,23 @@ continue (a continue re-arms the cap at start, not init).
   config always inherits. A top-level spawn's parent is the user node, which
   carries no steps, scripts, or skills — the parameter is for configured nodes
   spawning children
-- **`steps`**: directory of `NN-` prefixed step files (`*.md`) to seed `steps/`
-  from instead of the package seed; mutually exclusive with `inherit=steps`
-- **`profile`**: named seed bundle under `.fractal/profiles/<name>/` — its
-  `steps/` seeds the step list and its `NODE.md` a deployment-ready charter
-  (fill-sheet validated at init); mutually exclusive with `steps` and
-  `inherit=steps`
+- **`template`**: template folder (`<path>[@<ref>]`) — any tracked folder
+  holding `config.json`, read from git at the child's fork commit (or at
+  `<ref>`) and recorded in the node's `_template.toml`. Its surfaces (`NODE.md`,
+  `steps/`, `scripts/`, `skills/`, `agents/`) seed the node — a surface it lacks
+  falls back to the inherit-or-package source, and `inherit` of a surface the
+  template carries is refused — and its `config.json` preset fills each unset
+  init parameter (an explicit parameter wins over the preset); a template
+  charter's fill-sheet is validated at init
+- **`include`** / **`exclude`**: template-relative paths to deploy or drop
+  (repeatable; mutually exclusive; a directory entry covers its subtree),
+  recorded in `_template.toml` so `node diff` and `node reseed` judge by the
+  same effective set
+- **`values`** / **`set`**: fills for the template's `{{slot}}` placeholders —
+  `values` names a TOML file of string values, `set` takes repeatable
+  `KEY=VALUE` pairs that win over the sheet; an unfilled slot refuses init
 - **`pin`**: commission pin (a commit sha): must resolve, and every `pin:` line
-  in the profile charter must match it
+  in the template charter must match it; also fills the `{{pin}}` slot
 - **`agent`**: agent command; inherits the user node's default when omitted
 - **`provider`**: provider route for the agent (e.g. `openrouter`); inherits the
   user node's default when omitted

@@ -85,19 +85,20 @@ wherever a host rule already fenced it while sweeping the same file into history
 wherever nothing did, which is the default state of a fresh clone.
 
 The law describes everything an estate legitimately holds. Records are the
-canon-required surfaces -- the estate root's `NODE.md` and `config.json`, and
-the `memory/`, `plans/`, `scripts/`, `skills/`, and `steps/` directories -- and
-only at the text and structured-text suffixes a record is written in, so no pass
-can stage a key, a certificate, an archive, or a binary. Beside them sits the
-estate's own tool state, which is committed content rather than machine state:
-git's empty-directory placeholder (`.gitkeep`), which exists only so a bare
-record dir survives a clone, and the wiki tool's settings directory (`.wiki/`),
-whose declared-root marker the wiki CLI reads the memory wiki back through (the
-tool's derived cache self-ignores, and its plugin binaries install to an ignored
-`.obsidian/`). Every other dot-named path is machine or agent state and stays
-out. Only new content is judged: what an estate already tracks keeps committing,
-so the law gates what enters history and never the upkeep of history a node
-already owns.
+canon-required surfaces -- the estate root's `NODE.md`, `config.json`, and
+`_template.toml` (the template provenance record, see
+[[configuration/templates]]), and the `memory/`, `plans/`, `scripts/`,
+`skills/`, and `steps/` directories -- and only at the text and structured-text
+suffixes a record is written in, so no pass can stage a key, a certificate, an
+archive, or a binary. Beside them sits the estate's own tool state, which is
+committed content rather than machine state: git's empty-directory placeholder
+(`.gitkeep`), which exists only so a bare record dir survives a clone, and the
+wiki tool's settings directory (`.wiki/`), whose declared-root marker the wiki
+CLI reads the memory wiki back through (the tool's derived cache self-ignores,
+and its plugin binaries install to an ignored `.obsidian/`). Every other
+dot-named path is machine or agent state and stays out. Only new content is
+judged: what an estate already tracks keeps committing, so the law gates what
+enters history and never the upkeep of history a node already owns.
 
 Content the law refuses is withheld from the sweeps by name and reported, never
 staged and never silently dropped. The refused paths themselves are named as

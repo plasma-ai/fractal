@@ -131,9 +131,11 @@ Fractal's footprint
    branch. It holds the node's ``NODE.md`` task contract, its ``config.json``
    (:doc:`/configuration`), the step prompts under ``steps/``
    (:doc:`/guide/loop`), ``scripts/`` for setup and validation, ``skills/``,
-   ``plans/`` (:doc:`/guide/plans`), a ``memory/`` wiki, a git-ignored
-   ``tmp/`` scratch directory, and runtime markers such as the one-line
-   ``.status`` file. Agent-node data directories are tracked in git on the
+   ``plans/`` (:doc:`/guide/plans`), a ``memory/`` wiki, a ``_template.toml``
+   record of the template that seeded the node when ``node init --template``
+   did (:doc:`/cli/node`), a git-ignored ``tmp/`` scratch directory, and
+   runtime markers such as the one-line ``.status`` file.
+   Agent-node data directories are tracked in git on the
    node's own branch but never merge upward: ``fractal node merge`` returns
    every ``.fractal/`` path on the target to the target's own HEAD (only a
    scope root of the merging node that is, or lies under, a ``.fractal/``

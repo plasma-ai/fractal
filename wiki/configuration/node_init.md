@@ -70,13 +70,30 @@ exists.
   node's live copies instead of the package seed: `steps`, `scripts`, `skills`,
   `config`, or `all` (which expands to the other four). `config` copies the
   parent's preference keys only -- budget-class caps never inherit.
-- `--steps` -- directory of step files (`*.md`) seeding the node's `steps/`
-  instead of the package seed, copied byte-for-byte in filename order. The
-  directory must hold at least one step file, each carrying the `NN-` digit
-  prefix the loop discovers steps by, at one width (see [[configuration/steps]])
-  -- a profile that violates either would seed a node that cannot iterate, so
-  init refuses it. The flag is mutually exclusive with `--inherit=steps` (two
-  rival step sources).
+- `--template` -- template folder (`<path>[@<ref>]`): any tracked folder holding
+  `config.json`, read from git at the child's fork commit (or at `<ref>`) and
+  recorded in the node's `_template.toml`. Its surfaces (`NODE.md`, `steps/`,
+  `scripts/`, `skills/`, `agents/`) seed the node -- a surface it lacks falls
+  back to the inherit-or-package source, and `--inherit` of a surface the
+  template carries is refused (two rival sources) -- and its `config.json`
+  preset fills each unset run-config flag (a flag wins over the preset; the
+  preset beats an inherited value). A template charter's fill-sheet is validated
+  at init (`## Instructions` / `## Completion Requirements` present; every
+  `pin:` line resolves to a commit and matches `--pin` case-blind, and a `pin:`
+  spelling that is not a hex sha refuses outright; every `docket: <path>` line
+  resolves at the pin) -- stale or truncated commission seeds die at init.
+  [[configuration/templates]] is the full reference.
+- `--include` / `--exclude` (repeatable; mutually exclusive) --
+  template-relative paths to deploy or drop; a directory entry covers its
+  subtree. Recorded in `_template.toml`, so `node diff` and `node reseed` judge
+  by the same effective set.
+- `--values` -- slot fill sheet: a TOML file of string values the template's
+  `{{slot}}` placeholders render with; recorded in `_template.toml`.
+- `--set KEY=VALUE` (repeatable) -- individual slot fills; a pair wins over the
+  `--values` sheet.
+- `--pin=<sha>` -- commission pin: must resolve to a commit, and every `pin:`
+  declaration in the template charter must match it; also fills the `{{pin}}`
+  slot.
 - `--agent` -- agent command (e.g. `claude`, `codex`, `grok`, `opencode`,
   `omp`). Defaults to the nearest ancestor's configured agent; the user node
   sets the tree default via `fractal init --agent`. An unknown agent is refused
@@ -154,14 +171,6 @@ explicit reserve must stay below 99% of `--max-cost`.
   cannot be changed, and its children cannot push either.
 - `--blind` -- subscribe the node to no radio channels. The parent still reads
   this node's outbox.
-- `--profile=<name>` -- seed from a named bundle under
-  `.fractal/profiles/<name>/`: `steps/` seeds the step list (like `--steps`) and
-  `NODE.md` a deployment-ready charter, whose fill-sheet is validated at init
-  (`## Instructions`/`## Completion Requirements` present; every `pin:` line
-  resolves to a commit and matches `--pin` case-blind, and a `pin:` spelling
-  that is not a hex sha refuses outright; every `docket: <path>` line resolves
-  at the pin) -- stale or truncated commission seeds die at init.
-- `--pin=<sha>` -- the commission pin the profile charter must agree with.
 - `--sealed` -- seal the node's mailbox: its own seat cannot read hosted
   messages until an operator or the parent unseals it
   (`config set sealed=false`, which the sealed seat itself may not run). The

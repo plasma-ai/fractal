@@ -40,8 +40,9 @@ via `--inherit`.
   selects another sub-project.
 - **Agent config directories** -- each node data directory carries a config dir
   per supported agent backend (the agent CLI's settings file plus a skills
-  link), recreated at every init and gitignored. The parent's live copy always
-  wins over the package seed, so agent-level settings flow down the tree
+  link), recreated at every init and gitignored. A template's `agents/<agent>/`
+  file beats the parent's live copy, which wins over the package seed (see
+  [[configuration/templates]]), so agent-level settings flow down the tree
   unconditionally -- this is the one file surface that inherits without opting
   in. For codex, a relative `model_instructions_file` the config names is copied
   alongside it, so the inherited config never points at a missing file.
@@ -51,11 +52,12 @@ via `--inherit`.
 `fractal node init --inherit=<surfaces>` (comma-separated; repeatable) seeds
 file surfaces from the parent's live copies instead of the package seed; `all`
 expands to the full set. Inheriting a surface the parent does not carry is an
-error.
+error, and so is inheriting a surface the spawn's template bundles --
+`--inherit=steps`, `scripts`, or `skills` is refused when the template carries
+that surface, two rival sources (see [[configuration/templates]]).
 
 - **`steps`** -- copy the parent's step list, including its trims, added steps,
-  and frontmatter overrides (see [[configuration/steps]]); mutually exclusive
-  with an explicit `--steps` directory (see [[configuration/node_init]]).
+  and frontmatter overrides (see [[configuration/steps]]).
 - **`scripts`** -- copy the parent's setup, test, and lint scripts with their
   project-specific extensions (see [[configuration/scripts]]).
 - **`skills`** -- copy the parent's skill set.

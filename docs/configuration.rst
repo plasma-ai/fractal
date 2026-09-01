@@ -444,8 +444,12 @@ Inheritance at spawn
 default (``node init --path <sub-project>`` selects a different sub-project
 for the child; either way the key is immutable after init); ``agent`` and
 ``provider`` resolve through the nearest ancestor that sets them; a ``local``
-parent forces ``local`` children. Everything else defaults fresh unless the
-spawn passes ``--inherit config``, which copies the parent's *preference* keys
+parent forces ``local`` children. A spawn with ``--template`` fills the
+budget, limit, duration, model, and mode keys its flags left unset from the
+template's ``config.json`` preset — a flag wins over the preset, and the
+preset beats an inherited value (see :doc:`/cli/node`). Everything else
+defaults fresh unless the spawn passes ``--inherit config``, which copies
+the parent's *preference* keys
 — ``model``, ``effort``, ``sync``, ``detached``, ``iter_timeout``,
 ``step_timeout``, ``step_retries``, ``step_retry_backoff``, ``wait``, and
 ``sleep``/``interval`` (only when the spawn sets neither) — as a spawn-time
@@ -510,7 +514,8 @@ Defaulting and rounding:
 Validation
 ----------
 
-One merged validator runs at ``node init`` (over the flags), at
+One merged validator runs at ``node init`` (over the merged values — flag,
+else template preset, else inherited), at
 ``node config set`` and ``node update`` (over the merged result), and again at
 ``node start`` (over the stored file, since direct edits bypass the setters).
 It rejects:
