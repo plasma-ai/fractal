@@ -4,6 +4,7 @@ Drives the real ``fractal`` console script as a subprocess against a
 throwaway git repo built by the CLI itself -- a user (root) node plus two
 worker nodes. The tests exercise the node lifecycle surface end to end:
 ``init`` and its run-config flags, ``list`` and its filters, ``status``,
+``diff`` against a node's recorded template,
 the ``finish``/``stop``/``kill``/``retire``/``unretire``/``attach`` status
 guards (including their ``RuntimeError`` messages and exit codes), ``update``
 of a child's configuration, ``merge``'s ``--ignore-scope`` override reaching
@@ -26,8 +27,10 @@ import pathlib
 import re
 import shutil
 import subprocess
+import tomllib
 
 import pytest
+import tomli_w
 
 import fractal
 from fractal.constants import STATUSES
@@ -79,6 +82,10 @@ __all__ = [
     'test_rm_rf_worktree_lists_orphan_then_force_deletes',
     'test_list_shows_stored_status_for_orphaned_terminal_node',
     'test_reconcile_records_orphan_event_once',
+    'test_diff_reports_drift_per_surface',
+    'test_diff_applies_the_recorded_listing_and_warns_on_a_stale_entry',
+    'test_diff_requires_a_recorded_template_and_a_full_sha',
+    'test_diff_stays_clean_after_the_template_folder_moves',
     'test_lifecycle_guard_rejects_idle_node',
     'test_start_drain_requires_continue',
     'test_retire_unretire_round_trips_through_list',
@@ -1658,6 +1665,231 @@ def test_reconcile_records_orphan_event_once(repo: dict) -> None:
     assert deleted.returncode == 0, deleted.stdout + deleted.stderr
 
 
+# ------ diff
+
+
+def test_diff_reports_drift_per_surface(repo: dict) -> None:
+    """``diff`` re-renders the recorded template and reports drift per file.
+
+    A freshly seeded node is clean (exit 0, by branch and from its own
+    worktree), with the codex ``auth.json`` symlink in place. An edit to
+    each surface -- a step, a script, a skill file, an agent
+    ``settings.json``, and the charter -- exits 1 with a unified diff
+    naming the node-relative path; a deleted step reports as missing and
+    ``{{`` residue is its own finding, while a node-added step, a live
+    symlink, and the untouched ``auth.json`` are never reported.
+    """
+    root = repo['root']
+    charter = (
+        '# diffcrew\n\n## Instructions\n\nmission: {{mission}}\n\n'
+        '## Completion Requirements\n\nDone.\n'
+    )
+    _commit_template(
+        root,
+        'templates/diffcrew',
+        {
+            'config.json': '{}\n',
+            'NODE.md': charter,
+            'steps/01-PLAN.md': '# plan the work\n',
+            'steps/02-EXECUTE.md': '# execute the plan\n',
+            'scripts/probe.sh': 'echo probe\n',
+            'skills/workflow/SKILL.md': '# workflow\n',
+            'agents/claude/settings.json': '{"seeded": true}\n',
+            'agents/claude/math.md': 'think in lemmas\n',
+        },
+    )
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'diffcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/diffcrew',
+        '--set',
+        'mission=probe the surfaces',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        worktree = root / '.worktrees' / 'main.diffcrew'
+        node_dir = worktree / '.fractal' / 'main.diffcrew'
+        # a fresh seed is clean, by branch and from the node's own worktree
+        clean = _run(root, 'node', 'diff', 'main.diffcrew')
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        assert clean.stdout.strip() == 'No drift from the recorded template.'
+        assert _run(worktree, 'node', 'diff').returncode == 0
+        assert (node_dir / '.codex' / 'auth.json').is_symlink()
+        # drift every surface: edit a step, drop a step, add a node-own
+        # step, edit a script, a skill file, and the agent settings, park
+        # unrendered residue in the charter, and turn a live agent file
+        # into a symlink
+        step = node_dir / 'steps' / '01-PLAN.md'
+        step.write_text('# plan the work\nan added line\n', encoding='utf-8')
+        (node_dir / 'steps' / '02-EXECUTE.md').unlink()
+        added = node_dir / 'steps' / '03-NEW.md'
+        added.write_text('# node-added\n', encoding='utf-8')
+        script = node_dir / 'scripts' / 'probe.sh'
+        script.write_text('echo probed\n', encoding='utf-8')
+        skill = node_dir / 'skills' / 'workflow' / 'SKILL.md'
+        skill.write_text('# workflow, reworked\n', encoding='utf-8')
+        settings = node_dir / '.claude' / 'settings.json'
+        settings.write_text('{"seeded": false}\n', encoding='utf-8')
+        math = node_dir / '.claude' / 'math.md'
+        math.unlink()
+        math.symlink_to(node_dir / 'NODE.md')
+        (node_dir / 'NODE.md').write_text(charter, encoding='utf-8')
+        drifted = _run(root, 'node', 'diff', 'main.diffcrew')
+        assert drifted.returncode == 1, drifted.stdout + drifted.stderr
+        # one unified diff per drifted file, headed by the node-relative path
+        for header in (
+            'NODE.md',
+            'steps/01-PLAN.md',
+            'scripts/probe.sh',
+            'skills/workflow/SKILL.md',
+            '.claude/settings.json',
+        ):
+            assert f'--- template/{header}' in drifted.stdout
+            assert f'+++ node/{header}' in drifted.stdout
+        assert '+an added line' in drifted.stdout
+        assert 'steps/02-EXECUTE.md: missing from the node.' in drifted.stdout
+        assert 'NODE.md: unrendered {{ residue in the live copy.' in drifted.stdout
+        # never reported: the node's own additions and the live symlinks
+        assert '03-NEW.md' not in drifted.stdout
+        assert 'math.md' not in drifted.stdout
+        assert 'auth.json' not in drifted.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.diffcrew', '--force')
+
+
+def test_diff_applies_the_recorded_listing_and_warns_on_a_stale_entry(
+    repo: dict,
+) -> None:
+    """The recorded ``exclude`` shapes the diff; a stale entry only warns.
+
+    An excluded step is absent from the node by design, so it never
+    reports as missing; an entry matching nothing in the template draws
+    a warning on stderr, not a refusal, and the node still diffs clean.
+    """
+    root = repo['root']
+    _commit_template(
+        root,
+        'templates/leandiff',
+        {
+            'config.json': '{}\n',
+            'steps/01-GO.md': '# go\n',
+            'steps/02-SKIP.md': '# never deployed\n',
+        },
+    )
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'leandiff',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/leandiff',
+        '--exclude',
+        'steps/02-SKIP.md',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.leandiff' / '.fractal' / 'main.leandiff'
+        assert not (node_dir / 'steps' / '02-SKIP.md').exists()
+        clean = _run(root, 'node', 'diff', 'main.leandiff')
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        # a listing entry the template no longer carries warns, not refuses
+        record = node_dir / '_template.toml'
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        data['exclude'].append('steps/99-GONE.md')
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        warned = _run(root, 'node', 'diff', 'main.leandiff')
+        assert warned.returncode == 0, warned.stdout + warned.stderr
+        assert 'No drift from the recorded template.' in warned.stdout
+        expected = (
+            'Warning: exclude entry matches nothing in the template:'
+            " 'steps/99-GONE.md' (the template may have dropped it)."
+        )
+        assert expected in warned.stderr
+    finally:
+        _run(root, 'node', 'delete', 'main.leandiff', '--force')
+
+
+def test_diff_requires_a_recorded_template_and_a_full_sha(repo: dict) -> None:
+    """A recordless node and a hand-mangled commit are command errors.
+
+    A node seeded without ``--template`` has nothing to diff against --
+    exit 2, naming the missing record -- and a ``_template.toml`` whose
+    commit is not a full 40-hex sha refuses the same way.
+    """
+    root = repo['root']
+    # the long-lived task worker was seeded without a template
+    recordless = _run(root, 'node', 'diff', 'main.task')
+    assert recordless.returncode == 2, recordless.stdout + recordless.stderr
+    assert 'No template recorded' in recordless.stderr
+    _commit_template(
+        root,
+        'templates/shadiff',
+        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
+    )
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'shadiff',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/shadiff',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.shadiff' / '.fractal' / 'main.shadiff'
+        record = node_dir / '_template.toml'
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        data['commit'] = 'deadbeef'
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        mangled = _run(root, 'node', 'diff', 'main.shadiff')
+        assert mangled.returncode == 2, mangled.stdout + mangled.stderr
+        assert "commit is not a full 40-hex sha: 'deadbeef'" in mangled.stderr
+    finally:
+        _run(root, 'node', 'delete', 'main.shadiff', '--force')
+
+
+def test_diff_stays_clean_after_the_template_folder_moves(repo: dict) -> None:
+    """A template moved on a later commit still diffs clean at its recorded sha.
+
+    The recorded commit keeps the folder's objects reachable, so the
+    read is untouched by the rename and the node reports no drift.
+    """
+    root = repo['root']
+    _commit_template(
+        root,
+        'templates/movediff',
+        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
+    )
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'movediff',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/movediff',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        _git(root, 'mv', 'templates/movediff', 'templates/movediff2')
+        _git(root, 'commit', '-m', 'move the template folder')
+        moved = _run(root, 'node', 'diff', 'main.movediff')
+        assert moved.returncode == 0, moved.stdout + moved.stderr
+        assert 'No drift from the recorded template.' in moved.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.movediff', '--force')
+
+
 # ------ lifecycle guards (idle node)
 
 
@@ -2388,6 +2620,24 @@ def _orphan_activity_rows(activity: str, branch: str) -> list[str]:
     """Activity CSV lines recording ``branch``'s orphan event."""
     lines = activity.splitlines()
     return [line for line in lines if 'orphan' in line and branch in line]
+
+
+def _commit_template(
+    root: pathlib.Path,
+    path: str,
+    files: dict[str, str],
+) -> None:
+    """Write ``files`` under ``root/<path>`` and commit the folder.
+
+    Template bytes deploy from git, never from the working copy, so every
+    template fixture must be committed before the init that reads it.
+    """
+    for name, content in files.items():
+        target = root / path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding='utf-8')
+    _git(root, 'add', path)
+    _git(root, 'commit', '-m', f'template {path}')
 
 
 def _init_tree(

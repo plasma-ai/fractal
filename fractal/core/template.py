@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import difflib
 import io
 import json
 import pathlib
 import re
 import subprocess
 import tarfile
+import tempfile
 import tomllib
 from typing import Any, Optional
 
@@ -28,6 +30,10 @@ TEMPLATE_FILE = '_template.toml'
 # a slot value's key follows the slot-name grammar -- the braced group of
 # the slot pattern (fractal.core.render._SlotTemplate)
 _SLOT_NAME = re.compile(r'[a-z_][a-z0-9_]*')
+
+# a recorded commit is the full sha the folder deploys at -- the verbs
+# that act on a record resolve it verbatim, so anything shorter refuses
+_COMMIT_SHA = re.compile(r'[0-9a-f]{40}')
 
 #: config keys a template preset may carry -- the budget, limit, duration,
 #: model, and mode subset of a node's config keys; identity and immutable
@@ -361,7 +367,8 @@ def trim(
     *,
     include: Optional[list[str]] = None,
     exclude: Optional[list[str]] = None,
-) -> None:
+    strict: bool = True,
+) -> list[str]:
     """Reduce a materialized bundle to its effective set.
 
     The effective set is every template file minus ``exclude``, or only
@@ -375,14 +382,21 @@ def trim(
         bundle: The bundle root.
         include: Template-relative paths to keep (exclusive of ``exclude``).
         exclude: Template-relative paths to drop (exclusive of ``include``).
+        strict: Refuse an entry matching nothing. ``False`` warns
+            instead: a recorded listing may outlive the file it named.
+
+    Returns:
+        Warning lines for the entries matching nothing (always empty
+        under ``strict``).
 
     Raises:
-        ValueError: If an entry matches nothing in the template, or names
-            ``config.json`` or ``_template.toml``.
+        ValueError: If an entry matches nothing in the template (under
+            ``strict``), or names ``config.json`` or ``_template.toml``.
 
     """
+    warnings: list[str] = []
     if not include and not exclude:
-        return
+        return warnings
     flag = 'include' if include else 'exclude'
     files = sorted(
         entry.relative_to(bundle).as_posix()
@@ -403,9 +417,15 @@ def trim(
             if file == normalized or file.startswith(f'{normalized}/')
         ]
         if not matched:
-            raise ValueError(
-                f'--{flag} entry matches nothing in the template: {entry!r}.'
+            if strict:
+                raise ValueError(
+                    f'--{flag} entry matches nothing in the template: {entry!r}.'
+                )
+            warnings.append(
+                f'{flag} entry matches nothing in the template: {entry!r}'
+                ' (the template may have dropped it).'
             )
+            continue
         covered.update(matched)
     # delete outside the effective set -- the marker always stays: it is
     # the config preset, not a seed surface, and never a listing entry
@@ -423,6 +443,7 @@ def trim(
     ):
         if not any(folder.iterdir()):
             folder.rmdir()
+    return warnings
 
 
 def fill(
@@ -530,3 +551,154 @@ def write_provenance(
     data['values'] = dict(values)
     text = tomli_w.dumps(data)
     (bundle / TEMPLATE_FILE).write_text(text, encoding='utf-8')
+
+
+def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
+    """Read a node's ``_template.toml`` provenance record.
+
+    The counterpart of :func:`write_provenance` for the verbs that act
+    on a recorded template. The record is hand-editable, so every field
+    a consumer trusts is validated here; a listing entry the template no
+    longer carries is judged where the listing is applied
+    (:func:`trim`).
+
+    Args:
+        node_dir: The node data directory holding the record.
+
+    Returns:
+        The record mapping (``path``, ``commit``, the optional
+        ``include``/``exclude`` listing, and ``values``).
+
+    Raises:
+        ValueError: If the node records no template, the record is not
+            valid TOML, ``path`` is absolute or carries a ``..`` step,
+            ``commit`` is not a full 40-hex sha, ``include`` appears
+            beside ``exclude``, a listing is not a list of paths, or
+            ``values`` is not a table of strings.
+
+    """
+    record = node_dir / TEMPLATE_FILE
+    if not record.is_file():
+        raise ValueError(
+            f'No template recorded for this node: {record} does not exist.'
+        )
+    try:
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f'{record} is not valid TOML: {e}') from e
+    # the recorded path is worktree-relative: an absolute path or a '..'
+    # step would escape the repo the commit is read from
+    path = data.get('path')
+    if not isinstance(path, str) or not path:
+        raise ValueError(f'{record} records no template path.')
+    posix = pathlib.PurePosixPath(path)
+    if posix.is_absolute() or '..' in posix.parts:
+        raise ValueError(f'{record} template path is not worktree-relative: {path!r}.')
+    commit = data.get('commit')
+    if not isinstance(commit, str) or not _COMMIT_SHA.fullmatch(commit):
+        raise ValueError(f'{record} commit is not a full 40-hex sha: {commit!r}.')
+    include, exclude = data.get('include'), data.get('exclude')
+    if include is not None and exclude is not None:
+        raise ValueError(
+            f'{record} carries include beside exclude; the listing is one or the other.'
+        )
+    for key in ('include', 'exclude'):
+        listing = data.get(key)
+        if listing is None:
+            continue
+        if not isinstance(listing, list) or not all(
+            isinstance(entry, str) for entry in listing
+        ):
+            raise ValueError(f'{record} {key} is not a list of paths.')
+    values = data.get('values', {})
+    if not isinstance(values, dict) or not all(
+        isinstance(value, str) for value in values.values()
+    ):
+        raise ValueError(f'{record} values is not a table of strings.')
+    return data
+
+
+def diff(
+    *,
+    node_dir: pathlib.Path,
+    repo_dir: pathlib.Path,
+) -> tuple[list[str], list[str]]:
+    """Diff a node's live seed surfaces against its rendered template.
+
+    Re-renders the recorded folder at its recorded commit with its
+    recorded values, applies the effective set, and compares each bundle
+    surface against the node's live copy: ``NODE.md``, ``steps/``,
+    ``scripts/``, and ``skills/`` in the node data directory, and each
+    ``agents/<agent>/`` file as the live ``.<agent>/`` file. A live
+    symlink and a file the bundle does not carry are never judged; a
+    bundle file the node lacks is drift, as is unrendered ``{{`` residue
+    in a live copy.
+
+    Args:
+        node_dir: The node data directory (the live surfaces and the
+            provenance record).
+        repo_dir: Main repo root (the recorded commit resolves there).
+
+    Returns:
+        Tuple of the per-file drift reports -- unified diffs and
+        one-line findings -- and the stale-listing warnings.
+
+    Raises:
+        ValueError: If the provenance record refuses
+            (:func:`read_provenance`) or the recorded folder does not
+            materialize at its commit (:func:`materialize`).
+
+    """
+    record = read_provenance(node_dir)
+    reports: list[str] = []
+    with tempfile.TemporaryDirectory(prefix='fractal-template-') as tmp:
+        bundle = materialize(
+            worktree=repo_dir,
+            path=record['path'],
+            commit=record['commit'],
+            dest=pathlib.Path(tmp),
+        )
+        warnings = trim(
+            bundle,
+            include=record.get('include'),
+            exclude=record.get('exclude'),
+            strict=False,
+        )
+        fill(bundle, path=record['path'], values=record.get('values', {}))
+        files = sorted(entry for entry in bundle.rglob('*') if entry.is_file())
+        for entry in files:
+            relfile = entry.relative_to(bundle).as_posix()
+            parts = relfile.split('/')
+            # map the bundle file to its live counterpart; anything else
+            # (the config preset, stray root files) deploys nowhere
+            if relfile == 'NODE.md' or parts[0] in ('steps', 'scripts', 'skills'):
+                target = relfile
+            elif parts[0] == 'agents' and len(parts) > 2:
+                target = '/'.join([f'.{parts[1]}', *parts[2:]])
+            else:
+                continue
+            live = node_dir / target
+            # a live symlink (the skills mount, a linked credential) is
+            # machinery, never judged content
+            if live.is_symlink():
+                continue
+            if not live.is_file():
+                reports.append(f'{target}: missing from the node.')
+                continue
+            rendered = entry.read_bytes()
+            actual = live.read_bytes()
+            if actual == rendered:
+                continue
+            # residue is its own finding: a '{{' the seed-time pass would
+            # have refused marks a hand-copied, never-rendered file
+            if b'{{' in actual and b'{{' not in rendered:
+                reports.append(f'{target}: unrendered {{{{ residue in the live copy.')
+            lines = difflib.unified_diff(
+                rendered.decode('utf-8').splitlines(keepends=True),
+                actual.decode('utf-8', errors='replace').splitlines(keepends=True),
+                fromfile=f'template/{target}',
+                tofile=f'node/{target}',
+            )
+            report = ''.join(lines)
+            reports.append(report.rstrip('\n'))
+    return reports, warnings

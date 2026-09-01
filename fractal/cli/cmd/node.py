@@ -26,6 +26,7 @@ from fractal.core.commit import out_of_scope, scope_boundaries
 from fractal.core.config import parse_reserve_budget
 from fractal.core.loop import Loop
 from fractal.core.node import Node
+from fractal.core.template import diff
 
 __all__ = [
     'node_init',
@@ -42,6 +43,7 @@ __all__ = [
     'node_unretire',
     'node_attach',
     'node_status',
+    'node_diff',
     'node_list',
     'node_activity',
     'node_approve',
@@ -906,6 +908,42 @@ def node_status(app: typer.Typer) -> typer.Typer:
         # self-reconciling: a crashed-but-active node reads settled
         display = node.status_display()
         typer.echo(display)
+
+    return app
+
+
+def node_diff(app: typer.Typer) -> typer.Typer:
+    """Register the ``diff`` command."""
+    # node argument
+    node_help = 'Target node branch (default: this node).'
+    node = typer.Argument(None, help=node_help)
+    # path option
+    path_help = 'Worktree directory.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, 'diff')
+    def _diff(
+        node: Optional[str] = node,
+        path: str = path,
+    ) -> None:
+        """Show a node's drift from its recorded template.
+
+        Re-renders the recorded template folder at its recorded commit
+        with its recorded values and diffs the effective set against the
+        node's live seed surfaces. Exit 1 when any file drifts, 0 when
+        the node is clean, 2 on a command error -- scripts branch on the
+        exit code rather than parse the output.
+        """
+        node = resolve_target(path, node)
+        reports, warnings = diff(node_dir=node.node_dir, repo_dir=node.repo_dir)
+        for warning in warnings:
+            typer.echo(f'Warning: {warning}', err=True)
+        if not reports:
+            typer.echo('No drift from the recorded template.')
+            return
+        listing = '\n'.join(reports)
+        typer.echo(listing)
+        raise SystemExit(1)
 
     return app
 
