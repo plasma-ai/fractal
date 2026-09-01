@@ -89,6 +89,7 @@ __all__ = [
     'test_reseed_restores_the_seed_surfaces_and_records_the_event',
     'test_reseed_ref_reads_another_commit_and_keeps_exclusions',
     'test_reseed_refuses_a_missing_path_at_a_ref_and_re_points',
+    'test_reseed_refuses_a_template_carrying_agent_credentials',
     'test_lifecycle_guard_rejects_idle_node',
     'test_start_drain_requires_continue',
     'test_retire_unretire_round_trips_through_list',
@@ -2146,6 +2147,74 @@ def test_reseed_refuses_a_missing_path_at_a_ref_and_re_points(
         assert data['commit'] == moved
     finally:
         _run(root, 'node', 'delete', 'main.movecrew', '--force')
+
+
+def test_reseed_refuses_a_template_carrying_agent_credentials(
+    repo: dict,
+) -> None:
+    """A credential under a template's ``agents/`` refuses at reseed by name.
+
+    The read-side guard judges every materialized bundle: a re-point at a
+    folder whose ``agents/`` carries an ``auth.json`` refuses naming the
+    file, and the node keeps its recorded template and its live agent
+    files untouched.
+    """
+    root = repo['root']
+    _commit_template(
+        root,
+        'templates/cleancrew',
+        {
+            'config.json': '{}\n',
+            'steps/01-GO.md': '# go\n',
+            'agents/claude/settings.json': '{"seeded": true}\n',
+        },
+    )
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'guardcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/cleancrew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.guardcrew' / '.fractal' / 'main.guardcrew'
+        )
+        record_bytes = (node_dir / '_template.toml').read_bytes()
+        _commit_template(
+            root,
+            'templates/leakcrew',
+            {
+                'config.json': '{}\n',
+                'steps/01-GO.md': '# go\n',
+                'agents/codex/auth.json': '{"token": "leaked"}\n',
+            },
+        )
+        refused = _run(
+            root,
+            'node',
+            'reseed',
+            'main.guardcrew',
+            '--template',
+            'templates/leakcrew@main',
+        )
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert (
+            'carries a credential-named file under agents/:'
+            " 'templates/leakcrew/agents/codex/auth.json'"
+        ) in refused.stderr, refused.stderr
+        # the node is untouched: the leak never reaches the agent dir, the
+        # clean template's file stands, and the record still names it
+        settings = (node_dir / '.claude' / 'settings.json').read_text(encoding='utf-8')
+        assert settings == '{"seeded": true}\n'
+        assert (node_dir / '.codex' / 'auth.json').is_symlink()
+        assert (node_dir / '_template.toml').read_bytes() == record_bytes
+    finally:
+        _run(root, 'node', 'delete', 'main.guardcrew', '--force')
 
 
 # ------ lifecycle guards (idle node)

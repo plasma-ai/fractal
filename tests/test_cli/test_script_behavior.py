@@ -150,6 +150,14 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   with no scope is unrestricted, a sub-project node with none is bounded to
   its project dir (its own wiki in, the repo-root wiki out), and one with
   roots to ``<project>/<root>``.
+- **Templates under the scope law**: a template folder is ordinary project
+  content, so the scope rule is the only rule -- a node whose scope covers
+  the folder commits a template edit through ``fractal commit`` and lands it
+  with no restore warning, and a child inited afterwards from the target
+  deploys the landed bytes; a sibling whose scope does not cover the folder
+  is refused at commit and, committing with raw git, at the merge footprint;
+  and deleting the scoped node with the edit unmerged warns of the
+  discarded work.
 - **``merge.sh`` post-refresh no-op** re-checks the staged squash after the
   target's wiki index refresh: a squash the refresh fully reverts (a re-merge
   offering only regenerated wiki state, e.g. a legacy-tracked ``.wiki/cache``)
@@ -294,6 +302,9 @@ __all__ = [
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
     'test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal',
     'test_merge_continue_refuses_a_squash_outside_the_nodes_scope',
+    'test_merge_lands_a_scoped_nodes_template_edit_for_later_spawns',
+    'test_merge_refuses_a_siblings_template_edit_at_commit_and_footprint',
+    'test_delete_warns_of_an_unmerged_template_edit',
     'test_merge_bounds_a_sub_project_node_to_its_project',
     'test_merge_strips_a_nested_descendant_seed_from_a_no_ff_parent',
     'test_merge_reports_the_target_restored_past_a_ref_lock',
@@ -4313,6 +4324,172 @@ def test_merge_continue_refuses_a_squash_outside_the_nodes_scope(
     assert _git(repo, 'status', '--porcelain').stdout == ''
 
 
+# ------ templates under the scope law
+
+
+def test_merge_lands_a_scoped_nodes_template_edit_for_later_spawns(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A node whose scope covers a template folder lands its template edit.
+
+    A template is ordinary project content, so the scope rule is the only
+    rule: the scoped node's edit passes ``fractal commit``, the merge lands
+    it on the target with no restore warning, and a child inited afterwards
+    from the target deploys the landed bytes -- the template read is the
+    fork commit, which now carries the revision.
+    """
+    repo = _init_tree(tmp_path / 'templatescoperepo')
+    _commit_crew_template(repo)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'scribe',
+        '--scope',
+        'templates',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.scribe'
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'settle node scaffolding')
+    # the node revises the step through the commit law, which admits it
+    revised = '# execute the task\nwith the scoped revision\n'
+    node_copy = worktree / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    node_copy.write_text(revised, encoding='utf-8')
+    commit = _run(worktree, 'commit', 'revise the execute step')
+    assert commit.returncode == 0, commit.stderr
+    result = _run(repo, 'node', 'merge', f'--path={worktree}')
+
+    # the revision is on the target with nothing restored or refused
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'changed paths under .fractal/' not in result.stderr, result.stderr
+    assert 'added paths under .fractal/' not in result.stderr, result.stderr
+    assert 'outside its scope' not in result.stderr, result.stderr
+    target_copy = repo / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    assert target_copy.read_text(encoding='utf-8') == revised
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    # a child inited afterwards from the target deploys the landed bytes
+    spawn = _run(
+        repo,
+        'node',
+        'init',
+        'fresh',
+        '--agent',
+        'claude',
+        '--local',
+        '--template',
+        'templates/crew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    node_dir = repo / '.worktrees' / 'main.fresh' / '.fractal' / 'main.fresh'
+    deployed = node_dir / 'steps' / '10-EXECUTE.md'
+    assert deployed.read_text(encoding='utf-8') == revised
+
+
+def test_merge_refuses_a_siblings_template_edit_at_commit_and_footprint(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A template edit outside the node's scope refuses at commit and merge.
+
+    The commit law refuses the edit naming the path, and the same edit
+    committed with raw git is refused at the merge footprint -- no
+    out-of-scope path lands, template or otherwise, and a fresh merge
+    restores the target.
+    """
+    repo = _init_tree(tmp_path / 'templatestrayrepo')
+    execute = _commit_crew_template(repo)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'worker',
+        '--scope',
+        'docs',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.worker'
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'settle node scaffolding')
+    # the node's scope does not cover the folder: the commit law refuses
+    node_copy = worktree / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    node_copy.write_text(
+        '# execute the task\nrewritten out of scope\n',
+        encoding='utf-8',
+    )
+    refused = _run(worktree, 'commit', 'revise a foreign template')
+    assert refused.returncode != 0, refused.stdout + refused.stderr
+    assert 'Changes outside node scope' in refused.stderr, refused.stderr
+    assert 'templates/crew/steps/10-EXECUTE.md' in refused.stderr, refused.stderr
+    # raw git bypasses the commit law; the footprint refuses the squash
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'template edit outside the scope')
+    main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    result = _run(repo, 'node', 'merge', f'--path={worktree}')
+
+    # refused naming the template path, with the target restored
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert 'outside its scope' in result.stderr, result.stderr
+    assert 'templates/crew/steps/10-EXECUTE.md' in result.stderr, result.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == main_head
+    target_copy = repo / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    assert target_copy.read_text(encoding='utf-8') == execute
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+def test_delete_warns_of_an_unmerged_template_edit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Deleting a scoped node with an unmerged template edit warns of the loss.
+
+    A committed template revision is work like any other: with the node's
+    scaffolding already absorbed by a first merge, the template edit is the
+    branch's remaining unmerged diff and the delete warns before
+    discarding it.
+    """
+    repo = _init_tree(tmp_path / 'templatedeleterepo')
+    _commit_crew_template(repo)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'keeper',
+        '--scope',
+        'templates',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.keeper'
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'settle node scaffolding')
+    merged = _run(repo, 'node', 'merge', f'--path={worktree}')
+    assert merged.returncode == 0, merged.stderr
+    # the node revises the template; the parent never absorbs it
+    node_copy = worktree / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    node_copy.write_text(
+        '# execute the task\nan unmerged revision\n',
+        encoding='utf-8',
+    )
+    commit = _run(worktree, 'commit', 'revise the execute step')
+    assert commit.returncode == 0, commit.stderr
+    result = _run(repo, 'node', 'delete', f'--path={worktree}', '--force')
+
+    # the delete proceeds (destructive by design) but warns about the loss
+    assert result.returncode == 0, result.stderr
+    assert 'has commits not merged into main' in result.stderr, (
+        result.stdout,
+        result.stderr,
+    )
+    assert not worktree.exists()
+
+
 # ------ merge.sh: sub-project nodes
 
 
@@ -5568,6 +5745,23 @@ def _init_tree(root: pathlib.Path) -> pathlib.Path:
     _git(root, 'commit', '-m', 'init')
     assert _run(root, 'init').returncode == 0
     return root
+
+
+def _commit_crew_template(repo: pathlib.Path) -> str:
+    """Commit a minimal step-only template folder; return its step's bytes.
+
+    Template bytes deploy from git, never from the working copy, so the
+    fixture must be committed before the init that reads it.
+    """
+    template = repo / 'templates' / 'crew'
+    steps = template / 'steps'
+    steps.mkdir(parents=True)
+    (template / 'config.json').write_text('{}\n', encoding='utf-8')
+    execute = '# execute the task\n'
+    (steps / '10-EXECUTE.md').write_text(execute, encoding='utf-8')
+    _git(repo, 'add', 'templates/crew')
+    _git(repo, 'commit', '-m', 'crew template')
+    return execute
 
 
 def _require_case_folding(tmp: pathlib.Path) -> None:

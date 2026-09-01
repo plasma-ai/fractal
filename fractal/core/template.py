@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import fnmatch
 import io
 import json
 import pathlib
@@ -61,6 +62,23 @@ PRESET_KEYS = (
     'reserve_budget',
     'sync',
     'detached',
+)
+
+#: credential file names refused under a template's agents/ subtree --
+#: codex and grok symlink their OAuth stores into the node's agent dir as
+#: auth.json (opencode's global store shares the name), omp relocates
+#: credentials.json into its node dir, and the rest are the generic key
+#: shapes; a dot-file (claude's .credentials.json among them) refuses
+#: beside these
+CREDENTIAL_NAMES = (
+    'auth.json',
+    'credentials.json',
+    '*.key',
+    '*.pem',
+    '*.p12',
+    '*.pfx',
+    'id_rsa',
+    'id_ed25519',
 )
 
 
@@ -253,8 +271,10 @@ def materialize(
 
     Raises:
         ValueError: If the folder is untracked at the commit, the commit
-            is unknown, the path is not a template folder, or the folder
-            carries a symlink.
+            is unknown, the path is not a template folder, the folder
+            carries a symlink, or its ``agents/`` subtree carries a
+            dot-file or a credential-named file
+            (:data:`CREDENTIAL_NAMES`).
 
     """
     archive = subprocess.run(
@@ -292,6 +312,35 @@ def materialize(
                     f'Template folder {path!r} carries a symlink:'
                     f' {member.name!r}; a template is self-contained --'
                     ' commit the target file in its place.'
+                )
+            # agents/ deploys into the node's live agent dirs, where a
+            # leaked credential would do harm -- refuse a dot-file or a
+            # credential-named entry (CREDENTIAL_NAMES, casefolded) by
+            # name, whatever commit carried it; the other surfaces hold
+            # no agent credentials and pass through the estate law when
+            # committed (the archive lists the path's ancestors too --
+            # only the subtree under agents/ is judged)
+            relfile = pathlib.PurePosixPath(member.name)
+            if not relfile.is_relative_to(path):
+                continue
+            parts = relfile.relative_to(path).parts
+            if len(parts) < 2 or parts[0] != 'agents':
+                continue
+            if any(part.startswith('.') for part in parts[1:]):
+                raise ValueError(
+                    f'Template folder {path!r} carries a dot-file under'
+                    f' agents/: {member.name!r}; dot-files hold live agent'
+                    ' state and credentials, never template content.'
+                )
+            if member.isfile() and any(
+                fnmatch.fnmatchcase(parts[-1].casefold(), shape)
+                for shape in CREDENTIAL_NAMES
+            ):
+                raise ValueError(
+                    f'Template folder {path!r} carries a credential-named'
+                    f' file under agents/: {member.name!r}; credentials'
+                    ' never deploy from a template -- a node links its own'
+                    ' at seed time.'
                 )
         bundle.extractall(dest, filter='data')
     root = dest / pathlib.PurePosixPath(path)

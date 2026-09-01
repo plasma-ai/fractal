@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tomllib
@@ -64,6 +65,7 @@ __all__ = [
     'test_init_template_preset_fills_unset_flags',
     'test_init_template_preset_reserve_resolves_against_the_merged_ceiling',
     'test_init_template_refusals_leave_nothing_behind',
+    'test_init_template_refuses_agent_credentials',
     'test_init_template_preset_refuses_disallowed_keys',
     'test_init_template_preset_caps_refuse_like_flags',
     'test_init_template_resolves_the_same_path_from_any_cwd',
@@ -1316,6 +1318,41 @@ def test_init_template_refusals_leave_nothing_behind(
         match=r"matches nothing in the template: 'steps/99-NOPE\.md'",
     ):
         Node(git_repo).init(name='task', template=crew, exclude=['steps/99-NOPE.md'])
+    # nothing landed -- no worktree, no registry row
+    assert not (git_repo / '.worktrees' / 'main.task').exists()
+    assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+
+
+def test_init_template_refuses_agent_credentials(
+    git_repo: pathlib.Path,
+) -> None:
+    """A credential under a template's ``agents/`` refuses at init by name.
+
+    ``agents/`` deploys into the node's live agent dirs, so a committed
+    OAuth store (``auth.json``), a dot-file (claude's
+    ``.credentials.json``, an ``.env``), and a generic key shape
+    (``*.pem``) each refuse before any worktree exists, naming the file
+    -- nothing deploys, whatever commit carried the leak.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    offending = [
+        ('oauth', 'agents/codex/auth.json', 'credential-named file'),
+        ('dotcred', 'agents/claude/.credentials.json', 'dot-file'),
+        ('dotenv', 'agents/claude/.env', 'dot-file'),
+        ('keyfile', 'agents/deploy/signing.pem', 'credential-named file'),
+    ]
+    for folder, name, kind in offending:
+        path = f'templates/{folder}'
+        _commit_template(
+            git_repo,
+            path,
+            {'config.json': '{}\n', name: 'hands off\n'},
+        )
+        with pytest.raises(
+            ValueError,
+            match=rf"carries a {kind} under agents/: '{re.escape(f'{path}/{name}')}'",
+        ):
+            Node(git_repo).init(name='task', template=f'{git_repo}/{path}')
     # nothing landed -- no worktree, no registry row
     assert not (git_repo / '.worktrees' / 'main.task').exists()
     assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
