@@ -55,6 +55,7 @@ STATUSES = (
 #: point-in-time event kinds recorded on the node record
 EVENTS = (
     'init',
+    'reseed',
     'spawn',
     'commit',
     'approve',

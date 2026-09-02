@@ -444,14 +444,17 @@ Inheritance at spawn
 default (``node init --path <sub-project>`` selects a different sub-project
 for the child; either way the key is immutable after init); ``agent`` and
 ``provider`` resolve through the nearest ancestor that sets them; a ``local``
-parent forces ``local`` children. Everything else defaults fresh unless the
-spawn passes ``--inherit config``, which copies the parent's *preference* keys
-— ``model``, ``effort``, ``sync``, ``detached``, ``iter_timeout``,
-``step_timeout``, ``step_retries``, ``step_retry_backoff``, ``wait``, and
-``sleep``/``interval`` (only when the spawn sets neither) — as a spawn-time
-snapshot. Budget-class keys (the cost caps, ``max_iters``, the width/depth
-caps, and the run ``timeout``) never inherit; each node's budgets are set
-deliberately. See :doc:`/cli/node` for the ``--inherit`` surface.
+parent forces ``local`` children. A spawn with ``--template`` fills the
+budget, limit, duration, model, and mode keys its flags left unset from the
+template's ``config.json`` preset — a flag wins over the preset, and the
+preset beats an inherited value (see :doc:`/cli/node`). Everything else
+defaults fresh unless the spawn passes ``--inherit config``, which copies the
+parent's *preference* keys — ``model``, ``effort``, ``sync``, ``detached``,
+``iter_timeout``, ``step_timeout``, ``step_retries``, ``step_retry_backoff``,
+``wait``, and ``sleep``/``interval`` (only when the spawn sets neither) — as a
+spawn-time snapshot. Budget-class keys (the cost caps, ``max_iters``, the
+width/depth caps, and the run ``timeout``) never inherit; each node's budgets
+are set deliberately. See :doc:`/cli/node` for the ``--inherit`` surface.
 
 Immutable keys
 --------------
@@ -510,17 +513,18 @@ Defaulting and rounding:
 Validation
 ----------
 
-One merged validator runs at ``node init`` (over the flags), at
-``node config set`` and ``node update`` (over the merged result), and again at
-``node start`` (over the stored file, since direct edits bypass the setters).
+One merged validator runs at ``node init`` (over the merged values — flag,
+else template preset, else inherited), at ``node config set`` and
+``node update`` (over the merged result), and again at ``node start`` (over
+the stored file, since direct edits bypass the setters).
 It rejects:
 
 - non-numeric or non-finite cost values, and non-positive cost ceilings;
 - ``max_iter_cost`` or ``max_step_cost`` without ``max_cost``, and any
   violation of the ``step <= iter <= run`` cost ordering;
 - a reserve outside ``[0, 99% of max_cost)``;
-- non-integer or negative values for the integer caps, and
-  ``max_iters <= 0``;
+- non-integer or negative values for the integer caps, integer caps at or
+  past SQLite's signed 64-bit ceiling (2**63), and ``max_iters <= 0``;
 - non-boolean values for the mode flags;
 - bare-number durations and durations under one whole second;
 - ``interval`` and ``sleep`` both set, or ``iter_timeout`` exceeding

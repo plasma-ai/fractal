@@ -74,8 +74,8 @@ _PRICING = {
 }
 
 # cumulative usage snapshots (OpenAI convention: cached_input_tokens is a
-# subset of input_tokens; reasoning is folded into output_tokens) and their
-# hand-computed costs
+# subset of input_tokens; reasoning is folded into output_tokens)
+# and their hand-computed costs
 _USAGE_FIRST = {
     'input_tokens': 100,
     'output_tokens': 10,
@@ -693,7 +693,7 @@ def test_seed_links_auth_write_through_codex(
     assert (real_home / 'auth.json').read_text(encoding='utf-8') == (
         '{"refreshed": true}\n'
     )
-    # reseeding never re-links or clobbers
+    # a repeat seed never re-links or clobbers
     CodexAgent.seed(node_dir)
     assert link.readlink() == (real_home / 'auth.json').resolve()
     # a pre-auth seed (no credential written yet) still canonicalizes through
@@ -716,17 +716,19 @@ def test_seed_carries_the_parent_instructions_file_codex(
     Codex resolves a relative ``model_instructions_file`` against
     ``CODEX_HOME`` and fails the run when the file is missing, so the
     child's seed copies the file the parent's config names -- nested
-    directories included -- and reseeding never clobbers the child's
-    copy.
+    directories included -- and a repeat seed never clobbers the
+    child's copy.
     """
     monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'global-home'))
     parent_dir = tmp_path / 'parent'
     (parent_dir / '.codex' / 'prompts').mkdir(parents=True)
     (parent_dir / '.codex' / 'config.toml').write_text(
-        'model_instructions_file = "prompts/math.md"\n', encoding='utf-8'
+        'model_instructions_file = "prompts/math.md"\n',
+        encoding='utf-8',
     )
     (parent_dir / '.codex' / 'prompts' / 'math.md').write_text(
-        'Solve carefully.\n', encoding='utf-8'
+        'Solve carefully.\n',
+        encoding='utf-8',
     )
     node_dir = tmp_path / 'node'
     (node_dir / 'skills').mkdir(parents=True)
@@ -735,7 +737,8 @@ def test_seed_carries_the_parent_instructions_file_codex(
     assert copied.read_text(encoding='utf-8') == 'Solve carefully.\n'
     # an existing file is never overwritten
     (parent_dir / '.codex' / 'prompts' / 'math.md').write_text(
-        'Updated upstream.\n', encoding='utf-8'
+        'Updated upstream.\n',
+        encoding='utf-8',
     )
     CodexAgent.seed(node_dir, parent_dir=parent_dir)
     assert copied.read_text(encoding='utf-8') == 'Solve carefully.\n'

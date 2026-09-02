@@ -105,7 +105,7 @@ node's steps), so activity totals read *below* the guard figures on a spawning
 node by design -- the gap is the children's spend, itemized by `cost breakdown`.
 And every figure is per-run: runs are isolated, and no cost command reports a
 lifetime rollup -- reconcile across runs by scoping each run
-(`cost spent --run <id>`) and summing.
+(`cost spent --run=<id>`) and summing.
 
 > [!WARNING]
 > A **small `--max-cost` on a child running an expensive `--model`** is the
@@ -173,19 +173,23 @@ pool a cheaper token rate buys more steps, not a lower bill.
    invest here, it's the highest-leverage work (you can still steer after
    launch; see Configure below).
 
-   For a well-specified single-mission leaf, consider the **leaf step profile**:
-   before the config commit, trim the child's `steps/` to PLAN + EXECUTE +
-   COMMIT (delete the PREPARE and REVIEW files -- the loop runs whatever
-   `steps/` contains, in digit-prefix order). Loop overhead dominates
-   single-mission leaf cost, and a trimmed profile cuts it -- expect the
-   overhead cut, not an outcome guarantee. Two caveats: PREPARE is where a node
-   merges its parent and children -- keep it for any node that spawns, and for
-   leaves whose upstream moves mid-run -- when you cannot rule that out at spawn
-   time, keep PREPARE; REVIEW is where memory folds -- when you trim it,
-   relocate its duties into a surviving step (e.g. append the fold to EXECUTE's
-   tail) or, minimally, tell the child in its NODE.md to fold memory before
-   COMMIT. Managers keep the full profile. When your own `steps/` already fits
-   the child, skip the hand-trim and pass `--inherit=steps` at init.
+   For a well-specified single-mission leaf, consider the **leaf step set**:
+   trim the child to PLAN + EXECUTE + COMMIT. A leaner leaf uses a leaner
+   template or `--exclude` at init
+   (`--template=<path> --exclude=steps/00-PREPARE.md --exclude=steps/03-REVIEW.md`
+   -- the trim is recorded, so `node diff` and `node reseed` hold it); on a
+   template-less child, delete the PREPARE and REVIEW files from `steps/` before
+   the config commit (the loop runs whatever `steps/` contains, in digit-prefix
+   order). Loop overhead dominates single-mission leaf cost, and a trimmed set
+   cuts it -- expect the overhead cut, not an outcome guarantee. Two caveats:
+   PREPARE is where a node merges its parent and children -- keep it for any
+   node that spawns, and for leaves whose upstream moves mid-run -- when you
+   cannot rule that out at spawn time, keep PREPARE; REVIEW is where memory
+   folds -- when you trim it, relocate its duties into a surviving step (e.g.
+   append the fold to EXECUTE's tail) or, minimally, tell the child in its
+   NODE.md to fold memory before COMMIT. Managers keep the full set. When your
+   own `steps/` already fits the child, skip the hand-trim and pass
+   `--inherit=steps` at init.
 
 3. **Commit the config** so the child starts from a committed baseline (a
    continue refuses over uncommitted project files -- commit them or pass
@@ -258,7 +262,7 @@ direct decomposition.
   handle radio communication. The first and last steps (PREPARE and COMMIT in
   the stock set) are structurally important to the lifecycle (merging parent
   changes, committing work) -- do not remove or fundamentally alter them (one
-  scoped exception: the leaf step profile in Spawn step 2 drops PREPARE for a
+  scoped exception: the leaf step set in Spawn step 2 drops PREPARE for a
   childless leaf whose upstream won't move mid-run). Middle steps can be freely
   renamed, added, or replaced. A step file may begin with YAML frontmatter:
   `agent: <command>` runs it on a different agent (each agent keeps its own

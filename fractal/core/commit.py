@@ -745,8 +745,9 @@ def _attributes_is_init_edit(node: Node) -> bool:
 #: estate subdirectories whose contents are node records canon requires
 #: committed (the memory wiki, plans, and the seeded step/script/skill set)
 _RECORD_DIRS = ('memory', 'plans', 'scripts', 'skills', 'steps')
-#: estate root files that are records in their own right
-_RECORD_FILES = ('NODE.md', 'config.json')
+#: estate root files that are records in their own right (the charter,
+#: the template provenance, and the config)
+_RECORD_FILES = ('NODE.md', '_template.toml', 'config.json')
 #: the suffixes a record carries -- text and structured text only, so the
 #: force pass can never stage a key, a certificate, an archive, or a binary
 _RECORD_SUFFIXES = (

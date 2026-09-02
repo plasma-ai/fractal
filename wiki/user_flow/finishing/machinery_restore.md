@@ -32,11 +32,11 @@ Work product only.
 ## Restore warnings
 
 When the restore drops paths outside the node's own machinery — an edit to the
-target's estate, a foreign seed, a `.fractal/profiles/` change — the merge warns
-in two lines: paths the target tracks are restored to the target's content, and
-paths the target does not track are removed, since the target does not track
-them. The merge-base advance then brings the target's tree into the node's
-worktree, so the node's copy survives only in its branch history
+target's estate, a foreign seed, a stray file at the `.fractal/` root — the
+merge warns in two lines: paths the target tracks are restored to the target's
+content, and paths the target does not track are removed, since the target does
+not track them. The merge-base advance then brings the target's tree into the
+node's worktree, so the node's copy survives only in its branch history
 (`git -C <node worktree> log --full-history -- <path>` lists the advance that
 dropped the path first and the node's own commit below it;
 `git show <commit>:<path>` on that lower commit, or

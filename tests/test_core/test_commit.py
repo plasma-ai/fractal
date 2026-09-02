@@ -36,6 +36,7 @@ __all__ = [
     'test_record_force_add_refuses_non_record_files',
     'test_estate_add_refuses_non_record_files_with_no_ignore_layer',
     'test_estate_commits_its_own_tool_state',
+    'test_estate_commits_the_template_provenance',
     'test_refused_estate_content_leaves_the_clean_check_quiet',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
@@ -94,13 +95,9 @@ def test_user_node_commit_init_commits_baseline(
     with pytest.raises(RuntimeError, match='only --init is supported'):
         node.commit('x')
 
-    def _head() -> str:
-        result = _git(git_repo, 'rev-parse', 'HEAD')
-        return result.stdout.strip()
-
     # the baseline commits without error and always tracks the project wiki; the
     # node's own seed is committed only on a tracked tree
-    before = _head()
+    before = _head(git_repo)
     # a stranded config write lock sits beside the config at commit time
     (git_repo / '.fractal' / 'main' / 'config.json.lock').touch()
     # engine-materialized system skills sit under the tracked skills dir
@@ -120,7 +117,7 @@ def test_user_node_commit_init_commits_baseline(
     # a tracked tree makes a real commit (the seed is new); untracked, the wiki
     # is already committed by the fixture, so the baseline is legitimately a no-op
     if track:
-        assert _head() != before
+        assert _head(git_repo) != before
     result = _git(git_repo, 'ls-files', '.fractal', 'wiki')
     tracked = result.stdout
     assert 'wiki/_index.md' in tracked
@@ -229,10 +226,6 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    def _head() -> str:
-        result = _git(project_dir, 'rev-parse', 'HEAD')
-        return result.stdout.strip()
-
     # freshen both generated wikis up front -- the pipeline's index refresh
     # is byte-stable once run, so the no-op invocation below stays a no-op
     for wiki_dir in (
@@ -282,12 +275,12 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
 
     # exactly one commit event, keyed on the new sha (no double-log on retry)
     events = node.db.read('events', where={'event': 'commit'})
-    assert [row['metadata'] for row in events] == [_head()]
+    assert [row['metadata'] for row in events] == [_head(project_dir)]
     # a no-op invocation (clean tree, nothing staged) logs no event -- the
     # log counts commits, not command invocations
     node.commit('nothing to land')
     events = node.db.read('events', where={'event': 'commit'})
-    assert [row['metadata'] for row in events] == [_head()]
+    assert [row['metadata'] for row in events] == [_head(project_dir)]
     # the subject carries no repo-name prefix
     result = _git(project_dir, 'log', '-1', '--format=%s')
     subject = result.stdout.strip()
@@ -688,6 +681,45 @@ def test_estate_commits_its_own_tool_state(tmp_path: pathlib.Path) -> None:
     node.commit(check=True)
 
 
+def test_estate_commits_the_template_provenance(tmp_path: pathlib.Path) -> None:
+    """A template-seeded node's ``_template.toml`` is an estate record.
+
+    The provenance file is the record of what seeded the node, so the
+    node's own commits must fold it into history beside ``NODE.md`` and
+    ``config.json`` -- staged by the ``--init`` baseline with no refusal
+    notice, and clean against the pipeline's own check afterwards.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    # a committed template folder -- the seed reads from git, not the disk
+    template = repo / 'templates' / 'crew'
+    (template / 'steps').mkdir(parents=True)
+    (template / 'config.json').write_text('{}\n', encoding='utf-8')
+    (template / 'steps' / '01-GO.md').write_text('# go\n', encoding='utf-8')
+    _git(repo, 'add', 'templates')
+    _git(repo, 'commit', '-m', 'template templates/crew')
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        template=f'{template}',
+    )
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    result = node.commit('configure', init=True)
+
+    # the provenance rides the baseline beside the other estate records
+    tracked = _git(project_dir, 'ls-files').stdout
+    assert '.fractal/main.task/_template.toml' in tracked
+    # ordinary content draws no refusal notice
+    assert 'NOT staged' not in result
+    assert 'are not node records' not in result
+    # and the tree reads back clean
+    node.commit(check=True)
+
+
 def test_refused_estate_content_leaves_the_clean_check_quiet(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -938,10 +970,6 @@ def test_commit_update_failure_blocks_commit_but_not_backstops(
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    def _head() -> str:
-        result = _git(project_dir, 'rev-parse', 'HEAD')
-        return result.stdout.strip()
-
     # a conflict-marked wiki page -- `wiki update` refuses to write over it
     (project_dir / 'wiki' / 'broken.md').write_text(
         '---\nname: broken\ndesc: A broken page.\n---\n\n# broken\n\n***\n'
@@ -950,15 +978,15 @@ def test_commit_update_failure_blocks_commit_but_not_backstops(
     )
     # the --init baseline skips the refresh -- it lands despite the markers
     node.commit('baseline', init=True)
-    head_before = _head()
+    head_before = _head(project_dir)
     # a plain commit fails with the refusal named in the error, before landing
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
     with pytest.raises(RuntimeError, match='Merge conflict markers'):
         node.commit('add work')
-    assert _head() == head_before
+    assert _head(project_dir) == head_before
     # the force backstop skips the refresh -- the rescue always saves
     node.commit('rescued work', force=True)
-    assert _head() != head_before
+    assert _head(project_dir) != head_before
 
 
 def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
@@ -1443,13 +1471,9 @@ def test_commit_surfaces_hook_aborted_commit(tmp_path: pathlib.Path) -> None:
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    def _head() -> str:
-        result = _git(project_dir, 'rev-parse', 'HEAD')
-        return result.stdout.strip()
-
     # baseline commit -- tree clean
     node.commit('baseline', init=True)
-    head_before = _head()
+    head_before = _head(project_dir)
     # a clean tree is a genuine no-op -- commit must not raise
     node.commit('noop', init=True)
     # install a pre-commit hook that aborts the commit (a check-only hook
@@ -1473,7 +1497,7 @@ def test_commit_surfaces_hook_aborted_commit(tmp_path: pathlib.Path) -> None:
         node.commit('work', init=True)
     # HEAD did not advance -- the work is genuinely uncommitted, so a masked
     # "success" would have been a lie that a later --continue could discard
-    assert _head() == head_before
+    assert _head(project_dir) == head_before
 
 
 def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
@@ -1494,12 +1518,8 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    def _head() -> str:
-        result = _git(project_dir, 'rev-parse', 'HEAD')
-        return result.stdout.strip()
-
     node.commit('baseline', init=True)
-    head_before = _head()
+    head_before = _head(project_dir)
 
     # a pre-commit config makes the recovery path eligible
     (project_dir / '.pre-commit-config.yaml').write_text(
@@ -1528,7 +1548,7 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
     node.commit('work', init=True)
 
     # HEAD advanced and the committed work is the hook's reformatted version
-    assert _head() != head_before
+    assert _head(project_dir) != head_before
     committed = _git(project_dir, 'show', 'HEAD:work.txt')
     assert committed.stdout.strip() == 'reformatted'
 
@@ -1621,3 +1641,12 @@ def test_lint_runs_standalone_without_node_dir(
         env=env,
     )
     assert 'unbound variable' not in result.stderr
+
+
+# ------ helpers
+
+
+def _head(project_dir: pathlib.Path) -> str:
+    """The checked-out worktree's HEAD sha."""
+    result = _git(project_dir, 'rev-parse', 'HEAD')
+    return result.stdout.strip()

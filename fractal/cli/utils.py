@@ -24,16 +24,14 @@ from fractal.constants import (
     WORKTREES_FOLDER,
 )
 from fractal.core.agent import StreamEvent
-from fractal.core.config import DEFAULT_RESERVE_FRACTION, RESERVE_PRECISION
+from fractal.core.config import SQLITE_INT_MAX
 from fractal.core.node import Node
 from fractal.typing import PathLike
 
 __all__ = [
-    'SQLITE_INT_MAX',
     'command',
     'require_non_negative',
     'require_timestamp',
-    'parse_reserve_budget',
     'StreamRenderer',
     'print_rows',
     'print_json',
@@ -46,10 +44,6 @@ __all__ = [
     'resolve_target',
     'resolve_ledger_target',
 ]
-
-# signed 64-bit ceiling for SQLite INTEGER columns; an integer cap at or above
-# this raises a raw "int too large to convert" from the adapter downstream
-SQLITE_INT_MAX = 2**63
 
 # tool-result preview budget: two to three 80-column terminal lines, so one
 # verbose tool call cannot flood the streamed transcript
@@ -164,62 +158,6 @@ def require_timestamp(**instants: Optional[str]) -> None:
                 f'--{flag} expects an ISO 8601 date or timestamp'
                 f' (e.g. 2026-01-31 or 2026-01-31T14:00:00Z); got {value!r}.'
             ) from None
-
-
-def parse_reserve_budget(
-    value: Optional[str],
-    max_cost: Optional[float],
-    *,
-    default: str = f'{DEFAULT_RESERVE_FRACTION:.0%}',
-) -> Optional[float]:
-    """Resolve ``--reserve-budget`` to a USD amount.
-
-    The value is a USD number or ``N%`` of ``max_cost``; when omitted it falls
-    back to ``default`` (``10%`` of ``max_cost``), so a budget reserves a cleanup
-    buffer by default, and with no ``max_cost`` there is no reserve. The reserve
-    is not enforced -- it only moves when the node enters reserve mode (the budget
-    is treated as drained ``reserve_budget`` USD before ``max_cost`` is reached).
-
-    Args:
-        value: The raw ``--reserve-budget`` string (USD or ``N%``), or ``None``
-            to take ``default``.
-        max_cost: The node's ``--max-cost`` in USD; required when ``value`` is an
-            explicit reserve.
-        default: Reserve applied when ``value`` is ``None`` (USD or ``N%``).
-
-    Returns:
-        The reserve in USD -- ``default`` applied to ``max_cost`` when ``value``
-        is ``None``, or ``None`` when neither ``value`` nor ``max_cost`` is set.
-
-    Raises:
-        typer.BadParameter: If an explicit value is given without ``max_cost``,
-            is not a number, is negative, or is >= 99% of ``max_cost``.
-
-    """
-    if value is None:
-        if max_cost is None:
-            return None
-        value = default
-    if max_cost is None:
-        raise typer.BadParameter('--reserve-budget requires --max-cost.')
-    if max_cost <= 0:
-        raise typer.BadParameter('--max-cost must be greater than 0.')
-    value = value.strip()
-    try:
-        if value.endswith('%'):
-            reserve = float(value[:-1]) / 100 * max_cost
-        else:
-            reserve = float(value)
-    except ValueError:
-        raise typer.BadParameter('--reserve-budget must be a number or N%.') from None
-    if reserve < 0:
-        raise typer.BadParameter('--reserve-budget must be >= 0.')
-    if reserve >= 0.99 * max_cost:
-        raise typer.BadParameter('--reserve-budget must be < 99% of --max-cost.')
-    # money materializes at display precision -- a bare percent product
-    # (10% of $6) would otherwise persist binary noise into config.json
-    # and every echo that quotes it
-    return round(reserve, RESERVE_PRECISION)
 
 
 class StreamRenderer:
@@ -347,6 +285,9 @@ def print_rows(
         if not columns:
             return
         if csv or not sys.stdout.isatty():
+            # NOTE: pattern exception -- both DictWriter calls pass the stream
+            #   positionally; keywording it would couple to csv's opaque
+            #   parameter name (`f`)
             writer = DictWriter(
                 sys.stdout,
                 fieldnames=columns,

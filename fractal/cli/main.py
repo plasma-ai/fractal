@@ -65,6 +65,8 @@ def cli(**kwargs: Any) -> None:
     cmd.node_unretire(node_app)
     cmd.node_attach(node_app)
     cmd.node_status(node_app)
+    cmd.node_diff(node_app)
+    cmd.node_reseed(node_app)
     cmd.node_list(node_app)
     cmd.node_activity(node_app)
     cmd.node_approve(node_app)

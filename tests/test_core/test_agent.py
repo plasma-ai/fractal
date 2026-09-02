@@ -65,6 +65,7 @@ __all__ = [
     'test_seed_prefers_the_parent_config_and_never_overwrites',
     'test_seed_reset_wipes_the_agent_dir',
     'test_seed_falls_back_to_the_package_seed',
+    'test_seed_refuses_symlinked_intermediate_agent_dir',
 ]
 
 # a deployment hook file overriding the claude backend by base command
@@ -510,7 +511,8 @@ def test_stream_fails_on_error_frames_after_draining(node_with_db: Node) -> None
     # the discriminable type lets the loop book it as an agent error, not a
     # fractal-side stream error
     with pytest.raises(
-        AgentStreamError, match='sample reported an error: boom'
+        AgentStreamError,
+        match='sample reported an error: boom',
     ) as excinfo:
         backend.stream(_lines(frames), step_id=step_id, render=rendered.append)
     # the error detail is collected raw off the wire, so the message is
@@ -716,7 +718,7 @@ def test_seed_agents_tolerates_an_absent_package_seed(
 def test_seed_prefers_the_parent_config_and_never_overwrites(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Children inherit the parent's live config; reseeding never clobbers."""
+    """Children inherit the parent's live config; a repeat seed never clobbers."""
     parent_dir = tmp_path / 'parent'
     (parent_dir / '.sample').mkdir(parents=True)
     parent_config = parent_dir / '.sample' / 'sample.json'
@@ -761,9 +763,38 @@ def test_seed_falls_back_to_the_package_seed(tmp_path: pathlib.Path) -> None:
     node_dir = _node_dir(tmp_path)
     PackageSeeded.seed(node_dir)
     package_dir = pathlib.Path(fractal.__file__).parent
-    packaged = package_dir / '_node' / 'config' / 'claude' / 'settings.json'
+    packaged = package_dir / '_node' / 'agents' / 'claude' / 'settings.json'
     config = node_dir / '.claude' / 'settings.json'
     assert config.read_text(encoding='utf-8') == packaged.read_text(encoding='utf-8')
+
+
+def test_seed_refuses_symlinked_intermediate_agent_dir(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A symlinked directory inside the agent dir never carries a copy out.
+
+    The bundle deploy creates intermediate directories as it copies, so a
+    symlink parked at one would smuggle the file (and every later sibling)
+    outside the node's agent dir: the resolved parent is judged against the
+    agent dir and refuses naming the file, and the linked target never
+    receives a byte.
+    """
+    node_dir = _node_dir(tmp_path)
+    bundle_dir = tmp_path / 'bundle' / 'agents'
+    planted = bundle_dir / 'sample' / 'sub' / 'f.txt'
+    planted.parent.mkdir(parents=True)
+    planted.write_text('payload\n', encoding='utf-8')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (node_dir / '.sample').mkdir()
+    (node_dir / '.sample' / 'sub').symlink_to(outside)
+    with pytest.raises(
+        ValueError,
+        match=r'agents/sample/sub/f\.txt would deploy outside \.sample/',
+    ):
+        SampleAgent.seed(node_dir, bundle_dir=bundle_dir, overwrite=True)
+    # the out-of-node target never received a byte
+    assert list(outside.iterdir()) == []
 
 
 # ------ helpers

@@ -74,7 +74,8 @@ Creating nodes
 
 Create an agent node: a git worktree on branch ``<parent>.<name>`` under
 ``.worktrees/``, plus a node data directory ``.fractal/<branch>/`` seeded with
-steps, scripts, skills, and ``config.json``. The node's task contract
+steps, scripts, skills, and ``config.json`` (a template-seeded node also
+records what seeded it in ``_template.toml``). The node's task contract
 lives in ``<node_dir>/NODE.md`` — author its *Instructions* and *Completion
 Requirements* sections, then launch with ``fractal node start``.
 
@@ -119,27 +120,61 @@ node at ``--path``.
        (comma-separated; repeatable): ``steps``, ``scripts``, ``skills``,
        ``config``, or ``all``. ``config`` copies preference keys only —
        budget-class caps never inherit.
-   * - ``--steps <dir>``
+   * - ``--template <path[@ref]>``
      - package seed
-     - Directory of step files (``*.md``) seeding the node's ``steps/``
-       instead of the package seed; must hold at least one, each carrying
-       the loop's ``NN-`` digit prefix at one width.
-       Mutually exclusive with ``--inherit=steps``.
-   * - ``--profile <name>``
+     - Template folder: any tracked folder holding a ``config.json`` — its
+       presence is what marks the folder as a template. The folder is read
+       at the child's **fork commit**, so uncommitted edits never deploy
+       (append ``@<ref>`` to read another commit), and recorded — path,
+       commit, and slot values — in the node's ``_template.toml``. Its
+       surfaces (``NODE.md``, ``steps/``, ``scripts/``, ``skills/``,
+       ``agents/``) seed the node; a surface it lacks falls back to the
+       inherit-or-package source, and one it carries refuses the matching
+       ``--inherit``. The ``config.json`` doubles as a config preset,
+       filling each run-config flag the spawn left unset (a flag wins over
+       the preset; the preset beats an inherited value). Every template
+       refusal — an untracked folder, a symlink, a credential-named file
+       anywhere in the folder, a file a seed surface would silently skip,
+       a broken ``steps/`` contract, an unfilled ``{{slot}}``, a
+       truncated charter — fires before any worktree exists. One notice
+       appended to the init output names the ``@<ref>`` form when the
+       root branch holds a different copy of the folder.
+   * - ``--include <path>``
+     - whole template
+     - Deploy only these template-relative paths (repeatable; a directory
+       entry covers its subtree; no globs); requires ``--template`` and is
+       mutually exclusive with ``--exclude``. The listing is recorded in
+       ``_template.toml``: the **effective set** — only ``include``, or
+       everything minus ``exclude`` — is what init deploys and what
+       ``diff`` and ``reseed`` judge by, so an excluded step stays gone
+       across every reseed. An entry matching nothing refuses at init.
+   * - ``--exclude <path>``
      - none
-     - Named seed bundle under ``.fractal/profiles/<name>/``: ``steps/``
-       seeds the step list (like ``--steps``), ``NODE.md`` a
-       deployment-ready charter. The charter's fill-sheet is validated at
-       init: its two authored sections must be present, every ``pin:``
-       line must resolve to a commit (and match ``--pin``, case-blind —
-       a spelling that is not a hex sha refuses outright), and every
-       ``docket: <path>`` line must resolve at the pin — a stale or
-       truncated seed dies at init, not at the commission's first seat.
-       Mutually exclusive with ``--steps``/``--inherit=steps``.
+     - Skip these template-relative paths; the mirror image of
+       ``--include`` (repeatable, recorded, a directory entry covers its
+       subtree).
+   * - ``--values <file>``
+     - none
+     - Slot fill sheet: a TOML file of string values the template's
+       ``{{slot}}`` placeholders render with, once at init; requires
+       ``--template`` and is recorded in ``_template.toml``. A slot with
+       no value and any ``{{`` that is not a lowercase slot refuse;
+       prompt-time ``$VAR`` text passes through untouched.
+   * - ``--set KEY=VALUE``
+     - none
+     - One slot fill (repeatable); wins over the ``--values`` sheet.
+       Requires ``--template``.
    * - ``--pin <sha>``
      - none
-     - Commission pin: must resolve to a commit; the profile charter's
-       ``pin:`` declarations must match it.
+     - Commission pin: must resolve to a commit, and every ``pin:`` line
+       in the template charter must resolve and match it (case-blind — a
+       spelling that is not a hex sha refuses outright); every
+       ``docket: <path>`` line must resolve at the pin (``--pin`` when
+       given, else the charter's own, else the fork commit) — a stale or
+       truncated seed dies at init, not at the commission's first seat.
+       Also fills the ``{{pin}}`` slot; a ``pin`` supplied through
+       ``--set``/``--values`` must agree with ``--pin``, and a differing
+       pair refuses.
    * - ``--agent <command>``
      - nearest ancestor's
      - Agent command, validated against the agent registry (a typo refuses).
@@ -686,6 +721,35 @@ group) provably gone, is healed to ``exited`` first.
    $ fractal node status parser
    active (finishing)
 
+``diff``
+~~~~~~~~
+
+.. code-block:: console
+
+   $ fractal node diff [NODE]
+
+Show a node's drift from its recorded template. The recorded folder is
+re-rendered at its recorded commit with its recorded slot values, the
+effective set (the recorded ``include``/``exclude`` listing) is applied, and
+each file is compared against the node's live copy: ``NODE.md``, ``steps/``,
+``scripts/``, ``skills/``, and — for each ``agents/<agent>/`` file — the
+live ``.<agent>/`` copy, all in the node's data directory. A live symlink
+and a file the template does not carry are never judged; a template file the
+node lacks is drift, as is unrendered ``{{`` residue in a live copy. The
+recorded commit resolves as long as it is reachable, so a template folder
+moved or deleted later still diffs at the commit that seeded the node.
+
+Drift prints one unified diff per file (``template/<file>`` against
+``node/<file>``); a recorded listing entry the template no longer carries
+warns on stderr. The exit code is the contract — ``0`` clean, ``1`` drift
+(the command's own nonzero outcome), ``2`` a core refusal, a node with no
+recorded template included — so scripts branch on it rather than parse the
+output.
+
+.. code-block:: console
+
+   $ fractal node diff parser
+
 ``list``
 ~~~~~~~~
 
@@ -861,6 +925,51 @@ id prints on stderr as ``session: <id>`` so the thread can be continued.
 
 Retuning
 --------
+
+``reseed``
+~~~~~~~~~~
+
+.. code-block:: console
+
+   $ fractal node reseed [NODE] [--ref <ref> | --template <path[@ref]>]
+         [--force|-f]
+
+Rewrite a node's seed surfaces from its recorded template. The recorded
+folder is re-rendered at its recorded commit with its recorded slot values,
+and ``steps/``, ``scripts/``, ``skills/``, and the per-agent files are
+rewritten from the result: files the node lacks are added and files it has
+are overwritten, so the node matches its template's effective set (an
+excluded file stays gone); nothing is ever deleted, and a live symlink (the
+agent auth links) stands. ``NODE.md``, ``config.json``, and ``memory/`` are
+never touched, so an operator's charter edits survive. The reseed lands as
+an event on the node's record, and ``_template.toml`` advances to the commit
+actually read; the recorded values and listing ride along unchanged.
+
+Reseed rewrites the live steering surface, so it refuses over an active or
+paused node without ``--force``; it always refuses from the node's own
+worktree — a node may not edit its own seed.
+
+``--ref <ref>``
+   Committish to read the recorded template folder at (default: the
+   recorded commit). Mutually exclusive with ``--template``. A ref at which
+   the recorded path is no longer tracked (the folder moved or was retired)
+   refuses, naming the path and the ref — re-point with ``--template``.
+
+``--template <path[@ref]>``
+   Re-point the node at another template folder: the new path and the
+   commit read (the node branch's own tip unless ``@<ref>`` names one) land
+   in ``_template.toml``, and the node reseeds from it — memory and config
+   stay intact, so a moved template is followed with one command. One notice
+   names the ``@<root>`` form when the root branch holds a different copy of
+   the folder (a plain or ``--ref`` reseed stays silent).
+
+``--force`` / ``-f``
+   Reseed even while the node is active or paused.
+
+.. code-block:: console
+
+   $ fractal node reseed parser
+   $ fractal node reseed parser --template templates/crew@main
 
 ``update``
 ~~~~~~~~~~

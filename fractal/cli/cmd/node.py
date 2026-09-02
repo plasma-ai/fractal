@@ -12,7 +12,6 @@ import typer
 from fractal.cli.utils import (
     StreamRenderer,
     command,
-    parse_reserve_budget,
     print_json,
     print_rows,
     require_non_negative,
@@ -21,11 +20,13 @@ from fractal.cli.utils import (
     resolve_node,
     resolve_target,
 )
-from fractal.constants import STATUSES
+from fractal.constants import STATUSES, WORKTREES_FOLDER
 from fractal.core.agent import seed_agents
 from fractal.core.commit import out_of_scope, scope_boundaries
+from fractal.core.config import parse_reserve_budget
 from fractal.core.loop import Loop
 from fractal.core.node import Node
+from fractal.core.template import diff
 
 __all__ = [
     'node_init',
@@ -42,6 +43,8 @@ __all__ = [
     'node_unretire',
     'node_attach',
     'node_status',
+    'node_diff',
+    'node_reseed',
     'node_list',
     'node_activity',
     'node_approve',
@@ -124,23 +127,36 @@ def node_init(app: typer.Typer) -> typer.Typer:
         ' or all.'
     )
     inherit = typer.Option(None, '--inherit', help=inherit_help)
-    # steps option
-    steps_help = (
-        'Directory of NN- prefixed step files (*.md) to seed steps/ from'
-        ' instead of the package seed; mutually exclusive with --inherit=steps.'
+    # template option
+    template_help = (
+        "Template folder: any tracked folder, read at the child's fork"
+        ' commit; append @<ref> for another commit.'
     )
-    steps = typer.Option(None, '--steps', help=steps_help)
-    # profile option
-    profile_help = (
-        'Named seed bundle under .fractal/profiles/<name>/: steps/ seeds the'
-        ' step list, NODE.md a deployment-ready charter (fill-sheet validated'
-        ' at init; mutex with --steps).'
+    template = typer.Option(None, '--template', help=template_help)
+    # include option
+    include_help = (
+        'Deploy only these template-relative paths (repeatable; mutex with --exclude).'
     )
-    profile = typer.Option(None, '--profile', help=profile_help)
+    include = typer.Option(None, '--include', help=include_help)
+    # exclude option
+    exclude_help = (
+        'Skip these template-relative paths (repeatable; mutex with --include).'
+    )
+    exclude = typer.Option(None, '--exclude', help=exclude_help)
+    # values option
+    values_help = (
+        "Slot fill sheet: a TOML file of string values for the template's"
+        ' {{slot}} placeholders.'
+    )
+    values = typer.Option(None, '--values', help=values_help)
+    # set option
+    sets_help = 'Slot fill KEY=VALUE (repeatable; wins over --values).'
+    sets = typer.Option(None, '--set', help=sets_help)
     # pin option
     pin_help = (
         'Commission pin (a commit sha): must resolve, and every pin:'
-        ' declaration in the profile charter must match it.'
+        ' declaration in the template charter must match it; also fills'
+        ' the {{pin}} slot.'
     )
     pin = typer.Option(None, '--pin', help=pin_help)
     # agent option
@@ -247,8 +263,11 @@ def node_init(app: typer.Typer) -> typer.Typer:
         base: Optional[str] = base,
         meta: Optional[str] = meta,
         inherit: Optional[list[str]] = inherit,
-        steps: Optional[str] = steps,
-        profile: Optional[str] = profile,
+        template: Optional[str] = template,
+        include: Optional[list[str]] = include,
+        exclude: Optional[list[str]] = exclude,
+        values: Optional[str] = values,
+        sets: Optional[list[str]] = sets,
         pin: Optional[str] = pin,
         agent: Optional[str] = agent,
         provider: Optional[str] = provider,
@@ -283,31 +302,9 @@ def node_init(app: typer.Typer) -> typer.Typer:
         author its Instructions and Completion Requirements sections,
         then ``fractal node start <name>``.
         """
-        # a per-iter/step cap with no run ceiling can't be enforced
-        # (once the per-iter budget drains, later steps run unbounded)
-        # -- reject at creation so the operator fixes it now, not at
-        # runtime; no cost flags at all is allowed and runs uncapped
-        if max_cost is None:
-            if max_iter_cost is not None:
-                raise typer.BadParameter('--max-iter-cost requires --max-cost.')
-            if max_step_cost is not None:
-                raise typer.BadParameter('--max-step-cost requires --max-cost.')
-        # max_iters must be positive like the config setter enforces -- a
-        # non-positive cap reads as unlimited in the loop, so 0 would build
-        # a node that iterates without bound instead of never
-        if max_iters is not None and max_iters <= 0:
-            raise typer.BadParameter('--max-iters must be greater than 0.')
-        require_non_negative(
-            max_iters=max_iters,
-            max_depth=max_depth,
-            max_children=max_children,
-            max_descendants=max_descendants,
-            step_retries=step_retries,
-            max_cost=max_cost,
-            max_iter_cost=max_iter_cost,
-            max_step_cost=max_step_cost,
-        )
-        reserve_budget = parse_reserve_budget(reserve_budget, max_cost)
+        # the cap and reserve checks live in Node.init, which runs them on
+        # the merged values (flag > template preset > inherited > default) --
+        # a flag-only check here would miss every preset-supplied cap
         node, path = resolve_init_target(path)
         output = node.init(
             name=name,
@@ -317,8 +314,11 @@ def node_init(app: typer.Typer) -> typer.Typer:
             base=base,
             meta=meta,
             inherit=inherit,
-            steps=steps,
-            profile=profile,
+            template=template,
+            include=include,
+            exclude=exclude,
+            values=values,
+            sets=sets,
             pin=pin,
             agent=agent,
             provider=provider,
@@ -353,27 +353,8 @@ def node_init(app: typer.Typer) -> typer.Typer:
         # (advisory, never a block); an agent with no tracked spend to meter
         # (codex without a priced model) stays quiet
         if max_cost is None and max_iters is None:
-            # resolve the effective agent the way init does: the flag, else the
-            # nearest ancestor's default walked from the calling node (_NODE)
-            # the child nests under -- not the repo-root target resolve_init
-            # returned (they differ once an agent spawns its own children)
-            parent = Node.resolve_caller()
-            if parent is None or parent.repo_dir != node.repo_dir:
-                parent = node
-            effective_agent = agent or parent.agent_effective()
-            tracked = True
-            # the probe anchors the agent registry's database on an initialized
-            # node, and the resolve_init target (the repo root, off the tree's
-            # root branch) may carry no config -- an unprobed agent reads as
-            # tracked, and this advisory never fails a spawn that succeeded
-            if effective_agent and parent.exists():
-                # an unregistered backend reads as tracked -- unknown
-                # spend earns the warning, never a block
-                try:
-                    tracked = parent.agent(effective_agent).tracks_cost(model)
-                except ValueError:
-                    tracked = True
-            if tracked:
+            unmetered = _spend_unmetered(node, path, name, template, agent, model)
+            if unmetered:
                 typer.echo(
                     'Warning: no --max-cost/--max-iters -- this node can run'
                     ' and spend without bound.',
@@ -902,6 +883,89 @@ def node_status(app: typer.Typer) -> typer.Typer:
     return app
 
 
+def node_diff(app: typer.Typer) -> typer.Typer:
+    """Register the ``diff`` command."""
+    # node argument
+    node_help = 'Target node branch (default: this node).'
+    node = typer.Argument(None, help=node_help)
+    # path option
+    path_help = 'Worktree directory.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, 'diff')
+    def _diff(
+        node: Optional[str] = node,
+        path: str = path,
+    ) -> None:
+        """Show a node's drift from its recorded template.
+
+        Re-renders the recorded template folder at its recorded commit
+        with its recorded values and diffs the effective set against the
+        node's live seed surfaces. Exit 1 when any file drifts, 0 when
+        the node is clean, 2 on a command error -- scripts branch on the
+        exit code rather than parse the output.
+        """
+        node = resolve_target(path, node)
+        reports, warnings = diff(node_dir=node.node_dir, repo_dir=node.repo_dir)
+        for warning in warnings:
+            typer.echo(f'Warning: {warning}', err=True)
+        if not reports:
+            typer.echo('No drift from the recorded template.')
+            return
+        listing = '\n'.join(reports)
+        typer.echo(listing)
+        raise SystemExit(1)
+
+    return app
+
+
+def node_reseed(app: typer.Typer) -> typer.Typer:
+    """Register the ``reseed`` command."""
+    # node argument
+    node_help = 'Target node branch (default: this node).'
+    node = typer.Argument(None, help=node_help)
+    # ref option
+    ref_help = 'Committish to read the recorded template folder at.'
+    ref = typer.Option(None, '--ref', help=ref_help)
+    # template option
+    template_help = (
+        'Re-point the node at another template folder, read at the node'
+        ' branch tip; append @<ref> for another commit.'
+    )
+    template = typer.Option(None, '--template', help=template_help)
+    # force flag
+    force_help = 'Reseed even while the node is active or paused.'
+    force = typer.Option(False, '--force', '-f', help=force_help)
+    # path option
+    path_help = 'Worktree directory.'
+    path = typer.Option('.', '--path', help=path_help)
+
+    @command(app, 'reseed')
+    def _reseed(
+        node: Optional[str] = node,
+        ref: Optional[str] = ref,
+        template: Optional[str] = template,
+        force: bool = force,
+        path: str = path,
+    ) -> None:
+        """Rewrite a node's seed surfaces from its recorded template.
+
+        Re-renders the recorded folder at its recorded commit -- or at
+        ``--ref``, or from another folder with ``--template``, which
+        re-points the node -- and rewrites steps, scripts, skills, and
+        agent settings from the result: files the node lacks are added
+        and files it has are overwritten, never deleted. NODE.md,
+        config.json, and memory/ are never touched.
+        """
+        node = resolve_target(path, node)
+        output, warnings = node.reseed(ref=ref, template=template, force=force)
+        for warning in warnings:
+            typer.echo(f'Warning: {warning}', err=True)
+        typer.echo(output)
+
+    return app
+
+
 def node_list(app: typer.Typer) -> typer.Typer:
     """Register the ``list`` command."""
     # node argument
@@ -1313,21 +1377,23 @@ def node_update(app: typer.Typer) -> typer.Typer:
         parent = target.parent
         if parent is None:
             raise typer.BadParameter(f'Parent worktree not found: {target.branch}.')
-        # resolve an explicit reserve to USD against the effective cap -- the
-        # N% grammar is CLI surface and never enters core; the default-mode
-        # reserve retune is core's (child_retune)
+        # resolve an explicit reserve to USD against the effective cap through core's
+        # resolver (the default-mode reserve retune is core's own, in child_retune)
         new_reserve = None
         if reserve_budget is not None:
             if max_cost is not None:
                 effective_max_cost = max_cost
             else:
                 effective_max_cost = target.config.get('max_cost')
-            new_reserve = parse_reserve_budget(reserve_budget, effective_max_cost)
+            try:
+                new_reserve = parse_reserve_budget(reserve_budget, effective_max_cost)
+            except ValueError as e:
+                raise typer.BadParameter(str(e)) from None
         # retune through core -- it owns the reserve retune, the effective-cap
         # guards, the merged validation, and the prior capture
         _, _, name = target.branch.rpartition('.')
         changes = parent.child_retune(
-            name,
+            name=name,
             title=title,
             max_cost=max_cost,
             max_iter_cost=max_iter_cost,
@@ -1382,7 +1448,7 @@ def node_loop(app: typer.Typer) -> typer.Typer:
         """Run the node's iteration loop (invoked by the selected runtime)."""
         node = resolve_node(path)
         loop = Loop(
-            node,
+            node=node,
             agent_command=agent_command,
             continue_=continue_,
             resume=resume,
@@ -1439,22 +1505,37 @@ def node_seed(app: typer.Typer) -> typer.Typer:
     # seeds the agent dirs before the node is registered)
     node_dir_help = 'Node data directory to seed under.'
     node_dir = typer.Argument(..., help=node_dir_help)
-    # parent flag
+    # parent option
     parent_help = "Parent node's data directory, when one exists."
     parent = typer.Option(None, '--parent', help=parent_help)
+    # bundle option
+    bundle_help = 'Template bundle root, when the template carries agents/.'
+    bundle = typer.Option(None, '--bundle', help=bundle_help)
     # reset flag
     reset_help = 'Wipe each agent dir before seeding.'
     reset = typer.Option(False, '--reset', help=reset_help)
+    # overwrite flag
+    overwrite_help = 'Rewrite bundle-carried files over existing ones (a reseed).'
+    overwrite = typer.Option(False, '--overwrite', help=overwrite_help)
 
     @command(app, '_seed')
     def _seed(
         node_dir: str = node_dir,
         parent: Optional[str] = parent,
+        bundle: Optional[str] = bundle,
         reset: bool = reset,
+        overwrite: bool = overwrite,
     ) -> None:
-        """Seed the node's agent config dirs (invoked by init.sh)."""
+        """Seed the node's agent config dirs (invoked by init.sh and reseed.sh)."""
         parent_dir = pathlib.Path(parent) if parent else None
-        seed_agents(pathlib.Path(node_dir), parent_dir=parent_dir, reset=reset)
+        bundle_dir = pathlib.Path(bundle) / 'agents' if bundle else None
+        seed_agents(
+            node_dir=pathlib.Path(node_dir),
+            parent_dir=parent_dir,
+            bundle_dir=bundle_dir,
+            reset=reset,
+            overwrite=overwrite,
+        )
 
     return app
 
@@ -1495,3 +1576,68 @@ def node_scope(app: typer.Typer) -> typer.Typer:
             raise SystemExit(1)
 
     return app
+
+
+# ------ helper functions
+
+
+def _spend_unmetered(
+    node: Node,
+    path: str,
+    name: str,
+    template: Optional[str],
+    agent: Optional[str],
+    model: Optional[str],
+) -> bool:
+    """Return whether a just-initialized uncapped node has tracked spend.
+
+    Backs init's uncapped-spend advisory: resolves the parent the child
+    nests under, reads a template child's merged config back for the caps
+    and agent a preset can supply, and probes the parent's agent registry
+    for cost tracking. True means the advisory should print.
+    """
+    # resolve the effective agent the way init does: the flag, else the nearest
+    # ancestor's default walked from the calling node (_NODE) the child nests
+    # under -- not the repo-root target resolve_init returned (they differ once
+    # an agent spawns its own children)
+    parent = Node.resolve_caller()
+    if parent is not None and parent.repo_dir != node.repo_dir:
+        parent = None
+    # no ambient caller but a path under .worktrees/ (a manual init from inside
+    # a worktree): parent on that worktree's node, the way init itself does, so
+    # the read-back finds the branch it composed
+    if parent is None:
+        parts = pathlib.Path(path).parts
+        if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
+            candidate = Node(node.repo_dir / WORKTREES_FOLDER / parts[1])
+            if candidate.exists():
+                parent = candidate
+    if parent is None or not parent.exists():
+        parent = node
+    # a template preset can cap or re-agent what the flags left unset -- the
+    # child's stored config holds the merged values, so read them back rather
+    # than warn a preset-capped node it is unbounded
+    max_cost = None
+    max_iters = None
+    if template is not None:
+        child_branch = f'{parent.branch}.{name}'
+        child = Node(node.repo_dir / WORKTREES_FOLDER / child_branch)
+        if child.exists():
+            max_cost = child.config.get('max_cost')
+            max_iters = child.config.get('max_iters')
+            if agent is None:
+                agent = child.config.get('agent')
+    effective_agent = agent or parent.agent_effective()
+    tracked = True
+    # the probe anchors the agent registry's database on an initialized node,
+    # and the resolve_init target (the repo root, off the tree's root branch)
+    # may carry no config -- an unprobed agent reads as tracked, and this
+    # advisory never fails a spawn that succeeded
+    if effective_agent and parent.exists():
+        # an unregistered backend reads as tracked -- unknown spend earns the
+        # warning, never a block
+        try:
+            tracked = parent.agent(effective_agent).tracks_cost(model)
+        except ValueError:
+            tracked = True
+    return tracked and max_cost is None and max_iters is None

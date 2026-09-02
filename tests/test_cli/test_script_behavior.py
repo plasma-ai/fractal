@@ -13,11 +13,11 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   package unless the spawn passes ``--inherit=skills``, which copies the
   parent's set wholesale; the snapshot is one-shot, so a ``--reset``
   re-inherits only when the flag is passed again.
-- **``init.sh`` reseeding** treats a fresh worktree whose fork point already
-  carries files under the node's seed dir -- a PREPARE-merged copy of a
-  deleted node of the same name, or a partial leak as slight as a lone
-  ``NODE.md`` -- like ``--reset``, warning that the stale copy is reseeded
-  and removing the dir whole, so the init's own flags and charter land
+- **``init.sh`` stale-seed removal** treats a fresh worktree whose fork point
+  already carries files under the node's seed dir -- a PREPARE-merged copy of
+  a deleted node of the same name, or a partial leak as slight as a lone
+  ``NODE.md`` -- like ``--reset``, warning that the stale copy is seeded
+  afresh and removing the dir whole, so the init's own flags and charter land
   instead of the dead incarnation's and no stray file of the copy survives.
 - **``resume.sh`` backend selection** relaunches a paused headless node through
   ``start.sh --headless --resume`` and a paused tmux node through plain
@@ -58,32 +58,32 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   with the child's own and descendant seeds grafted back from its HEAD: the
   child converges to the target outside its own machinery (a file the target
   changed since the fork is never re-offered as the child's stale copy, and a
-  profile the target gained reaches the child), the seed trees are unchanged
-  byte for byte, and a child index or branch ref another process holds skips
-  the advance with the warning instead of failing the landed merge (a ref
-  lock rolls the half-written worktree back), as does a read of the child's
-  worktree git cannot answer (the landed squash is still reported and its
-  event closed, never aborted past the commit) and an edit to a tracked file
-  of a shape the commit law excludes (a force-tracked ``config.json.lock``,
-  which the law's own check reads as clean), as does a private ignored file
-  the target now tracks, which the advance would otherwise overwrite -- the
-  disk is probed, so a directory sitting where the target adds a file, a
-  file where it adds a directory, and a case-only alias count too -- with
-  rename detection off, so a target rename onto the child's private path is
-  a collision, while a disk hit the child's index tracks as a case-variant
-  is the reset's own rename, not one, and a hit at or under a path the
-  child's tree tracks, or at a prefix it tracks, is a type change the target
-  made (a file into a directory, or back) that the reset performs -- the
-  index read as text, so no NUL byte leaks onto stderr; a fresh "Nothing to
-  merge" whose restore dropped paths advances the child too, so the drop is
-  never re-offered, and so does one whose only conflict resolved itself on
-  a foreign ``.fractal/`` path (an edit to the node's own seed is no
-  adjudication and leaves the child put); into a node target that tracks
-  the child's seed from a PREPARE fold, the advance strips the target's
-  copy before grafting the live seed, so a seed file the child dropped never
-  comes back; and once the squash commit is on the target an interrupt
-  finishes or rolls back the child's update, closes the event, and reports
-  the landed squash with exit 0 rather than failing a complete merge.
+  ``.fractal/`` page the target gained reaches the child), the seed trees are
+  unchanged byte for byte, and a child index or branch ref another process
+  holds skips the advance with the warning instead of failing the landed
+  merge (a ref lock rolls the half-written worktree back), as does a read of
+  the child's worktree git cannot answer (the landed squash is still reported
+  and its event closed, never aborted past the commit) and an edit to a
+  tracked file of a shape the commit law excludes (a force-tracked
+  ``config.json.lock``, which the law's own check reads as clean), as does a
+  private ignored file the target now tracks, which the advance would
+  otherwise overwrite -- the disk is probed, so a directory sitting where the
+  target adds a file, a file where it adds a directory, and a case-only alias
+  count too -- with rename detection off, so a target rename onto the child's
+  private path is a collision, while a disk hit the child's index tracks as a
+  case-variant is the reset's own rename, not one, and a hit at or under a
+  path the child's tree tracks, or at a prefix it tracks, is a type change
+  the target made (a file into a directory, or back) that the reset performs
+  -- the index read as text, so no NUL byte leaks onto stderr; a fresh
+  "Nothing to merge" whose restore dropped paths advances the child too, so
+  the drop is never re-offered, and so does one whose only conflict resolved
+  itself on a foreign ``.fractal/`` path (an edit to the node's own seed is
+  no adjudication and leaves the child put); into a node target that tracks
+  the child's seed from a PREPARE fold, the advance strips the target's copy
+  before grafting the live seed, so a seed file the child dropped never comes
+  back; and once the squash commit is on the target an interrupt finishes or
+  rolls back the child's update, closes the event, and reports the landed
+  squash with exit 0 rather than failing a complete merge.
 - **``merge.sh`` interrupts once the target is settled** are judged by the
   target, not the step in flight: a SIGINT while ``git commit`` runs its
   post-commit hook (the ref moved, the child not yet reaped) finds a landed
@@ -94,7 +94,7 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 - **``merge.sh`` ``.fractal/`` restore** returns every ``.fractal`` directory
   on the target to its HEAD after the squash, minus the merging node's scope
   roots under it (a ``--meta`` node's edit to the target's seed still lands,
-  and so does a ``.fractal``-scoped node's profile edit), then strips the
+  and so does a ``.fractal``-scoped node's machinery edit), then strips the
   node's own seed and descendants at any depth and project prefix -- so a
   child's write into the target's estate or a foreign seed never lands, with
   a warning naming the dropped paths by fate (restored to the target's
@@ -150,6 +150,14 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   with no scope is unrestricted, a sub-project node with none is bounded to
   its project dir (its own wiki in, the repo-root wiki out), and one with
   roots to ``<project>/<root>``.
+- **Templates under the scope law**: a template folder is ordinary project
+  content, so the scope rule is the only rule -- a node whose scope covers
+  the folder commits a template edit through ``fractal commit`` and lands it
+  with no restore warning, and a child inited afterwards from the target
+  deploys the landed bytes; a sibling whose scope does not cover the folder
+  is refused at commit and, committing with raw git, at the merge
+  footprint; and deleting the scoped node with the edit unmerged warns
+  of the discarded work.
 - **``merge.sh`` post-refresh no-op** re-checks the staged squash after the
   target's wiki index refresh: a squash the refresh fully reverts (a re-merge
   offering only regenerated wiki state, e.g. a legacy-tracked ``.wiki/cache``)
@@ -232,8 +240,8 @@ __all__ = [
     'test_init_resolves_parent_worktree_under_a_space_path',
     'test_init_allows_a_repo_under_a_worktrees_path',
     'test_init_inherits_parent_skills_on_request',
-    'test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy',
-    'test_init_reseeds_over_a_partial_leaked_copy_with_a_profile_charter',
+    'test_init_seeds_afresh_over_a_stale_seed_copy',
+    'test_init_seeds_afresh_over_a_partial_leaked_copy_with_a_template_charter',
     'test_resume_reselects_the_recorded_backend',
     'test_headless_relaunch_vets_the_recorded_group',
     'test_headless_handoff_failure_records_no_backend',
@@ -254,7 +262,7 @@ __all__ = [
     'test_merge_advance_records_the_target_tree_on_the_child',
     'test_merge_advance_keeps_the_childs_own_seed_intact',
     'test_merge_advance_into_a_node_target_takes_the_live_seed',
-    'test_merge_advance_brings_the_targets_profiles_to_the_child',
+    'test_merge_advance_brings_the_targets_fractal_pages_to_the_child',
     'test_merge_skips_the_advance_when_the_child_index_is_locked',
     'test_merge_skips_the_advance_when_reading_the_child_worktree_fails',
     'test_merge_skips_the_advance_over_a_private_ignored_file',
@@ -276,8 +284,8 @@ __all__ = [
     'test_merge_refuses_over_a_seed_file_the_root_untracked_but_kept',
     'test_merge_refuses_over_an_ignored_copy_of_the_nodes_own_seed',
     'test_merge_lands_a_meta_nodes_edit_to_the_targets_seed',
-    'test_merge_lands_a_fractal_scoped_nodes_profile_edit',
-    'test_merge_lands_a_multi_root_scope_with_a_profile_root',
+    'test_merge_lands_a_fractal_scoped_nodes_machinery_edit',
+    'test_merge_lands_a_multi_root_scope_with_a_fractal_root',
     'test_merge_resolves_a_conflict_on_the_nodes_own_seed',
     'test_merge_removes_an_own_seed_leaked_after_the_fork',
     'test_merge_refuses_a_mixed_conflict',
@@ -294,6 +302,9 @@ __all__ = [
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
     'test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal',
     'test_merge_continue_refuses_a_squash_outside_the_nodes_scope',
+    'test_merge_lands_a_scoped_nodes_template_edit_for_later_spawns',
+    'test_merge_refuses_a_siblings_template_edit_at_commit_and_footprint',
+    'test_delete_warns_of_an_unmerged_template_edit',
     'test_merge_bounds_a_sub_project_node_to_its_project',
     'test_merge_strips_a_nested_descendant_seed_from_a_no_ff_parent',
     'test_merge_reports_the_target_restored_past_a_ref_lock',
@@ -437,7 +448,7 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
     assert reinit.returncode != 0, reinit.stdout
     kin_md = (kin_skills / 'fractal' / 'SKILL.md').read_text(encoding='utf-8')
     assert revised not in kin_md
-    reseed = _run(
+    plain_reset = _run(
         parent_wt,
         'node',
         'init',
@@ -447,7 +458,7 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
         'claude',
         '--local',
     )
-    assert reseed.returncode == 0, reseed.stderr
+    assert plain_reset.returncode == 0, plain_reset.stderr
     kin_md = (kin_skills / 'fractal' / 'SKILL.md').read_text(encoding='utf-8')
     assert sentinel not in kin_md
     assert (kin_skills / 'radio').is_dir()
@@ -469,24 +480,24 @@ def test_init_inherits_parent_skills_on_request(tmp_path: pathlib.Path) -> None:
     assert revised in kin_md
 
 
-# ------ init.sh: reseeding over a tracked stale seed copy
+# ------ init.sh: seeding afresh over a tracked stale seed copy
 
 
-def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
+def test_init_seeds_afresh_over_a_stale_seed_copy(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A fresh worktree whose fork point carries the node's seed is reseeded.
+    """A fresh worktree whose fork point carries the node's seed is seeded afresh.
 
     A parent that folds a child in with a real merge (as its PREPARE step
     does) tracks the child's seed on its branch. Deleted and spawned again
     under the same name, the new node forks from a tip that already carries
     ``.fractal/<branch>/config.json`` -- the dead incarnation's. Adopting
     those files as an existing seed would drop every flag of this init, so
-    the init warns naming the stale copy and reseeds like ``--reset``: the
+    the init warns naming the stale copy and seeds afresh like ``--reset``: the
     config carries the new flags, and the copy goes whole -- a stray file
     beside the seed's own does not survive either.
     """
-    repo = _init_tree(tmp_path / 'reseedrepo')
+    repo = _init_tree(tmp_path / 'staleseedrepo')
     init = _run(repo, 'node', 'init', 'parent', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     parent = repo / '.worktrees' / 'main.parent'
@@ -520,7 +531,7 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     _git(parent, 'add', '-f', '.fractal/main.parent.c/stray.txt')
     _git(parent, 'commit', '-m', 'stray file under the stale seed')
     # the same name again, with flags the stale copy does not carry, so the
-    # reseed is visible in config.json
+    # fresh seed is visible in config.json
     max_iters = 3
     again = _run(
         repo,
@@ -536,12 +547,12 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     )
     assert again.returncode == 0, again.stderr
 
-    # the init warned that it reseeded the stale copy, and the config is
-    # this init's, not the dead incarnation's
+    # the init warned that it seeded the stale copy afresh, and the config
+    # is this init's, not the dead incarnation's
     seed = child / '.fractal' / 'main.parent.c'
     assert (
         f'Warning: main.parent already carries a seed for main.parent.c at {seed}'
-        ' (a copy of an earlier node of this name); reseeding it'
+        ' (a copy of an earlier node of this name); seeding it afresh'
     ) in again.stdout, (again.stdout, again.stderr)
     config = json.loads((seed / 'config.json').read_text(encoding='utf-8'))
     assert config['agent'] == 'codex'
@@ -549,17 +560,17 @@ def test_init_reseeds_a_fresh_worktree_over_a_stale_seed_copy(
     assert not (seed / 'stray.txt').exists()
 
 
-def test_init_reseeds_over_a_partial_leaked_copy_with_a_profile_charter(
+def test_init_seeds_afresh_over_a_partial_leaked_copy_with_a_template_charter(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A partial leaked copy -- a lone ``NODE.md`` -- is reseeded under a profile.
+    """A lone leaked ``NODE.md`` is seeded afresh under a template.
 
     A leak need not be whole: a root tracking only ``.fractal/<branch>/NODE.md``
     carries no ``config.json`` to mark a seed, yet a fresh worktree forking
     from it holds that stale charter -- and a charter is copied only when
-    absent, so a ``--profile`` deployment charter would be dropped for the
-    leaked text without a word. The reseed keys on the seed dir itself, so
-    the init warns and the profile charter is the node's.
+    absent, so a ``--template`` deployment charter would be dropped for the
+    leaked text without a word. The removal keys on the seed dir itself, so
+    the init warns and the template charter is the node's.
     """
     repo = _init_tree(tmp_path / 'partialleakrepo')
     # the root tracks a lone stale charter under the node's seed dir
@@ -568,16 +579,17 @@ def test_init_reseeds_over_a_partial_leaked_copy_with_a_profile_charter(
     leaked.write_text('STALE LEAKED CHARTER\n', encoding='utf-8')
     _git(repo, 'add', '-f', '.fractal/main.task/NODE.md')
     _git(repo, 'commit', '-m', 'leaked main.task NODE.md')
-    # a profile carrying a deployment-ready charter
-    profile = repo / '.fractal' / 'profiles' / 'deploy' / 'NODE.md'
-    profile.parent.mkdir(parents=True)
-    profile.write_text(
-        '# deploy\n\n## Instructions\n\nPROFILE CHARTER\n\n'
+    # a plain tracked folder carrying a deployment-ready charter
+    template = repo / 'templates' / 'deploy'
+    template.mkdir(parents=True)
+    (template / 'config.json').write_text('{}\n', encoding='utf-8')
+    (template / 'NODE.md').write_text(
+        '# deploy\n\n## Instructions\n\nTEMPLATE CHARTER\n\n'
         '## Completion Requirements\n\nDone.\n',
         encoding='utf-8',
     )
-    _git(repo, 'add', '-f', '.fractal/profiles')
-    _git(repo, 'commit', '-m', 'deploy profile')
+    _git(repo, 'add', 'templates/deploy')
+    _git(repo, 'commit', '-m', 'deploy template')
     init = _run(
         repo,
         'node',
@@ -586,20 +598,20 @@ def test_init_reseeds_over_a_partial_leaked_copy_with_a_profile_charter(
         '--agent',
         'claude',
         '--local',
-        '--profile',
-        'deploy',
+        '--template',
+        'templates/deploy',
     )
     assert init.returncode == 0, init.stderr
 
-    # the init warned that it reseeded the stale copy, and the charter is
-    # the profile's, not the leaked text
+    # the init warned that it seeded the stale copy afresh, and the charter
+    # is the template's, not the leaked text
     seed = repo / '.worktrees' / 'main.task' / '.fractal' / 'main.task'
     assert (
         f'Warning: main already carries a seed for main.task at {seed}'
-        ' (a copy of an earlier node of this name); reseeding it'
+        ' (a copy of an earlier node of this name); seeding it afresh'
     ) in init.stdout, (init.stdout, init.stderr)
     charter = (seed / 'NODE.md').read_text(encoding='utf-8')
-    assert 'PROFILE CHARTER' in charter
+    assert 'TEMPLATE CHARTER' in charter
     assert 'STALE' not in charter
 
 
@@ -1663,26 +1675,26 @@ def test_merge_advance_into_a_node_target_takes_the_live_seed(
     assert _git(child, 'status', '--porcelain').stdout == ''
 
 
-def test_merge_advance_brings_the_targets_profiles_to_the_child(
+def test_merge_advance_brings_the_targets_fractal_pages_to_the_child(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A profile the target gained after the fork reaches the child on the advance.
+    """A ``.fractal/`` page the target gained after the fork reaches the child.
 
-    ``.fractal/profiles/<name>/`` is read from the root worktree and travels
-    with the target's tree like any other file, so a child forked before it
-    existed receives it only through the advance -- which carries the
-    target's content, not just its ancestry.
+    A page under the root's ``.fractal/`` travels with the target's tree
+    like any other file, so a child forked before it existed receives it
+    only through the advance -- which carries the target's content, not
+    just its ancestry.
     """
-    repo = _init_tree(tmp_path / 'profilerepo')
+    repo = _init_tree(tmp_path / 'fractalpagerepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
-    # the target gains a profile after the fork
-    profile = repo / '.fractal' / 'profiles' / 'p' / 'steps' / '00-X.md'
-    profile.parent.mkdir(parents=True)
-    profile.write_text('# X\n', encoding='utf-8')
+    # the target gains a .fractal/ page after the fork
+    page = repo / '.fractal' / 'profiles' / 'p' / 'steps' / '00-X.md'
+    page.parent.mkdir(parents=True)
+    page.write_text('# X\n', encoding='utf-8')
     _git(repo, 'add', '.fractal/profiles')
-    _git(repo, 'commit', '-m', 'add profile')
+    _git(repo, 'commit', '-m', 'add fractal page')
     # the child's work, with init's scaffolding settled so the advance runs
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
@@ -1691,7 +1703,7 @@ def test_merge_advance_brings_the_targets_profiles_to_the_child(
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'skipped advancing' not in result.stderr, result.stderr
 
-    # the profile is on the child's branch and in its worktree
+    # the page is on the child's branch and in its worktree
     tracked = _git(worktree, 'ls-files', '.fractal/profiles').stdout
     assert '.fractal/profiles/p/steps/00-X.md' in tracked
     child_copy = worktree / '.fractal' / 'profiles' / 'p' / 'steps' / '00-X.md'
@@ -2499,17 +2511,17 @@ def test_merge_continue_refuses_unstaged_target_edits(
     """``--continue`` refuses while an unstaged edit to a tracked path remains.
 
     A hand-resolved squash is fully staged by contract. An unstaged edit to a
-    tracked ``.fractal/`` path -- an operator's own tweak to a profile made
-    mid-resolution -- would be rewritten by the restore that returns every
+    tracked ``.fractal/`` path -- an operator's own tweak to a page under it
+    made mid-resolution -- would be rewritten by the restore that returns every
     ``.fractal/`` path to HEAD, so the continue names the path and leaves the
     edit and the staged squash in place; once staged, the continue lands.
     """
     repo = _init_tree(tmp_path / 'unstagedrepo')
-    profile = repo / '.fractal' / 'profiles' / 'p' / 'NODE.md'
-    profile.parent.mkdir(parents=True)
-    profile.write_text('v1\n', encoding='utf-8')
+    page = repo / '.fractal' / 'profiles' / 'p' / 'NODE.md'
+    page.parent.mkdir(parents=True)
+    page.write_text('v1\n', encoding='utf-8')
     _git(repo, 'add', '.fractal/profiles')
-    _git(repo, 'commit', '-m', 'add profile')
+    _git(repo, 'commit', '-m', 'add fractal page')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
@@ -2526,7 +2538,7 @@ def test_merge_continue_refuses_unstaged_target_edits(
     assert conflicted.returncode != 0, conflicted.stdout
 
     # the operator redoes the squash, resolves and stages the conflict, and
-    # tweaks the tracked profile without staging it
+    # tweaks the tracked page without staging it
     subprocess.run(
         ['git', 'merge', '--squash', 'main.task'],
         cwd=f'{repo}',
@@ -2535,7 +2547,7 @@ def test_merge_continue_refuses_unstaged_target_edits(
     )
     (repo / 'tracked.txt').write_text('resolved line\n', encoding='utf-8')
     _git(repo, 'add', 'tracked.txt')
-    profile.write_text('v1\nOPERATOR EDIT\n', encoding='utf-8')
+    page.write_text('v1\nOPERATOR EDIT\n', encoding='utf-8')
     refused = _script('merge.sh', repo, f'{worktree}', '--continue')
 
     # refused naming the path, with the edit and the staged squash intact
@@ -2549,7 +2561,7 @@ def test_merge_continue_refuses_unstaged_target_edits(
     assert 'checkout -- <path>' in refused.stderr, refused.stderr
     assert "restores every .fractal/ path to main's HEAD" in refused.stderr
     assert 'stash' not in refused.stderr, refused.stderr
-    assert profile.read_text(encoding='utf-8').endswith('OPERATOR EDIT\n')
+    assert page.read_text(encoding='utf-8').endswith('OPERATOR EDIT\n')
     assert (repo / '.git' / 'SQUASH_MSG').exists()
 
     # staged, the same squash lands
@@ -3096,7 +3108,7 @@ def test_merge_lands_a_meta_nodes_edit_to_the_targets_seed(
     flow under ``.fractal/`` is work, not machinery riding along: the restore
     that returns the rest of the target's ``.fractal/`` to HEAD leaves the
     meta node's scope root alone, and the edit lands without a warning, while
-    a profile the meta node adds beside it is removed like any other
+    a page the meta node adds beside it is removed like any other
     ``.fractal/`` addition. Being work, a conflict inside the scope root is
     the operator's -- the merge refuses it rather than resolving it to the
     target's content as it does for machinery.
@@ -3125,16 +3137,16 @@ def test_merge_lands_a_meta_nodes_edit_to_the_targets_seed(
         contract.read_text(encoding='utf-8') + '\nTuned by the meta node.\n',
         encoding='utf-8',
     )
-    # ...and adds a profile beside it, outside its scope root
-    profile = fix / '.fractal' / 'profiles' / 'q' / 'NODE.md'
-    profile.parent.mkdir(parents=True)
-    profile.write_text('# q\n', encoding='utf-8')
+    # ...and adds a page beside it, outside its scope root
+    page = fix / '.fractal' / 'profiles' / 'q' / 'NODE.md'
+    page.parent.mkdir(parents=True)
+    page.write_text('# q\n', encoding='utf-8')
     _git(fix, 'add', '-A')
     _git(fix, 'commit', '-m', 'tune the target contract')
     result = _script('merge.sh', repo, f'{fix}')
 
     # the edit is on the target and the meta node's own seed is not; nothing
-    # was restored, and only the profile outside the scope root was removed
+    # was restored, and only the page outside the scope root was removed
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'changed paths under .fractal/' not in result.stderr, result.stderr
     assert 'added paths under .fractal/ that the merge removed' in result.stderr
@@ -3164,23 +3176,23 @@ def test_merge_lands_a_meta_nodes_edit_to_the_targets_seed(
     assert _git(parent, 'status', '--porcelain').stdout == ''
 
 
-def test_merge_lands_a_fractal_scoped_nodes_profile_edit(
+def test_merge_lands_a_fractal_scoped_nodes_machinery_edit(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A node scoped to ``.fractal`` itself lands its profile edits.
+    """A node scoped to ``.fractal`` itself lands its edits under it.
 
     A scope root of ``.fractal`` makes the whole machinery dir the node's
-    work product -- a node commissioned to maintain the tree's profiles --
+    work product -- a node commissioned to maintain the tree's machinery --
     so the restore that returns ``.fractal/`` to the target's HEAD carves
     the whole dir out: the edit lands with no warning, and the advance
     carries it back to the node's worktree as the target's own content.
     """
-    repo = _init_tree(tmp_path / 'profilescoperepo')
-    profile = repo / '.fractal' / 'profiles' / 'p' / 'NODE.md'
-    profile.parent.mkdir(parents=True)
-    profile.write_text('v1\n', encoding='utf-8')
+    repo = _init_tree(tmp_path / 'fractalscoperepo')
+    page = repo / '.fractal' / 'profiles' / 'p' / 'NODE.md'
+    page.parent.mkdir(parents=True)
+    page.write_text('v1\n', encoding='utf-8')
     _git(repo, 'add', '.fractal/profiles')
-    _git(repo, 'commit', '-m', 'add profile')
+    _git(repo, 'commit', '-m', 'add fractal page')
     init = _run(
         repo,
         'node',
@@ -3196,10 +3208,10 @@ def test_merge_lands_a_fractal_scoped_nodes_profile_edit(
     worktree = repo / '.worktrees' / 'main.task'
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'settle node scaffolding')
-    # the node edits the profile through the commit law, which admits it
+    # the node edits the page through the commit law, which admits it
     node_copy = worktree / '.fractal' / 'profiles' / 'p' / 'NODE.md'
     node_copy.write_text('v2\n', encoding='utf-8')
-    commit = _run(worktree, 'commit', 'set the profile to v2')
+    commit = _run(worktree, 'commit', 'set the page to v2')
     assert commit.returncode == 0, commit.stderr
     result = _script('merge.sh', repo, f'{worktree}')
 
@@ -3208,28 +3220,28 @@ def test_merge_lands_a_fractal_scoped_nodes_profile_edit(
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert 'changed paths under .fractal/' not in result.stderr, result.stderr
     assert 'skipped advancing' not in result.stderr, result.stderr
-    assert profile.read_text(encoding='utf-8') == 'v2\n'
+    assert page.read_text(encoding='utf-8') == 'v2\n'
     assert node_copy.read_text(encoding='utf-8') == 'v2\n'
     assert _git(repo, 'status', '--porcelain').stdout == ''
 
 
-def test_merge_lands_a_multi_root_scope_with_a_profile_root(
+def test_merge_lands_a_multi_root_scope_with_a_fractal_root(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A node scoped to a work dir and the profiles dir lands both through the merge.
+    """A node scoped to a work dir and a ``.fractal/`` dir lands both.
 
     Scope roots are read one per line, so a node commissioned for ``docs``
-    and ``.fractal/profiles`` carves the profiles dir alone out of the
-    restore while every other ``.fractal/`` path stays the target's: the
-    profile edit lands with no restore warning beside the docs work, and
-    neither trips the footprint check.
+    and ``.fractal/profiles`` carves that dir alone out of the restore
+    while every other ``.fractal/`` path stays the target's: the machinery
+    edit lands with no restore warning beside the docs work, and neither
+    trips the footprint check.
     """
     repo = _init_tree(tmp_path / 'multiscoperepo')
-    profile = repo / '.fractal' / 'profiles' / 'p' / 'NODE.md'
-    profile.parent.mkdir(parents=True)
-    profile.write_text('v1\n', encoding='utf-8')
+    page = repo / '.fractal' / 'profiles' / 'p' / 'NODE.md'
+    page.parent.mkdir(parents=True)
+    page.write_text('v1\n', encoding='utf-8')
     _git(repo, 'add', '.fractal/profiles')
-    _git(repo, 'commit', '-m', 'add profile')
+    _git(repo, 'commit', '-m', 'add fractal page')
     init = _run(
         repo,
         'node',
@@ -3247,13 +3259,13 @@ def test_merge_lands_a_multi_root_scope_with_a_profile_root(
     worktree = repo / '.worktrees' / 'main.task'
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'settle node scaffolding')
-    # the node edits the profile and writes its docs through the commit law,
+    # the node edits the page and writes its docs through the commit law,
     # which admits both roots
     node_copy = worktree / '.fractal' / 'profiles' / 'p' / 'NODE.md'
     node_copy.write_text('v2\n', encoding='utf-8')
     (worktree / 'docs').mkdir()
     (worktree / 'docs' / 'a.md').write_text('# a\n', encoding='utf-8')
-    commit = _run(worktree, 'commit', 'edit the profile and the docs')
+    commit = _run(worktree, 'commit', 'edit the page and the docs')
     assert commit.returncode == 0, commit.stderr
     result = _script('merge.sh', repo, f'{worktree}')
 
@@ -3263,7 +3275,7 @@ def test_merge_lands_a_multi_root_scope_with_a_profile_root(
     assert 'added paths under .fractal/' not in result.stderr, result.stderr
     assert 'outside its scope' not in result.stderr, result.stderr
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
-    assert profile.read_text(encoding='utf-8') == 'v2\n'
+    assert page.read_text(encoding='utf-8') == 'v2\n'
     assert (repo / 'docs' / 'a.md').read_text(encoding='utf-8') == '# a\n'
     assert _git(repo, 'status', '--porcelain').stdout == ''
 
@@ -4310,6 +4322,172 @@ def test_merge_continue_refuses_a_squash_outside_the_nodes_scope(
     assert (repo / 'docs' / 'a.md').is_file()
     assert (repo / 'outside.txt').read_text(encoding='utf-8') == 'outside the scope\n'
     assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+# ------ templates under the scope law
+
+
+def test_merge_lands_a_scoped_nodes_template_edit_for_later_spawns(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A node whose scope covers a template folder lands its template edit.
+
+    A template is ordinary project content, so the scope rule is the only
+    rule: the scoped node's edit passes ``fractal commit``, the merge lands
+    it on the target with no restore warning, and a child inited afterwards
+    from the target deploys the landed bytes -- the template read is the
+    fork commit, which now carries the revision.
+    """
+    repo = _init_tree(tmp_path / 'templatescoperepo')
+    _commit_crew_template(repo)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'scribe',
+        '--scope',
+        'templates',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.scribe'
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'settle node scaffolding')
+    # the node revises the step through the commit law, which admits it
+    revised = '# execute the task\nwith the scoped revision\n'
+    node_copy = worktree / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    node_copy.write_text(revised, encoding='utf-8')
+    commit = _run(worktree, 'commit', 'revise the execute step')
+    assert commit.returncode == 0, commit.stderr
+    result = _run(repo, 'node', 'merge', f'--path={worktree}')
+
+    # the revision is on the target with nothing restored or refused
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'changed paths under .fractal/' not in result.stderr, result.stderr
+    assert 'added paths under .fractal/' not in result.stderr, result.stderr
+    assert 'outside its scope' not in result.stderr, result.stderr
+    target_copy = repo / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    assert target_copy.read_text(encoding='utf-8') == revised
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    # a child inited afterwards from the target deploys the landed bytes
+    spawn = _run(
+        repo,
+        'node',
+        'init',
+        'fresh',
+        '--agent',
+        'claude',
+        '--local',
+        '--template',
+        'templates/crew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    node_dir = repo / '.worktrees' / 'main.fresh' / '.fractal' / 'main.fresh'
+    deployed = node_dir / 'steps' / '10-EXECUTE.md'
+    assert deployed.read_text(encoding='utf-8') == revised
+
+
+def test_merge_refuses_a_siblings_template_edit_at_commit_and_footprint(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A template edit outside the node's scope refuses at commit and merge.
+
+    The commit law refuses the edit naming the path, and the same edit
+    committed with raw git is refused at the merge footprint -- no
+    out-of-scope path lands, template or otherwise, and a fresh merge
+    restores the target.
+    """
+    repo = _init_tree(tmp_path / 'templatestrayrepo')
+    execute = _commit_crew_template(repo)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'worker',
+        '--scope',
+        'docs',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.worker'
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'settle node scaffolding')
+    # the node's scope does not cover the folder: the commit law refuses
+    node_copy = worktree / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    node_copy.write_text(
+        '# execute the task\nrewritten out of scope\n',
+        encoding='utf-8',
+    )
+    refused = _run(worktree, 'commit', 'revise a foreign template')
+    assert refused.returncode != 0, refused.stdout + refused.stderr
+    assert 'Changes outside node scope' in refused.stderr, refused.stderr
+    assert 'templates/crew/steps/10-EXECUTE.md' in refused.stderr, refused.stderr
+    # raw git bypasses the commit law; the footprint refuses the squash
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'template edit outside the scope')
+    main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    result = _run(repo, 'node', 'merge', f'--path={worktree}')
+
+    # refused naming the template path, with the target restored
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert 'outside its scope' in result.stderr, result.stderr
+    assert 'templates/crew/steps/10-EXECUTE.md' in result.stderr, result.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == main_head
+    target_copy = repo / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    assert target_copy.read_text(encoding='utf-8') == execute
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+def test_delete_warns_of_an_unmerged_template_edit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Deleting a scoped node with an unmerged template edit warns of the loss.
+
+    A committed template revision is work like any other: with the node's
+    scaffolding already absorbed by a first merge, the template edit is the
+    branch's remaining unmerged diff and the delete warns before
+    discarding it.
+    """
+    repo = _init_tree(tmp_path / 'templatedeleterepo')
+    _commit_crew_template(repo)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'keeper',
+        '--scope',
+        'templates',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.keeper'
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'settle node scaffolding')
+    merged = _run(repo, 'node', 'merge', f'--path={worktree}')
+    assert merged.returncode == 0, merged.stderr
+    # the node revises the template; the parent never absorbs it
+    node_copy = worktree / 'templates' / 'crew' / 'steps' / '10-EXECUTE.md'
+    node_copy.write_text(
+        '# execute the task\nan unmerged revision\n',
+        encoding='utf-8',
+    )
+    commit = _run(worktree, 'commit', 'revise the execute step')
+    assert commit.returncode == 0, commit.stderr
+    result = _run(repo, 'node', 'delete', f'--path={worktree}', '--force')
+
+    # the delete proceeds (destructive by design) but warns about the loss
+    assert result.returncode == 0, result.stderr
+    assert 'has commits not merged into main' in result.stderr, (
+        result.stdout,
+        result.stderr,
+    )
+    assert not worktree.exists()
 
 
 # ------ merge.sh: sub-project nodes
@@ -5567,6 +5745,23 @@ def _init_tree(root: pathlib.Path) -> pathlib.Path:
     _git(root, 'commit', '-m', 'init')
     assert _run(root, 'init').returncode == 0
     return root
+
+
+def _commit_crew_template(repo: pathlib.Path) -> str:
+    """Commit a minimal step-only template folder; return its step's bytes.
+
+    Template bytes deploy from git, never from the working copy, so the
+    fixture must be committed before the init that reads it.
+    """
+    template = repo / 'templates' / 'crew'
+    steps = template / 'steps'
+    steps.mkdir(parents=True)
+    (template / 'config.json').write_text('{}\n', encoding='utf-8')
+    execute = '# execute the task\n'
+    (steps / '10-EXECUTE.md').write_text(execute, encoding='utf-8')
+    _git(repo, 'add', 'templates/crew')
+    _git(repo, 'commit', '-m', 'crew template')
+    return execute
 
 
 def _require_case_folding(tmp: pathlib.Path) -> None:

@@ -712,11 +712,11 @@ fi
 # safe under set -u even on bash 3.2: an empty array reads as unset
 RESTORE_SPEC=(":(glob)**/.fractal/**" ${SCOPE_EXCLUDES[@]+"${SCOPE_EXCLUDES[@]}"})
 # name what the restore drops outside the node's own machinery -- an edit
-# to the target's estate or a profile is visible, not silent -- captured
-# before the restore erases it from the index, split by fate: a path the
-# target tracks goes back to its content, a path it lacks is removed (the
-# node's branch history keeps its copy); --no-renames so a rename lists as
-# its two halves
+# to the target's estate or another node's seed is visible, not silent --
+# captured before the restore erases it from the index, split by fate: a
+# path the target tracks goes back to its content, a path it lacks is
+# removed (the node's branch history keeps its copy); --no-renames so a
+# rename lists as its two halves
 DROPPED_SPEC=("${RESTORE_SPEC[@]}" ":(exclude)$SEED_PREFIX/$BRANCH" ":(exclude,glob)**/.fractal/$BRANCH.*/**")
 if ! RESTORED=$(git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
     --diff-filter=a HEAD -- "${DROPPED_SPEC[@]}" | tr '\0' '\n') \

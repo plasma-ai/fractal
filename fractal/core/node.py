@@ -11,9 +11,11 @@ import logging
 import os
 import pathlib
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import typing
 from collections.abc import Callable, Iterator
@@ -39,7 +41,12 @@ from fractal.constants import (
 from fractal.typing import PathLike
 
 from . import commit, render, worktree
-from .config import DEFAULT_RESERVE_FRACTION, RESERVE_PRECISION, Config
+from .config import (
+    DEFAULT_RESERVE_FRACTION,
+    RESERVE_PRECISION,
+    Config,
+    parse_reserve_budget,
+)
 from .cost import Cost
 from .db import Database
 from .files import Files
@@ -906,8 +913,10 @@ class Node:
         charter: Optional[pathlib.Path],
         *,
         pin: Optional[str],
+        fork: Optional[str] = None,
+        display: Optional[str] = None,
     ) -> None:
-        """Validate a profile charter's fill-sheet before any spend.
+        """Validate a template charter's fill-sheet before any spend.
 
         The stale-seed gate: four commissions once shipped with stale pins,
         stale docket rows, or truncated charters, each costing the node's
@@ -919,12 +928,18 @@ class Node:
         - every ``pin: <sha>`` line in the charter resolves to a commit and
           matches ``--pin`` (prefix-wise, case-blind) when one is given --
           a ``pin:`` spelling that is not a hex sha refuses outright;
-        - every ``docket: <path>`` line resolves at the pin (the charter's
-          own when ``--pin`` is absent, else ``HEAD``).
+        - every ``docket: <path>`` line resolves at the pin (``--pin`` when
+          given, else the charter's own, else the child's fork ref).
 
         Args:
-            charter: The profile's ``NODE.md``, or ``None`` (pin-only).
+            charter: The template's rendered ``NODE.md``, or ``None``
+                (pin-only).
             pin: The commission pin from ``--pin``, or ``None``.
+            fork: The child's fork ref -- the docket anchor when neither
+                ``pin`` nor a charter ``pin:`` line supplies one.
+            display: Charter path for messages -- the repo-relative
+                template path, since the bundle's temp path is deleted
+                before the user reads a refusal.
 
         Raises:
             ValueError: On the first fill-sheet violation.
@@ -946,8 +961,8 @@ class Node:
         for heading in ('## Instructions', '## Completion Requirements'):
             if heading not in text:
                 raise ValueError(
-                    f'Profile charter {charter} is missing {heading!r}'
-                    ' (truncated or stale seed).'
+                    f'Template charter {display or charter} is missing'
+                    f' {heading!r} (truncated or stale seed).'
                 )
         # every pin: line is load-bearing -- a spelling the gate cannot read
         # as a commit sha (symbolic, or truncated below git's four-hex
@@ -975,7 +990,7 @@ class Node:
                     )
         # docket rows must exist at the pin -- an enumerated surface that
         # moved or never existed is exactly the stale-docket class
-        anchor = pin or (pins[0] if pins else 'HEAD')
+        anchor = pin or (pins[0] if pins else fork)
         for row in re.findall(r'^docket:\s*(\S+)\s*$', text, flags=re.M):
             cmd = ['cat-file', '-e', f'{anchor}:{row}']
             if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is None:
@@ -993,8 +1008,11 @@ class Node:
         base: Optional[str] = None,
         meta: Optional[str] = None,
         inherit: Optional[list[str]] = None,
-        steps: Optional[PathLike] = None,
-        profile: Optional[str] = None,
+        template: Optional[str] = None,
+        include: Optional[list[str]] = None,
+        exclude: Optional[list[str]] = None,
+        values: Optional[PathLike] = None,
+        sets: Optional[list[str]] = None,
         pin: Optional[str] = None,
         agent: Optional[str] = None,
         provider: Optional[str] = None,
@@ -1015,7 +1033,7 @@ class Node:
         max_cost: Optional[float] = None,
         max_iter_cost: Optional[float] = None,
         max_step_cost: Optional[float] = None,
-        reserve_budget: Optional[float] = None,
+        reserve_budget: Optional[str] = None,
         sync: Optional[bool] = None,
         detached: Optional[bool] = None,
         local: Optional[bool] = None,
@@ -1046,18 +1064,31 @@ class Node:
                 package seed (``steps``, ``scripts``, ``skills``,
                 ``config``, or ``all``). ``config`` copies the parent's
                 preference keys only -- budget-class caps never inherit.
-            steps: Directory of step files (``*.md``, each carrying the
-                loop's ``NN-`` digit prefix at one width) to seed the
-                node's ``steps/`` from instead of the package seed;
-                mutually exclusive with inheriting ``steps``.
-            profile: Named seed bundle under
-                ``.fractal/profiles/<name>/`` -- its ``steps/`` seeds the
-                step list (like ``steps``) and its ``NODE.md`` seeds a
-                deployment-ready charter, fill-sheet-validated at init;
-                mutually exclusive with ``steps`` and inheriting them.
+            template: Template folder (``<path>[@<ref>]``): a tracked
+                folder holding ``config.json``, read at the child's fork
+                commit (or at ``<ref>``) and recorded in the node's
+                ``_template.toml``. Its surfaces (``NODE.md``, ``steps/``,
+                ``scripts/``, ``skills/``, ``agents/``) seed the node; a
+                surface it lacks falls back to the inherit-or-package
+                source. Its ``config.json`` preset fills each unset
+                run-config flag (a flag wins over the preset; the preset
+                beats an inherited value).
+            include: Template-relative paths to deploy from the template,
+                dropping everything else; a directory entry covers its
+                subtree. Mutually exclusive with ``exclude`` and recorded
+                in ``_template.toml``.
+            exclude: Template-relative paths to drop from the template; a
+                directory entry covers its subtree. Mutually exclusive
+                with ``include`` and recorded in ``_template.toml``.
+            values: Slot fill sheet: a TOML file of string values the
+                template's ``{{slot}}`` placeholders render with; recorded
+                in ``_template.toml``.
+            sets: Slot fills as ``KEY=VALUE`` pairs (repeatable); a pair
+                wins over the ``values`` sheet.
             pin: Commission pin (a commit sha): must resolve, and every
-                ``pin:`` declaration in the profile charter must match it
-                -- a stale seed dies at init, not at the first seat.
+                ``pin:`` declaration in the template charter must match it
+                -- a stale seed dies at init, not at the first seat. Also
+                supplies the ``pin`` slot value.
             agent: Agent type.
             provider: Provider route for the agent (e.g. ``openrouter``;
                 default: the vendor-native endpoint, inherited from the
@@ -1082,8 +1113,10 @@ class Node:
             max_iter_cost: Maximum cost per iteration in USD.
             max_step_cost: Maximum cost per step in USD
                 (warn-only when unenforceable).
-            reserve_budget: USD reserved for cleanup; shifts when the node
-                enters reserve mode (not enforced).
+            reserve_budget: Budget reserved for cleanup: USD or ``N%`` of
+                the merged ``max_cost`` (default: the default reserve
+                fraction of it); shifts when the node enters reserve mode
+                (not enforced).
             sync: Run sync mode before each step.
             detached: Separate agent invocation per step.
             local: Skip pushing to remote after each commit.
@@ -1101,6 +1134,18 @@ class Node:
         """
         from .agent import command_base, resolve
         from .loop import _STEP_PREFIX
+        from .template import (
+            _UNRESOLVED_REF,
+            collect_values,
+            fill,
+            locate,
+            materialize,
+            read_preset,
+            root_notice,
+            trim,
+            vet,
+            write_provenance,
+        )
 
         # coerce path to a str -- downstream '.' comparisons and persisted
         # caches expect the string form
@@ -1167,65 +1212,38 @@ class Node:
                     )
             if 'all' in inherit:
                 inherit = ['steps', 'scripts', 'skills', 'config']
-        # resolve a named profile: a repo-provided seed bundle under
-        # .fractal/profiles/<name>/ -- its steps/ seeds the step list
-        # exactly like --steps, and its NODE.md seeds a deployment-ready
-        # charter whose fill-sheet is validated below, so a stale or
-        # truncated seed dies at init instead of at the node's first seat
-        charter: Optional[pathlib.Path] = None
-        if profile is not None:
-            if steps is not None:
-                raise ValueError('--profile cannot be combined with --steps.')
-            if inherit and 'steps' in inherit:
-                raise ValueError('--profile cannot be combined with --inherit=steps.')
-            profile_dir = self.repo_dir / FRACTAL_FOLDER / 'profiles' / profile
-            if not profile_dir.is_dir():
-                raise ValueError(f'No profile found at {profile_dir}.')
-            if (profile_dir / 'steps').is_dir():
-                steps = profile_dir / 'steps'
-            if (profile_dir / 'NODE.md').is_file():
-                charter = profile_dir / 'NODE.md'
-        # the fill-sheet gate: a pinned commission must hold together before
-        # any spend (--pin alone still validates the pin itself)
-        if pin is not None or charter is not None:
-            self._validate_charter(charter, pin=pin)
-        # an explicit steps dir is a rival step source to inheriting the
-        # parent's -- refuse the combination rather than pick one silently --
-        # and it must satisfy the loop's discovery contract, checked here so a
-        # bad profile refuses before any worktree is created rather than
-        # failing the node's first iteration; resolved so the arg handed to
-        # init.sh never depends on the script's inherited cwd
-        if steps is not None:
-            if inherit and 'steps' in inherit:
-                raise ValueError('--steps cannot be combined with --inherit=steps.')
-            steps = pathlib.Path(steps).resolve()
-            if not steps.exists():
-                raise ValueError(f'--steps directory does not exist: {steps}')
-            if not steps.is_dir():
-                raise ValueError(f'--steps is not a directory: {steps}')
-            # only regular files seed -- init.sh copies the same set
-            step_files = sorted(
-                entry for entry in steps.glob('*.md') if entry.is_file()
+        # resolve the template flag early: the path refusals (a machinery
+        # component, a path outside every worktree, '@' in a folder name)
+        # need no parent, so a typo dies before any other work; the read
+        # itself waits for the fork commit, resolved under the lock below
+        template_path: Optional[str] = None
+        template_ref: Optional[str] = None
+        template_worktree: Optional[pathlib.Path] = None
+        template_notice: Optional[str] = None
+        template_tmp: Optional[str] = None
+        template_bundle: Optional[pathlib.Path] = None
+        template_preset: dict[str, Any] = {}
+        template_values: dict[str, str] = {}
+        if include and exclude:
+            raise ValueError('--include cannot be combined with --exclude.')
+        if (include or exclude) and template is None:
+            raise ValueError('--include and --exclude require --template.')
+        if (values is not None or sets) and template is None:
+            raise ValueError('--values and --set require --template.')
+        if template is not None:
+            template_path, template_ref, template_worktree = locate(
+                template,
+                repo_dir=self.repo_dir,
             )
-            if not step_files:
-                raise ValueError(
-                    f'--steps directory contains no step files (*.md): {steps}'
-                )
-            # the loop discovers steps by their NN- prefix and fails an
-            # iteration on a missing prefix or mixed digit widths
-            widths = set()
-            for step_file in step_files:
-                match = _STEP_PREFIX.match(step_file.name)
-                if match is None:
-                    raise ValueError(
-                        f'--steps directory has a step file without an'
-                        f' NN- prefix: {step_file.name}'
-                    )
-                widths.add(len(match.group(1)))
-            if len(widths) > 1:
-                raise ValueError(
-                    f'--steps directory mixes digit prefix widths: {steps}'
-                )
+            # merge the slot values now (later sources win: the --values
+            # sheet, then --set, then --pin), so a malformed sheet or pair
+            # dies before any other work
+            template_values = collect_values(values=values, sets=sets, pin=pin)
+        # the fill-sheet gate: a pinned commission must hold together before
+        # any spend (--pin alone still validates the pin itself); a template
+        # charter validates once the bundle materializes below
+        if pin is not None and template is None:
+            self._validate_charter(None, pin=pin)
         # expand --meta into --base + --scope
         if meta:
             # handle mutually exclusive flags
@@ -1313,312 +1331,566 @@ class Node:
                     ' the scope list cannot hold; rename the project directory'
                     ' or init the node without --meta.'
                 )
-        # validate the cost and duration flags (the one merged validator:
-        # finiteness, positive ceiling, reserve range, step <= iter <= run
-        # ordering, unit suffixes) -- a pure check of the passed flags (no live
-        # state), so it stays out here; the live subtree/budget caps
-        # (max-children/depth/descendants/cost-remaining) are enforced inside the
-        # .worktrees flock below, after a fresh re-read, so concurrent fan-out
-        # cannot each pass the check before any of them takes the lock (a TOCTOU
-        # race that would defeat the caps)
-        config_values = {
-            'max_cost': max_cost,
-            'max_iter_cost': max_iter_cost,
-            'max_step_cost': max_step_cost,
-            'reserve_budget': reserve_budget,
-            'timeout': timeout,
-            'iter_timeout': iter_timeout,
-            'step_timeout': step_timeout,
-            'step_retry_backoff': step_retry_backoff,
-            'interval': interval,
-            'sleep': sleep,
-            'wait': wait,
-        }
-        self.config.validate(config_values)
-        # inherit local from the parent; local is immutable once set
-        if parent.config.get('local'):
-            if parent is self:
-                if local is False:
-                    raise ValueError('Local flag cannot be changed once set.')
-                local = True
-            elif local or local is None:
-                local = True
-            else:
-                raise ValueError('Parent is local; child cannot push.')
-        # default to non-local (allow pushing)
-        if local is None:
-            local = False
-        # inherit the agent from the nearest ancestor (the user node sets the
-        # default via `fractal init --agent`) when the spawn doesn't specify one
-        if agent is None:
-            for ancestor in parent._self_and_ancestors():
-                if ancestor_agent := ancestor.config.get('agent'):
-                    agent = ancestor_agent
-                    break
-            if agent is None:
-                raise ValueError(
-                    'No --agent given and no ancestor has one configured;'
-                    " pass --agent or set a default with 'fractal init --agent'."
-                )
-        # resolve the agent's base command against the registry now, reading
-        # the CLASS without construction (the child node does not exist yet)
-        # -- a junk name would store fine and kill the loop at boot inside
-        # the tmux pane, after start already printed its success, so the
-        # typo refuses here with the registry's supported-list error
-        base_word = command_base(agent)
-        resolved = resolve(base_word, root=parent.db.path.parent)
-        # inherit the provider route the same way, materializing it only when
-        # the child's agent supports routes -- an openrouter-defaulting
-        # ancestor must never pin a route on a route-less backend (no raise
-        # when absent: None means the vendor's own endpoint)
-        if provider is None:
-            for ancestor in parent._self_and_ancestors():
-                if ancestor_provider := ancestor.config.get('provider'):
-                    provider = ancestor_provider
-                    break
-            if provider is not None and provider not in resolved.providers:
-                provider = None
-        # an explicit route the backend does not support would store fine
-        # and silently spend vendor-native -- refuse like the agent typo
-        # above, naming the supported set (only the explicit flag refuses;
-        # the inherited default keeps its silent drop)
-        elif provider not in resolved.providers:
-            supported_providers = ', '.join(resolved.providers) or 'none'
-            raise ValueError(
-                f'Unsupported provider: {provider!r} (supported: {supported_providers})'
-            )
-        # inherit the parent's preference config when requested -- explicit
-        # flags win, values land in the child's config as a spawn-time
-        # snapshot, and budget-class keys (costs, iters, depth/children,
-        # run timeout) never inherit; a null parent value stays null (the
-        # loop defaults at read time)
-        if inherit and 'config' in inherit:
-            if model is None:
-                model = parent.config.get('model')
-            if effort is None:
-                effort = parent.config.get('effort')
-            if sync is None:
-                sync = parent.config.get('sync')
-            if detached is None:
-                detached = parent.config.get('detached')
-            if iter_timeout is None:
-                iter_timeout = parent.config.get('iter_timeout')
-            if step_timeout is None:
-                step_timeout = parent.config.get('step_timeout')
-            if step_retries is None:
-                step_retries = parent.config.get('step_retries')
-            if step_retry_backoff is None:
-                step_retry_backoff = parent.config.get('step_retry_backoff')
-            if wait is None:
-                wait = parent.config.get('wait')
-            # sleep and interval are rival pacing keys (the loop rejects
-            # both set): inherit them only when the spawn sets neither
-            if sleep is None and interval is None:
-                sleep = parent.config.get('sleep')
-                interval = parent.config.get('interval')
         # the child records the tree's root (inherited from the parent) so any
         # node can resolve the central database from its own config
         root = parent.config.get('root')
-        # default the display title to the de-slugged node name
-        if title is None:
-            title = fractal.util.name_to_title(name)
-        # build arguments (name and path are positional)
-        args = [name, f'{self._root}']
-        args.append(f'--title={title}')
-        args.append(f'--parent={parent.branch}')
-        args.append(f'--root={root}')
-        # a non-root path selects the child's sub-project (default: inherit); a
-        # .worktrees/ path is the cwd-in-a-worktree case above -- inherit too
-        if path is not None and path != '.':
-            parts = pathlib.Path(path).parts
-            if parts[0] != WORKTREES_FOLDER:
-                args.append(f'--project={path}')
-        for scope_root in scope or []:
-            args.append(f'--scope={scope_root}')
-        if base:
-            args.append(f'--base={base}')
-        if meta:
-            args.append(f'--meta={meta}')
-        if inherit:
-            joined = ','.join(inherit)
-            args.append(f'--inherit={joined}')
-        if steps is not None:
-            args.append(f'--steps={steps}')
-        if charter is not None:
-            args.append(f'--charter={charter}')
-        if agent:
-            args.append(f'--agent={agent}')
-        if provider:
-            args.append(f'--provider={provider}')
-        if model:
-            args.append(f'--model={model}')
-        if effort:
-            args.append(f'--effort={effort}')
-        if max_iters is not None:
-            args.append(f'--max-iters={max_iters}')
-        if max_depth is not None:
-            args.append(f'--max-depth={max_depth}')
-        if max_children is not None:
-            args.append(f'--max-children={max_children}')
-        if max_descendants is not None:
-            args.append(f'--max-descendants={max_descendants}')
-        if timeout is not None:
-            args.append(f'--timeout={timeout}')
-        if iter_timeout is not None:
-            args.append(f'--iter-timeout={iter_timeout}')
-        if step_timeout is not None:
-            args.append(f'--step-timeout={step_timeout}')
-        if step_retries is not None:
-            args.append(f'--step-retries={step_retries}')
-        if step_retry_backoff is not None:
-            args.append(f'--step-retry-backoff={step_retry_backoff}')
-        if interval is not None:
-            args.append(f'--interval={interval}')
-        if sleep is not None:
-            args.append(f'--sleep={sleep}')
-        if wait is not None:
-            args.append(f'--wait={wait}')
-        if max_cost is not None:
-            args.append(f'--max-cost={max_cost}')
-        if max_iter_cost is not None:
-            args.append(f'--max-iter-cost={max_iter_cost}')
-        if max_step_cost is not None:
-            args.append(f'--max-step-cost={max_step_cost}')
-        if reserve_budget is not None:
-            args.append(f'--reserve-budget={reserve_budget}')
-        if sync is True:
-            args.append('--sync')
-        if sync is False:
-            args.append('--no-sync')
-        if detached is True:
-            args.append('--detached')
-        if detached is False:
-            args.append('--no-detached')
-        if local:
-            args.append('--local')
-        if blind:
-            args.append('--blind')
-        if sealed:
-            args.append('--sealed')
-        if reset:
-            args.append('--reset')
-        # ensure git excludes
-        self._git_exclude()
-        # serialize concurrent child inits -- git worktree add is not parallel-safe
-        with worktree.lock(self.repo_dir):
-            # refuse to spawn into a paused subtree -- the pause latch admits
-            # no new work until resume
-            if latched := parent.pause_latched():
-                raise RuntimeError(
-                    f'Cannot spawn under a paused node ({latched}). Resume it first.'
+        # compose the child branch and probe its pre-existing ref now: the template
+        # read below forks from the branch's own tip on a --reset, and the failure
+        # rollback must never delete a reused branch's committed history
+        child_branch = f'{parent.branch}.{name}'
+        cmd = ['show-ref', '--verify', f'refs/heads/{child_branch}']
+        pre_existing_branch = fractal.util.git.run(
+            cmd,
+            cwd=self.repo_dir,
+            check=False,
+        )
+        # the materialized bundle must survive until init.sh consumes it, so
+        # everything through the seeding script shares one cleanup scope -- the
+        # finally below drops the bundle on success and on every refusal in between
+        try:
+            # materialize the template at the child's fork commit -- the
+            # branch's own tip when it already exists (a --reset), else the
+            # base or the parent branch, which is what worktree add checks
+            # out -- so the recorded commit is what deploys (the provenance
+            # keeps the commit actually read, which can differ from the fork
+            # sha when the parent commits before worktree add); every
+            # template refusal fires here, before any worktree exists
+            if template is not None:
+                fork = child_branch if pre_existing_branch else (base or parent.branch)
+                rev = template_ref if template_ref is not None else fork
+                cmd = ['rev-parse', '--verify', f'{rev}^{{commit}}']
+                template_commit = fractal.util.git.run(
+                    cmd,
+                    cwd=self.repo_dir,
+                    check=False,
                 )
-            # enforce the live subtree/budget caps under the lock, off a fresh
-            # re-read of live descendants -- only now (serialized) is the count
-            # authoritative, so concurrent fan-out can't each pass before any of
-            # them registers its child and blows past the cap
-            parent._enforce_spawn_limits(child_max_cost=max_cost)
-            # locate child worktree
-            child_branch = f'{parent.branch}.{name}'
-            child_worktree_dir = fractal.util.git.find_worktree(
-                repo_dir=self.repo_dir,
-                branch=child_branch,
-            )
-            # a case-insensitive filesystem resolves a name differing from a
-            # sibling only by case onto the sibling's worktree dir -- init.sh
-            # would then run every path below (node dir, init event, a
-            # --reset's rm -rf) against the sibling's node -- so refuse when
-            # the child's path lands on another branch's worktree
-            if child_worktree_dir is None:
-                child_path = self.repo_dir / WORKTREES_FOLDER / child_branch
-                if child_path.is_dir():
-                    worktrees = fractal.util.git.worktree_map(self.repo_dir)
-                    for branch, worktree_dir in worktrees.items():
-                        if child_path.samefile(worktree_dir):
-                            raise ValueError(
-                                f'Node {child_branch!r} would alias existing'
-                                f' node {branch!r} on this case-insensitive'
-                                ' filesystem; use a name that differs by more'
-                                ' than letter case.'
-                            )
-            # refuse an implicit adopt: exiting 0 against an existing node
-            # would leave its old config in place and silently drop the
-            # requested caps -- reuse is explicit in this CLI, never an accident
-            if child_worktree_dir is not None:
-                child = self.__class__(child_worktree_dir)
-                if child.exists():
-                    if not reset:
+                if template_commit is None:
+                    raise ValueError(_UNRESOLVED_REF.format(ref=rev))
+                template_tmp = tempfile.mkdtemp(prefix='fractal-template-')
+                bundle = materialize(
+                    worktree=template_worktree,
+                    path=template_path,
+                    commit=template_commit,
+                    dest=pathlib.Path(template_tmp),
+                )
+                # the folder's config.json is the preset: it fills each
+                # unset init flag below (flag wins over preset, preset over
+                # the parent's inherited value), so a bad key refuses
+                # before any other work
+                template_preset = read_preset(bundle, path=template_path)
+                # cut the bundle down to the effective set, so downstream
+                # only sees what the listing keeps -- every check below
+                # judges what actually deploys, so an excluded file can
+                # neither refuse the init nor slip past it
+                trim(bundle, include=include, exclude=exclude)
+                # the effective set's steps must satisfy the loop's
+                # discovery contract, so a template that cannot iterate
+                # refuses here rather than failing the node's first
+                # iteration (a steps/ kept alive by non-step survivors
+                # would deploy empty)
+                steps_dir = bundle / 'steps'
+                if steps_dir.is_dir():
+                    # only regular, non-hidden files seed -- init.sh
+                    # copies the same set (its glob skips dot entries,
+                    # which the vet below refuses by the accurate rule)
+                    step_files = sorted(
+                        entry
+                        for entry in steps_dir.glob('*.md')
+                        if entry.is_file() and not entry.name.startswith('.')
+                    )
+                    if not step_files:
                         raise ValueError(
-                            f'Node {child_branch!r} already exists; start it with'
-                            ' `fractal node start --continue`, remove it with'
-                            ' `fractal node delete`, or pass --reset to'
-                            ' reinitialize it.'
+                            f'Template steps/ contains no step files'
+                            f' (*.md): {template_path}'
                         )
-                    # reset rm -rf's the node dir, so refuse over a running or
-                    # frozen node exactly as delete/merge/retire do -- a live
-                    # loop's step files or a paused node's frozen run context
-                    # would otherwise be wiped irrecoverably
-                    child._reconcile_status(locked=True)
-                    if child.status() == 'active':
-                        raise RuntimeError(
-                            'Cannot reinitialize an active node. Stop or kill it first.'
+                    # the loop discovers steps by their NN- prefix and fails an
+                    # iteration on a missing prefix or mixed digit widths
+                    widths = set()
+                    for step_file in step_files:
+                        match = _STEP_PREFIX.match(step_file.name)
+                        if match is None:
+                            raise ValueError(
+                                f'Template steps/ has a step file without'
+                                f' an NN- prefix: {step_file.name}'
+                            )
+                        widths.add(len(match.group(1)))
+                    if len(widths) > 1:
+                        raise ValueError(
+                            f'Template steps/ mixes digit prefix widths:'
+                            f' {template_path}'
                         )
-                    if child.status() == 'paused':
-                        raise RuntimeError(
-                            'Cannot reinitialize a paused node.'
-                            ' Resume or kill it first.'
+                # a bundled surface is a rival source to inheriting the
+                # parent's -- refuse the combination rather than pick one
+                for surface in ('steps', 'scripts', 'skills'):
+                    if inherit and surface in inherit and (bundle / surface).is_dir():
+                        raise ValueError(
+                            f'--template carries {surface}/; it cannot be'
+                            f' combined with --inherit={surface}.'
                         )
-            # check for pre-existing branch
-            cmd = ['show-ref', '--verify', f'refs/heads/{child_branch}']
-            pre_existing_branch = fractal.util.git.run(
-                cmd,
-                cwd=self.repo_dir,
-                check=False,
-            )
-            # init.sh creates the worktree before the registration below, so a
-            # failure in between would strand a live worktree with no registry row
-            # -- roll back, but only what *this* init created (a pre-existing
-            # worktree means init failed on collision; leave it alone), and
-            # never delete a reused pre-existing branch's committed history
-            pre_existing = child_worktree_dir is not None
-            try:
-                # run script
-                result = self._run_script('init.sh', *args)
-                # seed the new node's radio (internal -- agents must not create
-                # radios explicitly; user nodes seed theirs in _init_user)
+                # a file the copy loops would silently skip -- a stray
+                # under steps/ or scripts/, a loose skills/ file, an
+                # unknown or loose agents/ entry -- would deploy nothing,
+                # print success, and drift on every later diff, so it
+                # refuses here like a credential
+                vet(bundle)
+                # the slot pass: render the effective set's {{slot}}
+                # placeholders in place -- an unfilled slot or a stray {{
+                # refuses here, naming the file and the token
+                fill(bundle, path=template_path, values=template_values)
+                # the fill-sheet gate on the bundle's rendered charter
+                # (--pin alone still validates the pin itself); a pinless
+                # docket anchors at the fork ref
+                node_md = bundle / 'NODE.md'
+                if pin is not None or node_md.is_file():
+                    charter = node_md if node_md.is_file() else None
+                    self._validate_charter(
+                        charter,
+                        pin=pin,
+                        fork=fork,
+                        display=f'{template_path}/NODE.md',
+                    )
+                # one notice when the root branch's copy differs from the
+                # commit read -- a path absent on the root is no notice
+                template_notice = root_notice(
+                    repo_dir=self.repo_dir,
+                    root=root,
+                    path=template_path,
+                    commit=template_commit,
+                )
+                # record the provenance into the bundle; init.sh places
+                # it with the other bundle surfaces
+                write_provenance(
+                    bundle,
+                    path=template_path,
+                    commit=template_commit,
+                    values=template_values,
+                    include=include,
+                    exclude=exclude,
+                )
+                template_bundle = bundle
+            # fill each unset flag from the template's config preset -- the
+            # flag wins over the preset, and the preset beats the parent's
+            # inherited value below; the package default covers the rest
+            if agent is None:
+                agent = template_preset.get('agent')
+            if provider is None:
+                provider = template_preset.get('provider')
+            if model is None:
+                model = template_preset.get('model')
+            if effort is None:
+                effort = template_preset.get('effort')
+            if max_iters is None:
+                max_iters = template_preset.get('max_iters')
+            if max_depth is None:
+                max_depth = template_preset.get('max_depth')
+            if max_children is None:
+                max_children = template_preset.get('max_children')
+            if max_descendants is None:
+                max_descendants = template_preset.get('max_descendants')
+            if timeout is None:
+                timeout = template_preset.get('timeout')
+            if iter_timeout is None:
+                iter_timeout = template_preset.get('iter_timeout')
+            if step_timeout is None:
+                step_timeout = template_preset.get('step_timeout')
+            if step_retries is None:
+                step_retries = template_preset.get('step_retries')
+            if step_retry_backoff is None:
+                step_retry_backoff = template_preset.get('step_retry_backoff')
+            # sleep and interval are rival pacing keys (the loop rejects
+            # both set): the preset fills them only when the spawn sets neither
+            if sleep is None and interval is None:
+                sleep = template_preset.get('sleep')
+                interval = template_preset.get('interval')
+            if wait is None:
+                wait = template_preset.get('wait')
+            if max_cost is None:
+                max_cost = template_preset.get('max_cost')
+            if max_iter_cost is None:
+                max_iter_cost = template_preset.get('max_iter_cost')
+            if max_step_cost is None:
+                max_step_cost = template_preset.get('max_step_cost')
+            if sync is None:
+                sync = template_preset.get('sync')
+            if detached is None:
+                detached = template_preset.get('detached')
+            # a bundled step may not flip an already-detached node -- init.sh
+            # vets the inherit/package sources, but only after its --reset
+            # arms rewrote the live steps, too late to refuse cleanly -- so
+            # the bundle's steps refuse here, before any worktree work; the
+            # check sits below the preset fill because the merged detached
+            # value (flag beats preset) only settles there
+            if detached and template_bundle is not None:
+                bundle_steps = template_bundle / 'steps'
+                if bundle_steps.is_dir():
+                    # the same set that seeds: regular, non-hidden *.md files
+                    for step_file in sorted(bundle_steps.glob('*.md')):
+                        if not step_file.is_file() or step_file.name.startswith('.'):
+                            continue
+                        # mirror init.sh's frontmatter rule: a detached: line
+                        # inside the first --- delimited block
+                        delimiters = 0
+                        text = step_file.read_text(encoding='utf-8')
+                        for line in text.splitlines():
+                            if line == '---':
+                                delimiters += 1
+                                if delimiters >= 2:
+                                    break
+                                continue
+                            if delimiters == 1 and line.startswith('detached:'):
+                                raise ValueError(
+                                    f'detached: in {step_file.name} is invalid'
+                                    ' in detached mode (already detached)'
+                                )
+            # inherit local from the parent; local is immutable once set
+            if parent.config.get('local'):
+                if parent is self:
+                    if local is False:
+                        raise ValueError('Local flag cannot be changed once set.')
+                    local = True
+                elif local or local is None:
+                    local = True
+                else:
+                    raise ValueError('Parent is local; child cannot push.')
+            # default to non-local (allow pushing)
+            if local is None:
+                local = False
+            # inherit the agent from the nearest ancestor (the user node sets the
+            # default via `fractal init --agent`) when the spawn doesn't specify one
+            if agent is None:
+                for ancestor in parent._self_and_ancestors():
+                    if ancestor_agent := ancestor.config.get('agent'):
+                        agent = ancestor_agent
+                        break
+                if agent is None:
+                    raise ValueError(
+                        'No --agent given and no ancestor has one configured;'
+                        " pass --agent or set a default with 'fractal init --agent'."
+                    )
+            # resolve the agent's base command against the registry now, reading
+            # the CLASS without construction (the child node does not exist yet)
+            # -- a junk name would store fine and kill the loop at boot inside
+            # the tmux pane, after start already printed its success, so the
+            # typo refuses here with the registry's supported-list error
+            base_word = command_base(agent)
+            resolved = resolve(base_word, root=parent.db.path.parent)
+            # inherit the provider route the same way, materializing it only when
+            # the child's agent supports routes -- an openrouter-defaulting
+            # ancestor must never pin a route on a route-less backend (no raise
+            # when absent: None means the vendor's own endpoint)
+            if provider is None:
+                for ancestor in parent._self_and_ancestors():
+                    if ancestor_provider := ancestor.config.get('provider'):
+                        provider = ancestor_provider
+                        break
+                if provider is not None and provider not in resolved.providers:
+                    provider = None
+            # an explicit route the backend does not support would store fine
+            # and silently spend vendor-native -- refuse like the agent typo
+            # above, naming the supported set (only the explicit flag refuses;
+            # the inherited default keeps its silent drop)
+            elif provider not in resolved.providers:
+                supported_providers = ', '.join(resolved.providers) or 'none'
+                raise ValueError(
+                    f'Unsupported provider: {provider!r} (supported: {supported_providers})'
+                )
+            # inherit the parent's preference config when requested -- explicit
+            # flags win, values land in the child's config as a spawn-time
+            # snapshot, and budget-class keys (costs, iters, depth/children,
+            # run timeout) never inherit; a null parent value stays null (the
+            # loop defaults at read time)
+            if inherit and 'config' in inherit:
+                if model is None:
+                    model = parent.config.get('model')
+                if effort is None:
+                    effort = parent.config.get('effort')
+                if sync is None:
+                    sync = parent.config.get('sync')
+                if detached is None:
+                    detached = parent.config.get('detached')
+                if iter_timeout is None:
+                    iter_timeout = parent.config.get('iter_timeout')
+                if step_timeout is None:
+                    step_timeout = parent.config.get('step_timeout')
+                if step_retries is None:
+                    step_retries = parent.config.get('step_retries')
+                if step_retry_backoff is None:
+                    step_retry_backoff = parent.config.get('step_retry_backoff')
+                if wait is None:
+                    wait = parent.config.get('wait')
+                # sleep and interval are rival pacing keys (the loop rejects
+                # both set): inherit them only when the spawn sets neither
+                if sleep is None and interval is None:
+                    sleep = parent.config.get('sleep')
+                    interval = parent.config.get('interval')
+            # resolve the reserve to USD against the merged ceiling -- the
+            # flag's USD-or-N% grammar needs the final max_cost (a percent
+            # of a preset ceiling resolves here), while a preset reserve is
+            # already a USD number, typed as config.json holds it
+            usable = (type(max_cost) in (int, float)) and (max_cost > 0)
+            ceiling_ok = (max_cost is None) or usable
+            if reserve_budget is None and 'reserve_budget' in template_preset:
+                # a reserve without a ceiling is inert, so the preset obeys
+                # the same requires-max-cost rule the flag does
+                if max_cost is None:
+                    raise ValueError(
+                        'Template preset reserve_budget requires max_cost'
+                        ' (preset or --max-cost).'
+                    )
+                reserve_budget = template_preset['reserve_budget']
+            elif ceiling_ok:
+                reserve_budget = parse_reserve_budget(reserve_budget, max_cost)
+            else:
+                # a degenerate or junk-typed ceiling resolves no reserve -- the
+                # merged validation below owns that rejection and its wording
+                reserve_budget = None
+            # validate the merged run config (the one merged validator: finiteness,
+            # positive ceilings, per-iter/step caps needing the run ceiling, reserve
+            # range, step <= iter <= run ordering, integer caps, mode-flag types, unit
+            # suffixes) only after flag > preset > inherit resolved, so a preset or
+            # inherited value obeys exactly the rules the matching flag does -- a pure
+            # check of the merged values (no live state), so it stays out of the flock;
+            # subtree/budget caps (max-children/depth/descendants/cost-remaining) are
+            # enforced inside the .worktrees flock below, after a fresh re-read, so
+            # concurrent fan-out cannot each pass the check before any of them takes
+            # the lock (a TOCTOU race that would defeat the caps)
+            config_values = {
+                'max_iters': max_iters,
+                'max_depth': max_depth,
+                'max_children': max_children,
+                'max_descendants': max_descendants,
+                'timeout': timeout,
+                'iter_timeout': iter_timeout,
+                'step_timeout': step_timeout,
+                'step_retries': step_retries,
+                'step_retry_backoff': step_retry_backoff,
+                'interval': interval,
+                'sleep': sleep,
+                'wait': wait,
+                'max_cost': max_cost,
+                'max_iter_cost': max_iter_cost,
+                'max_step_cost': max_step_cost,
+                'reserve_budget': reserve_budget,
+                'sync': sync,
+                'detached': detached,
+            }
+            self.config.validate(config_values)
+            # default the display title to the de-slugged node name
+            if title is None:
+                title = fractal.util.name_to_title(name)
+            # build arguments (name and path are positional)
+            args = [name, f'{self._root}']
+            args.append(f'--title={title}')
+            args.append(f'--parent={parent.branch}')
+            args.append(f'--root={root}')
+            # a non-root path selects the child's sub-project (default: inherit); a
+            # .worktrees/ path is the cwd-in-a-worktree case above -- inherit too
+            if path is not None and path != '.':
+                parts = pathlib.Path(path).parts
+                if parts[0] != WORKTREES_FOLDER:
+                    args.append(f'--project={path}')
+            for scope_root in scope or []:
+                args.append(f'--scope={scope_root}')
+            if base:
+                args.append(f'--base={base}')
+            if meta:
+                args.append(f'--meta={meta}')
+            if inherit:
+                joined = ','.join(inherit)
+                args.append(f'--inherit={joined}')
+            if agent:
+                args.append(f'--agent={agent}')
+            if provider:
+                args.append(f'--provider={provider}')
+            if model:
+                args.append(f'--model={model}')
+            if effort:
+                args.append(f'--effort={effort}')
+            if max_iters is not None:
+                args.append(f'--max-iters={max_iters}')
+            if max_depth is not None:
+                args.append(f'--max-depth={max_depth}')
+            if max_children is not None:
+                args.append(f'--max-children={max_children}')
+            if max_descendants is not None:
+                args.append(f'--max-descendants={max_descendants}')
+            if timeout is not None:
+                args.append(f'--timeout={timeout}')
+            if iter_timeout is not None:
+                args.append(f'--iter-timeout={iter_timeout}')
+            if step_timeout is not None:
+                args.append(f'--step-timeout={step_timeout}')
+            if step_retries is not None:
+                args.append(f'--step-retries={step_retries}')
+            if step_retry_backoff is not None:
+                args.append(f'--step-retry-backoff={step_retry_backoff}')
+            if interval is not None:
+                args.append(f'--interval={interval}')
+            if sleep is not None:
+                args.append(f'--sleep={sleep}')
+            if wait is not None:
+                args.append(f'--wait={wait}')
+            if max_cost is not None:
+                args.append(f'--max-cost={max_cost}')
+            if max_iter_cost is not None:
+                args.append(f'--max-iter-cost={max_iter_cost}')
+            if max_step_cost is not None:
+                args.append(f'--max-step-cost={max_step_cost}')
+            if reserve_budget is not None:
+                args.append(f'--reserve-budget={reserve_budget}')
+            if sync is True:
+                args.append('--sync')
+            if sync is False:
+                args.append('--no-sync')
+            if detached is True:
+                args.append('--detached')
+            if detached is False:
+                args.append('--no-detached')
+            if local:
+                args.append('--local')
+            if blind:
+                args.append('--blind')
+            if sealed:
+                args.append('--sealed')
+            if reset:
+                args.append('--reset')
+            # the bundle feeds init.sh's copy loops in place of the
+            # inherit-or-package sources for the surfaces it carries
+            if template_bundle is not None:
+                args.append(f'--bundle={template_bundle}')
+            # ensure git excludes
+            self._git_exclude()
+            # serialize concurrent child inits -- git worktree add is not parallel-safe
+            with worktree.lock(self.repo_dir):
+                # refuse to spawn into a paused subtree -- the pause latch admits
+                # no new work until resume
+                if latched := parent.pause_latched():
+                    raise RuntimeError(
+                        f'Cannot spawn under a paused node ({latched}). Resume it first.'
+                    )
+                # enforce the live subtree/budget caps under the lock, off a fresh
+                # re-read of live descendants -- only now (serialized) is the count
+                # authoritative, so concurrent fan-out can't each pass before any of
+                # them registers its child and blows past the cap
+                parent._enforce_spawn_limits(child_max_cost=max_cost)
+                # locate child worktree
                 child_worktree_dir = fractal.util.git.find_worktree(
                     repo_dir=self.repo_dir,
                     branch=child_branch,
                 )
-                if child_worktree_dir:
-                    self.__class__(child_worktree_dir).radio.init()
-                # register child in the nodes table; log the spawn on the parent
-                # (run lineage attaches only when it's mid-run -- an autonomous
-                # spawn during EXECUTE -- else NULL)
-                event_id = parent.record.event_start('spawn', metadata=child_branch)
+                # a case-insensitive filesystem resolves a name differing from a
+                # sibling only by case onto the sibling's worktree dir -- init.sh
+                # would then run every path below (node dir, init event, a
+                # --reset's rm -rf) against the sibling's node -- so refuse when
+                # the child's path lands on another branch's worktree
+                if child_worktree_dir is None:
+                    child_path = self.repo_dir / WORKTREES_FOLDER / child_branch
+                    if child_path.is_dir():
+                        worktrees = fractal.util.git.worktree_map(self.repo_dir)
+                        for branch, worktree_dir in worktrees.items():
+                            if child_path.samefile(worktree_dir):
+                                raise ValueError(
+                                    f'Node {child_branch!r} would alias existing'
+                                    f' node {branch!r} on this case-insensitive'
+                                    ' filesystem; use a name that differs by more'
+                                    ' than letter case.'
+                                )
+                # refuse an implicit adopt: exiting 0 against an existing node
+                # would leave its old config in place and silently drop the
+                # requested caps -- reuse is explicit in this CLI, never an accident
+                if child_worktree_dir is not None:
+                    child = self.__class__(child_worktree_dir)
+                    if child.exists():
+                        if not reset:
+                            raise ValueError(
+                                f'Node {child_branch!r} already exists; start it with'
+                                ' `fractal node start --continue`, remove it with'
+                                ' `fractal node delete`, or pass --reset to'
+                                ' reinitialize it.'
+                            )
+                        # reset rm -rf's the node dir, so refuse over a running or
+                        # frozen node exactly as delete/merge/retire do -- a live
+                        # loop's step files or a paused node's frozen run context
+                        # would otherwise be wiped irrecoverably
+                        child._reconcile_status(locked=True)
+                        if child.status() == 'active':
+                            raise RuntimeError(
+                                'Cannot reinitialize an active node. Stop or kill it first.'
+                            )
+                        if child.status() == 'paused':
+                            raise RuntimeError(
+                                'Cannot reinitialize a paused node.'
+                                ' Resume or kill it first.'
+                            )
+                # a phantom node -- branch alive, worktree gone -- would adopt
+                # the same way: worktree add checks the old committed seed back
+                # out and every not-exists-guarded arm keeps it (old config,
+                # dropped caps) while the bundle pass overwrites the agent
+                # files, so probe the branch tip for the node seed and refuse
+                # without --reset; a plain pre-existing branch that was never a
+                # node carries no seed, seeds fresh, and stays adoptable
+                elif pre_existing_branch and not reset:
+                    child_project = worktree.project_path(self.repo_dir, child_branch)
+                    prefix = '' if child_project == '.' else f'{child_project}/'
+                    seed = f'{prefix}{FRACTAL_FOLDER}/{child_branch}/config.json'
+                    cmd = ['cat-file', '-e', f'{child_branch}:{seed}']
+                    probe = fractal.util.git.run(cmd, cwd=self.repo_dir, check=False)
+                    if probe is not None:
+                        raise ValueError(
+                            f'Node {child_branch!r} already exists (its branch'
+                            ' holds the committed seed; only the worktree is'
+                            ' gone); remove it with `fractal node delete`, or'
+                            ' pass --reset to reinitialize it.'
+                        )
+                # init.sh creates the worktree before the registration below, so a
+                # failure in between would strand a live worktree with no registry row
+                # -- roll back, but only what *this* init created (a pre-existing
+                # worktree means init failed on collision; leave it alone), and
+                # never delete a reused pre-existing branch's committed history
+                pre_existing = child_worktree_dir is not None
                 try:
-                    parent.child_add(
-                        name=name,
-                        title=title,
-                        max_cost=max_cost,
-                        max_depth=max_depth,
-                        max_children=max_children,
-                        max_descendants=max_descendants,
-                    )
-                except Exception:
-                    if event_id is not None:
-                        parent.record.event_end(event_id=event_id, status='failed')
-                    raise
-                if event_id is not None:
-                    parent.record.event_end(event_id=event_id, status='completed')
-            except Exception:
-                if not pre_existing:
-                    created_branch = pre_existing_branch is None
-                    worktree.cleanup_failed_worktree(
+                    # run script
+                    result = self._run_script('init.sh', *args)
+                    # seed the new node's radio (internal -- agents must not create
+                    # radios explicitly; user nodes seed theirs in _init_user)
+                    child_worktree_dir = fractal.util.git.find_worktree(
                         repo_dir=self.repo_dir,
                         branch=child_branch,
-                        created_branch=created_branch,
                     )
-                raise
+                    if child_worktree_dir:
+                        self.__class__(child_worktree_dir).radio.init()
+                    # register child in the nodes table; log the spawn on the parent
+                    # (run lineage attaches only when it's mid-run -- an autonomous
+                    # spawn during EXECUTE -- else NULL)
+                    event_id = parent.record.event_start('spawn', metadata=child_branch)
+                    try:
+                        parent.child_add(
+                            name=name,
+                            title=title,
+                            max_cost=max_cost,
+                            max_depth=max_depth,
+                            max_children=max_children,
+                            max_descendants=max_descendants,
+                        )
+                    except Exception:
+                        if event_id is not None:
+                            parent.record.event_end(event_id=event_id, status='failed')
+                        raise
+                    if event_id is not None:
+                        parent.record.event_end(event_id=event_id, status='completed')
+                except Exception:
+                    if not pre_existing:
+                        created_branch = pre_existing_branch is None
+                        worktree.cleanup_failed_worktree(
+                            repo_dir=self.repo_dir,
+                            branch=child_branch,
+                            created_branch=created_branch,
+                        )
+                    raise
+        finally:
+            # the bundle outlives init.sh, never the init call
+            if template_tmp is not None:
+                shutil.rmtree(template_tmp, ignore_errors=True)
         # warm the child's configured cache dirs (copy-on-write clones from
         # the main checkout, see worktree.clone_cache_dirs) after the lock
         # releases -- a multi-gigabyte clone must never serialize sibling
@@ -1647,6 +1919,8 @@ class Node:
             if not line.startswith('Created ')
         )
         notices = result.stderr.strip()
+        if template_notice:
+            notices = f'{notices}\n{template_notice}' if notices else template_notice
         return f'{summary}\n{notices}' if notices else summary
 
     def _init_user(
@@ -1864,6 +2138,252 @@ class Node:
             summary += f' and the project wiki at {wiki}/'
         next_step = 'Next: commit the baseline: fractal commit "<message>" --init'
         return f'{headline}\n{summary}\n{next_step}'
+
+    def reseed(
+        self: Node,
+        *,
+        ref: Optional[str] = None,
+        template: Optional[str] = None,
+        force: bool = False,
+    ) -> tuple[str, list[str]]:
+        """Rewrite the node's seed surfaces from its recorded template.
+
+        Re-renders the recorded folder at its recorded commit -- or at
+        ``ref``, or from another folder with ``template`` -- and rewrites
+        ``steps/``, ``scripts/``, ``skills/``, and the per-agent files
+        from the result: files the node lacks are added and files it has
+        are overwritten, so the node matches its template's effective set
+        (an excluded file stays gone); nothing is ever deleted, and
+        ``NODE.md``, ``config.json``, and ``memory/`` are never touched.
+        ``template`` re-points the node: the new path and the commit read
+        land in ``_template.toml``, while the recorded values and listing
+        ride along unchanged, and the confirmation carries creation's
+        root-differs notice when the root branch holds a different copy
+        of the folder (a plain or ``ref`` reseed stays silent).
+
+        Args:
+            ref: Committish to read the recorded folder at (default: the
+                recorded commit). Mutually exclusive with ``template``.
+            template: Template folder (``<path>[@<ref>]``) to re-point
+                the node at, read at the node branch's own tip when the
+                value names no ref.
+            force: Reseed even while the node is active or paused.
+
+        Returns:
+            Tuple of the confirmation message and the stale-listing
+            warnings.
+
+        Raises:
+            ValueError: If ``ref`` is combined with ``template``, the
+                provenance record refuses, a ref does not resolve, or
+                the folder is not tracked at the requested ref.
+            RuntimeError: If the node is active or paused (without
+                ``force``), or the caller runs from the node's own
+                worktree.
+
+        """
+        from .loop import _STEP_PREFIX
+        from .template import (
+            _UNRESOLVED_REF,
+            fill,
+            locate,
+            materialize,
+            read_provenance,
+            root_notice,
+            trim,
+            vet,
+            write_provenance,
+        )
+
+        # the two read overrides are rivals: one names a commit for the
+        # recorded folder, the other a new folder outright
+        if ref is not None and template is not None:
+            raise ValueError('--ref cannot be combined with --template.')
+        # a node may not edit its own seed: the acting node (the loop's
+        # exported _NODE, else the cwd's worktree) must be someone else --
+        # the operator outside the worktree, the parent, or another node
+        actor = self.resolve_actor()
+        if actor is not None and actor.branch == self.branch:
+            raise RuntimeError(
+                'Cannot reseed a node from its own worktree;'
+                ' a node may not edit its own seed.'
+            )
+        # a merge's advance and conflict-recovery reset --hard rewrite the
+        # target worktree, silently reverting a concurrent reseed's writes to
+        # a committed seed -- hold the merge flock for the whole rewrite,
+        # taken before the worktree flock to match merge's own order (never
+        # nested inside it: merge.sh shells into verbs that take that one);
+        # the guard re-read and the rewrite stay atomic under the .worktrees
+        # flock, so a rival verb cannot land between them (the --reset guard)
+        with worktree.merge_lock(self.repo_dir):
+            with worktree.lock(self.repo_dir):
+                # reseed rewrites the live steering surface, so refuse over a
+                # running loop or a paused node's frozen run context unless the
+                # caller forces it
+                self._reconcile_status(locked=True)
+                if not force:
+                    if self.status() == 'active':
+                        raise RuntimeError(
+                            'Cannot reseed an active node. Stop or kill it first.'
+                        )
+                    if self.status() == 'paused':
+                        raise RuntimeError(
+                            'Cannot reseed a paused node. Resume or kill it first.'
+                        )
+                record = read_provenance(self.node_dir)
+                path = record['path']
+                commit = record['commit']
+                template_worktree = self.repo_dir
+                rev: Optional[str] = None
+                if template is not None:
+                    # re-point: resolve the folder like init does; the read falls
+                    # to the node branch's own tip when the value names no ref
+                    path, template_ref, template_worktree = locate(
+                        template,
+                        repo_dir=self.repo_dir,
+                    )
+                    rev = template_ref if template_ref is not None else self.branch
+                elif ref is not None:
+                    rev = ref
+                if rev is not None:
+                    cmd = ['rev-parse', '--verify', f'{rev}^{{commit}}']
+                    resolved = fractal.util.git.run(
+                        cmd,
+                        cwd=self.repo_dir,
+                        check=False,
+                    )
+                    if resolved is None:
+                        raise ValueError(_UNRESOLVED_REF.format(ref=rev))
+                    commit = resolved
+                # a --ref reads the recorded folder, which may have moved or
+                # been retired since: probe it at the ref and name the re-point
+                # remedy, which materialize's untracked-at-commit message lacks
+                if ref is not None:
+                    cmd = ['rev-parse', '-q', '--verify', f'{commit}:{path}']
+                    tree = fractal.util.git.run(cmd, cwd=self.repo_dir, check=False)
+                    if tree is None:
+                        raise ValueError(
+                            f'Template folder {path!r} is not tracked at {ref!r};'
+                            ' the folder may have moved -- re-point the node with'
+                            ' node reseed --template <path>[@<ref>].'
+                        )
+                # materialize and render the effective set exactly as init does,
+                # with the recorded values; a listing entry the template no
+                # longer carries only warns (the record may outlive the file)
+                template_tmp = tempfile.mkdtemp(prefix='fractal-template-')
+                notice: Optional[str] = None
+                try:
+                    bundle = materialize(
+                        worktree=template_worktree,
+                        path=path,
+                        commit=commit,
+                        dest=pathlib.Path(template_tmp),
+                    )
+                    # a re-point reads a fresh folder choice, so it gets
+                    # creation's root-differs notice; a plain or --ref reseed
+                    # deliberately re-reads a recorded or named version, silently
+                    if template is not None:
+                        notice = root_notice(
+                            repo_dir=self.repo_dir,
+                            root=self.config.get('root'),
+                            path=path,
+                            commit=commit,
+                        )
+                    warnings = trim(
+                        bundle,
+                        include=record.get('include'),
+                        exclude=record.get('exclude'),
+                        strict=False,
+                    )
+                    # a file the copy loops would silently skip refuses here
+                    # exactly as at init, judging the effective set
+                    vet(bundle)
+                    fill(
+                        bundle,
+                        path=path,
+                        values=record.get('values', {}),
+                        remedy=(
+                            'add the value to the [values] table in the'
+                            " node's _template.toml, or re-init the node"
+                            ' with --set'
+                        ),
+                    )
+                    # reseed adds and overwrites but never deletes, so the
+                    # loop's discovery contract judges the post-reseed union:
+                    # the bundle's steps plus the live steps the bundle does
+                    # not carry -- a renumbered template (or a bad step at the
+                    # ref) refuses here, before anything rewrites, rather than
+                    # failing every later iteration behind a clean diff
+                    steps_dir = bundle / 'steps'
+                    if steps_dir.is_dir():
+                        step_files = sorted(
+                            entry for entry in steps_dir.glob('*.md') if entry.is_file()
+                        )
+                        bundle_names = {entry.name for entry in step_files}
+                        live_dir = self.node_dir / 'steps'
+                        if live_dir.is_dir():
+                            # the live side takes everything the loop's own glob
+                            # discovers, hidden names included -- the union must
+                            # judge exactly what a run would read
+                            step_files += sorted(
+                                entry
+                                for entry in live_dir.glob('*.md')
+                                if entry.is_file() and entry.name not in bundle_names
+                            )
+                        widths = set()
+                        for step_file in step_files:
+                            match = _STEP_PREFIX.match(step_file.name)
+                            if match is None:
+                                raise ValueError(
+                                    f'Reseed would leave steps/ with a step'
+                                    f' file without an NN- prefix:'
+                                    f' {step_file.name}.'
+                                )
+                            widths.add(len(match.group(1)))
+                        if len(widths) > 1:
+                            conflict = ', '.join(
+                                sorted(step_file.name for step_file in step_files)
+                            )
+                            raise ValueError(
+                                f'Reseed would leave steps/ with mixed digit'
+                                f' prefix widths: {conflict} -- delete the'
+                                ' stale files first.'
+                            )
+                    # the script rewrites the file surfaces and the per-agent
+                    # files from the bundle; Python owns the provenance record
+                    event_id = self.record.event_start(
+                        'reseed',
+                        metadata=f'{path}@{commit}',
+                    )
+                    try:
+                        self._run_script(
+                            'reseed.sh',
+                            f'{self._root}',
+                            f'--bundle={bundle}',
+                        )
+                        # advance the record: the commit actually read, and the
+                        # path too on a re-point; values and listing ride along
+                        # unchanged -- inside the try so a failed record write
+                        # (surfaces already rewritten) stamps the event failed
+                        # rather than stranding it open
+                        write_provenance(
+                            self.node_dir,
+                            path=path,
+                            commit=commit,
+                            values=record.get('values', {}),
+                            include=record.get('include'),
+                            exclude=record.get('exclude'),
+                        )
+                    except Exception:
+                        self.record.event_end(event_id=event_id, status='failed')
+                        raise
+                    self.record.event_end(event_id=event_id, status='completed')
+                finally:
+                    shutil.rmtree(template_tmp, ignore_errors=True)
+        confirmation = f'Node reseeded from {path}@{commit}'
+        if notice is not None:
+            confirmation = f'{confirmation}\n{notice}'
+        return confirmation, warnings
 
     def _git_exclude(self: Node) -> None:
         """Write fractal's ignore patterns into the repo-local ``info/exclude``.
@@ -4210,10 +4730,9 @@ class Node:
                         f' recorded) and ps -p against {pgid_file}, then retry.'
                     )
                 if alive:
-                    group_backed = descendant.headless or (
-                        not (descendant.node_dir / SOCKET_FILE).exists()
-                        and pgid_file.exists()
-                    )
+                    no_socket = not (descendant.node_dir / SOCKET_FILE).exists()
+                    group_present = pgid_file.exists()
+                    group_backed = descendant.headless or (no_socket and group_present)
                     if group_backed:
                         # the parking loop can drop the record between the
                         # probe and this read -- a vanished record is the
@@ -4870,15 +5389,11 @@ class Node:
                 # record-only row (a .pgid, no .socket) when the host is blind
                 # -- a blind host vouches for no row, so such a row confirms
                 # through its own group
-                absent = (
-                    node.headless
-                    or (sessions is not None and node.tmux_session not in sessions)
-                    or (
-                        sessions is None
-                        and not (node.node_dir / SOCKET_FILE).exists()
-                        and (node.node_dir / PGID_FILE).exists()
-                    )
-                )
+                missing = (sessions is not None) and (node.tmux_session not in sessions)
+                no_socket = not (node.node_dir / SOCKET_FILE).exists()
+                group_present = (node.node_dir / PGID_FILE).exists()
+                record_only = (sessions is None) and no_socket and group_present
+                absent = node.headless or missing or record_only
                 if node.exists() and absent:
                     node._reconcile_status(locked=locked)
                     row = {**row, 'status': node.status()}

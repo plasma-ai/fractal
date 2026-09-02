@@ -7,6 +7,16 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Breaking
+
+- `node init --template=<path>[@<ref>]` replaces `--steps` and `--profile`, and
+  the `.fractal/profiles/` location goes away with no successor: a template is
+  any tracked folder holding `config.json`, so a steps-only template is such a
+  folder holding `steps/`, and an ad hoc step set is committed on the spawning
+  node's own branch before the spawn (its children fork from that tip). A
+  template is read from git at the child's fork commit — seeding from an
+  uncommitted directory is gone with the flags.
+
 ### Added
 
 - `node start --headless` / `--tmux`: the loop runs in a detached process group
@@ -32,6 +42,75 @@ may include breaking changes, each listed under a Breaking heading.
   runtime (unsettled, or holding a `.pgid`/`.socket`/`.headless` record), so a
   settled, record-less node — the state their own reconcile leaves after healing
   a dead bare loop on a blind host — proceeds instead of refusing.
+- `node init --template=<path>[@<ref>]`: a template is any tracked folder
+  holding `config.json` — the preset-and-marker file — read from git at the
+  child's fork commit (append `@<ref>` for another commit; one notice names the
+  `@<root-branch>` form when the root branch's copy differs from the commit
+  read), so uncommitted edits never deploy and the recorded version is exactly
+  what a later `diff` or `reseed` re-renders. Its surfaces (`NODE.md`, `steps/`,
+  `scripts/`, `skills/`, `agents/<agent>/` — the last deploying into the node's
+  live agent config dirs, where a template file beats the parent's live copy)
+  seed the node; a surface it lacks falls back to the inherit-or-package source,
+  `--inherit` of a bundled surface is refused, and a bundled `steps/` must
+  satisfy the loop's discovery contract at init. The `config.json` preset fills
+  each unset run-config flag (a flag wins over the preset, the preset over an
+  inherited value; only budget, limit, duration, model, and mode keys may
+  appear, and the merged values pass the same validation the flags do).
+  `--include`/`--exclude` (repeatable; mutually exclusive; a directory entry
+  covers its subtree) cut the deploy to an effective set that `node diff` and
+  `node reseed` judge by, so a trimmed spawn stays trimmed. A template refuses
+  machinery paths (`.fractal`, `.git`, `.worktrees` components), symlinks (a
+  template is self-contained), and non-UTF-8 files by name. The package seed's
+  per-agent files ship under `fractal/_node/agents/`, the template layout's own
+  `agents/` shape.
+- `_template.toml`: the node's template provenance record — the
+  worktree-relative template path, the commit actually read, the include/exclude
+  listing, and the slot values — written into the node data directory at init;
+  its presence marks a node as seeded from a template, it counts as a node
+  record file (the estate content law commits it with the seed), and a `--reset`
+  without `--template` drops it. Hand-editable, and validated wherever it is
+  read.
+- Seed-time slots: template files may carry `{{slot}}` placeholders — lowercase
+  names, filled once at init from `--values <file.toml>` (a flat TOML table of
+  string values), repeatable `--set KEY=VALUE` pairs that win over the sheet,
+  and `--pin`, which fills the `{{pin}}` slot beside its fill-sheet-gate role (a
+  `pin` supplied both ways must agree, or init refuses). A slot with no value
+  and any `{{` that is not a lowercase slot refuse init naming the file and the
+  token; prompt-time `$VAR` text passes through untouched, so the two namespaces
+  stay apart. The rendered charter passes the fill-sheet gate (authored sections
+  present, `pin:` lines resolving and matching `--pin`, `docket:` rows resolving
+  at the pin — anchored at the fork commit when the seed is pinless).
+- `node diff`: shows a node's drift from its recorded template by re-rendering
+  the recorded folder at its recorded commit with its recorded values and
+  diffing the effective set against the live seed surfaces — `NODE.md`,
+  `steps/`, `scripts/`, `skills/`, and each `agents/<agent>/` file against the
+  live `.<agent>/` copy. A live symlink and a file the bundle does not carry are
+  never judged; a bundle file the node lacks is drift, and unrendered `{{`
+  residue in a live copy is its own finding. Exits 1 on drift, 0 clean, 2 on a
+  command error, so scripts branch on the exit code.
+- `node reseed`: rewrites a node's seed surfaces from its recorded template —
+  files the node lacks are added, files it has are overwritten, nothing is
+  deleted, and `NODE.md`, `config.json`, and `memory/` are never touched.
+  `--ref` reads the recorded folder at another commit (a ref where the folder is
+  absent refuses naming the re-point remedy); `--template <path>[@<ref>]`
+  re-points the node, recording the new path and the commit read while the
+  values and listing ride along unchanged, and prints the root-differs notice
+  when the root branch holds another copy. The verb refuses over an active or
+  paused node without `--force` and always from the node's own worktree (a node
+  may not edit its own seed), records a `reseed` event, and advances the
+  recorded commit; a recorded listing entry the template no longer carries warns
+  instead of refusing.
+- Template content guard: a template refuses a credential-named file anywhere
+  and, under `agents/`, any dot-file; a file inside a seed surface that the seed
+  would skip — a non-step file under `steps/`, an underscore-prefixed script, a
+  loose file directly under `skills/` or `agents/` — refuses too, so every
+  template file is one the seed deploys and `node diff` never reports phantom
+  drift. The credential names refused are `auth.json`, `credentials.json`,
+  `*.key`, `*.pem`, `*.p12`, `*.pfx`, `id_rsa`, `id_ed25519`, `id_ecdsa`,
+  `id_ecdsa_sk`, `id_ed25519_sk`, `id_dsa`, and `*.ppk`, matched case-blind at
+  every materialize — init, `node diff`, and `node reseed` alike — naming the
+  file; credentials never deploy from a template — a node links its own at seed
+  time.
 
 ### Fixed
 
@@ -102,11 +181,11 @@ may include breaking changes, each listed under a Breaking heading.
   `--meta` node's scope is the target's seed directory, its work product): every
   other `.fractal/` path at any depth returns to the target's HEAD — a child's
   edit to the target's estate, a foreign node's seed, a sub-project descendant's
-  seed under `<project>/.fractal/`, a `.fractal/profiles/` change — with two
-  warnings naming what the restore dropped: paths the target tracks are restored
-  to its content, paths it does not track are removed, and the node's copy
-  survives only in its branch history once the merge-base advance brings the
-  target's tree into the node's worktree
+  seed under `<project>/.fractal/`, a stray file at the `.fractal/` root — with
+  two warnings naming what the restore dropped: paths the target tracks are
+  restored to its content, paths it does not track are removed, and the node's
+  copy survives only in its branch history once the merge-base advance brings
+  the target's tree into the node's worktree
   (`git -C <node worktree> log --full-history -- <path>` lists the advance that
   dropped the path first and the node's own commit below it;
   `git show <commit>:<path>` on that lower commit, or

@@ -4,6 +4,7 @@ Drives the real ``fractal`` console script as a subprocess against a
 throwaway git repo built by the CLI itself -- a user (root) node plus two
 worker nodes. The tests exercise the node lifecycle surface end to end:
 ``init`` and its run-config flags, ``list`` and its filters, ``status``,
+``diff`` against a node's recorded template and ``reseed`` from it,
 the ``finish``/``stop``/``kill``/``retire``/``unretire``/``attach`` status
 guards (including their ``RuntimeError`` messages and exit codes), ``update``
 of a child's configuration, ``merge``'s ``--ignore-scope`` override reaching
@@ -26,13 +27,15 @@ import pathlib
 import re
 import shutil
 import subprocess
+import tomllib
 
 import pytest
+import tomli_w
 
 import fractal
 from fractal.constants import STATUSES
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _commit_template, _git
 
 from .conftest import _await_settled, _cli_env, _fractal_bin, _require_tmux, _run
 
@@ -60,6 +63,7 @@ __all__ = [
     'test_init_uncapped_priced_agent_warns',
     'test_init_uncapped_unpriced_agent_stays_quiet',
     'test_init_uncapped_warning_reads_the_spawning_parents_agent',
+    'test_init_uncapped_warning_reads_a_template_preset_cap',
     'test_init_blind_seeds_no_subs_and_start_sweeps',
     'test_merge_delete_reaps_the_merged_child',
     'test_merge_ignore_scope_flag_lands_an_out_of_scope_squash',
@@ -78,6 +82,23 @@ __all__ = [
     'test_rm_rf_worktree_lists_orphan_then_force_deletes',
     'test_list_shows_stored_status_for_orphaned_terminal_node',
     'test_reconcile_records_orphan_event_once',
+    'test_diff_reports_drift_per_surface',
+    'test_diff_applies_the_recorded_listing_and_warns_on_a_stale_entry',
+    'test_diff_requires_a_recorded_template_and_a_full_sha',
+    'test_diff_stays_clean_after_the_template_folder_moves',
+    'test_diff_never_judges_a_root_file_named_like_a_surface',
+    'test_diff_and_reseed_name_the_record_remedy_for_a_missing_value',
+    'test_reseed_restores_the_seed_surfaces_and_records_the_event',
+    'test_reseed_ref_reads_another_commit_and_keeps_exclusions',
+    'test_reseed_refuses_a_missing_path_at_a_ref_and_re_points',
+    'test_reseed_bare_re_point_reads_the_node_branch_tip',
+    'test_reseed_prints_no_root_notice_without_a_re_point',
+    'test_reseed_refuses_a_template_carrying_agent_credentials',
+    'test_reseed_refuses_steps_breaking_the_discovery_contract',
+    'test_reseed_refuses_files_the_seed_would_skip',
+    'test_reseed_refuses_a_symlinked_seed_destination',
+    'test_reseed_refuses_a_symlinked_skills_destination',
+    'test_reseed_refuses_a_symlinked_surface_root',
     'test_lifecycle_guard_rejects_idle_node',
     'test_start_drain_requires_continue',
     'test_retire_unretire_round_trips_through_list',
@@ -407,25 +428,26 @@ def test_init_reset_reinitializes_node(repo: dict) -> None:
 
 
 @pytest.mark.parametrize(
-    argnames='flag',
+    argnames=('flag', 'error'),
     argvalues=[
-        '--max-iters',
-        '--max-depth',
-        '--max-children',
-        '--max-cost',
-        '--max-iter-cost',
+        ('--max-iters', 'max_iters must be greater than 0'),
+        ('--max-depth', 'max_depth must be >= 0'),
+        ('--max-children', 'max_children must be >= 0'),
+        ('--max-cost', 'max_cost must be greater than 0'),
+        ('--max-iter-cost', 'max_iter_cost must be greater than 0'),
     ],
 )
-def test_init_rejects_negative_limits(repo: dict, flag: str) -> None:
-    """``init`` rejects every negative numeric cap (``BadParameter``, exit 2).
+def test_init_rejects_negative_limits(repo: dict, flag: str, error: str) -> None:
+    """``init`` rejects every negative numeric cap (exit 2, naming the key).
 
-    The CLI boundary refuses negative limits uniformly -- unbounded is expressed
-    by omitting the flag, never a negative sentinel -- matching ``update`` and
-    ``list``. Rejection happens before any node is created.
+    The refusal runs in core on the merged config -- a negative cap from a
+    template preset refuses exactly like the flag -- so the message names
+    the config key. Unbounded is expressed by omitting the flag, never a
+    negative sentinel, and rejection happens before any node is created.
     """
     result = _run(repo['root'], 'node', 'init', 'neg', '--agent', 'claude', flag, '-1')
     assert result.returncode == 2, result.stderr
-    assert flag in (result.stdout + result.stderr)
+    assert error in (result.stdout + result.stderr)
 
 
 @pytest.mark.parametrize('flag', ['--max-iter-cost', '--max-step-cost'])
@@ -434,14 +456,14 @@ def test_init_rejects_iter_cost_without_max_cost(repo: dict, flag: str) -> None:
 
     A node always carries its own ``max_cost`` (``start`` refuses without a
     positive one), so an iter/step cap alone would build a node that can never
-    start. The CLI rejects it up front (``BadParameter``, exit 2, naming
-    ``--max-cost``) and creates no node, rather than letting it wedge at launch;
+    start. The merged-config validation rejects it up front (exit 2, naming
+    ``max_cost``) and creates no node, rather than letting it wedge at launch;
     pairing the cap with a ``--max-cost`` succeeds.
     """
     root = repo['root']
     rejected = _run(root, 'node', 'init', 'capless', '--agent', 'claude', flag, '5')
     assert rejected.returncode == 2, rejected.stderr
-    assert '--max-cost' in (rejected.stdout + rejected.stderr)
+    assert 'max_cost' in (rejected.stdout + rejected.stderr)
     # the rejected init created nothing -- no worktree for the would-be node
     assert not (root / '.worktrees' / 'main.capless').exists()
     # the same cap with a run ceiling is accepted
@@ -464,11 +486,11 @@ def test_init_rejects_iter_cost_without_max_cost(repo: dict, flag: str) -> None:
 
 @pytest.mark.parametrize(argnames='value', argvalues=['0', '-3'])
 def test_init_rejects_non_positive_max_iters(repo: dict, value: str) -> None:
-    """``init`` rejects a non-positive ``--max-iters`` (``BadParameter``, exit 2).
+    """``init`` rejects a non-positive ``--max-iters`` (exit 2).
 
     A non-positive cap reads as unlimited in the loop, so 0 would build a
-    node that iterates without bound instead of never -- the CLI refuses it
-    with the config setter's phrasing before any node is created.
+    node that iterates without bound instead of never -- the merged-config
+    validation refuses it before any node is created.
     """
     root = repo['root']
     result = _run(
@@ -821,6 +843,109 @@ def test_init_uncapped_warning_reads_the_spawning_parents_agent(repo: dict) -> N
     assert '--max-cost' not in spawn.stderr
     # clean up so the shared module fixture is left as other tests expect
     assert _run(root, 'node', 'delete', 'main.coparent', '--force').returncode == 0
+
+
+def test_init_uncapped_warning_reads_a_template_preset_cap(repo: dict) -> None:
+    """A template preset cap silences the uncapped-spend warning.
+
+    The warning's flag-only view would call a preset-capped node unbounded,
+    so the CLI reads the merged caps back from the child's stored config: a
+    node capped by its template draws no warning (and carries the preset
+    cap), while a template with no caps still warns. The same reads hold
+    from a cwd inside a node worktree with no ``_NODE`` (a manual spawn):
+    the read-back finds the branch the child actually nested under, so the
+    preset cap still silences the warning and the capless template still
+    draws it.
+    """
+    root = repo['root']
+    # commit a capped and a capless template -- template bytes deploy from
+    # the fork commit, never the working copy
+    for folder, preset in (('capped', '{"max_cost": 5}'), ('bare', '{}')):
+        config = root / 'templates' / folder / 'config.json'
+        config.parent.mkdir(parents=True)
+        config.write_text(preset + '\n', encoding='utf-8')
+    _git(root, 'add', 'templates')
+    _git(root, 'commit', '-m', 'add templates')
+    try:
+        spawn = _run(
+            root,
+            'node',
+            'init',
+            'presetcap',
+            '--agent',
+            'claude',
+            '--template',
+            'templates/capped',
+        )
+        assert spawn.returncode == 0, spawn.stderr
+        assert '--max-cost' not in spawn.stderr
+        node = root / '.worktrees' / 'main.presetcap'
+        assert _config(node, 'max_cost') == '5'
+        bare = _run(
+            root,
+            'node',
+            'init',
+            'barecap',
+            '--agent',
+            'claude',
+            '--template',
+            'templates/bare',
+        )
+        assert bare.returncode == 0, bare.stderr
+        warnings = [
+            line
+            for line in bare.stderr.splitlines()
+            if '--max-cost' in line and '--max-iters' in line
+        ]
+        assert len(warnings) == 1, bare.stderr
+        # a manual spawn from inside a node worktree (no _NODE): the child
+        # nests under that node, and the cap read-back follows it there
+        parent = _run(root, 'node', 'init', 'wtparent', '--agent', 'claude')
+        assert parent.returncode == 0, parent.stderr
+        worktree = root / '.worktrees' / 'main.wtparent'
+        capped = _run(
+            worktree,
+            'node',
+            'init',
+            'wtcapped',
+            '--agent',
+            'claude',
+            '--template',
+            'templates/capped',
+        )
+        assert capped.returncode == 0, capped.stderr
+        child = root / '.worktrees' / 'main.wtparent.wtcapped'
+        assert child.exists()
+        assert '--max-cost' not in capped.stderr
+        assert _config(child, 'max_cost') == '5'
+        # an uncapped template from the same cwd still warns
+        wtbare = _run(
+            worktree,
+            'node',
+            'init',
+            'wtbare',
+            '--agent',
+            'claude',
+            '--template',
+            'templates/bare',
+        )
+        assert wtbare.returncode == 0, wtbare.stderr
+        warnings = [
+            line
+            for line in wtbare.stderr.splitlines()
+            if '--max-cost' in line and '--max-iters' in line
+        ]
+        assert len(warnings) == 1, wtbare.stderr
+    finally:
+        # clean up so the shared module fixture is left as other tests expect
+        for worker in (
+            'main.presetcap',
+            'main.barecap',
+            'main.wtparent.wtcapped',
+            'main.wtparent.wtbare',
+            'main.wtparent',
+        ):
+            _run(root, 'node', 'delete', worker, '--force')
 
 
 def test_init_blind_seeds_no_subs_and_start_sweeps(
@@ -1599,6 +1724,1192 @@ def test_reconcile_records_orphan_event_once(repo: dict) -> None:
     # cleanup: deregister the orphan row (branch pruning is best-effort)
     deleted = _run(root, 'node', 'delete', 'main.ghost', '--force')
     assert deleted.returncode == 0, deleted.stdout + deleted.stderr
+
+
+# ------ diff
+
+
+def test_diff_reports_drift_per_surface(repo: dict) -> None:
+    """``diff`` re-renders the recorded template and reports drift per file.
+
+    A freshly seeded node is clean (exit 0, by branch and from its own
+    worktree), with the codex ``auth.json`` symlink in place. An edit to
+    each surface -- a step, a script, a skill file, an agent
+    ``settings.json``, and the charter -- exits 1 with a unified diff
+    naming the node-relative path; a deleted step reports as missing and
+    ``{{`` residue is its own finding, while a node-added step, a live
+    symlink, and the untouched ``auth.json`` are never reported.
+    """
+    root = repo['root']
+    charter = (
+        '# diffcrew\n\n## Instructions\n\nmission: {{mission}}\n\n'
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+        'steps/01-PLAN.md': '# plan the work\n',
+        'steps/02-EXECUTE.md': '# execute the plan\n',
+        'scripts/probe.sh': 'echo probe\n',
+        'skills/workflow/SKILL.md': '# workflow\n',
+        'agents/claude/settings.json': '{"seeded": true}\n',
+        'agents/claude/math.md': 'think in lemmas\n',
+    }
+    _commit_template(root, 'templates/diffcrew', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'diffcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/diffcrew',
+        '--set',
+        'mission=probe the surfaces',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        worktree = root / '.worktrees' / 'main.diffcrew'
+        node_dir = worktree / '.fractal' / 'main.diffcrew'
+        # a fresh seed is clean, by branch and from the node's own worktree
+        clean = _run(root, 'node', 'diff', 'main.diffcrew')
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        assert clean.stdout.strip() == 'No drift from the recorded template.'
+        assert _run(worktree, 'node', 'diff').returncode == 0
+        assert (node_dir / '.codex' / 'auth.json').is_symlink()
+        # drift every surface: edit a step, drop a step, add
+        # a node-own step, edit a script, a skill file, and the
+        # agent settings, park unrendered residue in the charter,
+        # and turn a live agent file into a symlink
+        step = node_dir / 'steps' / '01-PLAN.md'
+        step.write_text('# plan the work\nan added line\n', encoding='utf-8')
+        (node_dir / 'steps' / '02-EXECUTE.md').unlink()
+        added = node_dir / 'steps' / '03-NEW.md'
+        added.write_text('# node-added\n', encoding='utf-8')
+        script = node_dir / 'scripts' / 'probe.sh'
+        script.write_text('echo probed\n', encoding='utf-8')
+        skill = node_dir / 'skills' / 'workflow' / 'SKILL.md'
+        skill.write_text('# workflow, reworked\n', encoding='utf-8')
+        settings = node_dir / '.claude' / 'settings.json'
+        settings.write_text('{"seeded": false}\n', encoding='utf-8')
+        math = node_dir / '.claude' / 'math.md'
+        math.unlink()
+        math.symlink_to(node_dir / 'NODE.md')
+        (node_dir / 'NODE.md').write_text(charter, encoding='utf-8')
+        drifted = _run(root, 'node', 'diff', 'main.diffcrew')
+        assert drifted.returncode == 1, drifted.stdout + drifted.stderr
+        # one unified diff per drifted file, headed by the node-relative path
+        for header in (
+            'NODE.md',
+            'steps/01-PLAN.md',
+            'scripts/probe.sh',
+            'skills/workflow/SKILL.md',
+            '.claude/settings.json',
+        ):
+            assert f'--- template/{header}' in drifted.stdout
+            assert f'+++ node/{header}' in drifted.stdout
+        assert '+an added line' in drifted.stdout
+        assert 'steps/02-EXECUTE.md: missing from the node.' in drifted.stdout
+        assert 'NODE.md: unrendered {{ residue in the live copy.' in drifted.stdout
+        # never reported: the node's own additions and the live symlinks
+        assert '03-NEW.md' not in drifted.stdout
+        assert 'math.md' not in drifted.stdout
+        assert 'auth.json' not in drifted.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.diffcrew', '--force')
+
+
+def test_diff_applies_the_recorded_listing_and_warns_on_a_stale_entry(
+    repo: dict,
+) -> None:
+    """The recorded ``exclude`` shapes the diff; a stale entry only warns.
+
+    An excluded step is absent from the node by design, so it never
+    reports as missing; an entry matching nothing in the template draws
+    a warning on stderr, not a refusal, and the node still diffs clean.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'steps/02-SKIP.md': '# never deployed\n',
+    }
+    _commit_template(root, 'templates/leandiff', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'leandiff',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/leandiff',
+        '--exclude',
+        'steps/02-SKIP.md',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.leandiff' / '.fractal' / 'main.leandiff'
+        assert not (node_dir / 'steps' / '02-SKIP.md').exists()
+        clean = _run(root, 'node', 'diff', 'main.leandiff')
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        # a listing entry the template no longer carries warns, not refuses
+        record = node_dir / '_template.toml'
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        data['exclude'].append('steps/99-GONE.md')
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        warned = _run(root, 'node', 'diff', 'main.leandiff')
+        assert warned.returncode == 0, warned.stdout + warned.stderr
+        assert 'No drift from the recorded template.' in warned.stdout
+        expected = (
+            'Warning: exclude entry matches nothing in the template:'
+            " 'steps/99-GONE.md' (the template may have dropped it)."
+        )
+        assert expected in warned.stderr
+    finally:
+        _run(root, 'node', 'delete', 'main.leandiff', '--force')
+
+
+def test_diff_requires_a_recorded_template_and_a_full_sha(repo: dict) -> None:
+    """A recordless node and a hand-mangled record are command errors.
+
+    A node seeded without ``--template`` has nothing to diff against --
+    exit 2, naming the missing record -- and ``_template.toml`` is
+    hand-editable, so every shape its read validates refuses the same
+    way: a commit that is not a full 40-hex sha, unparseable TOML, a
+    path escaping the worktree (absolute or ``..`` -- the guard that
+    keeps the replay's git read inside the repo), ``include`` beside
+    ``exclude``, a listing that is no list, and a non-string slot value.
+    """
+    root = repo['root']
+    # the long-lived task worker was seeded without a template
+    recordless = _run(root, 'node', 'diff', 'main.task')
+    assert recordless.returncode == 2, recordless.stdout + recordless.stderr
+    assert 'No template recorded' in recordless.stderr
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/shadiff', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'shadiff',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/shadiff',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.shadiff' / '.fractal' / 'main.shadiff'
+        record = node_dir / '_template.toml'
+        pristine = tomllib.loads(record.read_text(encoding='utf-8'))
+        base = {'path': pristine['path'], 'commit': pristine['commit']}
+        bad_records = [
+            (
+                tomli_w.dumps({**base, 'commit': 'deadbeef'}),
+                "commit is not a full 40-hex sha: 'deadbeef'",
+            ),
+            ('= broken\n', 'is not valid TOML'),
+            (
+                tomli_w.dumps({**base, 'path': '/etc'}),
+                'template path is not worktree-relative',
+            ),
+            (
+                tomli_w.dumps({**base, 'path': '../../elsewhere'}),
+                'template path is not worktree-relative',
+            ),
+            (
+                tomli_w.dumps({**base, 'include': ['steps'], 'exclude': ['steps']}),
+                'carries include beside exclude',
+            ),
+            (
+                tomli_w.dumps({**base, 'include': 'steps'}),
+                'include is not a list of paths',
+            ),
+            (
+                tomli_w.dumps({**base, 'values': {'mission': 3}}),
+                'values is not a table of strings',
+            ),
+        ]
+        for text, message in bad_records:
+            record.write_text(text, encoding='utf-8')
+            mangled = _run(root, 'node', 'diff', 'main.shadiff')
+            assert mangled.returncode == 2, mangled.stdout + mangled.stderr
+            assert message in mangled.stderr, mangled.stderr
+    finally:
+        _run(root, 'node', 'delete', 'main.shadiff', '--force')
+
+
+def test_diff_stays_clean_after_the_template_folder_moves(repo: dict) -> None:
+    """A template moved on a later commit still diffs clean at its recorded sha.
+
+    The recorded commit keeps the folder's objects reachable, so the
+    read is untouched by the rename and the node reports no drift.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/movediff', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'movediff',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/movediff',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        _git(root, 'mv', 'templates/movediff', 'templates/movediff2')
+        _git(root, 'commit', '-m', 'move the template folder')
+        moved = _run(root, 'node', 'diff', 'main.movediff')
+        assert moved.returncode == 0, moved.stdout + moved.stderr
+        assert 'No drift from the recorded template.' in moved.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.movediff', '--force')
+
+
+def test_diff_never_judges_a_root_file_named_like_a_surface(repo: dict) -> None:
+    """A root-level file sharing a surface name is documentation, not drift.
+
+    A template may carry root-level files named ``steps`` and
+    ``scripts`` (git tracks no folder of the same name beside them):
+    they deploy nowhere, exactly like a ``README.md``, so ``diff``
+    never maps them onto the node's real ``steps/`` and ``scripts/``
+    directories -- the node seeds the package surfaces and stays clean,
+    with no missing-from-the-node finding.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps': 'a note, not a surface\n',
+        'scripts': 'another note, not a surface\n',
+    }
+    _commit_template(root, 'templates/rootnames', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'rootnames',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/rootnames',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.rootnames' / '.fractal' / 'main.rootnames'
+        )
+        # the package surfaces seeded as directories; the root files nowhere
+        assert (node_dir / 'steps').is_dir()
+        assert (node_dir / 'scripts').is_dir()
+        clean = _run(root, 'node', 'diff', 'main.rootnames')
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        assert clean.stdout.strip() == 'No drift from the recorded template.'
+        assert 'missing from the node' not in clean.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.rootnames', '--force')
+
+
+def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
+    repo: dict,
+) -> None:
+    """A replayed fill with no value names the record, not the init flags.
+
+    ``diff`` and ``reseed`` re-render from ``_template.toml``'s recorded
+    values, where ``--set`` and ``--values`` do not exist -- a slot the
+    record no longer covers refuses naming the ``[values]`` table and
+    the re-init remedy instead of the init flags.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go for {{mission}}\n',
+    }
+    _commit_template(root, 'templates/slotcrew', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'slotcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/slotcrew',
+        '--set',
+        'mission=probe',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.slotcrew' / '.fractal' / 'main.slotcrew'
+        record = node_dir / '_template.toml'
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        data['values'] = {}
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        remedy = (
+            "add the value to the [values] table in the node's"
+            ' _template.toml, or re-init the node with --set'
+        )
+        for verb in ('diff', 'reseed'):
+            result = _run(root, 'node', verb, 'main.slotcrew')
+            assert result.returncode == 2, result.stdout + result.stderr
+            assert 'no value for slot {{mission}}' in result.stderr, result.stderr
+            assert remedy in result.stderr, result.stderr
+            assert 'supply it with --set' not in result.stderr, result.stderr
+    finally:
+        _run(root, 'node', 'delete', 'main.slotcrew', '--force')
+
+
+# ------ reseed
+
+
+def test_reseed_restores_the_seed_surfaces_and_records_the_event(
+    repo: dict,
+) -> None:
+    """``reseed`` rewrites the four seed surfaces and nothing else.
+
+    A drifted step, script, skill file, and agent ``settings.json`` are
+    restored to the rendered template bytes and a deleted step is
+    re-added, while an operator's charter edit, ``config.json``,
+    ``memory/``, ``_template.toml`` (values included), a node-added step,
+    a node-authored file inside a template-carried skill dir (the skill
+    copy merges per file, never wholesale), and the codex ``auth.json``
+    symlink all survive untouched. The verb refuses from the node's own
+    worktree and on a paused node without ``--force``, and records a
+    ``reseed`` event naming the path and commit.
+    """
+    root = repo['root']
+    charter = (
+        '# reseedcrew\n\n## Instructions\n\nmission: {{mission}}\n\n'
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+        'steps/01-PLAN.md': '# plan the work\n',
+        'steps/02-EXECUTE.md': '# execute the plan\n',
+        'scripts/probe.sh': 'echo probe\n',
+        'skills/workflow/SKILL.md': '# workflow\n',
+        'agents/claude/settings.json': '{"seeded": true}\n',
+    }
+    _commit_template(root, 'templates/reseedcrew', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'reseedcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/reseedcrew',
+        '--set',
+        'mission=probe the surfaces',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        worktree = root / '.worktrees' / 'main.reseedcrew'
+        node_dir = worktree / '.fractal' / 'main.reseedcrew'
+        record = node_dir / '_template.toml'
+        record_bytes = record.read_bytes()
+        commit = tomllib.loads(record_bytes.decode('utf-8'))['commit']
+        config_bytes = (node_dir / 'config.json').read_bytes()
+        auth = node_dir / '.codex' / 'auth.json'
+        auth_target = auth.readlink()
+        memory = node_dir / 'memory' / 'notes.md'
+        memory.parent.mkdir(parents=True, exist_ok=True)
+        memory.write_text('remember this\n', encoding='utf-8')
+        # a node-authored file inside the template-carried skill dir --
+        # the per-skill merge must keep it beside the restored SKILL.md
+        notes = node_dir / 'skills' / 'workflow' / 'notes.md'
+        notes.write_text('# node-authored\n', encoding='utf-8')
+        # a node may not edit its own seed
+        own = _run(worktree, 'node', 'reseed')
+        assert own.returncode == 2, own.stdout + own.stderr
+        assert 'its own worktree' in own.stderr
+        # drift every rewritable surface, plus the surfaces reseed must
+        # leave alone: the charter, a node-added step
+        (node_dir / 'steps' / '01-PLAN.md').write_text(
+            '# plan the work\nan added line\n',
+            encoding='utf-8',
+        )
+        (node_dir / 'steps' / '02-EXECUTE.md').unlink()
+        added = node_dir / 'steps' / '03-NEW.md'
+        added.write_text('# node-added\n', encoding='utf-8')
+        (node_dir / 'scripts' / 'probe.sh').write_text(
+            'echo probed\n',
+            encoding='utf-8',
+        )
+        (node_dir / 'skills' / 'workflow' / 'SKILL.md').write_text(
+            '# workflow, reworked\n',
+            encoding='utf-8',
+        )
+        (node_dir / '.claude' / 'settings.json').write_text(
+            '{"seeded": false}\n',
+            encoding='utf-8',
+        )
+        operator_charter = '# reseedcrew\n\nOperator-steered.\n'
+        (node_dir / 'NODE.md').write_text(operator_charter, encoding='utf-8')
+        reseeded = _run(root, 'node', 'reseed', 'main.reseedcrew')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+        assert f'Node reseeded from templates/reseedcrew@{commit}' in reseeded.stdout
+        # the four surfaces match the rendered template again
+        plan = (node_dir / 'steps' / '01-PLAN.md').read_text(encoding='utf-8')
+        assert plan == '# plan the work\n'
+        execute = (node_dir / 'steps' / '02-EXECUTE.md').read_text(encoding='utf-8')
+        assert execute == '# execute the plan\n'
+        probe = (node_dir / 'scripts' / 'probe.sh').read_text(encoding='utf-8')
+        assert probe == 'echo probe\n'
+        skill_md = node_dir / 'skills' / 'workflow' / 'SKILL.md'
+        skill = skill_md.read_text(encoding='utf-8')
+        assert skill == '# workflow\n'
+        settings = (node_dir / '.claude' / 'settings.json').read_text(encoding='utf-8')
+        assert settings == '{"seeded": true}\n'
+        # nothing else moved: charter, config, memory, record, the node's
+        # own step, and the auth symlink all stand
+        assert (node_dir / 'NODE.md').read_text(encoding='utf-8') == operator_charter
+        assert (node_dir / 'config.json').read_bytes() == config_bytes
+        assert memory.read_text(encoding='utf-8') == 'remember this\n'
+        assert record.read_bytes() == record_bytes
+        assert added.read_text(encoding='utf-8') == '# node-added\n'
+        assert notes.read_text(encoding='utf-8') == '# node-authored\n'
+        assert auth.is_symlink()
+        assert auth.readlink() == auth_target
+        # the event names the path and the commit read
+        activity = _run(root, 'node', 'activity', 'main.reseedcrew', '--csv').stdout
+        events = [
+            row
+            for row in csv.DictReader(io.StringIO(activity))
+            if row['event'] == 'reseed'
+        ]
+        assert [row['metadata'] for row in events] == [f'templates/reseedcrew@{commit}']
+        # a paused node refuses without --force; --force reseeds it
+        Node(worktree).status_set('paused')
+        paused = _run(root, 'node', 'reseed', 'main.reseedcrew')
+        assert paused.returncode == 2, paused.stdout + paused.stderr
+        assert 'Cannot reseed a paused node' in paused.stderr
+        forced = _run(root, 'node', 'reseed', 'main.reseedcrew', '--force')
+        assert forced.returncode == 0, forced.stdout + forced.stderr
+        Node(worktree).status_set('idle')
+    finally:
+        _run(root, 'node', 'delete', 'main.reseedcrew', '--force')
+
+
+def test_reseed_ref_reads_another_commit_and_keeps_exclusions(
+    repo: dict,
+) -> None:
+    """``--ref`` reads the folder at another commit and records that commit.
+
+    The node picks up the step the template gained and the edit it made,
+    the recorded ``exclude`` still keeps its step absent, and
+    ``_template.toml`` advances to the ref's commit with the listing
+    intact.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'steps/02-SKIP.md': '# never deployed\n',
+    }
+    _commit_template(root, 'templates/refreseed', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'refreseed',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/refreseed',
+        '--exclude',
+        'steps/02-SKIP.md',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.refreseed' / '.fractal' / 'main.refreseed'
+        )
+        # the template evolves after the spawn: an edit and a new step
+        files = {
+            'steps/01-GO.md': '# go, faster\n',
+            'steps/03-NEW.md': '# gained after the spawn\n',
+        }
+        _commit_template(root, 'templates/refreseed', files)
+        advanced = _git(root, 'rev-parse', 'main').stdout.strip()
+        reseeded = _run(root, 'node', 'reseed', 'main.refreseed', '--ref', 'main')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go, faster\n'
+        new = (node_dir / 'steps' / '03-NEW.md').read_text(encoding='utf-8')
+        assert new == '# gained after the spawn\n'
+        assert not (node_dir / 'steps' / '02-SKIP.md').exists()
+        # the record advances to the ref's commit, listing intact
+        data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+        assert data['commit'] == advanced
+        assert data['exclude'] == ['steps/02-SKIP.md']
+        activity = _run(root, 'node', 'activity', 'main.refreseed', '--csv').stdout
+        events = [
+            row
+            for row in csv.DictReader(io.StringIO(activity))
+            if row['event'] == 'reseed'
+        ]
+        assert [row['metadata'] for row in events] == [
+            f'templates/refreseed@{advanced}'
+        ]
+    finally:
+        _run(root, 'node', 'delete', 'main.refreseed', '--force')
+
+
+def test_reseed_refuses_a_missing_path_at_a_ref_and_re_points(
+    repo: dict,
+) -> None:
+    """A ref missing the recorded folder refuses; ``--template`` re-points.
+
+    A template moved on a later commit makes ``--ref`` a pathspec miss:
+    the refusal names the path, the ref, and the re-point remedy. The
+    re-point rewrites ``_template.toml``'s path and commit and reseeds
+    from the new folder -- reading the root branch's own copy, so no
+    root-differs notice prints.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/oldhome', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'movecrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/oldhome',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.movecrew' / '.fractal' / 'main.movecrew'
+        _git(root, 'mv', 'templates/oldhome', 'templates/newhome')
+        _git(root, 'commit', '-m', 'move the template folder')
+        moved = _git(root, 'rev-parse', 'main').stdout.strip()
+        # the recorded path is gone at the ref: refuse naming the remedy
+        miss = _run(root, 'node', 'reseed', 'main.movecrew', '--ref', 'main')
+        assert miss.returncode == 2, miss.stdout + miss.stderr
+        assert "Template folder 'templates/oldhome' is not tracked at 'main'" in (
+            miss.stderr
+        )
+        assert 'node reseed --template' in miss.stderr
+        # re-point at the moved folder (the node's own tip predates the
+        # move, so the value names the ref carrying it) and reseed
+        (node_dir / 'steps' / '01-GO.md').write_text('# drifted\n', encoding='utf-8')
+        repointed = _run(
+            root,
+            'node',
+            'reseed',
+            'main.movecrew',
+            '--template',
+            'templates/newhome@main',
+        )
+        assert repointed.returncode == 0, repointed.stdout + repointed.stderr
+        # the commit read is the root's own tip, so no notice prints
+        assert 'Notice: template' not in repointed.stdout
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\n'
+        data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+        assert data['path'] == 'templates/newhome'
+        assert data['commit'] == moved
+    finally:
+        _run(root, 'node', 'delete', 'main.movecrew', '--force')
+
+
+def test_reseed_bare_re_point_reads_the_node_branch_tip(repo: dict) -> None:
+    """A re-point naming no ``@<ref>`` reads at the node branch's own tip.
+
+    The default keeps the re-point on the revision the node has actually
+    merged: a folder that advanced on ``main`` after the fork deploys its
+    node-tip bytes, and the recorded commit is the node branch tip -- not
+    ``main``'s. The root branch's copy differs from the commit read, so
+    the re-point prints creation's root-differs notice, naming the
+    ``@<root>`` form.
+    """
+    root = repo['root']
+    # both folders predate the spawn, so the node's own tip tracks them
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/pointa', files)
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# from b, original\n',
+    }
+    _commit_template(root, 'templates/pointb', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'pointer',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/pointa',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.pointer' / '.fractal' / 'main.pointer'
+        # the re-point target advances on main after the fork
+        files = {
+            'steps/01-GO.md': '# from b, advanced\n',
+        }
+        _commit_template(root, 'templates/pointb', files)
+        advanced = _git(root, 'rev-parse', 'main').stdout.strip()
+        tip = _git(root, 'rev-parse', 'main.pointer').stdout.strip()
+        assert tip != advanced
+        repointed = _run(
+            root,
+            'node',
+            'reseed',
+            'main.pointer',
+            '--template',
+            'templates/pointb',
+        )
+        assert repointed.returncode == 0, repointed.stdout + repointed.stderr
+        # the root moved past the commit read: the notice names the form
+        # that reads the root's copy
+        assert (
+            "Notice: template 'templates/pointb' differs on the root branch;"
+            " pass --template=templates/pointb@main to read the root's copy."
+        ) in repointed.stdout, repointed.stdout
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# from b, original\n'
+        data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+        assert data['path'] == 'templates/pointb'
+        assert data['commit'] == tip
+    finally:
+        _run(root, 'node', 'delete', 'main.pointer', '--force')
+
+
+def test_reseed_prints_no_root_notice_without_a_re_point(repo: dict) -> None:
+    """Only a re-point draws the root-differs notice; plain and ``--ref`` stay silent.
+
+    A plain reseed re-reads the recorded commit and ``--ref`` a named
+    one -- both deliberate choices of a version, so neither prints
+    creation's root-differs notice even while the root branch holds a
+    newer copy of the folder, and both keep the read version's bytes.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/quietcrew', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'quietcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/quietcrew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.quietcrew' / '.fractal' / 'main.quietcrew'
+        )
+        record = node_dir / '_template.toml'
+        recorded = tomllib.loads(record.read_text(encoding='utf-8'))['commit']
+        # the root branch moves past the recorded copy
+        files = {
+            'steps/01-GO.md': '# go, newer\n',
+        }
+        _commit_template(root, 'templates/quietcrew', files)
+        read_tree = _git(root, 'rev-parse', f'{recorded}:templates/quietcrew').stdout
+        root_tree = _git(root, 'rev-parse', 'main:templates/quietcrew').stdout
+        assert read_tree != root_tree
+        # a plain reseed re-reads the recorded commit, silently
+        plain = _run(root, 'node', 'reseed', 'main.quietcrew')
+        assert plain.returncode == 0, plain.stdout + plain.stderr
+        assert 'Notice: template' not in plain.stdout
+        # a --ref reseed reads the named commit, silently too
+        ref = _run(root, 'node', 'reseed', 'main.quietcrew', '--ref', recorded)
+        assert ref.returncode == 0, ref.stdout + ref.stderr
+        assert 'Notice: template' not in ref.stdout
+        # both re-reads keep the recorded bytes, not the root's newer copy
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\n'
+    finally:
+        _run(root, 'node', 'delete', 'main.quietcrew', '--force')
+
+
+def test_reseed_refuses_a_template_carrying_agent_credentials(
+    repo: dict,
+) -> None:
+    """A credential under a template's ``agents/`` refuses at reseed by name.
+
+    The read-side guard judges every materialized bundle: a re-point at a
+    folder whose ``agents/`` carries an ``auth.json`` refuses naming the
+    file, and the node keeps its recorded template and its live agent
+    files untouched.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'agents/claude/settings.json': '{"seeded": true}\n',
+    }
+    _commit_template(root, 'templates/cleancrew', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'guardcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/cleancrew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.guardcrew' / '.fractal' / 'main.guardcrew'
+        )
+        record_bytes = (node_dir / '_template.toml').read_bytes()
+        files = {
+            'config.json': '{}\n',
+            'steps/01-GO.md': '# go\n',
+            'agents/codex/auth.json': '{"token": "leaked"}\n',
+        }
+        _commit_template(root, 'templates/leakcrew', files)
+        refused = _run(
+            root,
+            'node',
+            'reseed',
+            'main.guardcrew',
+            '--template',
+            'templates/leakcrew@main',
+        )
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert (
+            'carries a credential-named file:'
+            " 'templates/leakcrew/agents/codex/auth.json'"
+        ) in refused.stderr, refused.stderr
+        # the node is untouched: the leak never reaches the agent dir, the
+        # clean template's file stands, and the record still names it
+        settings = (node_dir / '.claude' / 'settings.json').read_text(encoding='utf-8')
+        assert settings == '{"seeded": true}\n'
+        assert (node_dir / '.codex' / 'auth.json').is_symlink()
+        assert (node_dir / '_template.toml').read_bytes() == record_bytes
+    finally:
+        _run(root, 'node', 'delete', 'main.guardcrew', '--force')
+
+
+def test_reseed_refuses_steps_breaking_the_discovery_contract(repo: dict) -> None:
+    """A reseed whose post-reseed steps the loop cannot discover refuses.
+
+    Reseed adds and overwrites but never deletes, so the contract judges
+    the union of the bundle's steps and the node's own: a template
+    renumbered at the ``--ref`` leaves the stale live step beside the
+    new width (refused with the delete remedy), and a bundle step
+    without an ``NN-`` prefix refuses by name -- both before anything
+    rewrites.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/renum', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'renum',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/renum',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.renum' / '.fractal' / 'main.renum'
+        record_bytes = (node_dir / '_template.toml').read_bytes()
+        # the template renumbers to a wider prefix on main: the bundle is
+        # coherent alone, but the node's stale 01- step would survive
+        (root / 'templates' / 'renum' / 'steps' / '01-GO.md').unlink()
+        files = {
+            'steps/001-GO.md': '# go, renumbered\n',
+        }
+        _commit_template(root, 'templates/renum', files)
+        mixed = _run(root, 'node', 'reseed', 'main.renum', '--ref', 'main')
+        assert mixed.returncode == 2, mixed.stdout + mixed.stderr
+        assert 'mixed digit prefix widths' in mixed.stderr, mixed.stderr
+        assert '001-GO.md' in mixed.stderr
+        assert 'delete the stale files first' in mixed.stderr
+        # a bundle step without the NN- prefix refuses by name
+        files = {
+            'steps/ROGUE.md': '# unprefixed\n',
+        }
+        _commit_template(root, 'templates/renum', files)
+        rogue = _run(root, 'node', 'reseed', 'main.renum', '--ref', 'main')
+        assert rogue.returncode == 2, rogue.stdout + rogue.stderr
+        assert 'without an NN- prefix: ROGUE.md' in rogue.stderr, rogue.stderr
+        # nothing rewrote: the live step and the record stand
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\n'
+        assert not (node_dir / 'steps' / '001-GO.md').exists()
+        assert (node_dir / '_template.toml').read_bytes() == record_bytes
+    finally:
+        _run(root, 'node', 'delete', 'main.renum', '--force')
+
+
+def test_reseed_refuses_files_the_seed_would_skip(repo: dict) -> None:
+    """A bundle file the copy loops would skip refuses at reseed by name.
+
+    The skip-shape vet judges every seeding bundle: a ``--ref`` at which
+    the recorded folder gained a stray ``steps/`` note refuses, a
+    re-point at a folder whose ``scripts/`` carries underscore machinery
+    refuses, a hidden entry in any file surface refuses (the hidden step
+    by the skip rule, not the step-union's NN-prefix contract), a
+    case-variant surface folder (``Steps/``) and an
+    ``agents/<agent>/skills`` mount shadow refuse by name, and the node
+    keeps its recorded template and its live surfaces untouched. The vet
+    judges the effective set: a recorded ``exclude`` covering the
+    offender trims it first, and the same re-point reseeds cleanly.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/skipcrew', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'skipcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/skipcrew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.skipcrew' / '.fractal' / 'main.skipcrew'
+        record_bytes = (node_dir / '_template.toml').read_bytes()
+        # the template gains a stray note on main: the --ref read refuses
+        files = {
+            'steps/notes.txt': 'not a step\n',
+        }
+        _commit_template(root, 'templates/skipcrew', files)
+        stray = _run(root, 'node', 'reseed', 'main.skipcrew', '--ref', 'main')
+        assert stray.returncode == 2, stray.stdout + stray.stderr
+        assert ('steps/ has a file the seed would skip: notes.txt') in stray.stderr, (
+            stray.stderr
+        )
+        # a re-point at a folder carrying underscore machinery refuses too
+        files = {
+            'config.json': '{}\n',
+            'steps/01-GO.md': '# go\n',
+            'scripts/_helper.sh': 'echo hidden\n',
+        }
+        _commit_template(root, 'templates/skipscripts', files)
+        machinery = _run(
+            root,
+            'node',
+            'reseed',
+            'main.skipcrew',
+            '--template',
+            'templates/skipscripts@main',
+        )
+        assert machinery.returncode == 2, machinery.stdout + machinery.stderr
+        assert (
+            'scripts/ has a file the seed would skip: _helper.sh'
+        ) in machinery.stderr, machinery.stderr
+        # the vet's shape arms judge a reseed bundle exactly as an init
+        # one: a hidden entry per file surface, a case-variant surface
+        # folder, and an agents/<agent>/skills mount shadow each refuse
+        vetted = [
+            (
+                'hiddenstep',
+                {'steps/.notes.md': '# hidden\n'},
+                'steps/ has a file the seed would skip: .notes.md',
+            ),
+            (
+                'hiddenscript',
+                {'scripts/.env': 'PROBE=1\n'},
+                'scripts/ has a file the seed would skip: .env',
+            ),
+            (
+                'hiddenskill',
+                {'skills/.sneaky/SKILL.md': '# sneak\n'},
+                'skills/ has a skill directory the seed would skip: .sneaky',
+            ),
+            (
+                'wrongcase',
+                {'Steps/01-GO.md': '# go\n'},
+                'names a seed surface in the wrong case: Steps/',
+            ),
+            (
+                'mountshadow',
+                {'agents/claude/skills/planted.md': '# planted\n'},
+                'agents/claude/ carries a skills entry',
+            ),
+        ]
+        for folder, files, message in vetted:
+            bundle = {'config.json': '{}\n', **files}
+            _commit_template(root, f'templates/{folder}', bundle)
+            refused = _run(
+                root,
+                'node',
+                'reseed',
+                'main.skipcrew',
+                '--template',
+                f'templates/{folder}@main',
+            )
+            assert refused.returncode == 2, refused.stdout + refused.stderr
+            assert message in refused.stderr, refused.stderr
+            # the hidden step draws the vet's skip message, never the
+            # step-union NN-prefix refusal that runs after it
+            if folder == 'hiddenstep':
+                assert 'NN- prefix' not in refused.stderr, refused.stderr
+        # nothing rewrote: the record and the live steps stand
+        assert (node_dir / '_template.toml').read_bytes() == record_bytes
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\n'
+        assert not (node_dir / 'steps' / 'notes.txt').exists()
+        # a recorded exclude covering the offender trims it before the
+        # vet: the same machinery re-point now reseeds cleanly, and the
+        # record advances with the listing riding along
+        record = node_dir / '_template.toml'
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        data['exclude'] = ['scripts/_helper.sh']
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        trimmed = _run(
+            root,
+            'node',
+            'reseed',
+            'main.skipcrew',
+            '--template',
+            'templates/skipscripts@main',
+        )
+        assert trimmed.returncode == 0, trimmed.stdout + trimmed.stderr
+        assert not (node_dir / 'scripts' / '_helper.sh').exists()
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        assert data['path'] == 'templates/skipscripts'
+        assert data['exclude'] == ['scripts/_helper.sh']
+    finally:
+        _run(root, 'node', 'delete', 'main.skipcrew', '--force')
+
+
+def test_reseed_refuses_a_symlinked_seed_destination(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A symlink where a seed file belongs refuses before any write-through.
+
+    ``reseed.sh`` copies bundle steps and scripts over the node's own
+    files, so a symlink parked at a destination would smuggle the write
+    (and a script's ``chmod +x``) onto its target: each copy loop refuses
+    naming the file, and the out-of-node victim keeps its bytes and mode
+    -- the scripts victim never turns executable.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'scripts/probe.sh': 'echo probe\n',
+    }
+    _commit_template(root, 'templates/linkguard', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'linkguard',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/linkguard',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.linkguard' / '.fractal' / 'main.linkguard'
+        )
+        for surface, filename in (('steps', '01-GO.md'), ('scripts', 'probe.sh')):
+            victim = tmp_path / f'{surface}_victim'
+            victim.write_text('precious\n', encoding='utf-8')
+            victim.chmod(0o644)
+            mode = victim.stat().st_mode
+            target = node_dir / surface / filename
+            target.unlink()
+            target.symlink_to(victim)
+            refused = _run(root, 'node', 'reseed', 'main.linkguard')
+            assert refused.returncode == 2, refused.stdout + refused.stderr
+            assert f'{surface}/{filename} is a symlink' in refused.stderr, (
+                refused.stderr
+            )
+            # the victim is untouched: bytes, mode, and no executable bit
+            assert victim.read_text(encoding='utf-8') == 'precious\n'
+            assert victim.stat().st_mode == mode
+            assert not os.access(victim, os.X_OK)
+            target.unlink()
+        # with the symlinks gone the reseed lands, both files regular again
+        reseeded = _run(root, 'node', 'reseed', 'main.linkguard')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\n'
+        probe = node_dir / 'scripts' / 'probe.sh'
+        assert not probe.is_symlink()
+        assert probe.read_text(encoding='utf-8') == 'echo probe\n'
+        assert os.access(probe, os.X_OK)
+    finally:
+        _run(root, 'node', 'delete', 'main.linkguard', '--force')
+
+
+def test_reseed_refuses_a_symlinked_skills_destination(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A symlink anywhere on the skills copy path refuses before any write.
+
+    The per-skill merge copies into the node's ``skills/`` tree, so a
+    symlink at any level -- the ``skills/`` root, a skill directory, a
+    subdirectory inside one, or a file inside one -- would smuggle the
+    copy onto its target: each level refuses naming the node-relative
+    path, and the out-of-node victim never receives a byte.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'skills/workflow/SKILL.md': '# workflow\n',
+        'skills/workflow/sub/notes.md': '# nested\n',
+    }
+    _commit_template(root, 'templates/skilllink', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'skilllink',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/skilllink',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.skilllink' / '.fractal' / 'main.skilllink'
+        )
+        skills = node_dir / 'skills'
+        # each directory level -- the skills root, the skill dir, and the
+        # skill's subdirectory -- parked aside, replaced by a link, restored
+        levels = [
+            (skills, 'skills is a symlink'),
+            (skills / 'workflow', 'skills/workflow is a symlink'),
+            (skills / 'workflow' / 'sub', 'skills/workflow/sub is a symlink'),
+        ]
+        for target, message in levels:
+            victim = tmp_path / f'{target.name}_victim'
+            victim.mkdir()
+            parked = target.parent / f'{target.name}.parked'
+            target.rename(parked)
+            target.symlink_to(victim)
+            refused = _run(root, 'node', 'reseed', 'main.skilllink')
+            assert refused.returncode == 2, refused.stdout + refused.stderr
+            assert message in refused.stderr, refused.stderr
+            # the victim never received a byte
+            assert list(victim.iterdir()) == []
+            target.unlink()
+            parked.rename(target)
+        # the file-level refusal still fires beside the directory arms
+        victim = tmp_path / 'skill_md_victim'
+        victim.write_text('precious\n', encoding='utf-8')
+        skill_md = skills / 'workflow' / 'SKILL.md'
+        skill_md.unlink()
+        skill_md.symlink_to(victim)
+        refused = _run(root, 'node', 'reseed', 'main.skilllink')
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert 'skills/workflow/SKILL.md is a symlink' in refused.stderr, refused.stderr
+        assert victim.read_text(encoding='utf-8') == 'precious\n'
+        skill_md.unlink()
+        # with the links gone the reseed lands, every entry regular again
+        reseeded = _run(root, 'node', 'reseed', 'main.skilllink')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+        assert not skill_md.is_symlink()
+        assert skill_md.read_text(encoding='utf-8') == '# workflow\n'
+        notes = skills / 'workflow' / 'sub' / 'notes.md'
+        assert not notes.is_symlink()
+        assert notes.read_text(encoding='utf-8') == '# nested\n'
+    finally:
+        _run(root, 'node', 'delete', 'main.skilllink', '--force')
+
+
+@pytest.mark.parametrize('surface', ['steps', 'scripts'])
+def test_reseed_refuses_a_symlinked_surface_root(
+    repo: dict,
+    tmp_path: pathlib.Path,
+    surface: str,
+) -> None:
+    """A symlink at a surface root refuses before ``mkdir -p`` writes through it.
+
+    The per-file guards judge destinations inside the surface, so a symlink
+    at the ``steps/`` or ``scripts/`` root itself would let ``mkdir -p``
+    and every copy resolve through it into the target: the copy loop
+    refuses naming the surface, and the out-of-node victim never receives
+    a byte.
+    """
+    root = repo['root']
+    name = f'{surface}rootlink'
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'scripts/probe.sh': 'echo probe\n',
+    }
+    _commit_template(root, f'templates/{name}', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        name,
+        '--agent',
+        'claude',
+        '--template',
+        f'templates/{name}',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / f'main.{name}' / '.fractal' / f'main.{name}'
+        victim = tmp_path / 'victim'
+        victim.mkdir()
+        # the surface root parked aside, replaced by a link, restored below
+        target = node_dir / surface
+        parked = node_dir / f'{surface}.parked'
+        target.rename(parked)
+        target.symlink_to(victim)
+        refused = _run(root, 'node', 'reseed', f'main.{name}')
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert f'{surface} is a symlink' in refused.stderr, refused.stderr
+        # the victim never received a byte
+        assert list(victim.iterdir()) == []
+        target.unlink()
+        parked.rename(target)
+        # with the link gone the reseed lands
+        reseeded = _run(root, 'node', 'reseed', f'main.{name}')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+    finally:
+        _run(root, 'node', 'delete', f'main.{name}', '--force')
 
 
 # ------ lifecycle guards (idle node)

@@ -17,6 +17,7 @@ dependencies = [
     "plasma-wiki>=1,<2",
     "rich>=15,<16",
     "textual>=8,<9",
+    "tomli-w>=1,<2",
     "typer>=0.24,<1",
 ]
 

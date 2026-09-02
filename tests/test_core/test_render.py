@@ -2,8 +2,10 @@
 
 The engine is pinned against GNU ``envsubst`` -- the grammar the renderer is
 matched to -- so a template renders byte-identically to what ``envsubst``
-would produce. The remaining tests cover what the static map substitutes and
-how a chat sees it (real paths, ``N/A (chat)`` run-state).
+would produce. The seed-time slot grammar renders ``{{slot}}`` placeholders
+once, at init, and must leave the ``$VAR`` grammar untouched. The remaining
+tests cover what the static map substitutes and how a chat sees it (real
+paths, ``N/A (chat)`` run-state).
 """
 
 from __future__ import annotations
@@ -11,15 +13,19 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from typing import Optional
 
 import pytest
 
 import fractal.core.render
 from fractal.core.node import Node
-from fractal.core.render import _VarTemplate
+from fractal.core.render import _SlotTemplate, _VarTemplate
 
 __all__ = [
     'test_var_template_matches_envsubst',
+    'test_slot_template_fills_byte_for_byte',
+    'test_slot_template_raises_on_an_unfilled_slot',
+    'test_slot_template_refuses_every_stray_brace_pair',
     'test_render_template_substitutes_static_and_passes_runtime',
     'test_strip_frontmatter_edges',
     'test_build_prompt_assembles_charter_step_and_modes',
@@ -58,20 +64,70 @@ def test_var_template_matches_envsubst(template: str) -> None:
     assert _VarTemplate(template).safe_substitute(_VARS) == result.stdout
 
 
+# the slot fill map + templates exercising the fills (padding spaces,
+# adjacency) and the pass-through ($VAR text, shell parameter expansion,
+# lone braces) the seed-time grammar must leave byte-identical
+_SLOT_VALUES = {'pin': 'abc123', 'mission': 'prove the lemma'}
+_SLOT_TEMPLATES = [
+    ('pin: {{pin}}\n', 'pin: abc123\n'),
+    ('do {{ mission }} now', 'do prove the lemma now'),
+    ('{{pin}}{{mission}}', 'abc123prove the lemma'),
+    ('keep $VAR and ${CURRENT_BRANCH%.*} and $$', None),
+    ('lone { and } and }} stay', None),
+]
+
+
+@pytest.mark.parametrize(('template', 'expected'), _SLOT_TEMPLATES)
+def test_slot_template_fills_byte_for_byte(
+    template: str,
+    expected: Optional[str],
+) -> None:
+    """``_SlotTemplate`` fills lowercase slots and touches nothing else.
+
+    A ``None`` expectation means byte-identity: ``$VAR`` text, shell text
+    such as ``${CURRENT_BRANCH%.*}``, ``$$``, and lone braces pass through
+    unchanged, so the prompt-time envsubst grammar is undisturbed.
+    """
+    if expected is None:
+        expected = template
+    assert _SlotTemplate(template).substitute(_SLOT_VALUES) == expected
+
+
+def test_slot_template_raises_on_an_unfilled_slot() -> None:
+    """A slot with no value raises ``KeyError`` naming the slot."""
+    with pytest.raises(KeyError, match='mission'):
+        _SlotTemplate('do {{mission}} now').substitute({'pin': 'abc123'})
+
+
+@pytest.mark.parametrize(
+    argnames='residue',
+    argvalues=['{{PIN}}', '{{Pin}}', '{{9lives}}', '{{pin', '{{ }}'],
+)
+def test_slot_template_refuses_every_stray_brace_pair(residue: str) -> None:
+    """Any ``{{`` that is not a lowercase slot raises ``ValueError``.
+
+    The grammar itself refuses an uppercase or mixed-case name, a name
+    starting with a digit, an unclosed pair, and an empty pair -- there is
+    no escape and no way to write a literal ``{{``.
+    """
+    with pytest.raises(ValueError, match='Invalid placeholder'):
+        _SlotTemplate(residue).substitute(_SLOT_VALUES)
+
+
 def test_render_template_substitutes_static_and_passes_runtime(
     node_with_db: Node,
 ) -> None:
     """Static vars resolve and run-scoped vars pass through to the caller.
 
     An override wins over the (absent) derived value, and ``$MAX_DESCENDANTS``
-    now substitutes -- the former envsubst gap.
+    substitutes as a static var.
     """
     node = node_with_db
     template = 'wt=$WORKTREE_DIR step=$STEP_LABEL desc=$MAX_DESCENDANTS none=$NOPE'
     rendered = node.render_template(template)
     assert f'wt={node.worktree}' in rendered  # static var -> real path
     assert 'step=$STEP_LABEL' in rendered  # run-scoped: left for the caller
-    assert '$MAX_DESCENDANTS' not in rendered  # gap fix: now substituted
+    assert '$MAX_DESCENDANTS' not in rendered  # static var -> substituted
     assert 'none=$NOPE' in rendered  # unknown placeholder passes through
     # an override wins over the (absent) derived value
     overridden = node.render_template(template, overrides={'STEP_LABEL': 'step 1 of 3'})

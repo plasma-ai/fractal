@@ -7,7 +7,7 @@ import pathlib
 
 import typer
 
-from fractal.cli.utils import SQLITE_INT_MAX, command, resolve_node
+from fractal.cli.utils import command, resolve_node
 from fractal.core.config import (
     BOOL_KEYS,
     COST_KEYS,
@@ -15,6 +15,7 @@ from fractal.core.config import (
     INT_KEYS,
     KEYS,
     LIST_KEYS,
+    SQLITE_INT_MAX,
 )
 
 __all__ = [
