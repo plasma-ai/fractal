@@ -86,15 +86,18 @@ __all__ = [
     'test_diff_applies_the_recorded_listing_and_warns_on_a_stale_entry',
     'test_diff_requires_a_recorded_template_and_a_full_sha',
     'test_diff_stays_clean_after_the_template_folder_moves',
+    'test_diff_never_judges_a_root_file_named_like_a_surface',
     'test_diff_and_reseed_name_the_record_remedy_for_a_missing_value',
     'test_reseed_restores_the_seed_surfaces_and_records_the_event',
     'test_reseed_ref_reads_another_commit_and_keeps_exclusions',
     'test_reseed_refuses_a_missing_path_at_a_ref_and_re_points',
     'test_reseed_bare_re_point_reads_the_node_branch_tip',
+    'test_reseed_prints_no_root_notice_without_a_re_point',
     'test_reseed_refuses_a_template_carrying_agent_credentials',
     'test_reseed_refuses_steps_breaking_the_discovery_contract',
     'test_reseed_refuses_files_the_seed_would_skip',
     'test_reseed_refuses_a_symlinked_seed_destination',
+    'test_reseed_refuses_a_symlinked_skills_destination',
     'test_lifecycle_guard_rejects_idle_node',
     'test_start_drain_requires_continue',
     'test_retire_unretire_round_trips_through_list',
@@ -1973,6 +1976,49 @@ def test_diff_stays_clean_after_the_template_folder_moves(repo: dict) -> None:
         _run(root, 'node', 'delete', 'main.movediff', '--force')
 
 
+def test_diff_never_judges_a_root_file_named_like_a_surface(repo: dict) -> None:
+    """A root-level file sharing a surface name is documentation, not drift.
+
+    A template may carry root-level files named ``steps`` and
+    ``scripts`` (git tracks no folder of the same name beside them):
+    they deploy nowhere, exactly like a ``README.md``, so ``diff``
+    never maps them onto the node's real ``steps/`` and ``scripts/``
+    directories -- the node seeds the package surfaces and stays clean,
+    with no missing-from-the-node finding.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps': 'a note, not a surface\n',
+        'scripts': 'another note, not a surface\n',
+    }
+    _commit_template(root, 'templates/rootnames', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'rootnames',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/rootnames',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.rootnames' / '.fractal' / 'main.rootnames'
+        )
+        # the package surfaces seeded as directories; the root files nowhere
+        assert (node_dir / 'steps').is_dir()
+        assert (node_dir / 'scripts').is_dir()
+        clean = _run(root, 'node', 'diff', 'main.rootnames')
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        assert clean.stdout.strip() == 'No drift from the recorded template.'
+        assert 'missing from the node' not in clean.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.rootnames', '--force')
+
+
 def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
     repo: dict,
 ) -> None:
@@ -2348,6 +2394,61 @@ def test_reseed_bare_re_point_reads_the_node_branch_tip(repo: dict) -> None:
         _run(root, 'node', 'delete', 'main.pointer', '--force')
 
 
+def test_reseed_prints_no_root_notice_without_a_re_point(repo: dict) -> None:
+    """Only a re-point draws the root-differs notice; plain and ``--ref`` stay silent.
+
+    A plain reseed re-reads the recorded commit and ``--ref`` a named
+    one -- both deliberate choices of a version, so neither prints
+    creation's root-differs notice even while the root branch holds a
+    newer copy of the folder, and both keep the read version's bytes.
+    """
+    root = repo['root']
+    _commit_template(
+        root,
+        'templates/quietcrew',
+        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
+    )
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'quietcrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/quietcrew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.quietcrew' / '.fractal' / 'main.quietcrew'
+        )
+        record = node_dir / '_template.toml'
+        recorded = tomllib.loads(record.read_text(encoding='utf-8'))['commit']
+        # the root branch moves past the recorded copy
+        _commit_template(
+            root,
+            'templates/quietcrew',
+            {'steps/01-GO.md': '# go, newer\n'},
+        )
+        read_tree = _git(root, 'rev-parse', f'{recorded}:templates/quietcrew').stdout
+        root_tree = _git(root, 'rev-parse', 'main:templates/quietcrew').stdout
+        assert read_tree != root_tree
+        # a plain reseed re-reads the recorded commit, silently
+        plain = _run(root, 'node', 'reseed', 'main.quietcrew')
+        assert plain.returncode == 0, plain.stdout + plain.stderr
+        assert 'Notice: template' not in plain.stdout
+        # a --ref reseed reads the named commit, silently too
+        ref = _run(root, 'node', 'reseed', 'main.quietcrew', '--ref', recorded)
+        assert ref.returncode == 0, ref.stdout + ref.stderr
+        assert 'Notice: template' not in ref.stdout
+        # both re-reads keep the recorded bytes, not the root's newer copy
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\n'
+    finally:
+        _run(root, 'node', 'delete', 'main.quietcrew', '--force')
+
+
 def test_reseed_refuses_a_template_carrying_agent_credentials(
     repo: dict,
 ) -> None:
@@ -2477,8 +2578,13 @@ def test_reseed_refuses_files_the_seed_would_skip(repo: dict) -> None:
     The skip-shape vet judges every seeding bundle: a ``--ref`` at which
     the recorded folder gained a stray ``steps/`` note refuses, a
     re-point at a folder whose ``scripts/`` carries underscore machinery
-    refuses, and the node keeps its recorded template and its live
-    surfaces untouched.
+    refuses, a hidden entry in any file surface refuses (the hidden step
+    by the skip rule, not the step-union's NN-prefix contract), a
+    case-variant surface folder (``Steps/``) and an
+    ``agents/<agent>/skills`` mount shadow refuse by name, and the node
+    keeps its recorded template and its live surfaces untouched. The vet
+    judges the effective set: a recorded ``exclude`` covering the
+    offender trims it first, and the same re-point reseeds cleanly.
     """
     root = repo['root']
     _commit_template(
@@ -2533,11 +2639,81 @@ def test_reseed_refuses_files_the_seed_would_skip(repo: dict) -> None:
         assert (
             'scripts/ has a file the seed would skip: _helper.sh'
         ) in machinery.stderr, machinery.stderr
+        # the vet's shape arms judge a reseed bundle exactly as an init
+        # one: a hidden entry per file surface, a case-variant surface
+        # folder, and an agents/<agent>/skills mount shadow each refuse
+        vetted = [
+            (
+                'hiddenstep',
+                {'steps/.notes.md': '# hidden\n'},
+                'steps/ has a file the seed would skip: .notes.md',
+            ),
+            (
+                'hiddenscript',
+                {'scripts/.env': 'PROBE=1\n'},
+                'scripts/ has a file the seed would skip: .env',
+            ),
+            (
+                'hiddenskill',
+                {'skills/.sneaky/SKILL.md': '# sneak\n'},
+                'skills/ has a skill directory the seed would skip: .sneaky',
+            ),
+            (
+                'wrongcase',
+                {'Steps/01-GO.md': '# go\n'},
+                'names a seed surface in the wrong case: Steps/',
+            ),
+            (
+                'mountshadow',
+                {'agents/claude/skills/planted.md': '# planted\n'},
+                'agents/claude/ carries a skills entry',
+            ),
+        ]
+        for folder, files, message in vetted:
+            _commit_template(
+                root,
+                f'templates/{folder}',
+                {'config.json': '{}\n', **files},
+            )
+            refused = _run(
+                root,
+                'node',
+                'reseed',
+                'main.skipcrew',
+                '--template',
+                f'templates/{folder}@main',
+            )
+            assert refused.returncode == 2, refused.stdout + refused.stderr
+            assert message in refused.stderr, refused.stderr
+            # the hidden step draws the vet's skip message, never the
+            # step-union NN-prefix refusal that runs after it
+            if folder == 'hiddenstep':
+                assert 'NN- prefix' not in refused.stderr, refused.stderr
         # nothing rewrote: the record and the live steps stand
         assert (node_dir / '_template.toml').read_bytes() == record_bytes
         go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
         assert go == '# go\n'
         assert not (node_dir / 'steps' / 'notes.txt').exists()
+        # a recorded exclude covering the offender trims it before the
+        # vet: the same machinery re-point now reseeds cleanly, and the
+        # record advances with the listing riding along
+        record = node_dir / '_template.toml'
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        data['exclude'] = ['scripts/_helper.sh']
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        trimmed = _run(
+            root,
+            'node',
+            'reseed',
+            'main.skipcrew',
+            '--template',
+            'templates/skipscripts@main',
+        )
+        assert trimmed.returncode == 0, trimmed.stdout + trimmed.stderr
+        assert not (node_dir / 'scripts' / '_helper.sh').exists()
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        assert data['path'] == 'templates/skipscripts'
+        assert data['exclude'] == ['scripts/_helper.sh']
     finally:
         _run(root, 'node', 'delete', 'main.skipcrew', '--force')
 
@@ -2605,6 +2781,85 @@ def test_reseed_refuses_a_symlinked_seed_destination(
         assert os.access(probe, os.X_OK)
     finally:
         _run(root, 'node', 'delete', 'main.linkguard', '--force')
+
+
+def test_reseed_refuses_a_symlinked_skills_destination(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A symlink anywhere on the skills copy path refuses before any write.
+
+    The per-skill merge copies into the node's ``skills/`` tree, so a
+    symlink at any level -- the ``skills/`` root, a skill directory, a
+    subdirectory inside one, or a file inside one -- would smuggle the
+    copy onto its target: each level refuses naming the node-relative
+    path, and the out-of-node victim never receives a byte.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'skills/workflow/SKILL.md': '# workflow\n',
+        'skills/workflow/sub/notes.md': '# nested\n',
+    }
+    _commit_template(root, 'templates/skilllink', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'skilllink',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/skilllink',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.skilllink' / '.fractal' / 'main.skilllink'
+        )
+        skills = node_dir / 'skills'
+        # each directory level -- the skills root, the skill dir, and the
+        # skill's subdirectory -- parked aside, replaced by a link, restored
+        levels = [
+            (skills, 'skills is a symlink'),
+            (skills / 'workflow', 'skills/workflow is a symlink'),
+            (skills / 'workflow' / 'sub', 'skills/workflow/sub is a symlink'),
+        ]
+        for target, message in levels:
+            victim = tmp_path / f'{target.name}_victim'
+            victim.mkdir()
+            parked = target.parent / f'{target.name}.parked'
+            target.rename(parked)
+            target.symlink_to(victim)
+            refused = _run(root, 'node', 'reseed', 'main.skilllink')
+            assert refused.returncode == 2, refused.stdout + refused.stderr
+            assert message in refused.stderr, refused.stderr
+            # the victim never received a byte
+            assert list(victim.iterdir()) == []
+            target.unlink()
+            parked.rename(target)
+        # the file-level refusal still fires beside the directory arms
+        victim = tmp_path / 'skill_md_victim'
+        victim.write_text('precious\n', encoding='utf-8')
+        skill_md = skills / 'workflow' / 'SKILL.md'
+        skill_md.unlink()
+        skill_md.symlink_to(victim)
+        refused = _run(root, 'node', 'reseed', 'main.skilllink')
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert 'skills/workflow/SKILL.md is a symlink' in refused.stderr, refused.stderr
+        assert victim.read_text(encoding='utf-8') == 'precious\n'
+        skill_md.unlink()
+        # with the links gone the reseed lands, every entry regular again
+        reseeded = _run(root, 'node', 'reseed', 'main.skilllink')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+        assert not skill_md.is_symlink()
+        assert skill_md.read_text(encoding='utf-8') == '# workflow\n'
+        notes = skills / 'workflow' / 'sub' / 'notes.md'
+        assert not notes.is_symlink()
+        assert notes.read_text(encoding='utf-8') == '# nested\n'
+    finally:
+        _run(root, 'node', 'delete', 'main.skilllink', '--force')
 
 
 # ------ lifecycle guards (idle node)

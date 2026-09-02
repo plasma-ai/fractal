@@ -118,18 +118,29 @@ fi
 
 # skills (per skill dir, merged file by file: a node-added file survives)
 if [[ -d "$BUNDLE/skills" ]]; then
+    # refuse a symlinked skills root: mkdir -p and cp resolve through it
+    if [[ -L "$NODE_DIR/skills" ]]; then
+        echo "Error: skills is a symlink; refusing to write through it" >&2
+        exit 1
+    fi
     for SKILL_SRC in "$BUNDLE/skills"/*/; do
         [[ -d "$SKILL_SRC" ]] || continue
         SKILL_NAME=$(basename "$SKILL_SRC")
+        # refuse a symlinked skill dir before mkdir -p resolves through it
+        if [[ -L "$NODE_DIR/skills/$SKILL_NAME" ]]; then
+            echo "Error: skills/$SKILL_NAME is a symlink; refusing to write through it" >&2
+            exit 1
+        fi
         mkdir -p "$NODE_DIR/skills/$SKILL_NAME"
-        # refuse a symlinked destination: a plain cp would write through it
+        # refuse a symlinked destination, file or directory component: a
+        # plain cp would write through it
         while IFS= read -r REL; do
             REL="${REL#./}"
             if [[ -L "$NODE_DIR/skills/$SKILL_NAME/$REL" ]]; then
                 echo "Error: skills/$SKILL_NAME/$REL is a symlink; refusing to write through it" >&2
                 exit 1
             fi
-        done < <(cd "$SKILL_SRC" && find . -type f)
+        done < <(cd "$SKILL_SRC" && find . -mindepth 1 \( -type f -o -type d \))
         cp -RL "${SKILL_SRC}." "$NODE_DIR/skills/$SKILL_NAME/"
     done
 fi

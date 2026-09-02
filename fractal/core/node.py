@@ -1390,9 +1390,13 @@ class Node:
                 # would deploy empty)
                 steps_dir = bundle / 'steps'
                 if steps_dir.is_dir():
-                    # only regular files seed -- init.sh copies the same set
+                    # only regular, non-hidden files seed -- init.sh
+                    # copies the same set (its glob skips dot entries,
+                    # which the vet below refuses by the accurate rule)
                     step_files = sorted(
-                        entry for entry in steps_dir.glob('*.md') if entry.is_file()
+                        entry
+                        for entry in steps_dir.glob('*.md')
+                        if entry.is_file() and not entry.name.startswith('.')
                     )
                     if not step_files:
                         raise ValueError(
@@ -2267,6 +2271,9 @@ class Node:
                     bundle_names = {entry.name for entry in step_files}
                     live_dir = self.node_dir / 'steps'
                     if live_dir.is_dir():
+                        # the live side takes everything the loop's own glob
+                        # discovers, hidden names included -- the union must
+                        # judge exactly what a run would read
                         step_files += sorted(
                             entry
                             for entry in live_dir.glob('*.md')

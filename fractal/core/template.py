@@ -528,46 +528,75 @@ def vet(bundle: pathlib.Path) -> None:
         bundle: The bundle root.
 
     Raises:
-        ValueError: If ``steps/`` or ``scripts/`` holds a file the copy
-            loop would skip, ``skills/`` holds a loose file outside a
-            skill directory, or ``agents/`` holds an unknown or loose
-            entry.
+        ValueError: If a surface directory is named in the wrong case,
+            ``steps/`` or ``scripts/`` holds a file the copy loop would
+            skip, ``skills/`` holds a loose file or hidden directory,
+            or ``agents/`` holds an unknown or loose entry or a
+            ``skills`` entry shadowing the mount.
 
     """
     from .agent import supported
 
-    # steps: the copy loop deploys top-level *.md files only
+    # surface names are exact: a case-variant folder (Steps/) deploys
+    # through the seed's case-insensitive filesystem lookups on macOS
+    # yet diff's case-sensitive compare never judges it, and deploys
+    # nothing at all on a case-sensitive checkout -- refused either way
+    surfaces = ('steps', 'scripts', 'skills', 'agents')
+    for entry in sorted(bundle.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name.casefold() in surfaces and entry.name not in surfaces:
+            raise ValueError(
+                f'Template folder names a seed surface in the wrong'
+                f' case: {entry.name}/ (surfaces are lowercase: steps/,'
+                ' scripts/, skills/, agents/).'
+            )
+    # steps: the copy loop deploys top-level *.md files only, and its
+    # glob never matches a hidden entry
     steps_dir = bundle / 'steps'
     if steps_dir.is_dir():
         for entry in sorted(steps_dir.rglob('*')):
             if not entry.is_file():
                 continue
-            if entry.parent == steps_dir and entry.suffix == '.md':
+            if (
+                entry.parent == steps_dir
+                and entry.suffix == '.md'
+                and not entry.name.startswith('.')
+            ):
                 continue
             relname = entry.relative_to(steps_dir).as_posix()
             raise ValueError(
                 f'Template steps/ has a file the seed would skip:'
-                f' {relname} (steps deploy as top-level *.md files).'
+                f' {relname} (steps deploy as top-level, non-hidden'
+                ' *.md files).'
             )
-    # scripts: top-level regular files, underscore machinery skipped
+    # scripts: top-level regular files, underscore machinery skipped,
+    # and the copy loop's glob never matches a hidden entry
     scripts_dir = bundle / 'scripts'
     if scripts_dir.is_dir():
         for entry in sorted(scripts_dir.rglob('*')):
             if not entry.is_file():
                 continue
-            if entry.parent == scripts_dir and not entry.name.startswith('_'):
+            if entry.parent == scripts_dir and not entry.name.startswith(('_', '.')):
                 continue
             relname = entry.relative_to(scripts_dir).as_posix()
             raise ValueError(
                 f'Template scripts/ has a file the seed would skip:'
-                f' {relname} (scripts deploy as top-level, non-underscore'
-                ' files).'
+                f' {relname} (scripts deploy as top-level, non-underscore,'
+                ' non-hidden files).'
             )
-    # skills: whole skill directories -- a loose file deploys nowhere
+    # skills: whole skill directories -- a loose file deploys nowhere,
+    # and the copy loop's glob never matches a hidden directory
     skills_dir = bundle / 'skills'
     if skills_dir.is_dir():
         for entry in sorted(skills_dir.iterdir()):
             if entry.is_dir():
+                if entry.name.startswith('.'):
+                    raise ValueError(
+                        f'Template skills/ has a skill directory the seed'
+                        f' would skip: {entry.name} (skills deploy per'
+                        ' non-hidden directory).'
+                    )
                 continue
             raise ValueError(
                 f'Template skills/ has a loose file outside a skill'
@@ -591,6 +620,16 @@ def vet(bundle: pathlib.Path) -> None:
                     f'Template agents/ has a loose file, not an agent'
                     f' directory: {entry.name} (per-agent files live'
                     ' under agents/<agent>/).'
+                )
+            # the agent's skills/ is a mount of the node's skills
+            # directory: a bundle entry there would pre-empt the mount
+            # at init and write through the live link at reseed
+            if (entry / 'skills').exists():
+                raise ValueError(
+                    f'Template agents/{entry.name}/ carries a skills'
+                    f' entry: agents/<agent>/skills is the mount of the'
+                    " node's skills/ -- put skill directories under the"
+                    " template's top-level skills/ instead."
                 )
 
 

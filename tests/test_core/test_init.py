@@ -1510,15 +1510,20 @@ def test_init_template_refuses_files_the_seed_would_skip(
 ) -> None:
     """A file inside a seed surface that the copy loops skip refuses at init.
 
-    Each surface deploys a fixed shape -- top-level ``*.md`` steps,
-    top-level non-underscore scripts, whole skill directories, per-agent
-    directories -- so a stray outside it (a note or nested file in
-    ``steps/``, underscore machinery or a nested file in ``scripts/``, a
-    loose file in ``skills/`` or ``agents/``) would deploy nothing, print
-    success, and drift on every later diff: each refuses naming the
-    file, and nothing lands. A root-level extra beside the surfaces is
-    documentation -- the seed still deploys, and the extra reaches no
-    node surface.
+    Each surface deploys a fixed shape -- top-level non-hidden ``*.md``
+    steps, top-level non-underscore non-hidden scripts, whole non-hidden
+    skill directories, per-agent directories -- so a stray outside it (a
+    note or nested file in ``steps/``, underscore machinery or a nested
+    file in ``scripts/``, a loose file in ``skills/`` or ``agents/``, a
+    hidden entry in any of the three file surfaces) would deploy
+    nothing, print success, and drift on every later diff: each refuses
+    naming the file, a hidden step by the skip rule rather than the
+    NN-prefix contract, a case-variant surface folder (``Steps/``) by
+    the exact lowercase names, and an ``agents/<agent>/skills`` entry as
+    a shadow of the node's skills mount -- and nothing lands. A
+    root-level extra beside the surfaces is documentation -- a template
+    with every surface correctly shaped still deploys, and the extra
+    reaches no node surface.
     """
     Node(git_repo).init(agent='claude', user=True)
     step = {'steps/01-GO.md': '# go\n'}
@@ -1553,6 +1558,33 @@ def test_init_template_refuses_files_the_seed_would_skip(
             {**step, 'agents/claude': '# loose\n'},
             r'agents/ has a loose file, not an agent directory: claude',
         ),
+        (
+            'hiddenstep',
+            {**step, 'steps/.notes.md': '# hidden\n'},
+            r'steps/ has a file the seed would skip: \.notes\.md'
+            r' \(steps deploy as top-level, non-hidden \*\.md files\)',
+        ),
+        (
+            'hiddenscript',
+            {**step, 'scripts/.env': 'PROBE=1\n'},
+            r'scripts/ has a file the seed would skip: \.env'
+            r' \(scripts deploy as top-level, non-underscore, non-hidden',
+        ),
+        (
+            'hiddenskill',
+            {**step, 'skills/.sneaky/SKILL.md': '# sneak\n'},
+            r'skills/ has a skill directory the seed would skip: \.sneaky',
+        ),
+        (
+            'wrongcase',
+            {'Steps/01-GO.md': '# go\n'},
+            r'names a seed surface in the wrong case: Steps/',
+        ),
+        (
+            'mountshadow',
+            {**step, 'agents/claude/skills/planted.md': '# planted\n'},
+            r'agents/claude/ carries a skills entry.*mount',
+        ),
     ]
     for folder, files, match in offending:
         path = f'templates/{folder}'
@@ -1562,16 +1594,26 @@ def test_init_template_refuses_files_the_seed_would_skip(
     # nothing landed -- no worktree, no registry row
     assert not (git_repo / '.worktrees' / 'main.task').exists()
     assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
-    # a root-level extra outside the surfaces stays allowed: the seed
-    # deploys, and the extra reaches no node surface
+    # the positive control: every surface correctly shaped still deploys,
+    # and a root-level extra outside the surfaces reaches no node surface
     _commit_template(
         git_repo,
         'templates/documented',
-        {'config.json': '{}\n', **step, 'README.md': '# about this crew\n'},
+        {
+            'config.json': '{}\n',
+            **step,
+            'scripts/probe.sh': 'echo probe\n',
+            'skills/workflow/SKILL.md': '# workflow\n',
+            'agents/claude/settings.json': '{"seeded": true}\n',
+            'README.md': '# about this crew\n',
+        },
     )
     Node(git_repo).init(name='task', template=f'{git_repo}/templates/documented')
     node_dir = git_repo / '.worktrees' / 'main.task' / '.fractal' / 'main.task'
     assert (node_dir / 'steps' / '01-GO.md').is_file()
+    assert (node_dir / 'scripts' / 'probe.sh').is_file()
+    assert (node_dir / 'skills' / 'workflow' / 'SKILL.md').is_file()
+    assert (node_dir / '.claude' / 'settings.json').is_file()
     assert not (node_dir / 'README.md').exists()
 
 
@@ -1827,8 +1869,9 @@ def test_init_template_fills_slots_from_values_set_and_pin(
     """The slot pass renders the seed once, from merged values (later win).
 
     ``--set`` beats the ``--values`` sheet, ``--pin`` supplies ``pin``
-    and refuses beside a rival ``--set pin=`` that disagrees (an
-    agreeing pair is one instruction and passes), and the charter gate
+    and refuses beside a rival ``--set pin=`` or sheet ``pin`` that
+    disagrees (an agreeing pair is one instruction and passes), and the
+    charter gate
     reads the rendered text: a stale pin fill dies at init, a coherent
     one deploys with every ``{{slot}}`` filled and ``$VAR``/shell text
     intact, and the merged map -- an unused sheet key included (one
@@ -1875,6 +1918,21 @@ def test_init_template_fills_slots_from_values_set_and_pin(
             template=steward,
             values=sheet,
             sets=['mission=prove it', f'pin={rival}'],
+            pin=head,
+        )
+    assert not (git_repo / '.worktrees' / 'main.v1').exists()
+    # a rival pin in the --values sheet refuses the same way -- both
+    # spellings of the merged map conflict with --pin, not just --set
+    rival_sheet = tmp_path / 'rival.toml'
+    rival_sheet.write_text(
+        f'mission = "from the sheet"\npin = "{rival}"\n',
+        encoding='utf-8',
+    )
+    with pytest.raises(ValueError, match='pin supplied twice'):
+        Node(git_repo).init(
+            name='v1',
+            template=steward,
+            values=rival_sheet,
             pin=head,
         )
     assert not (git_repo / '.worktrees' / 'main.v1').exists()
