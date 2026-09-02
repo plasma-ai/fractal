@@ -38,10 +38,12 @@ commit it is read at is the version. The machinery lives in
 ```
 
 Every entry but `config.json` is optional; a surface the folder lacks falls back
-to the inherit-or-package source (see [[configuration/inheritance]]). A
-`README.md` beside the surfaces carries any description; init ignores it. The
-package seed (`fractal/_node/`) mirrors the same layout, its per-agent files
-under `agents/`.
+to the inherit-or-package source (see [[configuration/inheritance]]). Surface
+names are exact lowercase: a case-variant folder (`Steps/`) refuses by name. A
+`README.md` beside the surfaces carries any description; nothing deploys it, but
+it still renders through the slot pass like every other file, so a `{{slot}}`
+there needs a value and a literal `{{` an `--exclude`. The package seed
+(`fractal/_node/`) mirrors the same layout, its per-agent files under `agents/`.
 
 - `NODE.md` seeds a deployment-ready charter. The rendered charter passes the
   fill-sheet gate at init: its `## Instructions` and
@@ -54,19 +56,21 @@ under `agents/`.
   at least one `*.md`, an `NN-` digit prefix on every file, one prefix width
   (see [[configuration/steps]]) -- checked at init, so a template that cannot
   iterate refuses before any worktree exists. A file the copy would skip (a
-  non-`.md` or nested entry under `steps/`) refuses the same way.
+  non-`.md`, hidden, or nested entry under `steps/`) refuses the same way.
 - `scripts/` seeds the setup/test/lint scripts as top-level files, the package
-  seed's own copy set; an underscore-prefixed or nested file refuses rather than
-  silently not deploying.
+  seed's own copy set; an underscore-prefixed, hidden, or nested file refuses
+  rather than silently not deploying.
 - `skills/` seeds the skill directories wholesale; a loose file directly under
-  `skills/` refuses.
+  `skills/` or a hidden skill directory refuses.
 - `agents/<agent>/` files deploy into the node data directory's live agent
   config dirs (`.claude/`, `.codex/`, ... -- git-ignored, disk-only). A
   template's file beats the parent's live copy, which beats the package seed,
   and a template plus `node diff` and `node reseed` is the one versioned path
   agent settings have. An entry must name a registered agent's directory -- an
   unknown name or a loose file refuses at init and reseed rather than deploying
-  nothing and drifting on every later diff.
+  nothing and drifting on every later diff. An `agents/<agent>/skills` entry
+  refuses too: that path is the mount of the node's `skills/`, so skill
+  directories belong under the template's top-level `skills/`.
 
 A bundled surface is a rival source to inheriting the parent's:
 `--inherit=steps` (likewise `scripts` and `skills`) is refused when the template

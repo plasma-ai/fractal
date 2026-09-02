@@ -20,6 +20,7 @@ from typing import NoReturn, Optional
 import pytest
 
 import fractal.core.node
+import fractal.core.worktree
 from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, LOCK_FILE, PGID_FILE
 from fractal.core.node import Node
 from tests._helpers import _git, _stub_run_script
@@ -87,6 +88,8 @@ __all__ = [
     'test_reseed_force_bypasses_the_status_guard',
     'test_reseed_rejects_the_nodes_own_seat',
     'test_reseed_rejects_ref_beside_template',
+    'test_reseed_blocks_while_merge_lock_held',
+    'test_reseed_provenance_failure_marks_event_failed',
     'test_signals_recurse_to_active_descendants',
     'test_signals_heal_a_crashed_descendant_under_the_flock',
     'test_recursive_signals_attribute_the_propagating_node',
@@ -1646,6 +1649,59 @@ def test_reseed_rejects_ref_beside_template(node_with_db: Node) -> None:
     node = node_with_db
     with pytest.raises(ValueError, match='cannot be combined'):
         node.reseed(ref='main', template='templates/crew')
+
+
+def test_reseed_blocks_while_merge_lock_held(node_with_db: Node) -> None:
+    """Reseed waits on the merge flock before touching the worktree.
+
+    A merge's advance and conflict-recovery ``reset --hard`` rewrite the
+    target worktree, silently reverting a concurrent reseed's writes -- so
+    reseed takes the repo-wide merge flock first. While a rival holds it
+    the reseed cannot finish; on release it proceeds into the locked
+    section, where this recordless node's provenance read refuses -- proof
+    it entered only after the lock came free.
+    """
+    node = node_with_db
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        with fractal.core.worktree.merge_lock(node.repo_dir):
+            blocked = pool.submit(node.reseed)
+            # a recordless reseed refuses in milliseconds once inside the
+            # locks; only the held merge flock can keep it pending
+            with pytest.raises(concurrent.futures.TimeoutError):
+                blocked.result(timeout=0.5)
+        with pytest.raises(ValueError, match='No template recorded'):
+            blocked.result(timeout=5)
+
+
+def test_reseed_provenance_failure_marks_event_failed(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed provenance write stamps the reseed event failed, never active.
+
+    ``reseed.sh`` has already rewritten the surfaces when the record write
+    runs, so a write that fails there must fail the event row with it -- an
+    open ``reseed`` event would otherwise strand as ``active`` and
+    misreport a finished (if unrecorded) rewrite as still running.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    folder = git_repo / 'templates' / 'crew'
+    (folder / 'steps').mkdir(parents=True)
+    (folder / 'config.json').write_text('{}\n', encoding='utf-8')
+    (folder / 'steps' / '01-GO.md').write_text('# go\n', encoding='utf-8')
+    _git(git_repo, 'add', 'templates/crew')
+    _git(git_repo, 'commit', '-m', 'template templates/crew')
+    Node(git_repo).init(name='task', template=f'{git_repo}/templates/crew')
+    node = Node(git_repo / '.worktrees' / 'main.task')
+
+    def broken_write(*args: object, **kwargs: object) -> NoReturn:
+        raise RuntimeError('induced provenance write failure')
+
+    monkeypatch.setattr('fractal.core.template.write_provenance', broken_write)
+    with pytest.raises(RuntimeError, match='induced'):
+        node.reseed()
+    events = node.db.read('events', where={'node': 'main.task', 'event': 'reseed'})
+    assert [row['status'] for row in events] == ['failed']
 
 
 # ------ recursive signals

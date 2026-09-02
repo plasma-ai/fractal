@@ -98,6 +98,7 @@ __all__ = [
     'test_reseed_refuses_files_the_seed_would_skip',
     'test_reseed_refuses_a_symlinked_seed_destination',
     'test_reseed_refuses_a_symlinked_skills_destination',
+    'test_reseed_refuses_a_symlinked_surface_root',
     'test_lifecycle_guard_rejects_idle_node',
     'test_start_drain_requires_continue',
     'test_retire_unretire_round_trips_through_list',
@@ -2860,6 +2861,62 @@ def test_reseed_refuses_a_symlinked_skills_destination(
         assert notes.read_text(encoding='utf-8') == '# nested\n'
     finally:
         _run(root, 'node', 'delete', 'main.skilllink', '--force')
+
+
+@pytest.mark.parametrize('surface', ['steps', 'scripts'])
+def test_reseed_refuses_a_symlinked_surface_root(
+    repo: dict,
+    tmp_path: pathlib.Path,
+    surface: str,
+) -> None:
+    """A symlink at a surface root refuses before ``mkdir -p`` writes through it.
+
+    The per-file guards judge destinations inside the surface, so a symlink
+    at the ``steps/`` or ``scripts/`` root itself would let ``mkdir -p``
+    and every copy resolve through it into the target: the copy loop
+    refuses naming the surface, and the out-of-node victim never receives
+    a byte.
+    """
+    root = repo['root']
+    name = f'{surface}rootlink'
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'scripts/probe.sh': 'echo probe\n',
+    }
+    _commit_template(root, f'templates/{name}', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        name,
+        '--agent',
+        'claude',
+        '--template',
+        f'templates/{name}',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / f'main.{name}' / '.fractal' / f'main.{name}'
+        victim = tmp_path / 'victim'
+        victim.mkdir()
+        # the surface root parked aside, replaced by a link, restored below
+        target = node_dir / surface
+        parked = node_dir / f'{surface}.parked'
+        target.rename(parked)
+        target.symlink_to(victim)
+        refused = _run(root, 'node', 'reseed', f'main.{name}')
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert f'{surface} is a symlink' in refused.stderr, refused.stderr
+        # the victim never received a byte
+        assert list(victim.iterdir()) == []
+        target.unlink()
+        parked.rename(target)
+        # with the link gone the reseed lands
+        reseeded = _run(root, 'node', 'reseed', f'main.{name}')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+    finally:
+        _run(root, 'node', 'delete', f'main.{name}', '--force')
 
 
 # ------ lifecycle guards (idle node)

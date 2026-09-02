@@ -42,6 +42,7 @@ __all__ = [
     'test_reset_re_anchors_base_at_the_reset_point',
     'test_init_materializes_title_in_registry',
     'test_init_on_existing_node_refuses_loudly',
+    'test_init_refuses_phantom_node_without_reset',
     'test_init_refuses_when_an_active_fractal_shares_the_repo_name',
     'test_init_allows_a_second_tree_while_a_sibling_node_runs',
     'test_start_refuses_a_foreign_session_name_collision',
@@ -72,6 +73,7 @@ __all__ = [
     'test_init_template_refuses_files_the_seed_would_skip',
     'test_init_template_preset_refuses_disallowed_keys',
     'test_init_template_preset_caps_refuse_like_flags',
+    'test_init_template_detached_refuses_a_bundled_detached_step',
     'test_init_template_resolves_the_same_path_from_any_cwd',
     'test_reset_without_template_drops_the_provenance',
     'test_pin_without_a_template_still_validates',
@@ -350,6 +352,60 @@ def test_init_on_existing_node_refuses_loudly(
     with pytest.raises(ValueError, match=r"'main\.retune' already exists"):
         Node(git_repo).init(name='retune', max_cost=100.0)
     assert node.config.get('max_cost') == 0.10
+
+
+def test_init_refuses_phantom_node_without_reset(
+    git_repo: pathlib.Path,
+) -> None:
+    """A branch holding a committed seed refuses adoption once its worktree is gone.
+
+    ``worktree add`` on the surviving branch checks the old committed seed
+    back out, so a re-init would adopt the dead node -- old config kept, the
+    requested caps silently dropped -- exactly like the live-node refusal
+    above. The probe reads the branch tip: a phantom refuses naming both
+    remedies and moves nothing, ``--reset`` reinitializes it (recording the
+    new template), and a plain pre-existing branch that was never a node
+    carries no seed and still adopts.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    # committed before the spawn, so the phantom's own tip tracks the folder
+    # the --reset re-init below reads
+    _commit_template(
+        git_repo,
+        'templates/crew',
+        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
+    )
+    Node(git_repo).init(name='task', max_cost=0.10)
+    worktree = git_repo / '.worktrees' / 'main.task'
+    # commit the seed on the node branch, then lose the worktree out of band
+    Node(worktree).commit('baseline', init=True)
+    tip = _git(git_repo, 'rev-parse', 'main.task').stdout.strip()
+    row = Node(git_repo).db.read('nodes', where={'node': 'main.task'})
+    _git(git_repo, 'worktree', 'remove', '--force', f'{worktree}')
+    with pytest.raises(
+        ValueError,
+        match=r'holds the committed seed.*`fractal node delete`.*pass --reset',
+    ):
+        Node(git_repo).init(name='task', max_cost=100.0)
+    # nothing moved: no worktree, and the branch tip and registry row stand
+    assert not worktree.exists()
+    assert _git(git_repo, 'rev-parse', 'main.task').stdout.strip() == tip
+    assert Node(git_repo).db.read('nodes', where={'node': 'main.task'}) == row
+    # --reset reinitializes the phantom and records the new template
+    Node(git_repo).init(
+        name='task',
+        template=f'{git_repo}/templates/crew',
+        reset=True,
+    )
+    record = worktree / '.fractal' / 'main.task' / '_template.toml'
+    data = tomllib.loads(record.read_text(encoding='utf-8'))
+    assert data['path'] == 'templates/crew'
+    # a plain pre-existing branch that was never a node carries no seed
+    # and still adopts without --reset
+    _git(git_repo, 'branch', 'main.plain')
+    Node(git_repo).init(name='plain')
+    plain_dir = git_repo / '.worktrees' / 'main.plain' / '.fractal' / 'main.plain'
+    assert (plain_dir / 'config.json').is_file()
 
 
 def test_init_refuses_when_an_active_fractal_shares_the_repo_name(
@@ -1227,7 +1283,7 @@ def test_init_template_preset_fills_unset_flags(
     keeps the package default. The flag checks run on the merged values, so a
     flag ``--max-iter-cost`` is legal against a preset ``max_cost``, and
     the registry row records the preset cap the parent's budget law must
-    see.
+    see -- an explicit ``--max-cost`` lands in its place, in both stores.
     """
 
     def node_dir(branch: str) -> pathlib.Path:
@@ -1272,6 +1328,12 @@ def test_init_template_preset_fills_unset_flags(
     pinned = Node(git_repo / '.worktrees' / 'main.mgr.pinned')
     assert pinned.config.get('model') == 'haiku'
     assert pinned.config.get('max_cost') == 10
+    # a --max-cost flag beats the preset cap, in config and on the row
+    Node(git_repo).init(name='capped', template=crew, max_cost=2.0)
+    capped = Node(git_repo / '.worktrees' / 'main.mgr.capped')
+    assert capped.config.get('max_cost') == 2.0
+    rows = Node(git_repo).db.read('nodes', where={'node': 'main.mgr.capped'})
+    assert [row['max_cost'] for row in rows] == [2.0]
 
 
 def test_init_template_preset_reserve_resolves_against_the_merged_ceiling(
@@ -1474,19 +1536,22 @@ def test_init_template_refuses_credential_named_files(
 
     A committed OAuth store (``auth.json``) and a generic key shape
     (``*.pem``) refuse wherever they sit -- under ``agents/`` or any
-    other surface -- while a dot-file (claude's ``.credentials.json``,
-    an ``.env``) refuses only under ``agents/``, the one subtree that
-    deploys into live agent dirs. Each refusal names the file, fires
-    before any worktree exists, and nothing deploys, whatever commit
-    carried the leak.
+    other surface, and in any letter case (the match casefolds, so
+    ``Auth.json`` and ``deploy.PEM`` refuse the same way) -- while a
+    dot-file (claude's ``.credentials.json``, an ``.env``) refuses only
+    under ``agents/``, the one subtree that deploys into live agent
+    dirs. Each refusal names the file, fires before any worktree
+    exists, and nothing deploys, whatever commit carried the leak.
     """
     Node(git_repo).init(agent='claude', user=True)
     offending = [
         ('oauth', 'agents/codex/auth.json', 'credential-named file'),
+        ('oauthcase', 'agents/codex/Auth.json', 'credential-named file'),
         ('dotcred', 'agents/claude/.credentials.json', 'dot-file under agents/'),
         ('dotenv', 'agents/claude/.env', 'dot-file under agents/'),
         ('keyfile', 'agents/deploy/signing.pem', 'credential-named file'),
         ('scriptkey', 'scripts/deploy.pem', 'credential-named file'),
+        ('keycase', 'scripts/deploy.PEM', 'credential-named file'),
     ]
     for folder, name, kind in offending:
         path = f'templates/{folder}'
@@ -1519,8 +1584,9 @@ def test_init_template_refuses_files_the_seed_would_skip(
     nothing, print success, and drift on every later diff: each refuses
     naming the file, a hidden step by the skip rule rather than the
     NN-prefix contract, a case-variant surface folder (``Steps/``) by
-    the exact lowercase names, and an ``agents/<agent>/skills`` entry as
-    a shadow of the node's skills mount -- and nothing lands. A
+    the exact lowercase names, and an ``agents/<agent>/skills`` entry --
+    a directory or a regular file -- as a shadow of the node's skills
+    mount -- and nothing lands. A
     root-level extra beside the surfaces is documentation -- a template
     with every surface correctly shaped still deploys, and the extra
     reaches no node surface.
@@ -1583,6 +1649,11 @@ def test_init_template_refuses_files_the_seed_would_skip(
         (
             'mountshadow',
             {**step, 'agents/claude/skills/planted.md': '# planted\n'},
+            r'agents/claude/ carries a skills entry.*mount',
+        ),
+        (
+            'mountshadowfile',
+            {**step, 'agents/claude/skills': '# shadow\n'},
             r'agents/claude/ carries a skills entry.*mount',
         ),
     ]
@@ -1676,6 +1747,66 @@ def test_init_template_preset_caps_refuse_like_flags(
             Node(git_repo).init(name='task', template=f'{git_repo}/templates/crew')
     assert not (git_repo / '.worktrees' / 'main.task').exists()
     assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+
+
+def test_init_template_detached_refuses_a_bundled_detached_step(
+    git_repo: pathlib.Path,
+) -> None:
+    """A bundled ``detached:`` step refuses a detached spawn before any worktree.
+
+    ``detached:`` frontmatter is meaningless on an already-detached node,
+    and init.sh's own vet runs only after a ``--reset``'s arms rewrote the
+    live steps -- so the bundle's steps are judged before any worktree
+    work, whether detached comes from the preset or the flag. Nothing
+    lands, and a ``--reset`` re-init leaves the old NODE.md and steps
+    intact -- no hybrid. Attached, the same bundle stays legal (the
+    frontmatter steers that one step only).
+    """
+    charter = (
+        '# flagcrew\n\n## Instructions\n\nGo.\n\n## Completion Requirements\n\nDone.\n'
+    )
+    step = '---\ndetached: true\n---\n# go detached\n'
+    Node(git_repo).init(agent='claude', user=True)
+    _commit_template(
+        git_repo,
+        'templates/presetcrew',
+        {
+            'config.json': json.dumps({'detached': True}) + '\n',
+            'steps/01-GO.md': step,
+        },
+    )
+    _commit_template(
+        git_repo,
+        'templates/flagcrew',
+        {'config.json': '{}\n', 'NODE.md': charter, 'steps/01-GO.md': step},
+    )
+    flagcrew = f'{git_repo}/templates/flagcrew'
+    # the preset's detached refuses, before any worktree or registry row
+    with pytest.raises(
+        ValueError,
+        match=r'detached: in 01-GO\.md is invalid in detached mode',
+    ):
+        Node(git_repo).init(name='task', template=f'{git_repo}/templates/presetcrew')
+    # the --detached flag refuses the same way
+    with pytest.raises(ValueError, match='already detached'):
+        Node(git_repo).init(name='task', template=flagcrew, detached=True)
+    assert not (git_repo / '.worktrees' / 'main.task').exists()
+    assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+    # attached, the same bundle deploys -- the frontmatter is one step's own
+    Node(git_repo).init(name='task', template=flagcrew)
+    node_dir = git_repo / '.worktrees' / 'main.task' / '.fractal' / 'main.task'
+    charter_bytes = (node_dir / 'NODE.md').read_bytes()
+    step_bytes = (node_dir / 'steps' / '01-GO.md').read_bytes()
+    # a --reset re-init refuses before its arms rewrite anything: the old
+    # charter and steps stand -- no hybrid
+    with pytest.raises(ValueError, match='already detached'):
+        Node(git_repo).init(
+            name='task',
+            template=f'{git_repo}/templates/presetcrew',
+            reset=True,
+        )
+    assert (node_dir / 'NODE.md').read_bytes() == charter_bytes
+    assert (node_dir / 'steps' / '01-GO.md').read_bytes() == step_bytes
 
 
 def test_init_template_resolves_the_same_path_from_any_cwd(

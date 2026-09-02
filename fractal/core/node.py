@@ -1514,6 +1514,34 @@ class Node:
                 sync = template_preset.get('sync')
             if detached is None:
                 detached = template_preset.get('detached')
+            # a bundled step may not flip an already-detached node -- init.sh
+            # vets the inherit/package sources, but only after its --reset
+            # arms rewrote the live steps, too late to refuse cleanly -- so
+            # the bundle's steps refuse here, before any worktree work; the
+            # check sits below the preset fill because the merged detached
+            # value (flag beats preset) only settles there
+            if detached and template_bundle is not None:
+                bundle_steps = template_bundle / 'steps'
+                if bundle_steps.is_dir():
+                    # the same set that seeds: regular, non-hidden *.md files
+                    for step_file in sorted(bundle_steps.glob('*.md')):
+                        if not step_file.is_file() or step_file.name.startswith('.'):
+                            continue
+                        # mirror init.sh's frontmatter rule: a detached: line
+                        # inside the first --- delimited block
+                        delimiters = 0
+                        text = step_file.read_text(encoding='utf-8')
+                        for line in text.splitlines():
+                            if line == '---':
+                                delimiters += 1
+                                if delimiters >= 2:
+                                    break
+                                continue
+                            if delimiters == 1 and line.startswith('detached:'):
+                                raise ValueError(
+                                    f'detached: in {step_file.name} is invalid'
+                                    ' in detached mode (already detached)'
+                                )
             # inherit local from the parent; local is immutable once set
             if parent.config.get('local'):
                 if parent is self:
@@ -1796,6 +1824,26 @@ class Node:
                                 'Cannot reinitialize a paused node.'
                                 ' Resume or kill it first.'
                             )
+                # a phantom node -- branch alive, worktree gone -- would adopt
+                # the same way: worktree add checks the old committed seed back
+                # out and every not-exists-guarded arm keeps it (old config,
+                # dropped caps) while the bundle pass overwrites the agent
+                # files, so probe the branch tip for the node seed and refuse
+                # without --reset; a plain pre-existing branch that was never a
+                # node carries no seed, seeds fresh, and stays adoptable
+                elif pre_existing_branch and not reset:
+                    child_project = worktree.project_path(self.repo_dir, child_branch)
+                    prefix = '' if child_project == '.' else f'{child_project}/'
+                    seed = f'{prefix}{FRACTAL_FOLDER}/{child_branch}/config.json'
+                    cmd = ['cat-file', '-e', f'{child_branch}:{seed}']
+                    probe = fractal.util.git.run(cmd, cwd=self.repo_dir, check=False)
+                    if probe is not None:
+                        raise ValueError(
+                            f'Node {child_branch!r} already exists (its branch'
+                            ' holds the committed seed; only the worktree is'
+                            ' gone); remove it with `fractal node delete`, or'
+                            ' pass --reset to reinitialize it.'
+                        )
                 # init.sh creates the worktree before the registration below, so a
                 # failure in between would strand a live worktree with no registry row
                 # -- roll back, but only what *this* init created (a pre-existing
@@ -2161,9 +2209,14 @@ class Node:
                 'Cannot reseed a node from its own worktree;'
                 ' a node may not edit its own seed.'
             )
+        # a merge's advance and conflict-recovery reset --hard rewrite the
+        # target worktree, silently reverting a concurrent reseed's writes to
+        # a committed seed -- hold the merge flock for the whole rewrite,
+        # taken before the worktree flock to match merge's own order (never
+        # nested inside it: merge.sh shells into verbs that take that one);
         # the guard re-read and the rewrite stay atomic under the .worktrees
         # flock, so a rival verb cannot land between them (the --reset guard)
-        with worktree.lock(self.repo_dir):
+        with worktree.merge_lock(self.repo_dir), worktree.lock(self.repo_dir):
             # reseed rewrites the live steering surface, so refuse over a
             # running loop or a paused node's frozen run context unless the
             # caller forces it
@@ -2310,19 +2363,22 @@ class Node:
                         f'{self._root}',
                         f'--bundle={bundle}',
                     )
+                    # advance the record: the commit actually read, and the
+                    # path too on a re-point; values and listing ride along
+                    # unchanged -- inside the try so a failed record write
+                    # (surfaces already rewritten) stamps the event failed
+                    # rather than stranding it open
+                    write_provenance(
+                        self.node_dir,
+                        path=path,
+                        commit=commit,
+                        values=record.get('values', {}),
+                        include=record.get('include'),
+                        exclude=record.get('exclude'),
+                    )
                 except Exception:
                     self.record.event_end(event_id=event_id, status='failed')
                     raise
-                # advance the record: the commit actually read, and the path
-                # too on a re-point; values and listing ride along unchanged
-                write_provenance(
-                    self.node_dir,
-                    path=path,
-                    commit=commit,
-                    values=record.get('values', {}),
-                    include=record.get('include'),
-                    exclude=record.get('exclude'),
-                )
                 self.record.event_end(event_id=event_id, status='completed')
             finally:
                 shutil.rmtree(template_tmp, ignore_errors=True)

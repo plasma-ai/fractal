@@ -86,6 +86,11 @@ fi
 
 # steps (the copy set mirrors init.sh: *.md files only)
 if [[ -d "$BUNDLE/steps" ]]; then
+    # refuse a symlinked steps root: mkdir -p and cp resolve through it
+    if [[ -L "$NODE_DIR/steps" ]]; then
+        echo "Error: steps is a symlink; refusing to write through it" >&2
+        exit 1
+    fi
     mkdir -p "$NODE_DIR/steps"
     for FILE in "$BUNDLE/steps/"*.md; do
         [[ -f "$FILE" ]] || continue
@@ -101,6 +106,11 @@ fi
 
 # scripts (mirrors init.sh: regular files, skipping underscore machinery)
 if [[ -d "$BUNDLE/scripts" ]]; then
+    # refuse a symlinked scripts root: mkdir -p and cp resolve through it
+    if [[ -L "$NODE_DIR/scripts" ]]; then
+        echo "Error: scripts is a symlink; refusing to write through it" >&2
+        exit 1
+    fi
     mkdir -p "$NODE_DIR/scripts"
     for SRC in "$BUNDLE/scripts"/*; do
         [[ -f "$SRC" ]] || continue

@@ -1109,6 +1109,18 @@ class Agent:
                             f' .{cls.name}/{relfile}; remove the'
                             ' directory first.'
                         )
+                    # a symlinked intermediate directory would carry the copy
+                    # outside the node's agent dir -- refuse when the resolved
+                    # parent escapes it (the leaf symlink skip above keeps the
+                    # auth link untouched)
+                    if not target.parent.resolve().is_relative_to(config_dir.resolve()):
+                        relfile = path.relative_to(bundle_seed).as_posix()
+                        raise ValueError(
+                            f'Template agents/{cls.name}/{relfile} would'
+                            f' deploy outside .{cls.name}/ through a'
+                            ' symlinked directory; remove the symlink'
+                            ' first.'
+                        )
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy(path, target)
         # an overwrite ends here: files the bundle lacks are left alone
