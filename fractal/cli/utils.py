@@ -285,6 +285,9 @@ def print_rows(
         if not columns:
             return
         if csv or not sys.stdout.isatty():
+            # NOTE: pattern exception -- both DictWriter calls pass the stream
+            # positionally; keywording it would couple to csv's opaque
+            # parameter name (`f`)
             writer = DictWriter(
                 sys.stdout,
                 fieldnames=columns,
