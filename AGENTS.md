@@ -15,6 +15,10 @@ below):
 - **Seek the best solution, not agreement.** When you think the user is wrong,
   don't be afraid to say so — the right answer matters more than the path of
   least resistance (Pushing Back).
+- **Choose solutions that generalize.** Define the requirement before choosing
+  an approach. Consider alternatives and base each choice on the problem and
+  known constraints. Do not choose an approach for convenience or overfit it to
+  the cases tried during development (Principled Solutions).
 
 ## Overview
 
@@ -174,6 +178,33 @@ sync.
 - **Do not change signatures of functions you're not tasked with changing.**
   Adding parameters, changing defaults, or renaming arguments in existing
   functions cascades through callers and is a separate task.
+
+## Principled Solutions
+
+Choose approaches based on the problem and its constraints, not on what is
+easiest to try.
+
+- **Define the requirement first.** State the required outcome and the cost of
+  getting it wrong without referring to a proposed approach. If the task starts
+  with a failure, identify its cause before choosing a fix.
+- **Consider alternatives.** Treat the first workable idea as one option.
+  Consider other ways to solve the problem, including whether the full problem
+  can be handled directly. Compare them against the requirement, the size of the
+  problem, and the cost of being wrong.
+- **Choose based on the requirements.** Time and effort are valid constraints,
+  but they do not show that an approach will generalize effectively. If the
+  approach that best meets the requirement needs more time or resources than are
+  available, explain the tradeoff, recommend a fallback, and let the user
+  choose.
+- **Avoid overfitting.** Base the approach, scope, defaults, error handling,
+  stopping points, and other choices on requirements and known constraints. Do
+  not shape the code around the cases tried during development. The reasoning
+  must also apply to cases the code has not seen.
+- **Revisit the approach when something does not make sense.** An unexpected
+  failure or unexplained behavior may mean that you misunderstood the problem or
+  chose the wrong approach. Find the cause or revisit the choice instead of
+  adding a workaround. If a stopgap is necessary, state the problem it covers,
+  its limits, and when it can be removed.
 
 ## Communication
 
