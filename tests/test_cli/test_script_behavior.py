@@ -155,9 +155,9 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   the folder commits a template edit through ``fractal commit`` and lands it
   with no restore warning, and a child inited afterwards from the target
   deploys the landed bytes; a sibling whose scope does not cover the folder
-  is refused at commit and, committing with raw git, at the merge footprint;
-  and deleting the scoped node with the edit
-  unmerged warns of the discarded work.
+  is refused at commit and, committing with raw git, at the merge
+  footprint; and deleting the scoped node with the edit unmerged warns
+  of the discarded work.
 - **``merge.sh`` post-refresh no-op** re-checks the staged squash after the
   target's wiki index refresh: a squash the refresh fully reverts (a re-merge
   offering only regenerated wiki state, e.g. a legacy-tracked ``.wiki/cache``)

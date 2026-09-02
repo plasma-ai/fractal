@@ -959,10 +959,9 @@ worktree — a node may not edit its own seed.
    Re-point the node at another template folder: the new path and the
    commit read (the node branch's own tip unless ``@<ref>`` names one) land
    in ``_template.toml``, and the node reseeds from it — memory and config
-   stay intact, so a moved template is followed with one command. One
-   notice names the ``@<root>`` form when the root branch holds a
-   different copy of the folder (a plain or ``--ref`` reseed stays
-   silent).
+   stay intact, so a moved template is followed with one command. One notice
+   names the ``@<root>`` form when the root branch holds a different copy of
+   the folder (a plain or ``--ref`` reseed stays silent).
 
 ``--force`` / ``-f``
    Reseed even while the node is active or paused.

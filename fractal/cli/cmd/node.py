@@ -392,8 +392,8 @@ def node_start(app: typer.Typer) -> typer.Typer:
         ' old -> new; required when the last run ended on its budget.'
     )
     max_cost = typer.Option(None, '--max-cost', help=max_cost_help)
-    # headless flag (seat-supplied via $FRACTAL_HEADLESS;
-    # unset reuses the node's recorded backend)
+    # headless flag (seat-supplied via $FRACTAL_HEADLESS; unset reuses the
+    # node's recorded backend)
     headless_help = (
         'Run without tmux in a detached process group (default: the'
         " node's recorded backend, tmux for a node that has never run"
@@ -1385,12 +1385,15 @@ def node_update(app: typer.Typer) -> typer.Typer:
                 effective_max_cost = max_cost
             else:
                 effective_max_cost = target.config.get('max_cost')
-            new_reserve = parse_reserve_budget(reserve_budget, effective_max_cost)
+            try:
+                new_reserve = parse_reserve_budget(reserve_budget, effective_max_cost)
+            except ValueError as e:
+                raise typer.BadParameter(str(e)) from None
         # retune through core -- it owns the reserve retune, the effective-cap
         # guards, the merged validation, and the prior capture
         _, _, name = target.branch.rpartition('.')
         changes = parent.child_retune(
-            name,
+            name=name,
             title=title,
             max_cost=max_cost,
             max_iter_cost=max_iter_cost,
@@ -1445,7 +1448,7 @@ def node_loop(app: typer.Typer) -> typer.Typer:
         """Run the node's iteration loop (invoked by the selected runtime)."""
         node = resolve_node(path)
         loop = Loop(
-            node,
+            node=node,
             agent_command=agent_command,
             continue_=continue_,
             resume=resume,

@@ -13,7 +13,6 @@ import os
 import pathlib
 import re
 import shutil
-import subprocess
 import tomllib
 from typing import Any
 
@@ -23,7 +22,7 @@ import typer
 import fractal.core
 from fractal.cli.utils import init_node, resolve_init_target, resolve_node
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _commit_template, _git
 
 from .conftest import (
     _make_git_repo,
@@ -445,12 +444,7 @@ def test_init_allows_a_second_tree_while_a_sibling_node_runs(
     task = Node(git_repo / '.worktrees' / 'main.task')
     sessions = frozenset({task.tmux_session})
     monkeypatch.setattr('fractal.util.tmux.probe', lambda *, socket=None: sessions)
-    subprocess.run(
-        ['git', 'checkout', '-b', 'second'],
-        cwd=git_repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(git_repo, 'checkout', '-b', 'second')
     assert Node(git_repo).init(agent='claude', user=True)
     assert [user.branch for user in Node.user_nodes(git_repo)] == ['main', 'second']
 
@@ -594,12 +588,7 @@ def test_user_init_on_a_dotted_branch(tmp_path: pathlib.Path) -> None:
     ``--parent`` send from the root refuses cleanly the same way.
     """
     repo = _make_git_repo(tmp_path / 'dotted')
-    subprocess.run(
-        ['git', 'checkout', '-b', 'v1.0'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(repo, 'checkout', '-b', 'v1.0')
     node = Node(repo)
     assert node.init(agent='claude', user=True)
     # the re-init repair path must survive the dotted branch too
@@ -634,12 +623,7 @@ def test_user_init_rejects_a_dot_nested_second_root(
     # the repo dir name feeds the wiki project name, so keep it dot-free
     repo = _make_git_repo(tmp_path / 'repo')
     for branch in (first, second):
-        subprocess.run(
-            ['git', 'checkout', '-b', branch],
-            cwd=repo,
-            capture_output=True,
-            check=True,
-        )
+        _git(repo, 'checkout', '-b', branch)
         if branch == first:
             assert Node(repo).init(agent='claude', user=True)
     with pytest.raises(ValueError, match='collides with the tree rooted at'):
@@ -659,12 +643,7 @@ def test_user_init_rejects_detached_head(tmp_path: pathlib.Path) -> None:
     checkout. Init must name the remedy and write nothing.
     """
     repo = _make_git_repo(tmp_path / 'detached')
-    subprocess.run(
-        ['git', 'checkout', '--detach'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(repo, 'checkout', '--detach')
     with pytest.raises(ValueError, match='detached HEAD'):
         Node(repo).init(agent='claude', user=True)
     # nothing landed: no node data dir, no project cache
@@ -751,37 +730,34 @@ def test_child_inherits_agent_config_from_parent(
     # the single config file each agent reads from its (dot-prefixed) dir
     configs = {'claude': 'settings.json', 'codex': 'config.toml'}
 
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
-
     Node(git_repo).init(agent='claude', user=True)
 
     # top-level node: the user node carries no agent config -> seed fallback
     Node(git_repo).init(name='task')
     for agent, cfg in configs.items():
-        seeded = node_dir('main.task') / f'.{agent}' / cfg
+        seeded = _node_dir(git_repo, 'main.task') / f'.{agent}' / cfg
         assert seeded.read_text() == (seed_dir / agent / cfg).read_text()
 
     # edit the parent's config, then spawn a child as the parent node (_NODE)
     for agent, cfg in configs.items():
-        (node_dir('main.task') / f'.{agent}' / cfg).write_text(
+        (_node_dir(git_repo, 'main.task') / f'.{agent}' / cfg).write_text(
             f'edited-by-parent: {cfg}\n',
             encoding='utf-8',
         )
-    monkeypatch.setenv('_NODE', str(node_dir('main.task')))
+    monkeypatch.setenv('_NODE', str(_node_dir(git_repo, 'main.task')))
     Node(git_repo).init(name='sub')
     for agent, cfg in configs.items():
-        inherited = node_dir('main.task.sub') / f'.{agent}' / cfg
-        parent_cfg = node_dir('main.task') / f'.{agent}' / cfg
+        inherited = _node_dir(git_repo, 'main.task.sub') / f'.{agent}' / cfg
+        parent_cfg = _node_dir(git_repo, 'main.task') / f'.{agent}' / cfg
         assert inherited.read_text() == parent_cfg.read_text()
     # codex credentials stay a symlink to the global home, never copied per node
-    assert (node_dir('main.task.sub') / '.codex' / 'auth.json').is_symlink()
+    assert (_node_dir(git_repo, 'main.task.sub') / '.codex' / 'auth.json').is_symlink()
 
     # a second top-level node still seeds from the package, not the sibling
     monkeypatch.delenv('_NODE')
     Node(git_repo).init(name='other')
     for agent, cfg in configs.items():
-        seeded = node_dir('main.other') / f'.{agent}' / cfg
+        seeded = _node_dir(git_repo, 'main.other') / f'.{agent}' / cfg
         assert seeded.read_text() == (seed_dir / agent / cfg).read_text()
 
 
@@ -820,9 +796,6 @@ def test_child_inherits_steps_and_scripts_from_parent(
     and an unknown surface is rejected before the script runs.
     """
 
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
-
     Node(git_repo).init(agent='claude', user=True)
     # unknown surfaces are rejected up front
     with pytest.raises(ValueError, match='Unknown inherit surface'):
@@ -832,24 +805,26 @@ def test_child_inherits_steps_and_scripts_from_parent(
         Node(git_repo).init(name='early', inherit=['steps'])
     # configure a parent: trim to a leaf profile and tune test.sh
     Node(git_repo).init(name='task')
-    parent_steps = node_dir('main.task') / 'steps'
+    parent_steps = _node_dir(git_repo, 'main.task') / 'steps'
     (parent_steps / '00-PREPARE.md').unlink()
     (parent_steps / '03-REVIEW.md').unlink()
     tuned = '# tuned by parent\n'
-    (node_dir('main.task') / 'scripts' / 'test.sh').write_text(tuned, encoding='utf-8')
+    (_node_dir(git_repo, 'main.task') / 'scripts' / 'test.sh').write_text(
+        tuned, encoding='utf-8'
+    )
     # spawn as the parent node (_NODE): the child copies the live files
-    monkeypatch.setenv('_NODE', str(node_dir('main.task')))
+    monkeypatch.setenv('_NODE', str(_node_dir(git_repo, 'main.task')))
     Node(git_repo).init(name='sub', inherit=['steps', 'scripts'])
-    child_steps = node_dir('main.task.sub') / 'steps'
+    child_steps = _node_dir(git_repo, 'main.task.sub') / 'steps'
     assert sorted(f.name for f in child_steps.glob('*.md')) == sorted(
         f.name for f in parent_steps.glob('*.md')
     )
-    child_test = node_dir('main.task.sub') / 'scripts' / 'test.sh'
+    child_test = _node_dir(git_repo, 'main.task.sub') / 'scripts' / 'test.sh'
     assert child_test.read_text() == tuned
     assert os.access(child_test, os.X_OK)
     # a flagless sibling still seeds the full profile from the package
     Node(git_repo).init(name='stock')
-    stock_steps = node_dir('main.task.stock') / 'steps'
+    stock_steps = _node_dir(git_repo, 'main.task.stock') / 'steps'
     assert (stock_steps / '00-PREPARE.md').is_file()
 
 
@@ -866,9 +841,6 @@ def test_init_template_seeds_steps_and_validates_the_contract(
     ``--inherit=steps`` -- named or reached through ``all``, two rival
     step sources -- all refuse before any worktree is created.
     """
-
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
 
     Node(git_repo).init(agent='claude', user=True)
     # a steps/ the loop could not discover refuses here, not at the node's
@@ -920,7 +892,7 @@ def test_init_template_seeds_steps_and_validates_the_contract(
     rogue = git_repo / 'templates' / 'crew' / 'steps' / '99-ROGUE.md'
     rogue.write_text('# never committed\n', encoding='utf-8')
     Node(git_repo).init(name='task', template=crew)
-    seeded = node_dir('main.task') / 'steps'
+    seeded = _node_dir(git_repo, 'main.task') / 'steps'
     assert sorted(f.name for f in seeded.glob('*.md')) == [
         '00-SCOUT.md',
         '01-STRIKE.md',
@@ -930,7 +902,7 @@ def test_init_template_seeds_steps_and_validates_the_contract(
         assert step.read_text(encoding='utf-8') == committed.stdout
     # a flagless sibling still seeds the stock set from the package
     Node(git_repo).init(name='stock')
-    stock_steps = node_dir('main.stock') / 'steps'
+    stock_steps = _node_dir(git_repo, 'main.stock') / 'steps'
     assert (stock_steps / '00-PREPARE.md').is_file()
 
 
@@ -1031,9 +1003,6 @@ def test_init_template_reads_the_fork_commit(
     event's metadata stays the fork sha.
     """
 
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
-
     Node(git_repo).init(agent='claude', user=True)
     _commit_template(
         git_repo,
@@ -1049,8 +1018,10 @@ def test_init_template_reads_the_fork_commit(
     Node(git_repo).init(name='task')
     fork = _git(git_repo, 'rev-parse', 'main.task').stdout.strip()
     tuned = '# tuned by parent\n'
-    (node_dir('main.task') / 'scripts' / 'test.sh').write_text(tuned, encoding='utf-8')
-    (node_dir('main.task') / '.claude' / 'settings.json').write_text(
+    (_node_dir(git_repo, 'main.task') / 'scripts' / 'test.sh').write_text(
+        tuned, encoding='utf-8'
+    )
+    (_node_dir(git_repo, 'main.task') / '.claude' / 'settings.json').write_text(
         '{"edited": "by the parent"}\n',
         encoding='utf-8',
     )
@@ -1065,10 +1036,12 @@ def test_init_template_reads_the_fork_commit(
     # an edit-and-recommit reaches the next top-level init, and the fork
     # copy matches the root's, so no notice prints
     output = Node(git_repo).init(name='fresh', template=crew)
-    step = node_dir('main.fresh') / 'steps' / '01-GO.md'
+    step = _node_dir(git_repo, 'main.fresh') / 'steps' / '01-GO.md'
     assert step.read_text(encoding='utf-8') == '# go v2\n'
     data = tomllib.loads(
-        (node_dir('main.fresh') / '_template.toml').read_text(encoding='utf-8')
+        (_node_dir(git_repo, 'main.fresh') / '_template.toml').read_text(
+            encoding='utf-8'
+        )
     )
     assert data['commit'] == newer
     assert 'Notice: template' not in output
@@ -1079,13 +1052,13 @@ def test_init_template_reads_the_fork_commit(
         encoding='utf-8',
     )
     # a deep spawn reads the parent's lagging tip and prints the notice
-    monkeypatch.setenv('_NODE', str(node_dir('main.task')))
+    monkeypatch.setenv('_NODE', str(_node_dir(git_repo, 'main.task')))
     output = Node(git_repo).init(name='sub', template=crew, inherit=['scripts'])
     assert (
         "Notice: template 'templates/crew' differs on the root branch;"
         " pass --template=templates/crew@main to read the root's copy."
     ) in output
-    sub_dir = node_dir('main.task.sub')
+    sub_dir = _node_dir(git_repo, 'main.task.sub')
     assert (sub_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8') == '# go v1\n'
     data = tomllib.loads((sub_dir / '_template.toml').read_text(encoding='utf-8'))
     assert data['commit'] == fork
@@ -1103,7 +1076,7 @@ def test_init_template_reads_the_fork_commit(
     # @<root> reads the root's current copy -- a commit the parent has
     # never merged -- with no notice
     output = Node(git_repo).init(name='ref', template=f'{crew}@main')
-    ref_dir = node_dir('main.task.ref')
+    ref_dir = _node_dir(git_repo, 'main.task.ref')
     assert (ref_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8') == '# go v2\n'
     data = tomllib.loads((ref_dir / '_template.toml').read_text(encoding='utf-8'))
     assert data['commit'] == newer
@@ -1116,7 +1089,7 @@ def test_init_template_reads_the_fork_commit(
         {'config.json': '{}\n', 'steps/01-OWN.md': '# the parent authored this\n'},
     )
     output = Node(git_repo).init(name='loc', template=f'{worktree}/templates/local')
-    loc_dir = node_dir('main.task.loc')
+    loc_dir = _node_dir(git_repo, 'main.task.loc')
     assert (loc_dir / 'steps' / '01-OWN.md').is_file()
     assert 'Notice: template' not in output
 
@@ -1164,9 +1137,6 @@ def test_init_template_include_exclude_recorded_and_honored(
     later verbs to judge by.
     """
 
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
-
     charter = (
         '# crew\n\n## Instructions\n\nTEMPLATE CHARTER\n\n'
         '## Completion Requirements\n\nDone.\n'
@@ -1186,7 +1156,7 @@ def test_init_template_include_exclude_recorded_and_honored(
     crew = f'{git_repo}/templates/crew'
     # exclude drops the one step; every other surface still deploys
     Node(git_repo).init(name='lean', template=crew, exclude=['steps/02-EXECUTE.md'])
-    lean = node_dir('main.lean')
+    lean = _node_dir(git_repo, 'main.lean')
     assert sorted(f.name for f in (lean / 'steps').glob('*.md')) == ['01-PREPARE.md']
     assert 'TEMPLATE CHARTER' in (lean / 'NODE.md').read_text(encoding='utf-8')
     test_sh = (lean / 'scripts' / 'test.sh').read_text(encoding='utf-8')
@@ -1197,7 +1167,7 @@ def test_init_template_include_exclude_recorded_and_honored(
     # include keeps only the listed subtree; the trimmed surfaces fall back
     # to the package seed
     Node(git_repo).init(name='steponly', template=crew, include=['steps'])
-    steponly = node_dir('main.steponly')
+    steponly = _node_dir(git_repo, 'main.steponly')
     assert sorted(f.name for f in (steponly / 'steps').glob('*.md')) == [
         '01-PREPARE.md',
         '02-EXECUTE.md',
@@ -1226,9 +1196,6 @@ def test_init_template_listing_trims_before_the_contract_checks(
     no step files refuses rather than deploying an empty surface.
     """
 
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
-
     Node(git_repo).init(agent='claude', user=True)
     _commit_template(
         git_repo,
@@ -1248,7 +1215,7 @@ def test_init_template_listing_trims_before_the_contract_checks(
         template=mixed,
         exclude=['steps/0-SCOUT.md', 'steps/notes.txt'],
     )
-    lean_steps = node_dir('main.lean') / 'steps'
+    lean_steps = _node_dir(git_repo, 'main.lean') / 'steps'
     assert sorted(f.name for f in lean_steps.glob('*.md')) == ['01-STRIKE.md']
     # a steps/ whose survivors carry no step files still refuses
     with pytest.raises(ValueError, match='no step files'):
@@ -1260,14 +1227,14 @@ def test_init_template_listing_trims_before_the_contract_checks(
     assert not (git_repo / '.worktrees' / 'main.task').exists()
     # excluding steps/ outright clears the rival source: the child
     # inherits the parent's live steps instead
-    monkeypatch.setenv('_NODE', str(node_dir('main.lean')))
+    monkeypatch.setenv('_NODE', str(_node_dir(git_repo, 'main.lean')))
     Node(git_repo).init(
         name='sub',
         template=mixed,
         exclude=['steps'],
         inherit=['steps'],
     )
-    sub_steps = node_dir('main.lean.sub') / 'steps'
+    sub_steps = _node_dir(git_repo, 'main.lean.sub') / 'steps'
     assert sorted(f.name for f in sub_steps.glob('*.md')) == ['01-STRIKE.md']
 
 
@@ -1286,9 +1253,6 @@ def test_init_template_preset_fills_unset_flags(
     see -- an explicit ``--max-cost`` lands in its place, in both stores.
     """
 
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
-
     Node(git_repo).init(agent='claude', user=True)
     preset = {'model': 'sonnet', 'max_cost': 10, 'sync': False}
     _commit_template(
@@ -1302,7 +1266,7 @@ def test_init_template_preset_fills_unset_flags(
     crew = f'{git_repo}/templates/crew'
     # a parent whose preferences rival the preset's
     Node(git_repo).init(name='mgr', model='opus', step_timeout='10m')
-    monkeypatch.setenv('_NODE', str(node_dir('main.mgr')))
+    monkeypatch.setenv('_NODE', str(_node_dir(git_repo, 'main.mgr')))
     # a flag --max-iter-cost is accepted against the preset ceiling
     Node(git_repo).init(
         name='sub',
@@ -1586,10 +1550,9 @@ def test_init_template_refuses_files_the_seed_would_skip(
     NN-prefix contract, a case-variant surface folder (``Steps/``) by
     the exact lowercase names, and an ``agents/<agent>/skills`` entry --
     a directory or a regular file -- as a shadow of the node's skills
-    mount -- and nothing lands. A
-    root-level extra beside the surfaces is documentation -- a template
-    with every surface correctly shaped still deploys, and the extra
-    reaches no node surface.
+    mount -- and nothing lands. A root-level extra beside the surfaces
+    is documentation -- a template with every surface correctly shaped
+    still deploys, and the extra reaches no node surface.
     """
     Node(git_repo).init(agent='claude', user=True)
     step = {'steps/01-GO.md': '# go\n'}
@@ -1896,13 +1859,7 @@ def test_pin_without_a_template_still_validates(
     A resolvable pin initializes normally.
     """
     Node(git_repo).init(agent='claude', user=True)
-    head = subprocess.run(
-        ['git', 'rev-parse', 'HEAD'],
-        cwd=git_repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
+    head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
     # a pin that resolves to no commit refuses before any worktree exists
     with pytest.raises(ValueError, match='--pin does not resolve'):
         Node(git_repo).init(name='v1', pin='0' * 40)
@@ -2002,12 +1959,11 @@ def test_init_template_fills_slots_from_values_set_and_pin(
     ``--set`` beats the ``--values`` sheet, ``--pin`` supplies ``pin``
     and refuses beside a rival ``--set pin=`` or sheet ``pin`` that
     disagrees (an agreeing pair is one instruction and passes), and the
-    charter gate
-    reads the rendered text: a stale pin fill dies at init, a coherent
-    one deploys with every ``{{slot}}`` filled and ``$VAR``/shell text
-    intact, and the merged map -- an unused sheet key included (one
-    sheet may cover several templates) -- is recorded in
-    ``_template.toml``.
+    charter gate reads the rendered text: a stale pin fill dies at init,
+    a coherent one deploys with every ``{{slot}}`` filled and
+    ``$VAR``/shell text intact, and the merged map -- an unused sheet
+    key included (one sheet may cover several templates) -- is
+    recorded in ``_template.toml``.
     """
     Node(git_repo).init(agent='claude', user=True)
     charter = (
@@ -2222,11 +2178,8 @@ def test_child_inherits_skills_only_on_request(
     ``--inherit=skills`` fails loudly instead of falling back.
     """
 
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
-
     def skill_names(branch: str) -> set[str]:
-        skills_dir = node_dir(branch) / 'skills'
+        skills_dir = _node_dir(git_repo, branch) / 'skills'
         return {d.name for d in skills_dir.iterdir() if d.is_dir()}
 
     Node(git_repo).init(agent='claude', user=True)
@@ -2235,13 +2188,13 @@ def test_child_inherits_skills_only_on_request(
         Node(git_repo).init(name='early', inherit=['skills'])
     # configure a parent: drop a standard skill and add a custom one
     Node(git_repo).init(name='task')
-    parent_skills = node_dir('main.task') / 'skills'
+    parent_skills = _node_dir(git_repo, 'main.task') / 'skills'
     shutil.rmtree(parent_skills / 'memory')
     custom = parent_skills / 'custom' / 'SKILL.md'
     custom.parent.mkdir()
     custom.write_text('# custom\n', encoding='utf-8')
     # spawn as the parent node (_NODE): the child snapshots the parent's set
-    monkeypatch.setenv('_NODE', str(node_dir('main.task')))
+    monkeypatch.setenv('_NODE', str(_node_dir(git_repo, 'main.task')))
     Node(git_repo).init(name='sub', inherit=['skills'])
     assert 'custom' in skill_names('main.task.sub')
     assert 'memory' not in skill_names('main.task.sub')
@@ -2266,9 +2219,6 @@ def test_child_inherits_config_preferences_not_caps(
     explicit ``--interval`` also blocks inheriting the parent's ``sleep``.
     """
 
-    def node_dir(branch: str) -> pathlib.Path:
-        return git_repo / '.worktrees' / branch / '.fractal' / branch
-
     Node(git_repo).init(agent='claude', user=True)
     Node(git_repo).init(
         name='mgr',
@@ -2281,7 +2231,7 @@ def test_child_inherits_config_preferences_not_caps(
         max_iters=7,
         max_children=3,
     )
-    monkeypatch.setenv('_NODE', str(node_dir('main.mgr')))
+    monkeypatch.setenv('_NODE', str(_node_dir(git_repo, 'main.mgr')))
     # preferences snapshot; caps stay unset
     Node(git_repo).init(name='sub', inherit=['config'])
     sub = Node(git_repo / '.worktrees' / 'main.mgr.sub')
@@ -2386,24 +2336,9 @@ def test_init_requires_project_wiki(tmp_path: pathlib.Path) -> None:
     """Init errors if the base branch has no project wiki."""
     repo = tmp_path / 'repo'
     repo.mkdir()
-    subprocess.run(
-        ['git', 'init', '-b', 'main'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ['git', 'config', 'user.email', 'test@test.com'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ['git', 'config', 'user.name', 'Test'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(repo, 'init', '-b', 'main')
+    _git(repo, 'config', 'user.email', 'test@test.com')
+    _git(repo, 'config', 'user.name', 'Test')
     (repo / 'README.md').write_text(
         '# test\n',
         encoding='utf-8',
@@ -2412,18 +2347,8 @@ def test_init_requires_project_wiki(tmp_path: pathlib.Path) -> None:
         '.venv\n.worktrees/\n.db\n.db-*\n.status\n',
         encoding='utf-8',
     )
-    subprocess.run(
-        ['git', 'add', '.'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ['git', 'commit', '-m', 'init'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(repo, 'add', '.')
+    _git(repo, 'commit', '-m', 'init')
     node = Node(repo)
     node.init(agent='claude', user=True)
     with pytest.raises(RuntimeError, match='project wiki'):
@@ -2644,18 +2569,8 @@ def test_child_inherits_subproject_from_parent(git_repo: pathlib.Path) -> None:
         '---\nname: app\n---\n# app\n\n***\n',
         encoding='utf-8',
     )
-    subprocess.run(
-        ['git', 'add', 'app'],
-        cwd=git_repo,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ['git', 'commit', '-m', 'add app wiki'],
-        cwd=git_repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(git_repo, 'add', 'app')
+    _git(git_repo, 'commit', '-m', 'add app wiki')
     # user node for the sub-project, then a child under it
     Node(git_repo).init(path='app', agent='claude', user=True)
     Node(git_repo).init(name='task')
@@ -2733,13 +2648,8 @@ def test_resolve_node_targets_subproject_user_node(git_repo: pathlib.Path) -> No
         '---\nname: app\n---\n# app\n\n***\n',
         encoding='utf-8',
     )
-    subprocess.run(['git', 'add', 'app'], cwd=git_repo, capture_output=True, check=True)
-    subprocess.run(
-        ['git', 'commit', '-m', 'add app wiki'],
-        cwd=git_repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(git_repo, 'add', 'app')
+    _git(git_repo, 'commit', '-m', 'add app wiki')
     # a sub-project user node, then one child (the single-child mis-target trigger)
     Node(git_repo).init(path='app', agent='claude', user=True)
     Node(git_repo).init(name='w')
@@ -2777,12 +2687,7 @@ def test_resolve_init_target_refuses_linked_worktree(
     ``relative_to``'s raw ValueError.
     """
     repo = _make_git_repo(tmp_path / 'main')
-    subprocess.run(
-        ['git', 'worktree', 'add', '-b', 'feature', '../feature'],
-        cwd=repo,
-        capture_output=True,
-        check=True,
-    )
+    _git(repo, 'worktree', 'add', '-b', 'feature', '../feature')
     with pytest.raises(typer.BadParameter, match='main checkout'):
         resolve_init_target(f'{tmp_path / "feature"}')
 
@@ -2790,20 +2695,6 @@ def test_resolve_init_target_refuses_linked_worktree(
 # ------ helpers
 
 
-def _commit_template(
-    repo: pathlib.Path,
-    path: str,
-    files: dict[str, str],
-) -> str:
-    """Write ``files`` under ``repo/<path>``, commit the folder, return the sha.
-
-    Template bytes deploy from git, never from the working copy, so every
-    template fixture must be committed before the init that reads it.
-    """
-    for name, content in files.items():
-        target = repo / path / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding='utf-8')
-    _git(repo, 'add', path)
-    _git(repo, 'commit', '-m', f'template {path}')
-    return _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+def _node_dir(repo: pathlib.Path, branch: str) -> pathlib.Path:
+    """Path to ``branch``'s node data dir inside its linked worktree."""
+    return repo / '.worktrees' / branch / '.fractal' / branch

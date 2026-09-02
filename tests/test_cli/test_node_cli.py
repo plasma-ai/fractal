@@ -35,7 +35,7 @@ import tomli_w
 import fractal
 from fractal.constants import STATUSES
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _commit_template, _git
 
 from .conftest import _await_settled, _cli_env, _fractal_bin, _require_tmux, _run
 
@@ -1887,11 +1887,11 @@ def test_diff_requires_a_recorded_template_and_a_full_sha(repo: dict) -> None:
     recordless = _run(root, 'node', 'diff', 'main.task')
     assert recordless.returncode == 2, recordless.stdout + recordless.stderr
     assert 'No template recorded' in recordless.stderr
-    _commit_template(
-        root,
-        'templates/shadiff',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/shadiff', files)
     spawn = _run(
         root,
         'node',
@@ -1951,11 +1951,11 @@ def test_diff_stays_clean_after_the_template_folder_moves(repo: dict) -> None:
     read is untouched by the rename and the node reports no drift.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/movediff',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/movediff', files)
     spawn = _run(
         root,
         'node',
@@ -2031,11 +2031,11 @@ def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
     the re-init remedy instead of the init flags.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/slotcrew',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# go for {{mission}}\n'},
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go for {{mission}}\n',
+    }
+    _commit_template(root, 'templates/slotcrew', files)
     spawn = _run(
         root,
         'node',
@@ -2184,10 +2184,12 @@ def test_reseed_restores_the_seed_surfaces_and_records_the_event(
         assert auth.is_symlink()
         assert auth.readlink() == auth_target
         # the event names the path and the commit read
-        events = Node(worktree).db.read(
-            'events',
-            where={'node': 'main.reseedcrew', 'event': 'reseed'},
-        )
+        activity = _run(root, 'node', 'activity', 'main.reseedcrew', '--csv').stdout
+        events = [
+            row
+            for row in csv.DictReader(io.StringIO(activity))
+            if row['event'] == 'reseed'
+        ]
         assert [row['metadata'] for row in events] == [f'templates/reseedcrew@{commit}']
         # a paused node refuses without --force; --force reseeds it
         Node(worktree).status_set('paused')
@@ -2253,10 +2255,12 @@ def test_reseed_ref_reads_another_commit_and_keeps_exclusions(
         data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
         assert data['commit'] == advanced
         assert data['exclude'] == ['steps/02-SKIP.md']
-        events = Node(root / '.worktrees' / 'main.refreseed').db.read(
-            'events',
-            where={'node': 'main.refreseed', 'event': 'reseed'},
-        )
+        activity = _run(root, 'node', 'activity', 'main.refreseed', '--csv').stdout
+        events = [
+            row
+            for row in csv.DictReader(io.StringIO(activity))
+            if row['event'] == 'reseed'
+        ]
         assert [row['metadata'] for row in events] == [
             f'templates/refreseed@{advanced}'
         ]
@@ -2276,11 +2280,11 @@ def test_reseed_refuses_a_missing_path_at_a_ref_and_re_points(
     root-differs notice prints.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/oldhome',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/oldhome', files)
     spawn = _run(
         root,
         'node',
@@ -2339,16 +2343,16 @@ def test_reseed_bare_re_point_reads_the_node_branch_tip(repo: dict) -> None:
     """
     root = repo['root']
     # both folders predate the spawn, so the node's own tip tracks them
-    _commit_template(
-        root,
-        'templates/pointa',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
-    )
-    _commit_template(
-        root,
-        'templates/pointb',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# from b, original\n'},
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/pointa', files)
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# from b, original\n',
+    }
+    _commit_template(root, 'templates/pointb', files)
     spawn = _run(
         root,
         'node',
@@ -2363,11 +2367,10 @@ def test_reseed_bare_re_point_reads_the_node_branch_tip(repo: dict) -> None:
     try:
         node_dir = root / '.worktrees' / 'main.pointer' / '.fractal' / 'main.pointer'
         # the re-point target advances on main after the fork
-        _commit_template(
-            root,
-            'templates/pointb',
-            {'steps/01-GO.md': '# from b, advanced\n'},
-        )
+        files = {
+            'steps/01-GO.md': '# from b, advanced\n',
+        }
+        _commit_template(root, 'templates/pointb', files)
         advanced = _git(root, 'rev-parse', 'main').stdout.strip()
         tip = _git(root, 'rev-parse', 'main.pointer').stdout.strip()
         assert tip != advanced
@@ -2404,11 +2407,11 @@ def test_reseed_prints_no_root_notice_without_a_re_point(repo: dict) -> None:
     newer copy of the folder, and both keep the read version's bytes.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/quietcrew',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/quietcrew', files)
     spawn = _run(
         root,
         'node',
@@ -2427,11 +2430,10 @@ def test_reseed_prints_no_root_notice_without_a_re_point(repo: dict) -> None:
         record = node_dir / '_template.toml'
         recorded = tomllib.loads(record.read_text(encoding='utf-8'))['commit']
         # the root branch moves past the recorded copy
-        _commit_template(
-            root,
-            'templates/quietcrew',
-            {'steps/01-GO.md': '# go, newer\n'},
-        )
+        files = {
+            'steps/01-GO.md': '# go, newer\n',
+        }
+        _commit_template(root, 'templates/quietcrew', files)
         read_tree = _git(root, 'rev-parse', f'{recorded}:templates/quietcrew').stdout
         root_tree = _git(root, 'rev-parse', 'main:templates/quietcrew').stdout
         assert read_tree != root_tree
@@ -2523,11 +2525,11 @@ def test_reseed_refuses_steps_breaking_the_discovery_contract(repo: dict) -> Non
     rewrites.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/renum',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/renum', files)
     spawn = _run(
         root,
         'node',
@@ -2545,22 +2547,20 @@ def test_reseed_refuses_steps_breaking_the_discovery_contract(repo: dict) -> Non
         # the template renumbers to a wider prefix on main: the bundle is
         # coherent alone, but the node's stale 01- step would survive
         (root / 'templates' / 'renum' / 'steps' / '01-GO.md').unlink()
-        _commit_template(
-            root,
-            'templates/renum',
-            {'steps/001-GO.md': '# go, renumbered\n'},
-        )
+        files = {
+            'steps/001-GO.md': '# go, renumbered\n',
+        }
+        _commit_template(root, 'templates/renum', files)
         mixed = _run(root, 'node', 'reseed', 'main.renum', '--ref', 'main')
         assert mixed.returncode == 2, mixed.stdout + mixed.stderr
         assert 'mixed digit prefix widths' in mixed.stderr, mixed.stderr
         assert '001-GO.md' in mixed.stderr
         assert 'delete the stale files first' in mixed.stderr
         # a bundle step without the NN- prefix refuses by name
-        _commit_template(
-            root,
-            'templates/renum',
-            {'steps/ROGUE.md': '# unprefixed\n'},
-        )
+        files = {
+            'steps/ROGUE.md': '# unprefixed\n',
+        }
+        _commit_template(root, 'templates/renum', files)
         rogue = _run(root, 'node', 'reseed', 'main.renum', '--ref', 'main')
         assert rogue.returncode == 2, rogue.stdout + rogue.stderr
         assert 'without an NN- prefix: ROGUE.md' in rogue.stderr, rogue.stderr
@@ -2588,11 +2588,11 @@ def test_reseed_refuses_files_the_seed_would_skip(repo: dict) -> None:
     offender trims it first, and the same re-point reseeds cleanly.
     """
     root = repo['root']
-    _commit_template(
-        root,
-        'templates/skipcrew',
-        {'config.json': '{}\n', 'steps/01-GO.md': '# go\n'},
-    )
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/skipcrew', files)
     spawn = _run(
         root,
         'node',
@@ -2608,26 +2608,22 @@ def test_reseed_refuses_files_the_seed_would_skip(repo: dict) -> None:
         node_dir = root / '.worktrees' / 'main.skipcrew' / '.fractal' / 'main.skipcrew'
         record_bytes = (node_dir / '_template.toml').read_bytes()
         # the template gains a stray note on main: the --ref read refuses
-        _commit_template(
-            root,
-            'templates/skipcrew',
-            {'steps/notes.txt': 'not a step\n'},
-        )
+        files = {
+            'steps/notes.txt': 'not a step\n',
+        }
+        _commit_template(root, 'templates/skipcrew', files)
         stray = _run(root, 'node', 'reseed', 'main.skipcrew', '--ref', 'main')
         assert stray.returncode == 2, stray.stdout + stray.stderr
         assert ('steps/ has a file the seed would skip: notes.txt') in stray.stderr, (
             stray.stderr
         )
         # a re-point at a folder carrying underscore machinery refuses too
-        _commit_template(
-            root,
-            'templates/skipscripts',
-            {
-                'config.json': '{}\n',
-                'steps/01-GO.md': '# go\n',
-                'scripts/_helper.sh': 'echo hidden\n',
-            },
-        )
+        files = {
+            'config.json': '{}\n',
+            'steps/01-GO.md': '# go\n',
+            'scripts/_helper.sh': 'echo hidden\n',
+        }
+        _commit_template(root, 'templates/skipscripts', files)
         machinery = _run(
             root,
             'node',
@@ -2671,11 +2667,8 @@ def test_reseed_refuses_files_the_seed_would_skip(repo: dict) -> None:
             ),
         ]
         for folder, files, message in vetted:
-            _commit_template(
-                root,
-                f'templates/{folder}',
-                {'config.json': '{}\n', **files},
-            )
+            bundle = {'config.json': '{}\n', **files}
+            _commit_template(root, f'templates/{folder}', bundle)
             refused = _run(
                 root,
                 'node',
@@ -3649,24 +3642,6 @@ def _orphan_activity_rows(activity: str, branch: str) -> list[str]:
     """Activity CSV lines recording ``branch``'s orphan event."""
     lines = activity.splitlines()
     return [line for line in lines if 'orphan' in line and branch in line]
-
-
-def _commit_template(
-    root: pathlib.Path,
-    path: str,
-    files: dict[str, str],
-) -> None:
-    """Write ``files`` under ``root/<path>`` and commit the folder.
-
-    Template bytes deploy from git, never from the working copy, so every
-    template fixture must be committed before the init that reads it.
-    """
-    for name, content in files.items():
-        target = root / path / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding='utf-8')
-    _git(root, 'add', path)
-    _git(root, 'commit', '-m', f'template {path}')
 
 
 def _init_tree(

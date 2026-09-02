@@ -36,6 +36,10 @@ _SLOT_NAME = re.compile(r'[a-z_][a-z0-9_]*')
 # that act on a record resolve it verbatim, so anything shorter refuses
 _COMMIT_SHA = re.compile(r'[0-9a-f]{40}')
 
+# refusal for a template ref that resolves to no commit -- materialize and
+# the node verbs' own resolve sites raise it, so the wording stays identical
+_UNRESOLVED_REF = 'Template ref does not resolve to a commit: {ref!r}.'
+
 #: config keys a template preset may carry -- the budget, limit, duration,
 #: model, and mode subset of a node's config keys; identity and immutable
 #: keys (title, scope, base, ...) refuse at init by name
@@ -64,12 +68,12 @@ PRESET_KEYS = (
     'detached',
 )
 
-#: credential file names refused anywhere in a template --
-#: codex and grok symlink their OAuth stores into the node's agent dir as
-#: auth.json (opencode's global store shares the name), omp relocates
-#: credentials.json into its node dir, and the rest are the generic key shapes;
-#: a dot-file (claude's .credentials.json among them) refuses beside these
-#: under agents/, the one subtree that deploys into live agent dirs
+#: credential file names refused anywhere in a template -- codex and grok
+#: symlink their OAuth stores into the node's agent dir as auth.json
+#: (opencode's global store shares the name), omp relocates credentials.json
+#: into its node dir, and the rest are the generic key shapes; a dot-file
+#: (claude's .credentials.json among them) refuses beside these under
+#: agents/, the one subtree that deploys into live agent dirs
 CREDENTIAL_NAMES = (
     'auth.json',
     'credentials.json',
@@ -312,7 +316,7 @@ def materialize(
                 ' commit.'
             )
         if 'not a valid object name' in stderr:
-            raise ValueError(f'Template ref does not resolve to a commit: {commit!r}.')
+            raise ValueError(_UNRESOLVED_REF.format(ref=commit))
         raise RuntimeError(f'git archive failed: {stderr.strip()}')
     with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as bundle:
         # a template is self-contained: init.sh dereferences skill links
@@ -558,11 +562,9 @@ def vet(bundle: pathlib.Path) -> None:
         for entry in sorted(steps_dir.rglob('*')):
             if not entry.is_file():
                 continue
-            if (
-                entry.parent == steps_dir
-                and entry.suffix == '.md'
-                and not entry.name.startswith('.')
-            ):
+            top_level = entry.parent == steps_dir
+            step_shape = (entry.suffix == '.md') and not entry.name.startswith('.')
+            if top_level and step_shape:
                 continue
             relname = entry.relative_to(steps_dir).as_posix()
             raise ValueError(
@@ -715,7 +717,7 @@ def root_notice(
     path: str,
     commit: str,
 ) -> Optional[str]:
-    """One notice when the root branch's copy differs from the commit read.
+    """Return one notice when the root branch's copy differs from the commit read.
 
     The same tree-id comparison for every verb that reads a fresh folder
     choice (init, and a reseed re-point): a parent deep in the tree
@@ -912,9 +914,9 @@ def diff(
             # map the bundle file to its live counterpart; anything else
             # (the config preset, stray root files -- a root file named
             # like a surface included) deploys nowhere
-            if relfile == 'NODE.md' or (
-                len(parts) > 1 and parts[0] in ('steps', 'scripts', 'skills')
-            ):
+            in_surface = parts[0] in ('steps', 'scripts', 'skills')
+            surface_file = (len(parts) > 1) and in_surface
+            if relfile == 'NODE.md' or surface_file:
                 target = relfile
             elif parts[0] == 'agents' and len(parts) > 2:
                 target = '/'.join([f'.{parts[1]}', *parts[2:]])

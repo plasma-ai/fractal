@@ -1114,8 +1114,9 @@ class Node:
             max_step_cost: Maximum cost per step in USD
                 (warn-only when unenforceable).
             reserve_budget: Budget reserved for cleanup: USD or ``N%`` of
-                the merged ``max_cost`` (default ``10%`` of it); shifts when
-                the node enters reserve mode (not enforced).
+                the merged ``max_cost`` (default: the default reserve
+                fraction of it); shifts when the node enters reserve mode
+                (not enforced).
             sync: Run sync mode before each step.
             detached: Separate agent invocation per step.
             local: Skip pushing to remote after each commit.
@@ -1134,6 +1135,7 @@ class Node:
         from .agent import command_base, resolve
         from .loop import _STEP_PREFIX
         from .template import (
+            _UNRESOLVED_REF,
             collect_values,
             fill,
             locate,
@@ -1363,9 +1365,7 @@ class Node:
                     check=False,
                 )
                 if template_commit is None:
-                    raise ValueError(
-                        f'Template ref does not resolve to a commit: {rev!r}.'
-                    )
+                    raise ValueError(_UNRESOLVED_REF.format(ref=rev))
                 template_tmp = tempfile.mkdtemp(prefix='fractal-template-')
                 bundle = materialize(
                     worktree=template_worktree,
@@ -1627,8 +1627,8 @@ class Node:
             # flag's USD-or-N% grammar needs the final max_cost (a percent
             # of a preset ceiling resolves here), while a preset reserve is
             # already a USD number, typed as config.json holds it
-            usable = type(max_cost) in (int, float) and max_cost > 0
-            ceiling_ok = max_cost is None or usable
+            usable = (type(max_cost) in (int, float)) and (max_cost > 0)
+            ceiling_ok = (max_cost is None) or usable
             if reserve_budget is None and 'reserve_budget' in template_preset:
                 # a reserve without a ceiling is inert, so the preset obeys
                 # the same requires-max-cost rule the flag does
@@ -1644,18 +1644,16 @@ class Node:
                 # a degenerate or junk-typed ceiling resolves no reserve -- the
                 # merged validation below owns that rejection and its wording
                 reserve_budget = None
-            # validate the merged run config (the one merged validator:
-            # finiteness, positive ceilings, per-iter/step caps needing the
-            # run ceiling, reserve range, step <= iter <= run ordering,
-            # integer caps, mode-flag types, unit suffixes) only after
-            # flag > preset > inherit resolved, so a preset or inherited
-            # value obeys exactly the rules the matching flag does -- a pure
-            # check of the merged values (no live state), so it stays out of
-            # the flock; the live subtree/budget caps
-            # (max-children/depth/descendants/cost-remaining) are enforced
-            # inside the .worktrees flock below, after a fresh re-read, so
-            # concurrent fan-out cannot each pass the check before any of
-            # them takes the lock (a TOCTOU race that would defeat the caps)
+            # validate the merged run config (the one merged validator: finiteness,
+            # positive ceilings, per-iter/step caps needing the run ceiling, reserve
+            # range, step <= iter <= run ordering, integer caps, mode-flag types, unit
+            # suffixes) only after flag > preset > inherit resolved, so a preset or
+            # inherited value obeys exactly the rules the matching flag does -- a pure
+            # check of the merged values (no live state), so it stays out of the flock;
+            # subtree/budget caps (max-children/depth/descendants/cost-remaining) are
+            # enforced inside the .worktrees flock below, after a fresh re-read, so
+            # concurrent fan-out cannot each pass the check before any of them takes
+            # the lock (a TOCTOU race that would defeat the caps)
             config_values = {
                 'max_iters': max_iters,
                 'max_depth': max_depth,
@@ -2186,6 +2184,7 @@ class Node:
         """
         from .loop import _STEP_PREFIX
         from .template import (
+            _UNRESOLVED_REF,
             fill,
             locate,
             materialize,
@@ -2216,172 +2215,171 @@ class Node:
         # nested inside it: merge.sh shells into verbs that take that one);
         # the guard re-read and the rewrite stay atomic under the .worktrees
         # flock, so a rival verb cannot land between them (the --reset guard)
-        with worktree.merge_lock(self.repo_dir), worktree.lock(self.repo_dir):
-            # reseed rewrites the live steering surface, so refuse over a
-            # running loop or a paused node's frozen run context unless the
-            # caller forces it
-            self._reconcile_status(locked=True)
-            if not force:
-                if self.status() == 'active':
-                    raise RuntimeError(
-                        'Cannot reseed an active node. Stop or kill it first.'
-                    )
-                if self.status() == 'paused':
-                    raise RuntimeError(
-                        'Cannot reseed a paused node. Resume or kill it first.'
-                    )
-            record = read_provenance(self.node_dir)
-            path = record['path']
-            commit = record['commit']
-            template_worktree = self.repo_dir
-            rev: Optional[str] = None
-            if template is not None:
-                # re-point: resolve the folder like init does; the read falls
-                # to the node branch's own tip when the value names no ref
-                path, template_ref, template_worktree = locate(
-                    template,
-                    repo_dir=self.repo_dir,
-                )
-                rev = template_ref if template_ref is not None else self.branch
-            elif ref is not None:
-                rev = ref
-            if rev is not None:
-                cmd = ['rev-parse', '--verify', f'{rev}^{{commit}}']
-                resolved = fractal.util.git.run(
-                    cmd,
-                    cwd=self.repo_dir,
-                    check=False,
-                )
-                if resolved is None:
-                    raise ValueError(
-                        f'Template ref does not resolve to a commit: {rev!r}.'
-                    )
-                commit = resolved
-            # a --ref reads the recorded folder, which may have moved or
-            # been retired since: probe it at the ref and name the re-point
-            # remedy, which materialize's untracked-at-commit message lacks
-            if ref is not None:
-                cmd = ['rev-parse', '-q', '--verify', f'{commit}:{path}']
-                tree = fractal.util.git.run(cmd, cwd=self.repo_dir, check=False)
-                if tree is None:
-                    raise ValueError(
-                        f'Template folder {path!r} is not tracked at {ref!r};'
-                        ' the folder may have moved -- re-point the node with'
-                        ' node reseed --template <path>[@<ref>].'
-                    )
-            # materialize and render the effective set exactly as init does,
-            # with the recorded values; a listing entry the template no
-            # longer carries only warns (the record may outlive the file)
-            template_tmp = tempfile.mkdtemp(prefix='fractal-template-')
-            notice: Optional[str] = None
-            try:
-                bundle = materialize(
-                    worktree=template_worktree,
-                    path=path,
-                    commit=commit,
-                    dest=pathlib.Path(template_tmp),
-                )
-                # a re-point reads a fresh folder choice, so it gets
-                # creation's root-differs notice; a plain or --ref reseed
-                # deliberately re-reads a recorded or named version, silently
+        with worktree.merge_lock(self.repo_dir):
+            with worktree.lock(self.repo_dir):
+                # reseed rewrites the live steering surface, so refuse over a
+                # running loop or a paused node's frozen run context unless the
+                # caller forces it
+                self._reconcile_status(locked=True)
+                if not force:
+                    if self.status() == 'active':
+                        raise RuntimeError(
+                            'Cannot reseed an active node. Stop or kill it first.'
+                        )
+                    if self.status() == 'paused':
+                        raise RuntimeError(
+                            'Cannot reseed a paused node. Resume or kill it first.'
+                        )
+                record = read_provenance(self.node_dir)
+                path = record['path']
+                commit = record['commit']
+                template_worktree = self.repo_dir
+                rev: Optional[str] = None
                 if template is not None:
-                    notice = root_notice(
+                    # re-point: resolve the folder like init does; the read falls
+                    # to the node branch's own tip when the value names no ref
+                    path, template_ref, template_worktree = locate(
+                        template,
                         repo_dir=self.repo_dir,
-                        root=self.config.get('root'),
-                        path=path,
-                        commit=commit,
                     )
-                warnings = trim(
-                    bundle,
-                    include=record.get('include'),
-                    exclude=record.get('exclude'),
-                    strict=False,
-                )
-                # a file the copy loops would silently skip refuses here
-                # exactly as at init, judging the effective set
-                vet(bundle)
-                fill(
-                    bundle,
-                    path=path,
-                    values=record.get('values', {}),
-                    remedy=(
-                        'add the value to the [values] table in the'
-                        " node's _template.toml, or re-init the node"
-                        ' with --set'
-                    ),
-                )
-                # reseed adds and overwrites but never deletes, so the
-                # loop's discovery contract judges the post-reseed union:
-                # the bundle's steps plus the live steps the bundle does
-                # not carry -- a renumbered template (or a bad step at the
-                # ref) refuses here, before anything rewrites, rather than
-                # failing every later iteration behind a clean diff
-                steps_dir = bundle / 'steps'
-                if steps_dir.is_dir():
-                    step_files = sorted(
-                        entry for entry in steps_dir.glob('*.md') if entry.is_file()
+                    rev = template_ref if template_ref is not None else self.branch
+                elif ref is not None:
+                    rev = ref
+                if rev is not None:
+                    cmd = ['rev-parse', '--verify', f'{rev}^{{commit}}']
+                    resolved = fractal.util.git.run(
+                        cmd,
+                        cwd=self.repo_dir,
+                        check=False,
                     )
-                    bundle_names = {entry.name for entry in step_files}
-                    live_dir = self.node_dir / 'steps'
-                    if live_dir.is_dir():
-                        # the live side takes everything the loop's own glob
-                        # discovers, hidden names included -- the union must
-                        # judge exactly what a run would read
-                        step_files += sorted(
-                            entry
-                            for entry in live_dir.glob('*.md')
-                            if entry.is_file() and entry.name not in bundle_names
-                        )
-                    widths = set()
-                    for step_file in step_files:
-                        match = _STEP_PREFIX.match(step_file.name)
-                        if match is None:
-                            raise ValueError(
-                                f'Reseed would leave steps/ with a step'
-                                f' file without an NN- prefix:'
-                                f' {step_file.name}.'
-                            )
-                        widths.add(len(match.group(1)))
-                    if len(widths) > 1:
-                        conflict = ', '.join(
-                            sorted(step_file.name for step_file in step_files)
-                        )
+                    if resolved is None:
+                        raise ValueError(_UNRESOLVED_REF.format(ref=rev))
+                    commit = resolved
+                # a --ref reads the recorded folder, which may have moved or
+                # been retired since: probe it at the ref and name the re-point
+                # remedy, which materialize's untracked-at-commit message lacks
+                if ref is not None:
+                    cmd = ['rev-parse', '-q', '--verify', f'{commit}:{path}']
+                    tree = fractal.util.git.run(cmd, cwd=self.repo_dir, check=False)
+                    if tree is None:
                         raise ValueError(
-                            f'Reseed would leave steps/ with mixed digit'
-                            f' prefix widths: {conflict} -- delete the'
-                            ' stale files first.'
+                            f'Template folder {path!r} is not tracked at {ref!r};'
+                            ' the folder may have moved -- re-point the node with'
+                            ' node reseed --template <path>[@<ref>].'
                         )
-                # the script rewrites the file surfaces and the per-agent
-                # files from the bundle; Python owns the provenance record
-                event_id = self.record.event_start(
-                    'reseed',
-                    metadata=f'{path}@{commit}',
-                )
+                # materialize and render the effective set exactly as init does,
+                # with the recorded values; a listing entry the template no
+                # longer carries only warns (the record may outlive the file)
+                template_tmp = tempfile.mkdtemp(prefix='fractal-template-')
+                notice: Optional[str] = None
                 try:
-                    self._run_script(
-                        'reseed.sh',
-                        f'{self._root}',
-                        f'--bundle={bundle}',
-                    )
-                    # advance the record: the commit actually read, and the
-                    # path too on a re-point; values and listing ride along
-                    # unchanged -- inside the try so a failed record write
-                    # (surfaces already rewritten) stamps the event failed
-                    # rather than stranding it open
-                    write_provenance(
-                        self.node_dir,
+                    bundle = materialize(
+                        worktree=template_worktree,
                         path=path,
                         commit=commit,
-                        values=record.get('values', {}),
+                        dest=pathlib.Path(template_tmp),
+                    )
+                    # a re-point reads a fresh folder choice, so it gets
+                    # creation's root-differs notice; a plain or --ref reseed
+                    # deliberately re-reads a recorded or named version, silently
+                    if template is not None:
+                        notice = root_notice(
+                            repo_dir=self.repo_dir,
+                            root=self.config.get('root'),
+                            path=path,
+                            commit=commit,
+                        )
+                    warnings = trim(
+                        bundle,
                         include=record.get('include'),
                         exclude=record.get('exclude'),
+                        strict=False,
                     )
-                except Exception:
-                    self.record.event_end(event_id=event_id, status='failed')
-                    raise
-                self.record.event_end(event_id=event_id, status='completed')
-            finally:
-                shutil.rmtree(template_tmp, ignore_errors=True)
+                    # a file the copy loops would silently skip refuses here
+                    # exactly as at init, judging the effective set
+                    vet(bundle)
+                    fill(
+                        bundle,
+                        path=path,
+                        values=record.get('values', {}),
+                        remedy=(
+                            'add the value to the [values] table in the'
+                            " node's _template.toml, or re-init the node"
+                            ' with --set'
+                        ),
+                    )
+                    # reseed adds and overwrites but never deletes, so the
+                    # loop's discovery contract judges the post-reseed union:
+                    # the bundle's steps plus the live steps the bundle does
+                    # not carry -- a renumbered template (or a bad step at the
+                    # ref) refuses here, before anything rewrites, rather than
+                    # failing every later iteration behind a clean diff
+                    steps_dir = bundle / 'steps'
+                    if steps_dir.is_dir():
+                        step_files = sorted(
+                            entry for entry in steps_dir.glob('*.md') if entry.is_file()
+                        )
+                        bundle_names = {entry.name for entry in step_files}
+                        live_dir = self.node_dir / 'steps'
+                        if live_dir.is_dir():
+                            # the live side takes everything the loop's own glob
+                            # discovers, hidden names included -- the union must
+                            # judge exactly what a run would read
+                            step_files += sorted(
+                                entry
+                                for entry in live_dir.glob('*.md')
+                                if entry.is_file() and entry.name not in bundle_names
+                            )
+                        widths = set()
+                        for step_file in step_files:
+                            match = _STEP_PREFIX.match(step_file.name)
+                            if match is None:
+                                raise ValueError(
+                                    f'Reseed would leave steps/ with a step'
+                                    f' file without an NN- prefix:'
+                                    f' {step_file.name}.'
+                                )
+                            widths.add(len(match.group(1)))
+                        if len(widths) > 1:
+                            conflict = ', '.join(
+                                sorted(step_file.name for step_file in step_files)
+                            )
+                            raise ValueError(
+                                f'Reseed would leave steps/ with mixed digit'
+                                f' prefix widths: {conflict} -- delete the'
+                                ' stale files first.'
+                            )
+                    # the script rewrites the file surfaces and the per-agent
+                    # files from the bundle; Python owns the provenance record
+                    event_id = self.record.event_start(
+                        'reseed',
+                        metadata=f'{path}@{commit}',
+                    )
+                    try:
+                        self._run_script(
+                            'reseed.sh',
+                            f'{self._root}',
+                            f'--bundle={bundle}',
+                        )
+                        # advance the record: the commit actually read, and the
+                        # path too on a re-point; values and listing ride along
+                        # unchanged -- inside the try so a failed record write
+                        # (surfaces already rewritten) stamps the event failed
+                        # rather than stranding it open
+                        write_provenance(
+                            self.node_dir,
+                            path=path,
+                            commit=commit,
+                            values=record.get('values', {}),
+                            include=record.get('include'),
+                            exclude=record.get('exclude'),
+                        )
+                    except Exception:
+                        self.record.event_end(event_id=event_id, status='failed')
+                        raise
+                    self.record.event_end(event_id=event_id, status='completed')
+                finally:
+                    shutil.rmtree(template_tmp, ignore_errors=True)
         confirmation = f'Node reseeded from {path}@{commit}'
         if notice is not None:
             confirmation = f'{confirmation}\n{notice}'
@@ -5391,15 +5389,11 @@ class Node:
                 # record-only row (a .pgid, no .socket) when the host is blind
                 # -- a blind host vouches for no row, so such a row confirms
                 # through its own group
-                absent = (
-                    node.headless
-                    or (sessions is not None and node.tmux_session not in sessions)
-                    or (
-                        sessions is None
-                        and not (node.node_dir / SOCKET_FILE).exists()
-                        and (node.node_dir / PGID_FILE).exists()
-                    )
-                )
+                missing = (sessions is not None) and (node.tmux_session not in sessions)
+                no_socket = not (node.node_dir / SOCKET_FILE).exists()
+                group_present = (node.node_dir / PGID_FILE).exists()
+                record_only = (sessions is None) and no_socket and group_present
+                absent = node.headless or missing or record_only
                 if node.exists() and absent:
                     node._reconcile_status(locked=locked)
                     row = {**row, 'status': node.status()}

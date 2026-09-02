@@ -12,6 +12,7 @@ from fractal.core.node import Node
 
 __all__ = [
     '_git',
+    '_commit_template',
     '_past_timestamp',
     '_age_iter',
     '_age_run',
@@ -29,6 +30,25 @@ def _git(cwd: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
         text=True,
         check=True,
     )
+
+
+def _commit_template(
+    repo: pathlib.Path,
+    path: str,
+    files: dict[str, str],
+) -> str:
+    """Write ``files`` under ``repo/<path>``, commit the folder, return the sha.
+
+    Template bytes deploy from git, never from the working copy, so every
+    template fixture must be committed before the init that reads it.
+    """
+    for name, content in files.items():
+        target = repo / path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding='utf-8')
+    _git(repo, 'add', path)
+    _git(repo, 'commit', '-m', f'template {path}')
+    return _git(repo, 'rev-parse', 'HEAD').stdout.strip()
 
 
 def _past_timestamp(seconds_ago: float) -> str:

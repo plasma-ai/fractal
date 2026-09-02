@@ -106,7 +106,7 @@ trim seed steps a narrow node does not need (keeping the prefix widths
 consistent), add project-specific steps, or set frontmatter overrides (a cheap
 model for a mechanical step, an approval gate before an expensive one). Spawning
 with `--inherit=steps` starts from the parent's tailored list instead of the
-package seed, and `--template <path>` starts from a template folder's committed
+package seed, and `--template=<path>` starts from a template folder's committed
 step set (see [[configuration/templates]]). On a template-seeded node, record a
 trim with `--exclude` at init instead of deleting by hand: `node reseed` makes
 the node match its template's effective set, so a hand-deleted file comes back.

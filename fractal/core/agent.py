@@ -1090,39 +1090,40 @@ class Agent:
         # parent's live copy, which stays the fallback for files the bundle lacks
         if bundle_dir is not None and (bundle_seed := bundle_dir / cls.name).is_dir():
             for path in sorted(bundle_seed.rglob('*')):
-                if path.is_file():
-                    target = config_dir / path.relative_to(bundle_seed)
-                    # a live symlink (the auth link) is machinery: a copy
-                    # would write through it into the linked global store,
-                    # so it is never replaced
-                    if target.is_symlink():
-                        continue
-                    # a directory at the target would swallow the copy
-                    # (shutil.copy copies INTO a directory, nesting the
-                    # file), so a template that turned a directory into a
-                    # file refuses loudly with the old record kept
-                    if target.is_dir():
-                        relfile = path.relative_to(bundle_seed).as_posix()
-                        raise ValueError(
-                            f'Template agents/{cls.name}/{relfile} is a'
-                            f' file, but the node holds a directory at'
-                            f' .{cls.name}/{relfile}; remove the'
-                            ' directory first.'
-                        )
-                    # a symlinked intermediate directory would carry the copy
-                    # outside the node's agent dir -- refuse when the resolved
-                    # parent escapes it (the leaf symlink skip above keeps the
-                    # auth link untouched)
-                    if not target.parent.resolve().is_relative_to(config_dir.resolve()):
-                        relfile = path.relative_to(bundle_seed).as_posix()
-                        raise ValueError(
-                            f'Template agents/{cls.name}/{relfile} would'
-                            f' deploy outside .{cls.name}/ through a'
-                            ' symlinked directory; remove the symlink'
-                            ' first.'
-                        )
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy(path, target)
+                if not path.is_file():
+                    continue
+                target = config_dir / path.relative_to(bundle_seed)
+                # a live symlink (the auth link) is machinery: a copy
+                # would write through it into the linked global store,
+                # so it is never replaced
+                if target.is_symlink():
+                    continue
+                # a directory at the target would swallow the copy
+                # (shutil.copy copies INTO a directory, nesting the
+                # file), so a template that turned a directory into a
+                # file refuses loudly with the old record kept
+                if target.is_dir():
+                    relfile = path.relative_to(bundle_seed).as_posix()
+                    raise ValueError(
+                        f'Template agents/{cls.name}/{relfile} is a'
+                        f' file, but the node holds a directory at'
+                        f' .{cls.name}/{relfile}; remove the'
+                        ' directory first.'
+                    )
+                # a symlinked intermediate directory would carry the copy
+                # outside the node's agent dir -- refuse when the resolved
+                # parent escapes it (the leaf symlink skip above keeps the
+                # auth link untouched)
+                if not target.parent.resolve().is_relative_to(config_dir.resolve()):
+                    relfile = path.relative_to(bundle_seed).as_posix()
+                    raise ValueError(
+                        f'Template agents/{cls.name}/{relfile} would'
+                        f' deploy outside .{cls.name}/ through a'
+                        ' symlinked directory; remove the symlink'
+                        ' first.'
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(path, target)
         # an overwrite ends here: files the bundle lacks are left alone
         # entirely -- no parent/package fallback, no relink, no provider extras
         if overwrite:

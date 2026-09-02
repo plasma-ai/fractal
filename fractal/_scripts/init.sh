@@ -285,6 +285,15 @@ if [[ -z "$ROOT" ]]; then
     echo "Error: --root is required" >&2
     exit 1
 fi
+if [[ -n "$BUNDLE" ]]; then
+    if [[ ! -d "$BUNDLE" ]]; then
+        echo "Error: --bundle must name a directory: $BUNDLE" >&2
+        exit 1
+    fi
+    if [[ ! "$BUNDLE" = /* ]]; then
+        BUNDLE="$(cd "$BUNDLE" && pwd)"
+    fi
+fi
 
 # reject a sub-1s duration: it passes the per-flag format check above but the
 # loop's duration validation rejects < 1s at launch, so catch it here at the
@@ -654,8 +663,8 @@ if [[ "$RESET" == true ]]; then
     rm -f "$NODE_DIR/_template.toml"
 fi
 # the bundle's provenance record (template path, commit, values); the rm arm
-# above drops it on a --reset that names no template, the forget-unless-
-# repassed rule config flags have
+# above drops it on a --reset that names no template, the
+# forget-unless-repassed rule config flags have
 if [[ -n "$BUNDLE" && ! -f "$NODE_DIR/_template.toml" ]]; then
     cp "$BUNDLE/_template.toml" "$NODE_DIR/_template.toml"
     echo "Created $NODE_DIR/_template.toml"

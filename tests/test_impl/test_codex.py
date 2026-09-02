@@ -74,8 +74,8 @@ _PRICING = {
 }
 
 # cumulative usage snapshots (OpenAI convention: cached_input_tokens is a
-# subset of input_tokens; reasoning is folded into output_tokens) and their
-# hand-computed costs
+# subset of input_tokens; reasoning is folded into output_tokens)
+# and their hand-computed costs
 _USAGE_FIRST = {
     'input_tokens': 100,
     'output_tokens': 10,

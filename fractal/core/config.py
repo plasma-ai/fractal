@@ -134,10 +134,11 @@ def parse_reserve_budget(
     """Resolve a ``--reserve-budget`` value to a USD amount.
 
     The value is a USD number or ``N%`` of ``max_cost``; when omitted it falls
-    back to ``default`` (``10%`` of ``max_cost``), so a budget reserves a cleanup
-    buffer by default, and with no ``max_cost`` there is no reserve. The reserve
-    is not enforced -- it only moves when the node enters reserve mode (the budget
-    is treated as drained ``reserve_budget`` USD before ``max_cost`` is reached).
+    back to ``default`` (``DEFAULT_RESERVE_FRACTION`` of ``max_cost``), so a
+    budget reserves a cleanup buffer by default, and with no ``max_cost`` there
+    is no reserve. The reserve is not enforced -- it only moves when the node
+    enters reserve mode (the budget is treated as drained ``reserve_budget``
+    USD before ``max_cost`` is reached).
 
     Args:
         value: The raw ``--reserve-budget`` string (USD or ``N%``), or ``None``
@@ -152,7 +153,8 @@ def parse_reserve_budget(
 
     Raises:
         ValueError: If an explicit value is given without ``max_cost``,
-            is not a number, is negative, or is >= 99% of ``max_cost``.
+            is not a number, is negative, or is >= ``MAX_RESERVE_FRACTION``
+            of ``max_cost``.
 
     """
     if value is None:

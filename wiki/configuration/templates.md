@@ -141,9 +141,9 @@ uppercase `{{PIN}}` outright, so the two namespaces stay visibly apart.
 
 Values come from three sources, later ones winning:
 
-- `--values <file.toml>` -- a fill sheet: a flat TOML table of string values.
+- `--values=<file.toml>` -- a fill sheet: a flat TOML table of string values.
 - `--set KEY=VALUE` (repeatable) -- individual fills.
-- `--pin <sha>` -- supplies the `pin` slot, beside its fill-sheet-gate role (see
+- `--pin=<sha>` -- supplies the `pin` slot, beside its fill-sheet-gate role (see
   the charter bullet above); a `pin` from `--set`/`--values` that disagrees with
   `--pin` refuses, while equal spellings pass.
 
@@ -216,11 +216,11 @@ directories merge file by file (a node-added file survives), and the `skills`
 and auth symlinks in the agent dirs stand. The verb records a `reseed` event and
 advances the record's `commit` to the commit actually read.
 
-- `--ref <committish>` reads the recorded folder at another commit -- how a
+- `--ref=<committish>` reads the recorded folder at another commit -- how a
   template improvement reaches an existing node. A ref at which the recorded
   path is absent (the folder moved or was retired) refuses naming the re-point
   remedy.
-- `--template <path>[@<ref>]` re-points the node at another folder, read at the
+- `--template=<path>[@<ref>]` re-points the node at another folder, read at the
   node branch's own tip when the value names no ref: the new path and the commit
   read land in `_template.toml` while the values and listing ride along
   unchanged -- one explicit command follows a moved template. The re-point

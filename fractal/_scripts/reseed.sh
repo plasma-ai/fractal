@@ -6,7 +6,7 @@ set -euo pipefail
 
 usage() {
     cat <<USAGE
-Usage: reseed.sh <path> --bundle=<dir>
+Usage: reseed.sh <path> [options]
 
 Rewrite a node's seed surfaces from a rendered template bundle.
 
@@ -45,6 +45,10 @@ fi
 if [[ ! -d "$BUNDLE" ]]; then
     echo "Error: --bundle must name a directory: $BUNDLE" >&2
     exit 1
+fi
+
+if [[ ! "$BUNDLE" = /* ]]; then
+    BUNDLE="$(cd "$BUNDLE" && pwd)"
 fi
 
 if [[ ! "$WORKTREE_DIR" = /* ]]; then
@@ -144,13 +148,13 @@ if [[ -d "$BUNDLE/skills" ]]; then
         mkdir -p "$NODE_DIR/skills/$SKILL_NAME"
         # refuse a symlinked destination, file or directory component: a
         # plain cp would write through it
-        while IFS= read -r REL; do
+        while IFS= read -r -d '' REL; do
             REL="${REL#./}"
             if [[ -L "$NODE_DIR/skills/$SKILL_NAME/$REL" ]]; then
                 echo "Error: skills/$SKILL_NAME/$REL is a symlink; refusing to write through it" >&2
                 exit 1
             fi
-        done < <(cd "$SKILL_SRC" && find . -mindepth 1 \( -type f -o -type d \))
+        done < <(cd "$SKILL_SRC" && find . -mindepth 1 \( -type f -o -type d \) -print0)
         cp -RL "${SKILL_SRC}." "$NODE_DIR/skills/$SKILL_NAME/"
     done
 fi
