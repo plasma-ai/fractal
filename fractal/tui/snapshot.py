@@ -46,6 +46,9 @@ _SYNC_NAME = 'SYNC'
 _EV_LEAD_MAX = max(len(verb) for verb in fmt.NODE_VERB.values())
 
 
+# NOTE: field comments trail here against the above-the-line default --
+#   each is a column label, and the record reads as the pane layout
+#   it describes only when the labels sit beside the fields
 @dataclasses.dataclass(frozen=True)
 class Geometry:
     """Pane dimensions derived once per focused-section refresh."""

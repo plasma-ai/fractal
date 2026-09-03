@@ -215,6 +215,8 @@ class StreamEvent:
     never on the provider.
     """
 
+    # NOTE: fields cluster by the event kind that populates them rather than
+    #   by constructor grouping, so a parser branch and its fields read together
     kind: str
     text: Optional[str] = None
     # tool name (kind='tool')
@@ -270,6 +272,8 @@ def _sanitize_event(event: StreamEvent) -> StreamEvent:
 class StreamResult:
     """Outcome of one streamed invocation."""
 
+    # NOTE: field order mirrors StreamEvent's session/model/cost/budget_stopped
+    #   run, so both sides of the parser boundary read the same top to bottom
     session: Optional[str]
     model: Optional[str]
     cost: Optional[float]

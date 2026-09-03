@@ -51,6 +51,8 @@ class ChatEvent:
     text: str
 
 
+# NOTE: field comments trail here -- each is a one-line value gloss, and
+#   the above-line form would double a record that reads at a glance
 @dataclasses.dataclass(frozen=True)
 class Transport:
     """How a chat turn reaches a node (the resolved delivery decision)."""
