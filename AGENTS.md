@@ -10,7 +10,7 @@ below):
 - **Questions are not edit requests.** When a message asks a question without
   explicitly requesting a change, answer and stop (Communication).
 - **Write clear and concise English.** Write clear, concise, plain English which
-  can be quickly and easily parsed by the user - answer questions directly in
+  can be quickly and easily parsed by the user — answer questions directly in
   short form unless elaboration is requested (Writing Style).
 - **Seek the best solution, not agreement.** When you think the user is wrong,
   don't be afraid to say so — the right answer matters more than the path of

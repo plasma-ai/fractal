@@ -255,7 +255,7 @@ suppress-none-returning = true
 suppress-dummy-args = true
 
 [tool.pyright]
-include = ["fractal"]
+include = ["fractal", "tests"]
 
 [tool.pytest.ini_options]
 # https://docs.pytest.org/en/stable/customize.html
