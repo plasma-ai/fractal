@@ -143,26 +143,27 @@ def render_seed(
             ) from e
         return text, f'{path}/{name}', None
 
-    # one environment reads only committed bytes, never the deployment directory
-    environment = _SeedEnvironment(
-        loader=jinja2.FunctionLoader(load),
-        undefined=_SeedUndefined,
-        autoescape=False,
-        keep_trailing_newline=True,
-        trim_blocks=False,
-        lstrip_blocks=False,
-        newline_sequence='\n',
-    )
-    del environment.filters['random']
-    del environment.globals['lipsum']
     values = _ordered_values(values)
     filenames = {f'{path}/{name}' for name in sources}
     rendered: dict[str, bytes] = {}
     # complete every output before the caller can write any deployment file
     for name in files:
+        # isolate cached import state to one output over the committed source
+        environment = _SeedEnvironment(
+            loader=jinja2.FunctionLoader(load),
+            undefined=_SeedUndefined,
+            autoescape=False,
+            keep_trailing_newline=True,
+            trim_blocks=False,
+            lstrip_blocks=False,
+            newline_sequence='\n',
+        )
+        del environment.filters['random']
+        del environment.globals['lipsum']
         try:
             template = environment.get_template(name)
             text = template.render(values)
+            rendered[name] = text.encode('utf-8')
         except Exception as e:
             filename = f'{path}/{name}'
             line = None
@@ -184,7 +185,6 @@ def render_seed(
                 )
                 message = f'{message}; {fix}'
             raise ValueError(f'Template file {location}: {message}.') from e
-        rendered[name] = text.encode('utf-8')
     return rendered
 
 

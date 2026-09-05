@@ -211,8 +211,10 @@ An include names a template-relative file from the same committed bundle.
 `../shared/mission.md`, absolute paths, and files outside the template cannot be
 loaded. A missing include refuses unless its author uses Jinja's explicit
 `ignore missing`. All includes read immutable source, so one output cannot
-change what another output includes. Values are literal data: a supplied string
-containing `{{ other }}` stays that string and is never rendered again.
+change what another output includes. Imported module state is scoped to one
+output, so selecting or reordering other outputs cannot change its text. Values
+are literal data: a supplied string containing `{{ other }}` stays that string
+and is never rendered again.
 
 Rendering uses strict undefined values, disabled HTML escaping, preserved
 trailing newlines, and no automatic block whitespace trimming. Jinja normalizes

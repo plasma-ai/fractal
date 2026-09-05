@@ -23,8 +23,10 @@ from fractal.core.render import _VarTemplate, render_seed
 __all__ = [
     'test_var_template_matches_envsubst',
     'test_seed_composes_selected_outputs_from_literal_inputs',
+    'test_seed_isolates_import_state_between_outputs',
     'test_seed_replays_native_values_with_stable_table_order',
     'test_seed_reports_the_source_of_rendering_errors',
+    'test_seed_names_the_output_for_unencodable_text',
     'test_seed_requires_values_displayed_through_containers',
     'test_seed_refuses_mutation_and_ambient_state',
     'test_seed_preserves_text_with_jinja_whitespace_rules',
@@ -117,6 +119,37 @@ def test_seed_composes_selected_outputs_from_literal_inputs(reverse: bool) -> No
     )
 
 
+@pytest.mark.parametrize(
+    argnames='files',
+    argvalues=[
+        ['NODE.md'],
+        ['NODE.md', 'steps/01-summary.md'],
+        ['steps/01-summary.md', 'NODE.md'],
+    ],
+    ids=['alone', 'alongside', 'reversed'],
+)
+def test_seed_isolates_import_state_between_outputs(files: list[str]) -> None:
+    """Imports share state within one output, independently of other outputs."""
+    source = (
+        b"{% import '_partials/counter.md' as first %}"
+        b"{% import '_partials/counter.md' as second %}"
+        b'{{ first.next_value() }} {{ second.next_value() }}\n'
+    )
+    sources = {
+        'NODE.md': source,
+        'steps/01-summary.md': source,
+        '_partials/counter.md': (
+            b'{% set state = namespace(count=0) %}'
+            b'{% macro next_value() %}'
+            b'{% set state.count = state.count + 1 %}{{ state.count }}'
+            b'{% endmacro %}'
+        ),
+    }
+    rendered = render_seed(sources, files, values={}, path='nodes/worker')
+    expected = dict.fromkeys(files, b'1 2\n')
+    assert rendered == expected
+
+
 def test_seed_replays_native_values_with_stable_table_order() -> None:
     """TOML round-trips preserve rendering, including nested table iteration."""
     values = {
@@ -175,6 +208,13 @@ def test_seed_reports_the_source_of_rendering_errors(body: bytes, message: str) 
         assert 'add the input to the recorded [values] table' in str(exc.value)
     if b'secret.md' in body:
         assert 'included source not found' in str(exc.value)
+
+
+def test_seed_names_the_output_for_unencodable_text() -> None:
+    """Unencodable Jinja results identify the output whose bytes cannot be written."""
+    sources = {'NODE.md': b'{{ "\\ud800" }}'}
+    with pytest.raises(ValueError, match=r'Template file nodes/worker/NODE\.md:'):
+        render_seed(sources, ['NODE.md'], values={}, path='nodes/worker')
 
 
 @pytest.mark.parametrize(

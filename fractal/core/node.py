@@ -1073,22 +1073,25 @@ class Node:
                 source. Its ``config.json`` preset fills each unset
                 run-config flag (a flag wins over the preset; the preset
                 beats an inherited value).
-            include: Template-relative paths to deploy from the template,
+            include: Template-relative output paths to deploy from the template,
                 dropping everything else; a directory entry covers its
                 subtree. Mutually exclusive with ``exclude`` and recorded
                 in ``_template.toml``.
-            exclude: Template-relative paths to drop from the template; a
+            exclude: Template-relative output paths to skip deploying; a
                 directory entry covers its subtree. Mutually exclusive
                 with ``include`` and recorded in ``_template.toml``.
-            values: Slot fill sheet: a TOML file of string values the
-                template's ``{{slot}}`` placeholders render with; recorded
-                in ``_template.toml``.
-            sets: Slot fills as ``KEY=VALUE`` pairs (repeatable); a pair
-                wins over the ``values`` sheet.
+            values: TOML inputs for Jinja rendering, overriding the template's
+                ``_template.toml`` defaults. Top-level inputs keep their TOML
+                types; the complete resolved mapping is recorded in the node's
+                ``_template.toml``.
+            sets: Inputs as ``KEY=<TOML literal>`` pairs (repeatable); each pair
+                replaces a whole top-level value from ``values``. Text requires
+                TOML quotes, for example ``role="reviewer"``.
             pin: Commission pin (a commit sha): must resolve, and every
                 ``pin:`` declaration in the template charter must match it
                 -- a stale seed dies at init, not at the first seat. Also
-                supplies the ``pin`` slot value.
+                supplies the ``pin`` input, overriding a template default but
+                requiring agreement with an explicit ``values`` or ``sets`` pin.
             agent: Agent type.
             provider: Provider route for the agent (e.g. ``openrouter``;
                 default: the vendor-native endpoint, inherited from the
