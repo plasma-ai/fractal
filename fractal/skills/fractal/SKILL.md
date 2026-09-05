@@ -543,8 +543,13 @@ Once the node is running, briefly explain how to interact with it:
   footprint check, wiki index refresh, commit, merge-base advance) that a
   hand-rolled finish would miss, and the merge-base advance writes the target's
   adjudicated tree into the node's worktree, so the resolution lands on the node
-  too. A footprint refusal on the continue names its own remedies:
-  `--continue --ignore-scope`, or widen the scope and redo the squash
+  too. Where a repository requires an additional gate, pass
+  `--validate=scripts/check.sh` on both a fresh merge and `--continue`: bash
+  runs that destination-relative script after restoration and wiki refresh,
+  before committing. It must succeed without changing the staged tree or leaving
+  tracked unstaged changes; the merge does not stage its output. A footprint
+  refusal on the continue names its own remedies: `--continue --ignore-scope`,
+  or widen the scope and redo the squash
   (`git -C <target worktree> reset --hard HEAD && git -C <target worktree> merge --squash <branch>`),
   since the widening commit lands after the hand squash and a continue refuses a
   node commit newer than its squash. Deleting afterward with

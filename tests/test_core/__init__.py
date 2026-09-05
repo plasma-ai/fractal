@@ -14,6 +14,7 @@ from .test_lifecycle import *
 from .test_list import *
 from .test_loop import *
 from .test_merge_atomicity import *
+from .test_merge_validation import *
 from .test_node import *
 from .test_packaging import *
 from .test_pause import *

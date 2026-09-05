@@ -3909,6 +3909,7 @@ class Node:
         *,
         continue_merge: bool = False,
         ignore_scope: bool = False,
+        validation_script: str | None = None,
     ) -> tuple[str, str]:
         """Squash-merge the node's branch into its merge target.
 
@@ -3934,6 +3935,13 @@ class Node:
         footprint check, index refresh, commit, merge-base advance -- so a
         manual resolution never has to hand-roll those steps (a hand-rolled
         seed strip leaves working-tree residue).
+
+        ``validation_script`` names a file relative to the destination
+        worktree. When supplied, bash runs it there after restoration and
+        index refresh, before committing. It must succeed without changing
+        the staged tree or leaving tracked unstaged changes. A failed fresh
+        merge restores the target; a failed continue preserves the staged
+        resolution. A no-op merge does not run the script.
 
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
@@ -3989,6 +3997,8 @@ class Node:
             args.append('--continue')
         if ignore_scope:
             args.append('--ignore-scope')
+        if validation_script is not None:
+            args.append(f'--validate={validation_script}')
         # the target's user-ness from the repo's record: a root checked out in
         # a linked worktree carries no self-ignored seed there to probe
         if any(user.branch == target_branch for user in Node.user_nodes(self.repo_dir)):

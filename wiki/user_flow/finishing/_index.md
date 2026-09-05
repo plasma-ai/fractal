@@ -6,7 +6,7 @@ desc: |
   merge guards each have a page here — and how finished work climbs the tree
   to the base branch and the operator's review.
 created: 2026-07-21T04:47:43Z
-updated: 2026-08-29T11:30:50Z
+updated: 2026-09-05T21:23:25Z
 ---
 
 # user_flow/finishing
@@ -27,8 +27,9 @@ advance carried no content.
 
 [[user_flow/finishing/merge_guards|merge_guards]]: The refusals and recovery
 paths of a merge: the node and target state guards and the repo-wide merge lock,
-the untracked-file and footprint refusals, conflict restore and its verdicts,
-interrupts, and finishing a hand-resolved squash with the continue flag.
+the untracked-file and footprint refusals, destination validation, conflict
+restore and its verdicts, interrupts, and finishing a hand-resolved squash with
+the continue flag.
 
 ***
 

@@ -613,6 +613,12 @@ def node_merge(app: typer.Typer) -> typer.Typer:
     # ignore scope flag
     ignore_scope_help = 'Merge out-of-scope changes instead of refusing.'
     ignore_scope = typer.Option(False, '--ignore-scope', help=ignore_scope_help)
+    # validation script option
+    validate_help = (
+        'Run this destination-relative bash script before committing the'
+        ' restored, refreshed squash; it must preserve the staged tree.'
+    )
+    validate = typer.Option(None, '--validate', help=validate_help)
     # delete flag
     delete_help = (
         'Delete the node (worktree, branch, and subtree) after a successful merge.'
@@ -630,6 +636,7 @@ def node_merge(app: typer.Typer) -> typer.Typer:
         node: Optional[str] = node,
         continue_: bool = continue_,
         ignore_scope: bool = ignore_scope,
+        validate: Optional[str] = validate,
         delete: bool = delete,
         force: bool = force,
         path: str = path,
@@ -669,6 +676,7 @@ def node_merge(app: typer.Typer) -> typer.Typer:
         output, notices = node.merge(
             continue_merge=continue_,
             ignore_scope=ignore_scope,
+            validation_script=validate,
         )
         if output:
             typer.echo(output)

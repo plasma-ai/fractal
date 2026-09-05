@@ -22,6 +22,10 @@ Options:
                       advance -- exactly like a clean merge.
     --ignore-scope    Land paths outside the node's scope instead of refusing
                       the merge.
+    --validate=PATH   Run a destination-relative bash script after restoration
+                      and index refresh, before committing. It must succeed
+                      without changing the staged tree or leaving tracked
+                      unstaged changes. No-op merges skip validation.
     --user-target     Judge the target as its tree's user node (Node.merge
                       passes it from the repo's record; the checkout probe is
                       the fallback for a direct call).
@@ -34,12 +38,18 @@ WORKTREE_DIR=""
 CONTINUE=false
 IGNORE_SCOPE=false
 USER_TARGET=false
+VALIDATE=false
+VALIDATION_SCRIPT=""
 
 for arg in "$@"; do
     case "$arg" in
         --help | -h) usage ;;
         --continue) CONTINUE=true ;;
         --ignore-scope) IGNORE_SCOPE=true ;;
+        --validate=*)
+            VALIDATE=true
+            VALIDATION_SCRIPT="${arg#*=}"
+            ;;
         --user-target) USER_TARGET=true ;;
         *)
             if [[ -z "$WORKTREE_DIR" ]]; then
@@ -902,6 +912,43 @@ if git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet; then
     trap - INT TERM
     echo "$SUMMARY"
     exit 0
+fi
+
+# ------ destination validation
+
+# validate the actual commit candidate after the merge's own writes; a check
+# that rewrites files cannot certify that candidate, so never auto-stage them
+if [[ "$VALIDATE" == true ]]; then
+    case "$VALIDATION_SCRIPT" in
+        "" | /* | .. | ../* | */../* | */..)
+            fail_target "validation script must be a non-empty destination-relative file path without '..'"
+            ;;
+    esac
+    VALIDATION_PATH="$PARENT_WORKTREE_DIR/$VALIDATION_SCRIPT"
+    if [[ ! -f "$VALIDATION_PATH" || -L "$VALIDATION_PATH" ]]; then
+        fail_target "validation script '$VALIDATION_SCRIPT' is not a regular file in $PARENT_BRANCH's worktree"
+    fi
+    # resolve parent directories physically so a symlink cannot escape the
+    # destination; the script itself is a regular file, never a symlink
+    if ! VALIDATION_DIR=$(cd "$(dirname "$VALIDATION_PATH")" && pwd -P) \
+        || ! TARGET_DIR=$(cd "$PARENT_WORKTREE_DIR" && pwd -P); then
+        fail_target "resolving validation script '$VALIDATION_SCRIPT' failed"
+    fi
+    if [[ "$VALIDATION_DIR" != "$TARGET_DIR" && "$VALIDATION_DIR" != "$TARGET_DIR/"* ]]; then
+        fail_target "validation script '$VALIDATION_SCRIPT' resolves outside $PARENT_BRANCH's worktree"
+    fi
+    if ! VALIDATED_TREE=$(git -C "$PARENT_WORKTREE_DIR" write-tree) \
+        || ! git -C "$PARENT_WORKTREE_DIR" diff --quiet --ignore-submodules=none; then
+        fail_target "the staged squash is not ready for validation; stage or discard tracked unstaged changes"
+    fi
+    if ! (cd "$PARENT_WORKTREE_DIR" && bash "./$VALIDATION_SCRIPT") >&2; then
+        fail_target "validation script '$VALIDATION_SCRIPT' failed"
+    fi
+    if ! CURRENT_TREE=$(git -C "$PARENT_WORKTREE_DIR" write-tree) \
+        || [[ "$CURRENT_TREE" != "$VALIDATED_TREE" ]] \
+        || ! git -C "$PARENT_WORKTREE_DIR" diff --quiet --ignore-submodules=none; then
+        fail_target "validation script '$VALIDATION_SCRIPT' changed the staged tree or left tracked unstaged changes"
+    fi
 fi
 
 # commit the squash-merge and report success (-q: drop git's own commit

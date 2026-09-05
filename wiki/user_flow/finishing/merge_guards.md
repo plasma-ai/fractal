@@ -3,8 +3,8 @@ name: user_flow/finishing/merge_guards
 desc: |
   The refusals and recovery paths of a merge: the node and target state
   guards and the repo-wide merge lock, the untracked-file and footprint
-  refusals, conflict restore and its verdicts, interrupts, and finishing a
-  hand-resolved squash with the continue flag.
+  refusals, destination validation, conflict restore and its verdicts,
+  interrupts, and finishing a hand-resolved squash with the continue flag.
 created: 2026-08-29T11:30:50Z
 updated: 2026-08-29T11:30:50Z
 ---
@@ -114,3 +114,28 @@ on the target's disk: git's own squash refuses over a plain untracked file but
 writes over an ignored one (git treats it as expendable) — a file the fresh
 merge would have refused over — and the hand squash has already done it, so move
 private files aside before redoing the squash by hand.
+
+## Destination validation
+
+Pass `fractal node merge <node> --validate=scripts/check.sh` to run a repository
+gate on the actual destination before its squash commit. The path names an
+existing regular file relative to the destination worktree root; absolute paths,
+parent traversal, a symlink script, and directory symlinks that escape the
+destination are refused. Bash runs the script from that root after `.fractal/`
+restoration, the footprint check, and wiki index refresh. A user root need not
+have node scripts. Script output appears on stderr.
+
+The validator must exit successfully, preserve the exact staged tree, and leave
+no tracked unstaged changes. The merge does not stage validator output. A
+failure restores a fresh merge's target; with `--continue`, it preserves the
+operator's staged resolution and any validator edits for explicit repair. Repeat
+`--validate` when retrying with `--continue`. A no-op merge skips the validator
+because it creates no commit. Without `--validate`, the merge runs its normal
+checks and commit hooks but no additional repository gate.
+
+Validators inspect files and run checks; they must not commit, merge, or change
+refs. Keep other writers out of the destination throughout the merge and
+validation; the merge lock coordinates Fractal merges, not arbitrary tools or
+editors. Validators inherit the caller's environment, including any node
+identity, so Fractal commands inside a validator must select the destination
+explicitly with `--path` rather than relying on the caller's node context.
