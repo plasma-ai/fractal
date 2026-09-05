@@ -29,6 +29,11 @@ passes through verbatim (it is not collapsed to `$`), and an unknown placeholder
 stays in the text untouched rather than rendering blank. A template therefore
 means exactly what the `envsubst` grammar says regardless of who renders it.
 
+Node templates render through Jinja once at seed time, before this prompt pass
+(see [[configuration/templates]]). Their values are already ordinary text in the
+node's files. This runtime pass substitutes only `$NAME` / `${NAME}`; literal
+Jinja braces in a seeded file are not evaluated again.
+
 ## The variable map
 
 Static variables are derived from the node itself and shared by every renderer:

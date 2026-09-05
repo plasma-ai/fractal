@@ -173,6 +173,30 @@ pool a cheaper token rate buys more steps, not a lower bill.
    invest here, it's the highest-leverage work (you can still steer after
    launch; see Configure below).
 
+   With `--template=<path>[@<ref>]`, author reusable prose and Jinja expressions
+   in the committed template; `_partials/` holds source-only includes. Its
+   optional `_template.toml` supplies literal `[values]` defaults. Provide the
+   child's inputs before init with `--values=<file.toml>` (top-level input keys,
+   no `[values]` wrapper) and repeatable TOML-literal overrides such as
+   `--set 'role="reviewer"'` or `--set enabled=false`. Each source overrides the
+   preceding one, replacing whole top-level values. `--pin` overrides a default
+   pin but must agree with an explicit values-file or set pin. Missing inputs
+   used by a selected output refuse before the child is created. Render step
+   frontmatter booleans with `|lower` or `|tojson`, so their text is lowercase
+   `true`/`false`; rendered step settings are checked before init.
+
+   Jinja renders once: values containing `{{...}}` stay literal, and `$VAR`
+   remains for runtime rendering. Includes read only the same committed template
+   bundle. `--include`/`--exclude` select deployment outputs; excluded files
+   remain available as include source, and `_partials/` or README files cannot
+   be selected as outputs. The child's generated `_template.toml` records the
+   complete inputs and source commit. Edit the rendered charter directly to
+   steer it; changing the record is not a live update. `node diff` and bare
+   `node reseed` replay recorded values, while an explicit `--ref` or
+   `--template` refresh adds defaults only for missing keys. Reseed refreshes
+   steps, scripts, skills, and agent settings while preserving `NODE.md`,
+   config, and memory, so charter drift can remain.
+
    For a well-specified single-mission leaf, consider the **leaf step set**:
    trim the child to PLAN + EXECUTE + COMMIT. A leaner leaf uses a leaner
    template or `--exclude` at init

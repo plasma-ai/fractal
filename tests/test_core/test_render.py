@@ -1,11 +1,9 @@
 """Test the ``fractal.core.render`` module.
 
-The engine is pinned against GNU ``envsubst`` -- the grammar the renderer is
-matched to -- so a template renders byte-identically to what ``envsubst``
-would produce. The seed-time slot grammar renders ``{{slot}}`` placeholders
-once, at init, and must leave the ``$VAR`` grammar untouched. The remaining
-tests cover what the static map substitutes and how a chat sees it (real
-paths, ``N/A (chat)`` run-state).
+Runtime substitution is pinned against GNU ``envsubst``. Seed templates
+compose committed sources through Jinja without reinterpreting supplied data
+or changing the runtime variable grammar. The remaining tests cover the
+static variable map, prompt assembly, and the chat's runtime sentinels.
 """
 
 from __future__ import annotations
@@ -13,19 +11,25 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from typing import Optional
+import tomllib
 
 import pytest
+import tomli_w
 
 import fractal.core.render
 from fractal.core.node import Node
-from fractal.core.render import _SlotTemplate, _VarTemplate
+from fractal.core.render import _VarTemplate
 
 __all__ = [
     'test_var_template_matches_envsubst',
-    'test_slot_template_fills_byte_for_byte',
-    'test_slot_template_raises_on_an_unfilled_slot',
-    'test_slot_template_refuses_every_stray_brace_pair',
+    'test_seed_composes_selected_outputs_from_literal_inputs',
+    'test_seed_isolates_import_state_between_outputs',
+    'test_seed_replays_native_values_with_stable_table_order',
+    'test_seed_reports_the_source_of_rendering_errors',
+    'test_seed_names_the_output_for_unencodable_text',
+    'test_seed_requires_values_displayed_through_containers',
+    'test_seed_refuses_mutation_and_ambient_state',
+    'test_seed_preserves_text_with_jinja_whitespace_rules',
     'test_render_template_substitutes_static_and_passes_runtime',
     'test_strip_frontmatter_edges',
     'test_build_prompt_assembles_charter_step_and_modes',
@@ -64,54 +68,289 @@ def test_var_template_matches_envsubst(template: str) -> None:
     assert _VarTemplate(template).safe_substitute(_VARS) == result.stdout
 
 
-# the slot fill map + templates exercising the fills (padding spaces,
-# adjacency) and the pass-through ($VAR text, shell parameter expansion,
-# lone braces) the seed-time grammar must leave byte-identical
-_SLOT_VALUES = {'pin': 'abc123', 'mission': 'prove the lemma'}
-_SLOT_TEMPLATES = [
-    ('pin: {{pin}}\n', 'pin: abc123\n'),
-    ('do {{ mission }} now', 'do prove the lemma now'),
-    ('{{pin}}{{mission}}', 'abc123prove the lemma'),
-    ('keep $VAR and ${CURRENT_BRANCH%.*} and $$', None),
-    ('lone { and } and }} stay', None),
-]
-
-
-@pytest.mark.parametrize(('template', 'expected'), _SLOT_TEMPLATES)
-def test_slot_template_fills_byte_for_byte(
-    template: str,
-    expected: Optional[str],
-) -> None:
-    """``_SlotTemplate`` fills lowercase slots and touches nothing else.
-
-    A ``None`` expectation means byte-identity: ``$VAR`` text, shell text
-    such as ``${CURRENT_BRANCH%.*}``, ``$$``, and lone braces pass through
-    unchanged, so the prompt-time envsubst grammar is undisturbed.
-    """
-    if expected is None:
-        expected = template
-    assert _SlotTemplate(template).substitute(_SLOT_VALUES) == expected
-
-
-def test_slot_template_raises_on_an_unfilled_slot() -> None:
-    """A slot with no value raises ``KeyError`` naming the slot."""
-    with pytest.raises(KeyError, match='mission'):
-        _SlotTemplate('do {{mission}} now').substitute({'pin': 'abc123'})
+@pytest.mark.parametrize('reverse', [False, True])
+def test_seed_composes_selected_outputs_from_literal_inputs(reverse: bool) -> None:
+    """Includes share immutable source and data across independently rendered outputs."""
+    # compose outputs from shared helpers and literal inputs
+    sources = {
+        'NODE.md': (
+            b"{% extends '_partials/base.md' %}"
+            b"{% import '_partials/macros.md' as prose %}"
+            b'{% block title %}{{ prose.title(role) }}{% endblock %}'
+            b'{% block body %}'
+            b"{% include 'steps/01-summary.md' %}"
+            b'{% for target in targets %}- {{ target }}\n{% endfor %}'
+            b'{% if enabled %}{{ required_when_enabled }}{% else %}disabled{% endif %}\n'
+            b"{% include 'optional.md' ignore missing %}"
+            b'{% raw %}{{literal}}{% endraw %}{% endblock %}'
+        ),
+        'steps/01-summary.md': b"mission: {% include '_partials/mission.md' %}\n",
+        '_partials/base.md': (
+            b'# {% block title %}{% endblock %}\n{% block body %}{% endblock %}\n'
+        ),
+        '_partials/macros.md': b'{% macro title(role) %}Role: {{ role }}{% endmacro %}',
+        '_partials/mission.md': (
+            b'{{ mission }} | {{ details.note }} | $VAR ${CURRENT_BRANCH%.*} $$'
+        ),
+        'README.md': b'{{ missing_documentation_example }}',
+        'unused.bin': b'\xff',
+    }
+    values = {
+        'role': 'reviewer',
+        'mission': '{{ untouched }}',
+        'targets': ['first', 'second'],
+        'enabled': False,
+        'details': {'note': '<a & b>'},
+    }
+    files = ['NODE.md', 'steps/01-summary.md']
+    if reverse:
+        files.reverse()
+    rendered = fractal.core.render.render_seed(
+        sources=sources,
+        files=files,
+        values=values,
+        path='nodes/worker',
+    )
+    # verify deployed bytes and unchanged include source
+    summary = b'mission: {{ untouched }} | <a & b> | $VAR ${CURRENT_BRANCH%.*} $$\n'
+    assert rendered == {
+        'NODE.md': (
+            b'# Role: reviewer\n'
+            + summary
+            + b'- first\n- second\ndisabled\n{{literal}}\n'
+        ),
+        'steps/01-summary.md': summary,
+    }
+    assert sources['steps/01-summary.md'] == (
+        b"mission: {% include '_partials/mission.md' %}\n"
+    )
 
 
 @pytest.mark.parametrize(
-    argnames='residue',
-    argvalues=['{{PIN}}', '{{Pin}}', '{{9lives}}', '{{pin', '{{ }}'],
+    argnames='files',
+    argvalues=[
+        ['NODE.md'],
+        ['NODE.md', 'steps/01-summary.md'],
+        ['steps/01-summary.md', 'NODE.md'],
+    ],
+    ids=['alone', 'alongside', 'reversed'],
 )
-def test_slot_template_refuses_every_stray_brace_pair(residue: str) -> None:
-    """Any ``{{`` that is not a lowercase slot raises ``ValueError``.
+def test_seed_isolates_import_state_between_outputs(files: list[str]) -> None:
+    """Imports share state within one output, independently of other outputs."""
+    source = (
+        b"{% import '_partials/counter.md' as first %}"
+        b"{% import '_partials/counter.md' as second %}"
+        b'{{ first.next_value() }} {{ second.next_value() }}\n'
+    )
+    sources = {
+        'NODE.md': source,
+        'steps/01-summary.md': source,
+        '_partials/counter.md': (
+            b'{% set state = namespace(count=0) %}'
+            b'{% macro next_value() %}'
+            b'{% set state.count = state.count + 1 %}{{ state.count }}'
+            b'{% endmacro %}'
+        ),
+    }
+    rendered = fractal.core.render.render_seed(
+        sources=sources,
+        files=files,
+        values={},
+        path='nodes/worker',
+    )
+    expected = dict.fromkeys(files, b'1 2\n')
+    assert rendered == expected
 
-    The grammar itself refuses an uppercase or mixed-case name, a name
-    starting with a digit, an unclosed pair, and an empty pair -- there is
-    no escape and no way to write a literal ``{{``.
-    """
-    with pytest.raises(ValueError, match='Invalid placeholder'):
-        _SlotTemplate(residue).substitute(_SLOT_VALUES)
+
+def test_seed_replays_native_values_with_stable_table_order() -> None:
+    """TOML round-trips preserve rendering, including nested table iteration."""
+    # render tables with scalar and nested values
+    values = {
+        'profile': {'nested': {'z': 2, 'a': 1}, 'enabled': False},
+        'targets': [{'z': 2, 'a': 1}, {'b': 4, 'a': 3}],
+        **tomllib.loads('created = 2026-09-04\ncount = 3\nratio = 1.5\n'),
+    }
+    sources = {
+        'NODE.md': (
+            b'{{ profile | join(",") }}\n{{ profile.nested | join(",") }}\n'
+            b'{% for target in targets %}{{ target | join(",") }};{% endfor %}\n'
+            b'{{ count + ratio }} {{ created }} {{ created.year }}\n'
+        ),
+    }
+    recorded = tomllib.loads(tomli_w.dumps(values))
+    seeded = fractal.core.render.render_seed(
+        sources=sources,
+        files=['NODE.md'],
+        values=values,
+        path='nodes/worker',
+    )
+    # replay the serialized inputs without changing caller-owned table order
+    replayed = fractal.core.render.render_seed(
+        sources=sources,
+        files=['NODE.md'],
+        values=recorded,
+        path='nodes/worker',
+    )
+    expected = {
+        'NODE.md': b'enabled,nested\na,z\na,z;a,b;\n4.5 2026-09-04 2026\n',
+    }
+    assert seeded == expected
+    assert replayed == expected
+    assert list(values['profile']) == ['nested', 'enabled']
+
+
+@pytest.mark.parametrize(
+    argnames=('body', 'message'),
+    argvalues=[
+        # missing inputs and invalid syntax
+        (b'header\n{{ mission }}', '_partials/body.md:2'),
+        (b'header\n{% if %}', '_partials/body.md:2'),
+        # include names escaping the bundle
+        (b"header\n{% include '../secret.md' %}", '_partials/body.md:2'),
+        (b"header\n{% include '/secret.md' %}", '_partials/body.md:2'),
+        # expression and source decoding failures
+        (b'header\n{{ 1 / 0 }}', '_partials/body.md:2'),
+        (b'header\n{{ "text" + 1 }}', '_partials/body.md:2'),
+        (b'header\n\xff', '_partials/body.md:2: source is not UTF-8'),
+    ],
+)
+def test_seed_reports_the_source_of_rendering_errors(body: bytes, message: str) -> None:
+    """Errors name the included source while escaped names cannot resolve."""
+    sources = {
+        'NODE.md': b"{% include '_partials/body.md' %}",
+        '_partials/body.md': body,
+        'secret.md': b'not reachable through an absolute or traversing name',
+    }
+    with pytest.raises(ValueError) as exc:
+        fractal.core.render.render_seed(
+            sources=sources,
+            files=['NODE.md'],
+            values={},
+            path='nodes/worker',
+            remedy='add the input to the recorded [values] table',
+        )
+    assert f'nodes/worker/{message}' in str(exc.value)
+    if b'{{ mission }}' in body:
+        assert 'mission' in str(exc.value)
+        assert 'add the input to the recorded [values] table' in str(exc.value)
+    if b'secret.md' in body:
+        assert 'included source not found' in str(exc.value)
+
+
+def test_seed_names_the_output_for_unencodable_text() -> None:
+    """Unencodable Jinja results identify the output whose bytes cannot be written."""
+    sources = {'NODE.md': b'{{ "\\ud800" }}'}
+    with pytest.raises(ValueError, match=r'Template file nodes/worker/NODE\.md:'):
+        fractal.core.render.render_seed(
+            sources=sources,
+            files=['NODE.md'],
+            values={},
+            path='nodes/worker',
+        )
+
+
+@pytest.mark.parametrize(
+    argnames='expression',
+    argvalues=[
+        # direct and joined missing values
+        'missing',
+        '[missing] | join(",")',
+        # container representations and explicit string conversion
+        '[missing]',
+        '{"value": missing}',
+        '[missing] | string',
+        '{"value": missing} | string',
+    ],
+)
+def test_seed_requires_values_displayed_through_containers(expression: str) -> None:
+    """Only optional inputs may remain undefined, including inside displayed data."""
+    source = '{{ ' + expression + ' }}'
+    sources = {
+        'NODE.md': source.encode('utf-8'),
+        'optional.md': (
+            b'{{ missing is defined }} {{ missing | default("fallback") }}'
+            b'{% if false %}{{ missing }}{% endif %}\n'
+        ),
+    }
+    # allow explicitly optional inputs
+    rendered = fractal.core.render.render_seed(
+        sources=sources,
+        files=['optional.md'],
+        values={},
+        path='nodes/worker',
+    )
+    assert rendered == {'optional.md': b'False fallback\n'}
+    # refuse missing values in displayed data
+    with pytest.raises(ValueError, match="'missing' is undefined"):
+        fractal.core.render.render_seed(
+            sources=sources,
+            files=['NODE.md'],
+            values={},
+            path='nodes/worker',
+        )
+
+
+@pytest.mark.parametrize(
+    argnames='expression',
+    argvalues=[
+        # mutation and randomness
+        'targets.append("extra")',
+        'targets | random',
+        'lipsum()',
+        # date methods and locale-sensitive formatting
+        'created.today()',
+        'created.strftime("%B")',
+        '"{0:%B}".format(created)',
+        '"{created:%B}".format_map({"created": created})',
+        # clock and timezone access
+        'timestamp.now()',
+        'timestamp.astimezone()',
+        'timestamp.tzinfo.tzname(timestamp)',
+    ],
+)
+def test_seed_refuses_mutation_and_ambient_state(expression: str) -> None:
+    """Templates cannot mutate their inputs or obtain random, clock, or locale data."""
+    values = tomllib.loads(
+        'targets = ["first"]\ncreated = 2026-09-04\ntimestamp = 2026-09-04T12:00:00Z\n'
+    )
+    source = '{{ ' + expression + ' }}'
+    with pytest.raises(ValueError, match=r'nodes/worker/NODE\.md:1'):
+        fractal.core.render.render_seed(
+            sources={'NODE.md': source.encode('utf-8')},
+            files=['NODE.md'],
+            values=values,
+            path='nodes/worker',
+        )
+    assert values['targets'] == ['first']
+
+
+@pytest.mark.parametrize(
+    argnames=('source', 'expected'),
+    argvalues=[
+        # absent and present trailing newlines
+        (b'plain', b'plain'),
+        (b'plain\n', b'plain\n'),
+        # source newline normalization with literal value bytes
+        (b'plain\r\n{{ value }}\r\n', b'plain\nfirst\r\nsecond\n'),
+        (b'plain\r{{ value }}\r', b'plain\nfirst\r\nsecond\n'),
+        # block whitespace controls and literal braces
+        (b'  {% if true %}\nbody\n{% endif %}\n', b'  \nbody\n\n'),
+        (b'  {%- if true -%}\nbody\n{%- endif -%}\n', b'body'),
+        (b'{% raw %}{{ x }}{% endraw %} {# hidden #}', b'{{ x }} '),
+    ],
+)
+def test_seed_preserves_text_with_jinja_whitespace_rules(
+    source: bytes,
+    expected: bytes,
+) -> None:
+    """Jinja normalizes source newlines while values and explicit spacing stay literal."""
+    rendered = fractal.core.render.render_seed(
+        sources={'NODE.md': source},
+        files=['NODE.md'],
+        values={'value': 'first\r\nsecond'},
+        path='nodes/worker',
+    )
+    assert rendered['NODE.md'] == expected
 
 
 def test_render_template_substitutes_static_and_passes_runtime(

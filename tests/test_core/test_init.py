@@ -78,7 +78,9 @@ __all__ = [
     'test_pin_without_a_template_still_validates',
     'test_init_template_seeds_and_validates_the_fill_sheet',
     'test_init_template_fills_slots_from_values_set_and_pin',
-    'test_init_template_slot_refusals_fire_before_any_worktree',
+    'test_init_template_input_refusals_fire_before_any_worktree',
+    'test_init_template_defaults_and_includes_replay',
+    'test_init_template_validates_rendered_step_settings',
     'test_init_template_docket_anchor_defaults_to_the_fork_commit',
     'test_child_inherits_skills_only_on_request',
     'test_child_inherits_config_preferences_not_caps',
@@ -1712,8 +1714,19 @@ def test_init_template_preset_caps_refuse_like_flags(
     assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
 
 
+@pytest.mark.parametrize(
+    argnames='step',
+    argvalues=[
+        '---\ndetached: true\n---\n# go detached\n',
+        '---\ndetached:\n---\n# go detached\n',
+        '# go detached\n\n---\ndetached: true\n---\n',
+        '---\n  detached: false\n---\n# go detached\n',
+    ],
+    ids=['value', 'empty', 'below-title', 'indented'],
+)
 def test_init_template_detached_refuses_a_bundled_detached_step(
     git_repo: pathlib.Path,
+    step: str,
 ) -> None:
     """A bundled ``detached:`` step refuses a detached spawn before any worktree.
 
@@ -1728,7 +1741,6 @@ def test_init_template_detached_refuses_a_bundled_detached_step(
     charter = (
         '# flagcrew\n\n## Instructions\n\nGo.\n\n## Completion Requirements\n\nDone.\n'
     )
-    step = '---\ndetached: true\n---\n# go detached\n'
     Node(git_repo).init(agent='claude', user=True)
     _commit_template(
         git_repo,
@@ -1966,6 +1978,7 @@ def test_init_template_fills_slots_from_values_set_and_pin(
     recorded in ``_template.toml``.
     """
     Node(git_repo).init(agent='claude', user=True)
+    default_pin = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
     charter = (
         '## Instructions\n\npin: {{pin}}\nmission: {{ mission }}\n\n'
         '## Completion Requirements\n\nDone.\n'
@@ -1975,6 +1988,7 @@ def test_init_template_fills_slots_from_values_set_and_pin(
         'templates/steward',
         {
             'config.json': '{}\n',
+            '_template.toml': f'[values]\npin = "{default_pin}"\nmission = "default"\n',
             'NODE.md': charter,
             'steps/01-GO.md': '# {{mission}} on $WORKTREE_DIR (${CURRENT_BRANCH%.*})\n',
         },
@@ -1987,7 +2001,7 @@ def test_init_template_fills_slots_from_values_set_and_pin(
         Node(git_repo).init(
             name='v1',
             template=steward,
-            sets=[f'pin={stale}', 'mission=x'],
+            sets=[f'pin="{stale}"', 'mission="x"'],
         )
     assert not (git_repo / '.worktrees' / 'main.v1').exists()
     # a rival --set pin= that disagrees with --pin refuses: one
@@ -2004,7 +2018,7 @@ def test_init_template_fills_slots_from_values_set_and_pin(
             name='v1',
             template=steward,
             values=sheet,
-            sets=['mission=prove it', f'pin={rival}'],
+            sets=['mission="prove it"', f'pin="{rival}"'],
             pin=head,
         )
     assert not (git_repo / '.worktrees' / 'main.v1').exists()
@@ -2029,7 +2043,7 @@ def test_init_template_fills_slots_from_values_set_and_pin(
         name='v1',
         template=steward,
         values=sheet,
-        sets=['mission=prove it', f'pin={head}'],
+        sets=['mission="prove it"', f'pin="{head}"'],
         pin=head,
     )
     node_dir = git_repo / '.worktrees' / 'main.v1' / '.fractal' / 'main.v1'
@@ -2047,81 +2061,219 @@ def test_init_template_fills_slots_from_values_set_and_pin(
     }
 
 
-def test_init_template_slot_refusals_fire_before_any_worktree(
+def test_init_template_input_refusals_fire_before_any_worktree(
     git_repo: pathlib.Path,
     tmp_path: pathlib.Path,
 ) -> None:
-    """Every slot-pass refusal names what broke, before any worktree exists.
-
-    An unfilled slot and a stray ``{{`` (an uppercase name included) name
-    the file and the token, a file that does not decode refuses by name
-    (templates are text), a shapeless ``--set`` pair, a key breaking the
-    slot grammar, and a malformed ``--values`` sheet refuse outright, and
-    the fill flags require ``--template``.
-    """
+    """Bad source, metadata, and supplied inputs refuse before creating a node."""
     Node(git_repo).init(agent='claude', user=True)
+    crew = f'{git_repo}/templates/crew'
     _commit_template(
         git_repo,
         'templates/crew',
         {'config.json': '{}\n', 'steps/01-GO.md': '# go for {{mission}}\n'},
     )
-    crew = f'{git_repo}/templates/crew'
-    # an unfilled slot names the file and the token
-    with pytest.raises(
-        ValueError,
-        match=r'templates/crew/steps/01-GO\.md has no value for slot'
-        r' \{\{mission\}\}',
-    ):
+    with pytest.raises(ValueError, match=r"steps/01-GO\.md:1: 'mission' is undefined"):
         Node(git_repo).init(name='task', template=crew)
-    # an uppercase {{PIN}} is not a slot; the refusal names the residue
-    _commit_template(
-        git_repo,
-        'templates/crew',
-        {'steps/01-GO.md': '# go for {{PIN}}\n'},
-    )
-    with pytest.raises(
-        ValueError,
-        match=r"steps/01-GO\.md carries '\{\{PIN\}\}', which is not a slot",
+    # source errors name the committed file and leave no live artifacts
+    for source, message in (
+        ('{{ mission', 'unexpected end of template'),
+        ('{% include "_partials/missing.md" %}', 'included source not found'),
+        ('{% include "../outside.md" %}', 'included source not found'),
     ):
-        Node(git_repo).init(name='task', template=crew)
-    # a file that does not decode refuses by name -- templates are text
+        _commit_template(git_repo, 'templates/crew', {'steps/01-GO.md': source})
+        with pytest.raises(ValueError, match=message):
+            Node(git_repo).init(name='task', template=crew)
     step = git_repo / 'templates' / 'crew' / 'steps' / '01-GO.md'
     step.write_bytes(b'\x80\x81 not utf-8\n')
     _git(git_repo, 'add', 'templates/crew')
     _git(git_repo, 'commit', '-m', 'binary step')
-    with pytest.raises(ValueError, match=r'steps/01-GO\.md is not UTF-8 text'):
+    with pytest.raises(
+        ValueError, match=r'steps/01-GO\.md:1: source is not UTF-8 text'
+    ):
         Node(git_repo).init(name='task', template=crew)
-    # the value sources validate before any read: a pair without '=', a
-    # key outside the slot grammar (either source), a non-string sheet
-    # value, a sheet that does not parse, and a sheet that does not exist
-    with pytest.raises(ValueError, match=r"Invalid --set value: 'mission'"):
-        Node(git_repo).init(name='task', template=crew, sets=['mission'])
-    with pytest.raises(ValueError, match=r"--set key is not a slot name: 'MISSION'"):
-        Node(git_repo).init(name='task', template=crew, sets=['MISSION=x'])
+    # supplied values validate before source rendering
+    for pair, message in (
+        ('mission', 'Invalid --set value'),
+        ('MISSION="x"', 'not an input name'),
+        ('self="x"', 'reserved by Jinja'),
+        ('not="x"', 'reserved by Jinja'),
+        ('mission=unquoted', 'not a TOML literal'),
+        ('count=1\nextra=2', 'one TOML literal'),
+        ('pin=3', 'pin must be text'),
+    ):
+        with pytest.raises(ValueError, match=message):
+            Node(git_repo).init(name='task', template=crew, sets=[pair])
     sheet = tmp_path / 'fills.toml'
-    sheet.write_text('Mission = "x"\n', encoding='utf-8')
-    with pytest.raises(
-        ValueError,
-        match=r"--values key is not a slot name: 'Mission'",
+    for content, message in (
+        ('Mission = "x"\n', 'not an input name'),
+        ('true = "x"\n', 'reserved by Jinja'),
+        ('pin = 3\n', 'pin must be text'),
+        ('= broken\n', 'not valid TOML'),
     ):
-        Node(git_repo).init(name='task', template=crew, values=sheet)
-    sheet.write_text('count = 3\n', encoding='utf-8')
-    with pytest.raises(
-        ValueError,
-        match=r"--values key 'count' does not hold a string",
-    ):
-        Node(git_repo).init(name='task', template=crew, values=sheet)
-    sheet.write_text('= broken\n', encoding='utf-8')
-    with pytest.raises(ValueError, match='not valid TOML'):
-        Node(git_repo).init(name='task', template=crew, values=sheet)
+        sheet.write_text(content, encoding='utf-8')
+        with pytest.raises(ValueError, match=message):
+            Node(git_repo).init(name='task', template=crew, values=sheet)
     with pytest.raises(ValueError, match='--values file does not exist'):
         Node(git_repo).init(name='task', template=crew, values=tmp_path / 'no.toml')
-    # the fill flags ride the template
+    for content, message in (
+        ('[values\n', 'not valid TOML'),
+        ('values = "x"\n', 'values is not a table'),
+        ('path = "templates/crew"\n', "unknown field: 'path'"),
+        ('[values]\nnone = "x"\n', 'reserved by Jinja'),
+    ):
+        _commit_template(git_repo, 'templates/crew', {'_template.toml': content})
+        with pytest.raises(ValueError, match=message):
+            Node(git_repo).init(name='task', template=crew)
     with pytest.raises(ValueError, match='--values and --set require --template'):
-        Node(git_repo).init(name='task', sets=['mission=x'])
-    # nothing landed -- no worktree, no registry row
+        Node(git_repo).init(name='task', sets=['mission="x"'])
     assert not (git_repo / '.worktrees' / 'main.task').exists()
     assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+
+
+def test_init_template_defaults_and_includes_replay(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Committed includes and native inputs reproduce the selected seed bytes."""
+    from fractal.core.template import diff
+
+    # commit defaults, helper sources, and deployment outputs
+    Node(git_repo).init(agent='claude', user=True)
+    commit = _commit_template(
+        git_repo,
+        'templates/crew',
+        {
+            'config.json': '{}\n',
+            '_template.toml': (
+                '[values]\nrole = "reviewer"\nmission = "default"\n'
+                'enabled = true\ncount = 1\nitems = ["default"]\n'
+            ),
+            'NODE.md': (
+                '## Instructions\n\n{% include "_partials/mission.md" %}\n'
+                'role: {{ role }}\ncount: {{ count }}\n'
+                '{% if enabled %}Enabled{% else %}Disabled{% endif %}\n'
+                '{% for item in items %}- {{ item }}\n{% endfor %}'
+                '{% for key in details %}{{ key }} {% endfor %}\n'
+                '## Completion Requirements\n\nDone.\n'
+            ),
+            'steps/01-GO.md': '{% include "_partials/mission.md" %}\n$WORKTREE_DIR\n',
+            'steps/02-CHECK.md': '{% include "steps/01-GO.md" %}',
+            'steps/99-UNUSED.md': '{{ missing_input }}\n',
+            '_partials/mission.md': (
+                'mission: {{ mission }}'
+                '{% include "_partials/optional.md" ignore missing %}'
+            ),
+            '_partials/unused.md': '{{ fragment_local }}',
+            'README.md': 'Source example: {{ documentation_input }}\n',
+        },
+    )
+    # a different source revision cannot override an explicitly selected commit
+    _commit_template(
+        git_repo,
+        'templates/crew',
+        {'_partials/mission.md': 'different source {{ missing_input }}'},
+    )
+    sheet = tmp_path / 'values.toml'
+    sheet.write_text(
+        'enabled = false\ncount = 2\nitems = ["first", "second"]\n'
+        'details = { nested = { name = "example" }, label = "report" }\n',
+        encoding='utf-8',
+    )
+    # refuse source-only entries in the deployment listing
+    outputs = ['NODE.md', 'steps/01-GO.md', 'steps/02-CHECK.md']
+    for entry in ('README.md', '_partials'):
+        with pytest.raises(ValueError, match='entry is source-only'):
+            Node(git_repo).init(
+                name='invalid',
+                template=f'{git_repo}/templates/crew@{commit}',
+                include=[entry],
+            )
+    # seed selected outputs from the pinned source and layered inputs
+    Node(git_repo).init(
+        name='crew',
+        template=f'{git_repo}/templates/crew@{commit}',
+        values=sheet,
+        sets=['count=3', 'mission="{{ literal_input }}"'],
+        include=outputs,
+    )
+    node_dir = _node_dir(git_repo, 'main.crew')
+    charter = (node_dir / 'NODE.md').read_text(encoding='utf-8')
+    assert 'mission: {{ literal_input }}\n' in charter
+    assert 'role: reviewer\ncount: 3\nDisabled\n' in charter
+    assert '- first\n- second\nlabel nested \n' in charter
+    step = b'mission: {{ literal_input }}\n$WORKTREE_DIR\n'
+    assert (node_dir / 'steps' / '01-GO.md').read_bytes() == step
+    assert (node_dir / 'steps' / '02-CHECK.md').read_bytes() == step
+    assert not (node_dir / 'steps' / '99-UNUSED.md').exists()
+    assert not (node_dir / '_partials').exists()
+    assert not (node_dir / 'README.md').exists()
+    # replay the complete recorded values without drift
+    record = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+    assert record['include'] == outputs
+    assert record['values'] == {
+        'role': 'reviewer',
+        'mission': '{{ literal_input }}',
+        'enabled': False,
+        'count': 3,
+        'items': ['first', 'second'],
+        'details': {'nested': {'name': 'example'}, 'label': 'report'},
+    }
+    assert diff(node_dir=node_dir, repo_dir=git_repo) == ([], [])
+
+
+def test_init_template_validates_rendered_step_settings(
+    git_repo: pathlib.Path,
+) -> None:
+    """Invalid rendered overrides fail before init or reseed changes a node."""
+    import tomli_w
+
+    # commit valid defaults for each rendered step setting
+    Node(git_repo).init(agent='claude', user=True)
+    _commit_template(
+        git_repo,
+        'templates/crew',
+        {
+            'config.json': '{}\n',
+            'steps/01-GO.md': (
+                '---\nagent: {{ runner }}\n'
+                '{% if route %}provider: {{ route }}\n{% endif %}'
+                'timeout: {{ duration }}\n'
+                'requires_approval: {{ approval }}\n---\n# go\n'
+            ),
+            '_template.toml': (
+                '[values]\nrunner = "claude"\nroute = ""\n'
+                'duration = "10m"\napproval = "true"\n'
+            ),
+        },
+    )
+    # refuse invalid overrides before creating live artifacts
+    template = f'{git_repo}/templates/crew'
+    for value, message in (
+        ('runner="missing_agent"', 'Unsupported agent'),
+        ('route="missing_provider"', 'Unsupported provider'),
+        ('duration="0.5s"', 'timeout must be greater than zero'),
+        ('approval="invalid"', 'requires_approval: must be true or false'),
+    ):
+        with pytest.raises(ValueError, match=message):
+            Node(git_repo).init(name='crew', template=template, sets=[value])
+        assert not (git_repo / '.worktrees' / 'main.crew').exists()
+        assert not Node(git_repo).db.exists('nodes', where={'node': 'main.crew'})
+    # seed valid defaults and make the recorded timeout invalid
+    Node(git_repo).init(name='crew', template=template)
+    child = Node(git_repo / '.worktrees' / 'main.crew')
+    step = child.node_dir / 'steps' / '01-GO.md'
+    before = step.read_bytes()
+    record = child.node_dir / '_template.toml'
+    data = tomllib.loads(record.read_text(encoding='utf-8'))
+    data['values']['duration'] = 'invalid'
+    record.write_text(tomli_w.dumps(data), encoding='utf-8')
+    record_bytes = record.read_bytes()
+    # refuse replay without rewriting the step or record
+    with pytest.raises(ValueError, match='timeout must be a duration'):
+        child.reseed()
+    assert step.read_bytes() == before
+    assert record.read_bytes() == record_bytes
 
 
 def test_init_template_docket_anchor_defaults_to_the_fork_commit(

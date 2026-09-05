@@ -21,16 +21,18 @@ from fractal.constants import CONFIG_FILE, FRACTAL_FOLDER, WORKTREES_FOLDER
 from fractal.typing import PathLike
 
 from .config import KEYS
-from .render import _SlotTemplate
+from .render import render_seed
 
 __all__ = []
 
-#: per-node template provenance file in the node's data directory
+#: template-local defaults and per-node provenance filename
 TEMPLATE_FILE = '_template.toml'
 
-# a slot value's key follows the slot-name grammar -- the braced group of
-# the slot pattern (fractal.core.render._SlotTemplate)
-_SLOT_NAME = re.compile(r'[a-z_][a-z0-9_]*')
+#: top-level input names stay distinct from runtime $UPPER variables
+_VALUE_NAME = re.compile(r'[a-z_][a-z0-9_]*')
+
+#: Jinja names that cannot refer to a supplied context input
+_RESERVED_NAMES = ('true', 'false', 'none', 'not', 'self')
 
 # a recorded commit is the full sha the folder deploys at -- the verbs
 # that act on a record resolve it verbatim, so anything shorter refuses
@@ -189,71 +191,89 @@ def locate(
     return relpath, ref, found
 
 
+def validate_values(values: Any, *, source: str) -> dict[str, Any]:
+    """Validate a TOML input table at its read boundary.
+
+    Args:
+        values: Parsed TOML inputs.
+        source: Input source name for messages.
+
+    Returns:
+        The validated input table.
+
+    Raises:
+        ValueError: If the inputs are not a table, a top-level name is
+            invalid or reserved, or a commission pin is not text.
+
+    """
+    if not isinstance(values, dict):
+        raise ValueError(f'{source} values is not a table.')
+    for key in values:
+        if not _VALUE_NAME.fullmatch(key):
+            raise ValueError(
+                f'{source} key is not an input name: {key!r}'
+                ' (an input name is lowercase [a-z_][a-z0-9_]*).'
+            )
+        if key in _RESERVED_NAMES:
+            raise ValueError(f'{source} key is reserved by Jinja: {key!r}.')
+    if 'pin' in values and not isinstance(values['pin'], str):
+        raise ValueError(f'{source} pin must be text.')
+    return values
+
+
 def collect_values(
     *,
     values: Optional[PathLike],
     sets: Optional[list[str]],
     pin: Optional[str],
-) -> dict[str, str]:
-    """Merge the slot values a spawn supplies (later sources win).
+) -> dict[str, Any]:
+    """Merge the inputs a spawn supplies, with later sources winning.
 
-    The sources, in winning order: the ``--values`` fill sheet (a TOML
-    file of string values) and the repeatable ``--set KEY=VALUE`` pairs;
-    ``--pin`` supplies ``pin`` and must agree with any ``pin`` those
-    sources carry -- one commission pin, two spellings. Every key must
-    follow the slot-name grammar -- a key the slot pass could never
-    match would otherwise sit unused while its slot refuses as unfilled.
+    The ``--values`` TOML file supplies inputs and repeatable
+    ``--set KEY=VALUE`` pairs override whole top-level values. Each
+    override is a TOML literal; text requires quotes. ``--pin`` must
+    agree with a pin supplied through either source.
 
     Args:
-        values: The ``--values`` fill-sheet path, or ``None``.
+        values: The ``--values`` path, or ``None``.
         sets: The ``--set`` pairs (``KEY=VALUE``), or ``None``.
         pin: The commission pin from ``--pin``, or ``None``.
 
     Returns:
-        The merged ``slot -> value`` map.
+        The merged input map, without template defaults.
 
     Raises:
-        ValueError: If the fill sheet is missing, is not valid TOML, or
-            holds a non-string value; if a ``--set`` pair has no ``=``;
-            if any key breaks the slot-name grammar; or if ``--pin``
-            disagrees with a ``pin`` from ``--set``/``--values``.
+        ValueError: If a file or override is malformed, an input name
+            is invalid, or two explicit commission pins disagree.
 
     """
-    collected: dict[str, str] = {}
-    # the fill sheet: a flat TOML table of string values
+    collected: dict[str, Any] = {}
+    # the external TOML table supplies per-spawn inputs
     if values is not None:
         sheet = pathlib.Path(values)
         if not sheet.is_file():
             raise ValueError(f'--values file does not exist: {sheet}')
         try:
             data = tomllib.loads(sheet.read_text(encoding='utf-8'))
-        except tomllib.TOMLDecodeError as e:
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
             raise ValueError(f'--values file is not valid TOML: {sheet}: {e}') from e
-        for key, value in data.items():
-            if not _SLOT_NAME.fullmatch(key):
-                raise ValueError(
-                    f'--values key is not a slot name: {key!r}'
-                    ' (a slot name is lowercase [a-z_][a-z0-9_]*).'
-                )
-            if not isinstance(value, str):
-                raise ValueError(
-                    f'--values key {key!r} does not hold a string'
-                    ' (slot values are strings).'
-                )
-            collected[key] = value
-    # the --set pairs override the sheet
+        collected.update(validate_values(data, source='--values'))
+    # --set replaces a whole top-level value, never a nested merge
     for pair in sets or []:
         key, sep, value = pair.partition('=')
         if not sep:
             raise ValueError(f'Invalid --set value: {pair!r} (expected KEY=VALUE).')
-        if not _SLOT_NAME.fullmatch(key):
+        validate_values({key: ''}, source='--set')
+        try:
+            data = tomllib.loads(f'value = {value}')
+        except tomllib.TOMLDecodeError as e:
             raise ValueError(
-                f'--set key is not a slot name: {key!r}'
-                ' (a slot name is lowercase [a-z_][a-z0-9_]*).'
-            )
-        collected[key] = value
-    # --pin supplies the pin slot, beside its fill-sheet-gate role -- a
-    # rival fill that disagrees refuses rather than silently losing
+                f'--set {key} is not a TOML literal: {e}; quote text values.'
+            ) from e
+        if set(data) != {'value'}:
+            raise ValueError(f'--set {key} must contain one TOML literal.')
+        collected.update(validate_values({key: data['value']}, source='--set'))
+    # explicit pins are one commission instruction, not competing defaults
     if pin is not None:
         merged = collected.get('pin')
         if merged is not None and merged != pin:
@@ -263,6 +283,58 @@ def collect_values(
             )
         collected['pin'] = pin
     return collected
+
+
+def read_defaults(bundle: pathlib.Path, *, path: str) -> dict[str, Any]:
+    """Read literal defaults from a template's optional metadata file.
+
+    Args:
+        bundle: The untrimmed bundle root.
+        path: Worktree-relative template folder path, for messages.
+
+    Returns:
+        The template's default inputs, or an empty table.
+
+    Raises:
+        ValueError: If the metadata is malformed or carries fields
+            outside its ``[values]`` table.
+
+    """
+    metadata = bundle / TEMPLATE_FILE
+    if not metadata.is_file():
+        return {}
+    source = f'Template defaults {path}/{TEMPLATE_FILE}'
+    try:
+        data = tomllib.loads(metadata.read_text(encoding='utf-8'))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(f'{source} is not valid TOML: {e}') from e
+    for key in data:
+        if key != 'values':
+            raise ValueError(
+                f'{source} has an unknown field: {key!r}; only [values] is allowed.'
+            )
+    values = data.get('values', {})
+    return validate_values(values, source=source)
+
+
+def read_sources(bundle: pathlib.Path) -> dict[str, bytes]:
+    """Snapshot committed source bytes before output selection or rendering.
+
+    Args:
+        bundle: The untrimmed bundle root.
+
+    Returns:
+        Exact template-relative filenames mapped to their source bytes.
+
+    """
+    result: dict[str, bytes] = {}
+    for entry in sorted(bundle.rglob('*')):
+        if not entry.is_file():
+            continue
+        relfile = entry.relative_to(bundle).as_posix()
+        blob = entry.read_bytes()
+        result[relfile] = blob
+    return result
 
 
 def materialize(
@@ -440,12 +512,11 @@ def trim(
 ) -> list[str]:
     """Reduce a materialized bundle to its effective set.
 
-    The effective set is every template file minus ``exclude``, or only
-    ``include``; a directory entry covers its subtree. Files outside the
-    set are deleted from the bundle -- downstream only ever sees the
-    effective set -- and directories the deletions emptied are dropped,
-    so a fully trimmed surface falls back to the inherit-or-package
-    source.
+    A directory entry covers its subtree. Files outside the selected
+    outputs are deleted from the deployment bundle and emptied directories
+    are dropped, so a fully trimmed surface falls back to the
+    inherit-or-package source. The separate source snapshot remains
+    available to Jinja includes regardless of output selection.
 
     Args:
         bundle: The bundle root.
@@ -460,7 +531,7 @@ def trim(
 
     Raises:
         ValueError: If an entry matches nothing in the template (under
-            ``strict``), or names ``config.json`` or ``_template.toml``.
+            ``strict``), or names machinery or source-only files.
 
     """
     warnings: list[str] = []
@@ -495,14 +566,25 @@ def trim(
                 ' (the template may have dropped it).'
             )
             continue
+        outputs = []
+        for file in matched:
+            parts = file.split('/')
+            in_surface = parts[0] in ('steps', 'scripts', 'skills', 'agents')
+            surface_file = (len(parts) > 1) and in_surface
+            if file == 'NODE.md' or surface_file:
+                outputs.append(file)
+        if not outputs:
+            raise ValueError(
+                f'--{flag} entry is source-only: {entry!r};'
+                ' select deployed seed surfaces, not documentation or helpers.'
+            )
         covered.update(matched)
-    # delete outside the effective set -- the marker always stays: it is
-    # the config preset, not a seed surface, and never a listing entry
+    # metadata always stays; it is not a selectable seed surface
     for file in files:
         if exclude:
             keep = file not in covered
         else:
-            keep = file in covered or file == CONFIG_FILE
+            keep = file in covered or file in (CONFIG_FILE, TEMPLATE_FILE)
         if not keep:
             (bundle / file).unlink()
     # drop emptied directories, deepest first
@@ -635,79 +717,116 @@ def vet(bundle: pathlib.Path) -> None:
                 )
 
 
+def vet_steps(
+    bundle: pathlib.Path,
+    *,
+    agent: Optional[str],
+    provider: Optional[str],
+    root: pathlib.Path,
+    detached: Optional[bool],
+) -> None:
+    """Validate rendered step overrides against the node's effective settings.
+
+    Args:
+        bundle: The rendered deployment bundle.
+        agent: The node's effective agent command.
+        provider: The node's effective provider route.
+        root: Tree data directory for registered deployment agents.
+        detached: Whether the node runs detached.
+
+    Raises:
+        ValueError: If a rendered override has an invalid boolean,
+            duration, agent, provider, or detached-mode combination.
+
+    """
+    from .agent import command_base, resolve
+    from .loop import Step, _parse_duration
+
+    for entry in sorted((bundle / 'steps').glob('*.md')):
+        step = Step.load(entry)
+        try:
+            # init.sh refuses any detached: line between its first two exact
+            # fences; the loop also recognizes indented frontmatter fields
+            if detached:
+                has_detached = bool(step.detached_raw)
+                delimiters = 0
+                for line in entry.read_text(encoding='utf-8').splitlines():
+                    if line == '---':
+                        delimiters += 1
+                        if delimiters >= 2:
+                            break
+                        continue
+                    if delimiters == 1 and line.startswith('detached:'):
+                        has_detached = True
+                        break
+                if has_detached:
+                    raise ValueError(
+                        f'detached: in {entry.name} is invalid'
+                        ' in detached mode (already detached)'
+                    )
+            for key in ('requires_approval', 'detached'):
+                value = step.frontmatter.get(key)
+                if value is not None and value not in ('true', 'false'):
+                    raise ValueError(f'{key}: must be true or false')
+            if step.timeout is not None:
+                _parse_duration(step.timeout, 'timeout')
+            command = step.agent or agent
+            if command is None:
+                raise ValueError(
+                    'No agent configured; set one with fractal init --agent.'
+                )
+            backend = resolve(command_base(command), root=root)
+            route = step.provider
+            if route is None and backend.providers:
+                route = provider
+            if route is not None and route not in backend.providers:
+                supported = ', '.join(backend.providers) or 'none'
+                raise ValueError(
+                    f'Unsupported provider: {route!r} (supported: {supported})'
+                )
+        except ValueError as e:
+            raise ValueError(f'Template step steps/{entry.name}: {e}') from e
+
+
 def fill(
     bundle: pathlib.Path,
     *,
+    sources: dict[str, bytes],
     path: str,
-    values: dict[str, str],
+    values: dict[str, Any],
     remedy: Optional[str] = None,
 ) -> None:
-    """Render every bundle file's ``{{slot}}`` placeholders in place.
+    """Render selected deployment outputs from an immutable source snapshot.
 
-    The slot pass: every regular file except ``config.json`` and
-    ``_template.toml`` renders through the slot grammar
-    (:class:`fractal.core.render._SlotTemplate`) -- a slot with no value
-    and any ``{{`` that is not a lowercase slot refuse naming the file
-    and the token, and a file that does not decode refuses by name
-    (templates are text). Unused values pass: one fill sheet may cover
-    several templates.
+    Source-only files remain available to includes but never render as
+    standalone outputs. All selected files render before any output is
+    written, so a failure cannot leave a partly rendered bundle.
 
     Args:
-        bundle: The bundle root.
-        path: Worktree-relative template folder path (POSIX), for messages.
-        values: The ``slot -> value`` fill map.
-        remedy: Remedy clause for the no-value refusal (default: the
-            init flags) -- reseed and diff replay recorded values, where
-            the init flags do not exist.
+        bundle: The selected deployment bundle.
+        sources: Committed bytes captured before selection or rendering.
+        path: Worktree-relative template folder path, for messages.
+        values: The resolved input map.
+        remedy: Undefined-input remedy for replaying a recorded seed.
 
     Raises:
-        ValueError: If a file is not UTF-8 text, a slot has no value,
-            or a ``{{`` is not a slot.
+        ValueError: If selected source is not UTF-8 text or Jinja cannot
+            render an output with the supplied inputs.
 
     """
-    files = sorted(entry for entry in bundle.rglob('*') if entry.is_file())
-    for entry in files:
-        relfile = entry.relative_to(bundle).as_posix()
-        # the preset and the provenance record are template machinery,
-        # never a rendered seed surface
-        if relfile in (CONFIG_FILE, TEMPLATE_FILE):
+    files = []
+    for entry in sorted(bundle.rglob('*')):
+        if not entry.is_file():
             continue
-        # byte-level read and write, so the pass never rewrites line
-        # endings: deployed bytes equal render(committed bytes, values)
-        blob = entry.read_bytes()
-        try:
-            text = blob.decode('utf-8')
-        except UnicodeDecodeError as e:
-            raise ValueError(
-                f'Template file {path}/{relfile} is not UTF-8 text; templates are text.'
-            ) from e
-        try:
-            rendered = _SlotTemplate(text).substitute(values)
-        except KeyError as e:
-            name = e.args[0]
-            fix = remedy or (f'supply it with --set {name}=<value> or a --values file')
-            raise ValueError(
-                f'Template file {path}/{relfile} has no value for slot'
-                f' {{{{{name}}}}}: {fix}.'
-            ) from e
-        except ValueError as e:
-            # name the offending token: the first {{ the grammar calls
-            # invalid, through its closing braces (or its line end)
-            invalid = next(
-                found
-                for found in _SlotTemplate.pattern.finditer(text)
-                if found.group('invalid') is not None
-            )
-            line = text[invalid.start() :].split('\n', 1)[0]
-            head, closer, _ = line.partition('}}')
-            token = f'{head}{closer}'
-            raise ValueError(
-                f'Template file {path}/{relfile} carries {token!r}, which'
-                ' is not a slot: a slot is a lowercase {{name}}, and a'
-                ' literal "{{" cannot be written.'
-            ) from e
-        if rendered != text:
-            entry.write_bytes(rendered.encode('utf-8'))
+        relfile = entry.relative_to(bundle).as_posix()
+        parts = relfile.split('/')
+        in_surface = parts[0] in ('steps', 'scripts', 'skills', 'agents')
+        surface_file = (len(parts) > 1) and in_surface
+        if relfile == 'NODE.md' or surface_file:
+            files.append(relfile)
+    rendered = render_seed(sources, files, values=values, path=path, remedy=remedy)
+    for relfile, blob in rendered.items():
+        (bundle / relfile).write_bytes(blob)
 
 
 def root_notice(
@@ -753,7 +872,7 @@ def write_provenance(
     *,
     path: str,
     commit: str,
-    values: dict[str, str],
+    values: dict[str, Any],
     include: Optional[list[str]] = None,
     exclude: Optional[list[str]] = None,
 ) -> None:
@@ -762,7 +881,7 @@ def write_provenance(
     The file records what seeded the node: the repo-relative template
     ``path``, the ``commit`` actually read, the mutually exclusive
     ``include``/``exclude`` listing when one was given, and the
-    ``[values]`` table of slot fills. The table goes last so the scalar
+    ``[values]`` table of resolved inputs. The table goes last so the scalar
     keys stay at the top level. Init writes into the bundle (init.sh
     places the record with the other surfaces); reseed rewrites the
     node data directory's copy in place.
@@ -772,7 +891,7 @@ def write_provenance(
             root, or the node data directory on reseed).
         path: Worktree-relative template folder path (POSIX).
         commit: The commit the folder was read at.
-        values: Slot fills to record.
+        values: Resolved inputs to record.
         include: Template-relative paths kept (exclusive of ``exclude``).
         exclude: Template-relative paths dropped (exclusive of ``include``).
 
@@ -808,7 +927,7 @@ def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
             valid TOML, ``path`` is absolute or carries a ``..`` step,
             ``commit`` is not a full 40-hex sha, ``include`` appears
             beside ``exclude``, a listing is not a list of paths, or
-            ``values`` is not a table of strings.
+            ``values`` is not a valid input table.
 
     """
     record = node_dir / TEMPLATE_FILE
@@ -818,7 +937,7 @@ def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
         )
     try:
         data = tomllib.loads(record.read_text(encoding='utf-8'))
-    except tomllib.TOMLDecodeError as e:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         raise ValueError(f'{record} is not valid TOML: {e}') from e
     # the recorded path is worktree-relative: an absolute path or a '..'
     # step would escape the repo the commit is read from
@@ -844,11 +963,7 @@ def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
         strings = listed and all(isinstance(entry, str) for entry in listing)
         if not strings:
             raise ValueError(f'{record} {key} is not a list of paths.')
-    values = data.get('values', {})
-    table = isinstance(values, dict)
-    strings = table and all(isinstance(value, str) for value in values.values())
-    if not strings:
-        raise ValueError(f'{record} values is not a table of strings.')
+    validate_values(data.get('values', {}), source=str(record))
     return data
 
 
@@ -865,8 +980,8 @@ def diff(
     ``scripts/``, and ``skills/`` in the node data directory, and each
     ``agents/<agent>/`` file as the live ``.<agent>/`` file. A live
     symlink and a file the bundle does not carry are never judged; a
-    bundle file the node lacks is drift, as is unrendered ``{{`` residue
-    in a live copy.
+    bundle file the node lacks is drift. Literal braces are ordinary
+    output and are judged only by the byte comparison.
 
     Args:
         node_dir: The node data directory (the live surfaces and the
@@ -892,6 +1007,8 @@ def diff(
             commit=record['commit'],
             dest=pathlib.Path(tmp),
         )
+        sources = read_sources(bundle)
+        read_defaults(bundle, path=record['path'])
         warnings = trim(
             bundle,
             include=record.get('include'),
@@ -900,6 +1017,7 @@ def diff(
         )
         fill(
             bundle,
+            sources=sources,
             path=record['path'],
             values=record.get('values', {}),
             remedy=(
@@ -934,10 +1052,6 @@ def diff(
             actual = live.read_bytes()
             if actual == rendered:
                 continue
-            # residue is its own finding: a '{{' the seed-time pass would
-            # have refused marks a hand-copied, never-rendered file
-            if b'{{' in actual and b'{{' not in rendered:
-                reports.append(f'{target}: unrendered {{{{ residue in the live copy.')
             rendered_lines = rendered.decode('utf-8').splitlines(keepends=True)
             actual_text = actual.decode('utf-8', errors='replace')
             actual_lines = actual_text.splitlines(keepends=True)

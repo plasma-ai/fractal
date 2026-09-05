@@ -15,6 +15,7 @@ maintainers = [
 dynamic = ["classifiers"]
 dependencies = [
     "plasma-wiki>=1,<2",
+    "jinja2>=3.1,<4",
     "rich>=15,<16",
     "textual>=8,<9",
     "tomli-w>=1,<2",
