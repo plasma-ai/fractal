@@ -78,10 +78,10 @@ class CodexParser(StreamParser):
             if item.get('type') == 'agent_message' and item.get('text'):
                 # codex sends whole messages, not deltas -- each closes a line
                 return [StreamEvent(kind='text', text=item['text'] + '\n')]
-        # turn summary -- codex usage is cumulative per thread and only grows,
-        # so keep the max: a zero/empty terminal usage frame (codex emits
-        # usage:{} on some error/cancel paths) must not reset the running
-        # total and drive the per-step delta negative, nor move it off None
+        # turn summary -- usage accumulates within one invocation; resuming
+        # the thread starts a new total. Keep the max within this stream: a
+        # zero/empty terminal usage frame (codex emits usage:{} on some
+        # error/cancel paths) must not erase known usage, nor move it off None
         # (a genuine turn always consumes tokens, so a computed 0.0 would
         # record a known $0 for an unknowable cost); flush per turn so a
         # stream killed by signal still has the last increment recorded
@@ -125,7 +125,7 @@ class CodexAgent(Agent):
     can_fork = False
     mints_session = True
     needs_pricing = True
-    cost_scope = 'thread'
+    cost_scope = 'call'
     enforces_budget = False
     providers = ('openrouter',)
 

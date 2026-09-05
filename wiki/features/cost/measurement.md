@@ -35,11 +35,16 @@ Providers differ in how a figure is obtained (the seam lives in
   LiteLLM table (see [[features/cost/pricing|pricing]]). If the model is absent
   from the table, the step records `NULL` cost -- unknowable, never `$0`.
 
-Some backends report cost per invocation; others report a cumulative
-thread-scoped total, which fractal settles into a per-step delta by subtracting
-the amounts already recorded for earlier steps of the same session. A settled
-figure is floored at zero: a provider-side credit or accounting anomaly never
-records negative spend.
+Cost figures can cover one invocation or a cumulative thread-scoped total.
+Fractal settles a thread-scoped total into a per-step delta by subtracting the
+amounts already recorded for earlier steps of the same session. A settled figure
+is floored at zero: a provider-side credit or accounting anomaly never records
+negative spend.
+
+Codex reports usage for one invocation, including when `exec resume` continues
+an existing thread. Cached context can carry across invocations, but the usage
+total starts fresh. Each step records its whole priced usage, and the run's
+spend is the sum of those independent invocation costs.
 
 ## Rollups and the per-run subtree
 
@@ -86,6 +91,9 @@ Zero and unknowable are never conflated:
 - Ended steps with `NULL` cost are silently skipped by the sum, so ledger-facing
   commands disclose the count on stderr
   (`N unpriced steps (NULL cost) excluded`) while stdout stays parseable.
+
+Codex's model-acceptance preflight runs before step rows exist. Its usage is
+outside the step ledger and is not included in the recorded run spend.
 
 ## Finality
 

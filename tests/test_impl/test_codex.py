@@ -1,7 +1,7 @@
 """Test the ``fractal.impl.codex`` module.
 
 The codex dialect end to end: the ``exec --json`` protocol parsed into
-normalized events, the ``exec`` argv builder, thread-cumulative pricing
+normalized events, the ``exec`` argv builder, per-invocation pricing
 over the OpenAI cached-subset usage shape, the ``config.toml`` model
 default, the dated-rollout transcript layout, the account model
 preflight, and the auth write-through and instructions-carry seeding.
@@ -31,8 +31,8 @@ __all__ = [
     'test_capability_flags_report_provider_facts_codex',
     'test_parser_maps_the_stream_protocol_codex',
     'test_parser_captures_the_thread_from_thread_started_only',
-    'test_parser_keeps_the_cumulative_maximum',
-    'test_parser_flushes_cost_per_turn',
+    'test_parser_keeps_the_invocation_maximum',
+    'test_parser_flushes_terminal_usage_snapshots',
     'test_parser_unpriced_model_records_no_cost_codex',
     'test_parser_surfaces_error_frames_codex',
     'test_parser_tolerates_garbage_codex',
@@ -45,8 +45,7 @@ __all__ = [
     'test_compute_cost_unpriced_model_returns_none_codex',
     'test_stream_records_cost_model_and_session_codex',
     'test_stream_detached_keeps_session_unpersisted_codex',
-    'test_stream_subtracts_prior_sibling_on_same_session',
-    'test_stream_increment_never_negative',
+    'test_stream_records_each_resumed_invocation_cost_codex',
     'test_stream_fails_on_error_frames_codex',
     'test_invocation_modes_build_the_pinned_argv_codex',
     'test_invocation_overlay_beats_a_colliding_ambient_var',
@@ -71,10 +70,15 @@ _PRICING = {
         'output_cost_per_token': 8e-6,
         'cache_read_input_token_cost': 1e-7,
     },
+    'gpt-6-astra': {
+        'input_cost_per_token': 1e-5,
+        'output_cost_per_token': 5e-5,
+        'cache_read_input_token_cost': 1e-6,
+    },
 }
 
-# cumulative usage snapshots (OpenAI convention: cached_input_tokens is a
-# subset of input_tokens; reasoning is folded into output_tokens)
+# usage snapshots within one invocation (OpenAI convention: cached_input_tokens
+# is a subset of input_tokens; reasoning is folded into output_tokens)
 # and their hand-computed costs
 _USAGE_FIRST = {
     'input_tokens': 100,
@@ -99,7 +103,7 @@ def test_capability_flags_report_provider_facts_codex(
     assert not backend.can_fork
     assert backend.mints_session
     assert backend.needs_pricing
-    assert backend.cost_scope == 'thread'
+    assert backend.cost_scope == 'call'
     assert not backend.enforces_budget
     # a token-priced agent tracks spend only with a priced model
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
@@ -154,15 +158,15 @@ def test_parser_captures_the_thread_from_thread_started_only() -> None:
     assert parser.session == 'thr-1'
 
 
-def test_parser_keeps_the_cumulative_maximum(
+def test_parser_keeps_the_invocation_maximum(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Zero/empty or shrinking terminal usage never resets the total.
+    """Zero/empty or shrinking terminal snapshots never erase known usage.
 
     Codex emits a zeroed ``turn.completed`` on some error/cancel paths;
-    pricing it as $0 would reset the running total and drive the per-step
-    delta negative -- and a zeroed FIRST turn must leave the cost NULL
-    (unknowable), never record a known $0.
+    pricing it as $0 would erase the invocation's known spend. A zeroed
+    first snapshot must leave the cost NULL (unknowable), never record
+    a known $0.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
     parser = CodexParser(model='o3')
@@ -181,12 +185,14 @@ def test_parser_keeps_the_cumulative_maximum(
     assert parser.cost == pytest.approx(_USAGE_SECOND_COST)
 
 
-def test_parser_flushes_cost_per_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each growing turn emits its cumulative snapshot, never a sum.
+def test_parser_flushes_terminal_usage_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each growing terminal snapshot flushes the invocation's whole cost.
 
     Same durability property as the claude per-event flush: if the stream
-    reader dies by signal mid-stream, the last completed turn's increment
-    must already be on the step row -- and summing the cumulative snapshots
+    reader dies by signal mid-stream, the last known invocation cost
+    must already be on the step row -- and summing repeated snapshots
     would over-bill.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
@@ -391,7 +397,7 @@ def test_stream_records_cost_model_and_session_codex(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The driver stamps the real thread id and settles the priced delta."""
+    """The driver stamps the real thread id and records the priced invocation."""
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
     node = node_with_db
     backend = CodexAgent(node, 'codex')
@@ -428,50 +434,54 @@ def test_stream_detached_keeps_session_unpersisted_codex(node_with_db: Node) -> 
     assert node.sessions.get('codex') is None
 
 
-def test_stream_subtracts_prior_sibling_on_same_session(
+def test_stream_records_each_resumed_invocation_cost_codex(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A continuous step records cumulative minus prior thread siblings.
+    """Resuming one thread records each invocation's full token-priced cost.
 
-    Exercises the telescoping subtraction against the recorded prior
-    sibling (the settle lives in the base ``record_cost``; the parser
-    supplies the cumulative snapshots that drive it).
+    Cached context persists across calls while usage resets. A cheaper
+    resumed invocation still contributes its own spend to the run total.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
     node = node_with_db
     backend = CodexAgent(node, 'codex')
-    prior_id, step_id = _steps(node, 2)
-    node.record.step_session('codex', step_id=prior_id, model=None, session='t1')
-    node.record.step_cost(step_id=prior_id, cost=_USAGE_FIRST_COST)
-    frames = [
-        {'type': 'thread.started', 'thread_id': 't1'},
-        {'type': 'turn.completed', 'usage': _USAGE_SECOND},
+    steps = _steps(node, 3)
+    usages = [
+        {
+            'input_tokens': 580_339,
+            'cached_input_tokens': 503_424,
+            'output_tokens': 4_548,
+        },
+        {
+            'input_tokens': 1_076_747,
+            'cached_input_tokens': 1_060_992,
+            'output_tokens': 6_880,
+        },
+        {
+            'input_tokens': 760_746,
+            'cached_input_tokens': 744_320,
+            'output_tokens': 4_876,
+        },
     ]
-    backend.stream(_lines(frames), step_id=step_id, model='o3')
-    row = node.db.read('steps', where={'step_id': step_id})[0]
-    assert row['cost'] == pytest.approx(_USAGE_SECOND_COST - _USAGE_FIRST_COST)
-
-
-def test_stream_increment_never_negative(
-    node_with_db: Node,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A per-step delta below zero (e.g. a mid-run price drop) clamps to $0."""
-    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
-    node = node_with_db
-    backend = CodexAgent(node, 'codex')
-    prior_id, step_id = _steps(node, 2)
-    node.record.step_session('codex', step_id=prior_id, model=None, session='t1')
-    node.record.step_cost(step_id=prior_id, cost=0.001)  # prior recorded high
-    frames = [
-        {'type': 'thread.started', 'thread_id': 't1'},
-        {'type': 'turn.completed', 'usage': _USAGE_FIRST},
-    ]
-    backend.stream(_lines(frames), step_id=step_id, model='o3')
-    row = node.db.read('steps', where={'step_id': step_id})[0]
-    # cumulative 0.00018 < prior 0.001 -> clamped to 0, never written negative
-    assert row['cost'] == 0.0
+    expected_costs = [1.499974, 1.562542, 1.152380]
+    # stream a fresh call followed by two calls resuming the same thread
+    for step_id, usage in zip(steps, usages, strict=True):
+        session = node.sessions.get('codex')
+        invocation = backend.invocation('continue', session=session)
+        if session is not None:
+            assert invocation.argv[1:4] == ('exec', 'resume', 't1')
+        frames = [
+            {'type': 'thread.started', 'thread_id': 't1'},
+            {'type': 'turn.completed', 'usage': usage},
+        ]
+        backend.stream(_lines(frames), step_id=step_id, model='gpt-6-astra')
+        node.record.step_end(step_id=step_id, status='completed', exit_code=0)
+    # the ledger retains every call's full cost, including the cheaper last call
+    rows = [node.db.read('steps', where={'step_id': step_id})[0] for step_id in steps]
+    assert [row['session'] for row in rows] == ['t1', 't1', 't1']
+    assert [row['cost'] for row in rows] == pytest.approx(expected_costs)
+    assert node.cost.spent(run_id=rows[0]['run_id']) == pytest.approx(4.214896)
 
 
 def test_stream_fails_on_error_frames_codex(node_with_db: Node) -> None:
