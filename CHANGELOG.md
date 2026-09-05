@@ -9,6 +9,12 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Breaking
 
+- Seed templates use Jinja syntax: `{% ... %}` statements and `{# ... #}`
+  comments are active, source line endings normalize to LF, and trailing
+  newlines are retained. Development template records are replayed through this
+  same renderer. `--set KEY=VALUE` requires a TOML literal: text is quoted as
+  `--set 'role="reviewer"'`, while `--set enabled=false` supplies a boolean; an
+  unquoted text value refuses.
 - `node init --template=<path>[@<ref>]` replaces `--steps` and `--profile`, and
   the `.fractal/profiles/` location goes away with no successor: a template is
   any tracked folder holding `config.json`, so a steps-only template is such a
@@ -60,51 +66,65 @@ may include breaking changes, each listed under a Breaking heading.
   covers its subtree) cut the deploy to an effective set that `node diff` and
   `node reseed` judge by, so a trimmed spawn stays trimmed. A template refuses
   machinery paths (`.fractal`, `.git`, `.worktrees` components), symlinks (a
-  template is self-contained), and non-UTF-8 files by name. The package seed's
-  per-agent files ship under `fractal/_node/agents/`, the template layout's own
-  `agents/` shape.
+  template is self-contained), and non-UTF-8 rendering inputs by name. The
+  package seed's per-agent files ship under `fractal/_node/agents/`, the
+  template layout's own `agents/` shape.
 - `_template.toml`: the node's template provenance record — the
   worktree-relative template path, the commit actually read, the include/exclude
-  listing, and the slot values — written into the node data directory at init;
-  its presence marks a node as seeded from a template, it counts as a node
-  record file (the estate content law commits it with the seed), and a `--reset`
-  without `--template` drops it. Hand-editable, and validated wherever it is
-  read.
-- Seed-time slots: template files may carry `{{slot}}` placeholders — lowercase
-  names, filled once at init from `--values <file.toml>` (a flat TOML table of
-  string values), repeatable `--set KEY=VALUE` pairs that win over the sheet,
-  and `--pin`, which fills the `{{pin}}` slot beside its fill-sheet-gate role (a
-  `pin` supplied both ways must agree, or init refuses). A slot with no value
-  and any `{{` that is not a lowercase slot refuse init naming the file and the
-  token; prompt-time `$VAR` text passes through untouched, so the two namespaces
-  stay apart. The rendered charter passes the fill-sheet gate (authored sections
-  present, `pin:` lines resolving and matching `--pin`, `docket:` rows resolving
-  at the pin — anchored at the fork commit when the seed is pinless).
+  listing, and the complete resolved inputs — written into the node data
+  directory at init; its presence marks a node as seeded from a template, it
+  counts as a node record file (the estate content law commits it with the
+  seed), and a `--reset` without `--template` drops it. Hand-editable, and
+  validated wherever it is read.
+- Seed-time Jinja: selected template outputs support expressions, includes,
+  imports, macros, inheritance, conditions, loops, and raw blocks. The optional
+  template-local `_template.toml` carries literal `[values]` defaults;
+  `--values <file.toml>` overrides them and repeatable `--set KEY=VALUE` TOML
+  literals win over the file. Values preserve TOML types, replace whole
+  top-level inputs, and are never rendered recursively. `--pin` fills `{{pin}}`,
+  overriding a default but requiring agreement with an explicit values-file or
+  set pin. Missing required inputs, includes, syntax errors, and invalid
+  rendered step frontmatter refuse before deployment. The rendered charter
+  passes the fill-sheet gate (authored sections present, `pin:` lines resolving
+  and matching `--pin`, `docket:` rows resolving at the pin — anchored at the
+  fork commit when the seed is pinless); prompt-time `$VAR` text passes through
+  untouched.
+- Template includes read immutable source from the same committed bundle.
+  `_partials/` holds source-only helpers, and documentation does not render
+  independently. `--include`/`--exclude` select deployment outputs, not include
+  dependencies: an excluded output remains available as source for another
+  output. Rendering preserves list order and sorts table keys recursively; an
+  immutable sandbox prevents input mutation, and nondeterministic helpers are
+  unavailable.
 - `node diff`: shows a node's drift from its recorded template by re-rendering
   the recorded folder at its recorded commit with its recorded values and
   diffing the effective set against the live seed surfaces — `NODE.md`,
   `steps/`, `scripts/`, `skills/`, and each `agents/<agent>/` file against the
   live `.<agent>/` copy. A live symlink and a file the bundle does not carry are
-  never judged; a bundle file the node lacks is drift, and unrendered `{{`
-  residue in a live copy is its own finding. Exits 1 on drift, 0 clean, 2 on a
-  command error, so scripts branch on the exit code.
+  never judged; a bundle file the node lacks is drift, and literal braces are
+  compared as ordinary text. Exact recorded values replay without merging source
+  defaults. Exits 1 on drift, 0 clean, 2 on a command error, so scripts branch
+  on the exit code.
 - `node reseed`: rewrites a node's seed surfaces from its recorded template —
   files the node lacks are added, files it has are overwritten, nothing is
   deleted, and `NODE.md`, `config.json`, and `memory/` are never touched.
   `--ref` reads the recorded folder at another commit (a ref where the folder is
   absent refuses naming the re-point remedy); `--template <path>[@<ref>]`
-  re-points the node, recording the new path and the commit read while the
-  values and listing ride along unchanged, and prints the root-differs notice
-  when the root branch holds another copy. The verb refuses over an active or
-  paused node without `--force` and always from the node's own worktree (a node
-  may not edit its own seed), records a `reseed` event, and advances the
-  recorded commit; a recorded listing entry the template no longer carries warns
-  instead of refusing.
+  re-points the node, recording the new path and the commit read with the
+  unchanged listing, and prints the root-differs notice when the root branch
+  holds another copy. The verb refuses over an active or paused node without
+  `--force` and always from the node's own worktree (a node may not edit its own
+  seed), records a `reseed` event, and advances the recorded commit; a recorded
+  listing entry the template no longer carries warns instead of refusing. Bare
+  reseed uses exactly the recorded inputs; an explicit `--ref` or `--template`
+  adds target defaults only for missing keys and records the complete map.
+  Existing values win, including values obtained from defaults. The preserved
+  charter can remain drifted after a successful reseed.
 - Template content guard: a template refuses a credential-named file anywhere
   and, under `agents/`, any dot-file; a file inside a seed surface that the seed
   would skip — a non-step file under `steps/`, an underscore-prefixed script, a
   loose file directly under `skills/` or `agents/` — refuses too, so every
-  template file is one the seed deploys and `node diff` never reports phantom
+  selected output is one the seed deploys and `node diff` never reports phantom
   drift. The credential names refused are `auth.json`, `credentials.json`,
   `*.key`, `*.pem`, `*.p12`, `*.pfx`, `id_rsa`, `id_ed25519`, `id_ecdsa`,
   `id_ecdsa_sk`, `id_ed25519_sk`, `id_dsa`, and `*.ppk`, matched case-blind at

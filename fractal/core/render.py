@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import pathlib
-import re
 import string
+import traceback
 import typing
-from typing import Optional
+from collections.abc import Iterable, Mapping
+from typing import Any, Optional
+
+import jinja2
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 if typing.TYPE_CHECKING:
     from .node import Node
@@ -50,32 +55,137 @@ class _VarTemplate(string.Template):
     """
 
 
-class _SlotTemplate(string.Template):
-    """``{{slot}}`` substitution for the seed-time slot pass.
+class _SeedUndefined(jinja2.StrictUndefined):
+    """Undefined input that also refuses representation inside a container."""
 
-    Only a lowercase ``{{name}}`` (padding spaces tolerated) is a slot;
-    the ``named`` and ``escaped`` groups are made unreachable and
-    ``invalid`` catches every other ``{{``, so ``substitute`` raises
-    ``KeyError`` on a slot with no value and ``ValueError`` on any
-    ``{{`` that is not a slot -- an uppercase ``{{PIN}}`` included. No
-    includes, loops, conditionals, defaults, or escapes; ``$VAR`` text
-    and shell text such as ``${CURRENT_BRANCH%.*}`` pass through
-    untouched, so the prompt-time grammar (:class:`_VarTemplate`) is
-    undisturbed.
+    def __repr__(self: _SeedUndefined) -> str:
+        """Refuse a missing value displayed through list or table representation."""
+        return self._fail_with_undefined_error()
+
+
+class _SeedEnvironment(ImmutableSandboxedEnvironment):
+    """Jinja environment for repeatable rendering from TOML inputs."""
+
+    def is_safe_attribute(
+        self: _SeedEnvironment,
+        obj: Any,
+        attr: str,
+        value: Any,
+    ) -> bool:
+        """Refuse date methods that can read the clock, timezone, or locale."""
+        if isinstance(obj, (dt.date, dt.time, dt.tzinfo)) and callable(value):
+            return False
+        return super().is_safe_attribute(obj, attr, value)
+
+    def is_safe_callable(self: _SeedEnvironment, obj: Any) -> bool:
+        """Refuse string formatting that invokes locale-aware date formatting."""
+        # Jinja wraps str.format; its datetime format specs read the host locale.
+        method = getattr(obj, '__wrapped__', obj)
+        if isinstance(getattr(method, '__self__', None), str):
+            if method.__name__ in ('format', 'format_map'):
+                return False
+        return super().is_safe_callable(obj)
+
+
+def _ordered_values(value: Any) -> Any:
+    """Return TOML values with stable table ordering and unchanged list order."""
+    if isinstance(value, dict):
+        return {key: _ordered_values(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_ordered_values(item) for item in value]
+    return value
+
+
+def render_seed(
+    sources: Mapping[str, bytes],
+    files: Iterable[str],
+    *,
+    values: dict[str, Any],
+    path: str,
+    remedy: Optional[str] = None,
+) -> dict[str, bytes]:
+    """Render selected files from an immutable snapshot of a template folder.
+
+    Includes read the same source snapshot as each output. Only requested
+    files render independently; unused sources need not decode as UTF-8.
+    Supplied values remain literal, with table order normalized recursively
+    so TOML serialization cannot change subsequent rendering.
+
+    Args:
+        sources: Template-relative names mapped to committed source bytes.
+        files: Template-relative output filenames to render.
+        values: Resolved TOML inputs.
+        path: Repo-relative template folder for error messages.
+        remedy: Missing-input remedy for the caller (default: init flags).
+
+    Returns:
+        The complete mapping of output filenames to rendered UTF-8 bytes.
+
+    Raises:
+        ValueError: If a required source is not UTF-8, a template fails to
+            render, or a required input or included source is missing.
+
     """
 
-    # the base class compiles with IGNORECASE, which would admit {{PIN}}
-    flags = re.NOFLAG
-    # spelled [ ] because the compile is always VERBOSE, which drops a
-    # bare space from the pattern
-    pattern = r"""
-        (?:
-          (?P<escaped>(?!))                             |  # unreachable: no escape
-          (?P<named>(?!))                               |  # unreachable: braced only
-          \{\{[ ]*(?P<braced>[a-z_][a-z0-9_]*)[ ]*\}\}  |
-          (?P<invalid>\{\{)
-        )
-    """
+    def load(name: str) -> Optional[tuple[str, str, None]]:
+        blob = sources.get(name)
+        if blob is None:
+            return None
+        try:
+            text = blob.decode('utf-8')
+        except UnicodeDecodeError as e:
+            prefix = blob[: e.start].replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+            raise jinja2.TemplateSyntaxError(
+                message='source is not UTF-8 text; templates are text',
+                lineno=prefix.count(b'\n') + 1,
+                name=name,
+                filename=f'{path}/{name}',
+            ) from e
+        return text, f'{path}/{name}', None
+
+    # one environment reads only committed bytes, never the deployment directory
+    environment = _SeedEnvironment(
+        loader=jinja2.FunctionLoader(load),
+        undefined=_SeedUndefined,
+        autoescape=False,
+        keep_trailing_newline=True,
+        trim_blocks=False,
+        lstrip_blocks=False,
+        newline_sequence='\n',
+    )
+    del environment.filters['random']
+    del environment.globals['lipsum']
+    values = _ordered_values(values)
+    filenames = {f'{path}/{name}' for name in sources}
+    rendered: dict[str, bytes] = {}
+    # complete every output before the caller can write any deployment file
+    for name in files:
+        try:
+            template = environment.get_template(name)
+            text = template.render(values)
+        except Exception as e:
+            filename = f'{path}/{name}'
+            line = None
+            if isinstance(e, jinja2.TemplateSyntaxError):
+                filename = e.filename or filename
+                line = e.lineno
+            else:
+                for frame in traceback.extract_tb(e.__traceback__):
+                    if frame.filename in filenames:
+                        filename = frame.filename
+                        line = frame.lineno
+            location = f'{filename}:{line}' if line is not None else filename
+            message = str(e)
+            if isinstance(e, jinja2.TemplateNotFound):
+                message = f'included source not found: {e.name!r}'
+            elif isinstance(e, jinja2.UndefinedError):
+                fix = (
+                    remedy or 'supply it with --set KEY=<TOML value> or a --values file'
+                )
+                message = f'{message}; {fix}'
+            raise ValueError(f'Template file {location}: {message}.') from e
+        rendered[name] = text.encode('utf-8')
+    return rendered
 
 
 def render(text: str, variables: dict[str, str]) -> str:

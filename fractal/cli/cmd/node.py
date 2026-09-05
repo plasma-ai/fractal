@@ -135,28 +135,34 @@ def node_init(app: typer.Typer) -> typer.Typer:
     template = typer.Option(None, '--template', help=template_help)
     # include option
     include_help = (
-        'Deploy only these template-relative paths (repeatable; mutex with --exclude).'
+        'Deploy only these template-relative output paths (repeatable;'
+        ' mutex with --exclude). Jinja includes still read the full bundle.'
     )
     include = typer.Option(None, '--include', help=include_help)
     # exclude option
     exclude_help = (
-        'Skip these template-relative paths (repeatable; mutex with --include).'
+        'Skip deployment of these template-relative output paths (repeatable;'
+        ' mutex with --include). Their source remains available to Jinja includes.'
     )
     exclude = typer.Option(None, '--exclude', help=exclude_help)
     # values option
     values_help = (
-        "Slot fill sheet: a TOML file of string values for the template's"
-        ' {{slot}} placeholders.'
+        'TOML input values for seed-time Jinja rendering; override the'
+        " template's _template.toml defaults. Values are literal data."
     )
     values = typer.Option(None, '--values', help=values_help)
     # set option
-    sets_help = 'Slot fill KEY=VALUE (repeatable; wins over --values).'
+    sets_help = (
+        'Input KEY=<TOML literal> (repeatable; wins over --values);'
+        ' quote text, e.g. --set \'role="reviewer"\', or --set enabled=false.'
+    )
     sets = typer.Option(None, '--set', help=sets_help)
     # pin option
     pin_help = (
         'Commission pin (a commit sha): must resolve, and every pin:'
         ' declaration in the template charter must match it; also fills'
-        ' the {{pin}} slot.'
+        ' the {{pin}} input, overriding a default but requiring agreement'
+        ' with an explicit --values/--set pin.'
     )
     pin = typer.Option(None, '--pin', help=pin_help)
     # agent option
@@ -900,8 +906,8 @@ def node_diff(app: typer.Typer) -> typer.Typer:
         """Show a node's drift from its recorded template.
 
         Re-renders the recorded template folder at its recorded commit
-        with its recorded values and diffs the effective set against the
-        node's live seed surfaces. Exit 1 when any file drifts, 0 when
+        with exactly its recorded values and diffs the selected outputs
+        against the node's live seed surfaces. Exit 1 when any file drifts, 0 when
         the node is clean, 2 on a command error -- scripts branch on the
         exit code rather than parse the output.
         """
@@ -956,6 +962,10 @@ def node_reseed(app: typer.Typer) -> typer.Typer:
         agent settings from the result: files the node lacks are added
         and files it has are overwritten, never deleted. NODE.md,
         config.json, and memory/ are never touched.
+
+        A bare reseed uses exactly the recorded values. An explicit
+        --ref or --template fills new keys from the target defaults;
+        every recorded value wins. Charter drift can remain after reseeding.
         """
         node = resolve_target(path, node)
         output, warnings = node.reseed(ref=ref, template=template, force=force)

@@ -1140,10 +1140,13 @@ class Node:
             fill,
             locate,
             materialize,
+            read_defaults,
             read_preset,
+            read_sources,
             root_notice,
             trim,
             vet,
+            vet_steps,
             write_provenance,
         )
 
@@ -1223,7 +1226,7 @@ class Node:
         template_tmp: Optional[str] = None
         template_bundle: Optional[pathlib.Path] = None
         template_preset: dict[str, Any] = {}
-        template_values: dict[str, str] = {}
+        template_values: dict[str, Any] = {}
         if include and exclude:
             raise ValueError('--include cannot be combined with --exclude.')
         if (include or exclude) and template is None:
@@ -1235,9 +1238,8 @@ class Node:
                 template,
                 repo_dir=self.repo_dir,
             )
-            # merge the slot values now (later sources win: the --values
-            # sheet, then --set, then --pin), so a malformed sheet or pair
-            # dies before any other work
+            # validate explicit inputs before reading the template; defaults
+            # fill absent keys once the committed bundle materializes
             template_values = collect_values(values=values, sets=sets, pin=pin)
         # the fill-sheet gate: a pinned commission must hold together before
         # any spend (--pin alone still validates the pin itself); a template
@@ -1355,7 +1357,7 @@ class Node:
             # keeps the commit actually read, which can differ from the fork
             # sha when the parent commits before worktree add); every
             # template refusal fires here, before any worktree exists
-            if template is not None:
+            if template_path is not None:
                 fork = child_branch if pre_existing_branch else (base or parent.branch)
                 rev = template_ref if template_ref is not None else fork
                 cmd = ['rev-parse', '--verify', f'{rev}^{{commit}}']
@@ -1378,6 +1380,11 @@ class Node:
                 # the parent's inherited value), so a bad key refuses
                 # before any other work
                 template_preset = read_preset(bundle, path=template_path)
+                template_values = (
+                    read_defaults(bundle, path=template_path) | template_values
+                )
+                pin = template_values.get('pin')
+                sources = read_sources(bundle)
                 # cut the bundle down to the effective set, so downstream
                 # only sees what the listing keeps -- every check below
                 # judges what actually deploys, so an excluded file can
@@ -1433,10 +1440,14 @@ class Node:
                 # print success, and drift on every later diff, so it
                 # refuses here like a credential
                 vet(bundle)
-                # the slot pass: render the effective set's {{slot}}
-                # placeholders in place -- an unfilled slot or a stray {{
-                # refuses here, naming the file and the token
-                fill(bundle, path=template_path, values=template_values)
+                # render from the unmodified source snapshot, including files
+                # the output listing omitted; values are never template source
+                fill(
+                    bundle,
+                    sources=sources,
+                    path=template_path,
+                    values=template_values,
+                )
                 # the fill-sheet gate on the bundle's rendered charter
                 # (--pin alone still validates the pin itself); a pinless
                 # docket anchors at the fork ref
@@ -1514,34 +1525,6 @@ class Node:
                 sync = template_preset.get('sync')
             if detached is None:
                 detached = template_preset.get('detached')
-            # a bundled step may not flip an already-detached node -- init.sh
-            # vets the inherit/package sources, but only after its --reset
-            # arms rewrote the live steps, too late to refuse cleanly -- so
-            # the bundle's steps refuse here, before any worktree work; the
-            # check sits below the preset fill because the merged detached
-            # value (flag beats preset) only settles there
-            if detached and template_bundle is not None:
-                bundle_steps = template_bundle / 'steps'
-                if bundle_steps.is_dir():
-                    # the same set that seeds: regular, non-hidden *.md files
-                    for step_file in sorted(bundle_steps.glob('*.md')):
-                        if not step_file.is_file() or step_file.name.startswith('.'):
-                            continue
-                        # mirror init.sh's frontmatter rule: a detached: line
-                        # inside the first --- delimited block
-                        delimiters = 0
-                        text = step_file.read_text(encoding='utf-8')
-                        for line in text.splitlines():
-                            if line == '---':
-                                delimiters += 1
-                                if delimiters >= 2:
-                                    break
-                                continue
-                            if delimiters == 1 and line.startswith('detached:'):
-                                raise ValueError(
-                                    f'detached: in {step_file.name} is invalid'
-                                    ' in detached mode (already detached)'
-                                )
             # inherit local from the parent; local is immutable once set
             if parent.config.get('local'):
                 if parent is self:
@@ -1675,6 +1658,16 @@ class Node:
                 'detached': detached,
             }
             self.config.validate(config_values)
+            # rendered overrides validate after preset and inheritance resolve,
+            # before any worktree or live seed can be written
+            if template_bundle is not None:
+                vet_steps(
+                    template_bundle,
+                    agent=agent,
+                    provider=provider,
+                    detached=detached,
+                    root=parent.db.path.parent,
+                )
             # default the display title to the de-slugged node name
             if title is None:
                 title = fractal.util.name_to_title(name)
@@ -2156,8 +2149,9 @@ class Node:
         (an excluded file stays gone); nothing is ever deleted, and
         ``NODE.md``, ``config.json``, and ``memory/`` are never touched.
         ``template`` re-points the node: the new path and the commit read
-        land in ``_template.toml``, while the recorded values and listing
-        ride along unchanged, and the confirmation carries creation's
+        land in ``_template.toml``. Recorded values win over the target's
+        defaults; defaults supply only new keys on an explicit refresh.
+        The listing persists, and the confirmation carries creation's
         root-differs notice when the root branch holds a different copy
         of the folder (a plain or ``ref`` reseed stays silent).
 
@@ -2188,10 +2182,13 @@ class Node:
             fill,
             locate,
             materialize,
+            read_defaults,
             read_provenance,
+            read_sources,
             root_notice,
             trim,
             vet,
+            vet_steps,
             write_provenance,
         )
 
@@ -2289,6 +2286,11 @@ class Node:
                             path=path,
                             commit=commit,
                         )
+                    defaults = read_defaults(bundle, path=path)
+                    values = record.get('values', {})
+                    if rev is not None:
+                        values = defaults | values
+                    sources = read_sources(bundle)
                     warnings = trim(
                         bundle,
                         include=record.get('include'),
@@ -2300,14 +2302,31 @@ class Node:
                     vet(bundle)
                     fill(
                         bundle,
+                        sources=sources,
                         path=path,
-                        values=record.get('values', {}),
+                        values=values,
                         remedy=(
                             'add the value to the [values] table in the'
                             " node's _template.toml, or re-init the node"
                             ' with --set'
                         ),
                     )
+                    vet_steps(
+                        bundle,
+                        agent=self.agent_effective(),
+                        provider=self.provider_effective(),
+                        detached=self.config.get('detached'),
+                        root=self.db.path.parent,
+                    )
+                    node_md = bundle / 'NODE.md'
+                    if values.get('pin') is not None or node_md.is_file():
+                        charter = node_md if node_md.is_file() else None
+                        self._validate_charter(
+                            charter,
+                            pin=values.get('pin'),
+                            fork=self.branch,
+                            display=f'{path}/NODE.md',
+                        )
                     # reseed adds and overwrites but never deletes, so the
                     # loop's discovery contract judges the post-reseed union:
                     # the bundle's steps plus the live steps the bundle does
@@ -2362,15 +2381,15 @@ class Node:
                             f'--bundle={bundle}',
                         )
                         # advance the record: the commit actually read, and the
-                        # path too on a re-point; values and listing ride along
-                        # unchanged -- inside the try so a failed record write
+                        # path too on a re-point; record resolved inputs and
+                        # the listing -- inside the try so a failed record write
                         # (surfaces already rewritten) stamps the event failed
                         # rather than stranding it open
                         write_provenance(
                             self.node_dir,
                             path=path,
                             commit=commit,
-                            values=record.get('values', {}),
+                            values=values,
                             include=record.get('include'),
                             exclude=record.get('exclude'),
                         )

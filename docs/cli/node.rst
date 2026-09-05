@@ -79,6 +79,27 @@ records what seeded it in ``_template.toml``). The node's task contract
 lives in ``<node_dir>/NODE.md`` — author its *Instructions* and *Completion
 Requirements* sections, then launch with ``fractal node start``.
 
+With a template, supply required inputs before init. Reusable prose and Jinja
+expressions live in ``NODE.md``, steps, or source-only fragments such as
+``_partials/foundations.md``. Jinja includes read only the same committed
+template bundle. Its optional ``_template.toml`` holds literal ``[values]``
+defaults, while the node's generated file records the complete resolved inputs
+and source commit. TOML is parsed as data, without rendering, and metadata is
+not a standalone output. An explicit Jinja include treats any named bundle
+file as source.
+
+Jinja supports includes, imports, macros, inheritance, branches, loops, and raw
+blocks. Source line endings normalize to LF, trailing newlines are retained,
+and HTML escaping and automatic block whitespace trimming are disabled. Values
+containing ``{{...}}`` remain literal; ``$VAR`` remains for runtime rendering.
+Tables render in recursively sorted key order; lists preserve their supplied
+order. Only selected outputs render independently, and all rendering completes
+before deployment.
+
+Rendered step frontmatter must satisfy the step configuration grammar before
+deployment. Use ``{{ detached | lower }}`` or ``{{ detached | tojson }}`` for
+a boolean flag: the step parser requires lowercase ``true``/``false``.
+
 ``NAME`` is one branch segment: letters, digits, and underscores only (no
 dots, dashes, or slashes), at most 64 characters. A node spawned from inside
 another node's worktree nests under that node; otherwise it nests under the
@@ -126,7 +147,7 @@ node at ``--path``.
        presence is what marks the folder as a template. The folder is read
        at the child's **fork commit**, so uncommitted edits never deploy
        (append ``@<ref>`` to read another commit), and recorded — path,
-       commit, and slot values — in the node's ``_template.toml``. Its
+       commit, and resolved inputs — in the node's ``_template.toml``. Its
        surfaces (``NODE.md``, ``steps/``, ``scripts/``, ``skills/``,
        ``agents/``) seed the node; a surface it lacks falls back to the
        inherit-or-package source, and one it carries refuses the matching
@@ -135,35 +156,45 @@ node at ``--path``.
        the preset; the preset beats an inherited value). Every template
        refusal — an untracked folder, a symlink, a credential-named file
        anywhere in the folder, a file a seed surface would silently skip,
-       a broken ``steps/`` contract, an unfilled ``{{slot}}``, a
+       a broken ``steps/`` contract, missing required Jinja inputs, a
        truncated charter — fires before any worktree exists. One notice
        appended to the init output names the ``@<ref>`` form when the
        root branch holds a different copy of the folder.
    * - ``--include <path>``
      - whole template
-     - Deploy only these template-relative paths (repeatable; a directory
-       entry covers its subtree; no globs); requires ``--template`` and is
+     - Deploy only these template-relative output paths (repeatable; a
+       directory entry covers its subtree; no globs); requires ``--template`` and is
        mutually exclusive with ``--exclude``. The listing is recorded in
        ``_template.toml``: the **effective set** — only ``include``, or
        everything minus ``exclude`` — is what init deploys and what
        ``diff`` and ``reseed`` judge by, so an excluded step stays gone
-       across every reseed. An entry matching nothing refuses at init.
+       across every reseed. An entry matching nothing or naming source-only
+       documentation or ``_partials/`` refuses at init. Jinja includes
+       still read source from the full committed template bundle.
    * - ``--exclude <path>``
      - none
-     - Skip these template-relative paths; the mirror image of
-       ``--include`` (repeatable, recorded, a directory entry covers its
-       subtree).
+     - Skip deployment of these template-relative output paths; the mirror
+       image of ``--include`` (repeatable, recorded, a directory entry covers its
+       subtree). An excluded output may still be included by another
+       selected output; excluding a file does not remove its text transitively.
    * - ``--values <file>``
      - none
-     - Slot fill sheet: a TOML file of string values the template's
-       ``{{slot}}`` placeholders render with, once at init; requires
-       ``--template`` and is recorded in ``_template.toml``. A slot with
-       no value and any ``{{`` that is not a lowercase slot refuse;
-       prompt-time ``$VAR`` text passes through untouched.
+     - TOML inputs for seed-time Jinja rendering, overriding the template's
+       optional ``_template.toml`` ``[values]`` defaults. The external file
+       names inputs at its top level, without a ``[values]`` wrapper;
+       strings, booleans, numbers, lists, tables, and date/time values keep
+       their types. Requires ``--template``; the node's generated
+       ``_template.toml`` records the complete resolved map. Missing inputs
+       used by selected outputs refuse before creation. Values remain literal
+       data, and prompt-time ``$VAR`` text passes through untouched.
    * - ``--set KEY=VALUE``
      - none
-     - One slot fill (repeatable); wins over the ``--values`` sheet.
-       Requires ``--template``.
+     - One input as a TOML literal (repeatable); wins over ``--values``.
+       Use ``--set 'role="reviewer"'`` for text, ``--set enabled=false`` for
+       a boolean, or ``--set 'checks=["tests"]'`` for a list. Requires
+       ``--template``. Each override replaces the whole top-level value;
+       nested tables are not deep-merged. Names are lowercase identifiers;
+       ``true``, ``false``, ``none``, ``not``, and ``self`` are reserved.
    * - ``--pin <sha>``
      - none
      - Commission pin: must resolve to a commit, and every ``pin:`` line
@@ -172,8 +203,8 @@ node at ``--path``.
        ``docket: <path>`` line must resolve at the pin (``--pin`` when
        given, else the charter's own, else the fork commit) — a stale or
        truncated seed dies at init, not at the commission's first seat.
-       Also fills the ``{{pin}}`` slot; a ``pin`` supplied through
-       ``--set``/``--values`` must agree with ``--pin``, and a differing
+       Also fills ``{{pin}}``, overriding a template default; a ``pin`` supplied
+       through ``--set``/``--values`` must agree with ``--pin``, and a differing
        pair refuses.
    * - ``--agent <command>``
      - nearest ancestor's
@@ -729,14 +760,16 @@ group) provably gone, is healed to ``exited`` first.
    $ fractal node diff [NODE]
 
 Show a node's drift from its recorded template. The recorded folder is
-re-rendered at its recorded commit with its recorded slot values, the
+re-rendered at its recorded commit with exactly its recorded input values, the
 effective set (the recorded ``include``/``exclude`` listing) is applied, and
 each file is compared against the node's live copy: ``NODE.md``, ``steps/``,
 ``scripts/``, ``skills/``, and — for each ``agents/<agent>/`` file — the
 live ``.<agent>/`` copy, all in the node's data directory. A live symlink
 and a file the template does not carry are never judged; a template file the
-node lacks is drift, as is unrendered ``{{`` residue in a live copy. The
-recorded commit resolves as long as it is reachable, so a template folder
+node lacks is drift. Literal braces are valid output and are compared like any
+other text. Source defaults are not merged again; deleting a required recorded
+input causes a rendering refusal. The recorded commit resolves as long as it
+is reachable, so a template folder
 moved or deleted later still diffs at the commit that seeded the node.
 
 Drift prints one unified diff per file (``template/<file>`` against
@@ -935,15 +968,24 @@ Retuning
          [--force|-f]
 
 Rewrite a node's seed surfaces from its recorded template. The recorded
-folder is re-rendered at its recorded commit with its recorded slot values,
-and ``steps/``, ``scripts/``, ``skills/``, and the per-agent files are
+folder is re-rendered at its recorded commit with exactly its recorded input
+values, and ``steps/``, ``scripts/``, ``skills/``, and the per-agent files are
 rewritten from the result: files the node lacks are added and files it has
 are overwritten, so the node matches its template's effective set (an
 excluded file stays gone); nothing is ever deleted, and a live symlink (the
 agent auth links) stands. ``NODE.md``, ``config.json``, and ``memory/`` are
 never touched, so an operator's charter edits survive. The reseed lands as
 an event on the node's record, and ``_template.toml`` advances to the commit
-actually read; the recorded values and listing ride along unchanged.
+actually read; the listing is preserved. A bare reseed keeps the recorded
+values exactly. An explicit ``--ref`` or ``--template`` refresh adds the target
+template's defaults only for missing keys, keeping every recorded value,
+including values first obtained from a default. It records the complete merged
+map; a new required input without a default refuses before live writes.
+
+Changing recorded values does not update generated files until reseeding.
+Reseed preserves the charter even when those values or the template change,
+so a successful reseed can leave charter drift. Edit ``NODE.md`` directly
+when the charter needs a change.
 
 Reseed rewrites the live steering surface, so it refuses over an active or
 paused node without ``--force``; it always refuses from the node's own

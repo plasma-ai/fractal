@@ -1737,8 +1737,8 @@ def test_diff_reports_drift_per_surface(repo: dict) -> None:
     each surface -- a step, a script, a skill file, an agent
     ``settings.json``, and the charter -- exits 1 with a unified diff
     naming the node-relative path; a deleted step reports as missing and
-    ``{{`` residue is its own finding, while a node-added step, a live
-    symlink, and the untouched ``auth.json`` are never reported.
+    literal brace text is ordinary changed content, while a node-added
+    step, a live symlink, and the untouched ``auth.json`` are never reported.
     """
     root = repo['root']
     charter = (
@@ -1766,7 +1766,7 @@ def test_diff_reports_drift_per_surface(repo: dict) -> None:
         '--template',
         'templates/diffcrew',
         '--set',
-        'mission=probe the surfaces',
+        'mission="probe the surfaces"',
     )
     assert spawn.returncode == 0, spawn.stderr
     try:
@@ -1811,7 +1811,7 @@ def test_diff_reports_drift_per_surface(repo: dict) -> None:
             assert f'+++ node/{header}' in drifted.stdout
         assert '+an added line' in drifted.stdout
         assert 'steps/02-EXECUTE.md: missing from the node.' in drifted.stdout
-        assert 'NODE.md: unrendered {{ residue in the live copy.' in drifted.stdout
+        assert '+mission: {{mission}}' in drifted.stdout
         # never reported: the node's own additions and the live symlinks
         assert '03-NEW.md' not in drifted.stdout
         assert 'math.md' not in drifted.stdout
@@ -1880,7 +1880,7 @@ def test_diff_requires_a_recorded_template_and_a_full_sha(repo: dict) -> None:
     way: a commit that is not a full 40-hex sha, unparseable TOML, a
     path escaping the worktree (absolute or ``..`` -- the guard that
     keeps the replay's git read inside the repo), ``include`` beside
-    ``exclude``, a listing that is no list, and a non-string slot value.
+    ``exclude``, a listing that is no list, and malformed input values.
     """
     root = repo['root']
     # the long-lived task worker was seeded without a template
@@ -1931,8 +1931,8 @@ def test_diff_requires_a_recorded_template_and_a_full_sha(repo: dict) -> None:
                 'include is not a list of paths',
             ),
             (
-                tomli_w.dumps({**base, 'values': {'mission': 3}}),
-                'values is not a table of strings',
+                tomli_w.dumps({**base, 'values': 'invalid'}),
+                'values is not a table',
             ),
         ]
         for text, message in bad_records:
@@ -2046,7 +2046,7 @@ def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
         '--template',
         'templates/slotcrew',
         '--set',
-        'mission=probe',
+        'mission="probe"',
     )
     assert spawn.returncode == 0, spawn.stderr
     try:
@@ -2062,7 +2062,7 @@ def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
         for verb in ('diff', 'reseed'):
             result = _run(root, 'node', verb, 'main.slotcrew')
             assert result.returncode == 2, result.stdout + result.stderr
-            assert 'no value for slot {{mission}}' in result.stderr, result.stderr
+            assert "'mission' is undefined" in result.stderr, result.stderr
             assert remedy in result.stderr, result.stderr
             assert 'supply it with --set' not in result.stderr, result.stderr
     finally:
@@ -2070,6 +2070,92 @@ def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
 
 
 # ------ reseed
+
+
+@pytest.mark.parametrize('repoint', [False, True], ids=['ref', 'template'])
+def test_reseed_keeps_recorded_values_and_adds_new_defaults(
+    repo: dict,
+    repoint: bool,
+) -> None:
+    """An explicit refresh adds defaults for new inputs and preserves chosen values."""
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        '_template.toml': '[values]\nmission = "original"\nrole = "reader"\n',
+        'NODE.md': (
+            '## Instructions\n\n{{ mission }}\n\n## Completion Requirements\n\nDone.\n'
+        ),
+        'steps/01-GO.md': '{{ mission }}: {{ role }}\n',
+    }
+    _commit_template(root, 'templates/defaults', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'defaults',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/defaults',
+        '--set',
+        'role="writer"',
+    )
+    assert spawn.returncode == 0, spawn.stdout + spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.defaults' / '.fractal' / 'main.defaults'
+        record = node_dir / '_template.toml'
+        initial_record = record.read_bytes()
+        step = node_dir / 'steps' / '01-GO.md'
+        assert step.read_text(encoding='utf-8') == 'original: writer\n'
+        charter = node_dir / 'NODE.md'
+        charter.write_text('Operator-authored charter.\n', encoding='utf-8')
+        # the target changes existing defaults and introduces one new input
+        target = 'templates/newdefaults' if repoint else 'templates/defaults'
+        files['_template.toml'] = (
+            '[values]\nmission = "changed"\nrole = "changed"\nending = "new"\n'
+        )
+        files['steps/01-GO.md'] = '{{ mission }}: {{ role }}: {{ ending }}\n'
+        commit = _commit_template(root, target, files)
+        plain = _run(root, 'node', 'reseed', 'main.defaults')
+        assert plain.returncode == 0, plain.stdout + plain.stderr
+        assert record.read_bytes() == initial_record
+        assert step.read_text(encoding='utf-8') == 'original: writer\n'
+        refresh = ['--template', f'{target}@main'] if repoint else ['--ref', 'main']
+        updated = _run(root, 'node', 'reseed', 'main.defaults', *refresh)
+        assert updated.returncode == 0, updated.stdout + updated.stderr
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        assert data['path'] == target
+        assert data['commit'] == commit
+        assert data['values'] == {
+            'mission': 'original',
+            'role': 'writer',
+            'ending': 'new',
+        }
+        assert step.read_text(encoding='utf-8') == 'original: writer: new\n'
+        assert charter.read_text(encoding='utf-8') == 'Operator-authored charter.\n'
+        drift = _run(root, 'node', 'diff', 'main.defaults')
+        assert drift.returncode == 1, drift.stdout + drift.stderr
+        assert 'node/NODE.md' in drift.stdout
+        assert 'steps/01-GO.md' not in drift.stdout
+        # a missing new input cannot partly refresh the seed or its record
+        before_record, before_step = record.read_bytes(), step.read_bytes()
+        files['steps/01-GO.md'] = '{{ required_input }}\n'
+        _commit_template(root, target, files)
+        refused = _run(root, 'node', 'reseed', 'main.defaults', *refresh)
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert 'required_input' in refused.stderr
+        assert record.read_bytes() == before_record
+        assert step.read_bytes() == before_step
+        # bare replay never repairs an edited record from source defaults
+        del data['values']['mission']
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        for verb in ('diff', 'reseed'):
+            refused = _run(root, 'node', verb, 'main.defaults')
+            assert refused.returncode == 2, refused.stdout + refused.stderr
+            assert "'mission' is undefined" in refused.stderr
+        assert step.read_bytes() == before_step
+    finally:
+        _run(root, 'node', 'delete', 'main.defaults', '--force')
 
 
 def test_reseed_restores_the_seed_surfaces_and_records_the_event(
@@ -2112,7 +2198,7 @@ def test_reseed_restores_the_seed_surfaces_and_records_the_event(
         '--template',
         'templates/reseedcrew',
         '--set',
-        'mission=probe the surfaces',
+        'mission="probe the surfaces"',
     )
     assert spawn.returncode == 0, spawn.stderr
     try:

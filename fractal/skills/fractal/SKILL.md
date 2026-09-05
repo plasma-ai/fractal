@@ -58,12 +58,19 @@ continue (a continue re-arms the cap at start, not init).
 - **`include`** / **`exclude`**: template-relative paths to deploy or drop
   (repeatable; mutually exclusive; a directory entry covers its subtree),
   recorded in `_template.toml` so `node diff` and `node reseed` judge by the
-  same effective set
-- **`values`** / **`set`**: fills for the template's `{{slot}}` placeholders —
-  `values` names a TOML file of string values, `set` takes repeatable
-  `KEY=VALUE` pairs that win over the sheet; an unfilled slot refuses init
+  same effective set; only deployment outputs are selectable, and Jinja includes
+  can still read excluded outputs and source-only `_partials/` fragments
+- **`values`** / **`set`**: literal inputs for seed-time Jinja — the template's
+  optional `_template.toml` holds `[values]` defaults, `values` names a TOML
+  file whose top-level keys override those defaults, and `set` takes repeatable
+  `KEY=<TOML literal>` pairs that win over the file. Use
+  `--set 'role="reviewer"'` for text or `--set enabled=false` for a boolean;
+  lists and tables replace whole input values. Supply required inputs before
+  init; an input used by the rendered output must have a value
 - **`pin`**: commission pin (a commit sha): must resolve, and every `pin:` line
-  in the template charter must match it; also fills the `{{pin}}` slot
+  in the template charter must match it; also fills `{{pin}}`, overriding a
+  template default but requiring agreement with an explicit values-file or set
+  input
 - **`agent`**: agent command; inherits the user node's default when omitted
 - **`provider`**: provider route for the agent (e.g. `openrouter`); inherits the
   user node's default when omitted
@@ -99,6 +106,18 @@ continue (a continue re-arms the cap at start, not init).
 - **`sealed`**: seal the node's mailbox — its own seat cannot read hosted
   messages until an operator or the parent unseals it with
   `config set sealed=false` (the sealed seat cannot lift its own seal)
+
+**Template authoring** — put prose and Jinja expressions in `NODE.md`, steps,
+and included fragments such as `_partials/foundations.md`. Includes read the
+same committed template bundle and cannot reach sibling templates. Values are
+data: strings containing `{{...}}` are never rendered again, and `$VAR` stays
+for runtime rendering. The template's `_template.toml` supplies defaults; the
+node's generated `_template.toml` records complete inputs and the source commit.
+Parent edits to the rendered charter are ordinary text edits. Editing recorded
+inputs is not a live update: `node diff` and bare `node reseed` replay them,
+while an explicit `reseed --ref` or `--template` adds defaults only for missing
+keys. Reseed preserves `NODE.md`, config, and memory, so charter drift can
+remain.
 
 **Start** — `fractal node start` just launches; all run parameters come from
 `config.json`. A `max_cost` in `config.json` must be positive if set; a missing

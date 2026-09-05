@@ -86,14 +86,21 @@ exists.
 - `--include` / `--exclude` (repeatable; mutually exclusive) --
   template-relative paths to deploy or drop; a directory entry covers its
   subtree. Recorded in `_template.toml`, so `node diff` and `node reseed` judge
-  by the same effective set.
-- `--values` -- slot fill sheet: a TOML file of string values the template's
-  `{{slot}}` placeholders render with; recorded in `_template.toml`.
-- `--set KEY=VALUE` (repeatable) -- individual slot fills; a pair wins over the
-  `--values` sheet.
+  by the same effective set. Only deployment outputs are selectable; Jinja
+  includes still read source from the full committed bundle, including
+  `_partials/` and excluded outputs.
+- `--values` -- TOML inputs for seed-time Jinja rendering, overriding the
+  template's optional `_template.toml` `[values]` defaults. The external file
+  names inputs at its top level; the node's generated `_template.toml` records
+  the complete resolved map. Values remain literal data, never template source.
+- `--set KEY=VALUE` (repeatable) -- one input as a TOML literal, winning over
+  `--values`: `--set 'role="reviewer"'` supplies text and `--set enabled=false`
+  supplies a boolean. Lists and nested tables replace whole top-level values
+  rather than deep-merging.
 - `--pin=<sha>` -- commission pin: must resolve to a commit, and every `pin:`
   declaration in the template charter must match it; also fills the `{{pin}}`
-  slot.
+  input. It overrides a template default; an explicit `pin` in `--values` or
+  `--set` must agree.
 - `--agent` -- agent command (e.g. `claude`, `codex`, `grok`, `opencode`,
   `omp`). Defaults to the nearest ancestor's configured agent; the user node
   sets the tree default via `fractal init --agent`. An unknown agent is refused
