@@ -313,7 +313,8 @@ def read_defaults(bundle: pathlib.Path, *, path: str) -> dict[str, Any]:
             raise ValueError(
                 f'{source} has an unknown field: {key!r}; only [values] is allowed.'
             )
-    return validate_values(data.get('values', {}), source=source)
+    values = data.get('values', {})
+    return validate_values(values, source=source)
 
 
 def read_sources(bundle: pathlib.Path) -> dict[str, bytes]:
@@ -326,11 +327,14 @@ def read_sources(bundle: pathlib.Path) -> dict[str, bytes]:
         Exact template-relative filenames mapped to their source bytes.
 
     """
-    return {
-        entry.relative_to(bundle).as_posix(): entry.read_bytes()
-        for entry in sorted(bundle.rglob('*'))
-        if entry.is_file()
-    }
+    result: dict[str, bytes] = {}
+    for entry in sorted(bundle.rglob('*')):
+        if not entry.is_file():
+            continue
+        relfile = entry.relative_to(bundle).as_posix()
+        blob = entry.read_bytes()
+        result[relfile] = blob
+    return result
 
 
 def materialize(
@@ -562,15 +566,13 @@ def trim(
                 ' (the template may have dropped it).'
             )
             continue
-        outputs = [
-            file
-            for file in matched
-            if file == 'NODE.md'
-            or (
-                '/' in file
-                and file.split('/')[0] in ('steps', 'scripts', 'skills', 'agents')
-            )
-        ]
+        outputs = []
+        for file in matched:
+            parts = file.split('/')
+            in_surface = parts[0] in ('steps', 'scripts', 'skills', 'agents')
+            surface_file = (len(parts) > 1) and in_surface
+            if file == 'NODE.md' or surface_file:
+                outputs.append(file)
         if not outputs:
             raise ValueError(
                 f'--{flag} entry is source-only: {entry!r};'
@@ -720,8 +722,8 @@ def vet_steps(
     *,
     agent: Optional[str],
     provider: Optional[str],
-    detached: Optional[bool],
     root: pathlib.Path,
+    detached: Optional[bool],
 ) -> None:
     """Validate rendered step overrides against the node's effective settings.
 
@@ -729,8 +731,8 @@ def vet_steps(
         bundle: The rendered deployment bundle.
         agent: The node's effective agent command.
         provider: The node's effective provider route.
-        detached: Whether the node runs detached.
         root: Tree data directory for registered deployment agents.
+        detached: Whether the node runs detached.
 
     Raises:
         ValueError: If a rendered override has an invalid boolean,
@@ -818,13 +820,9 @@ def fill(
             continue
         relfile = entry.relative_to(bundle).as_posix()
         parts = relfile.split('/')
-        surface = len(parts) > 1 and parts[0] in (
-            'steps',
-            'scripts',
-            'skills',
-            'agents',
-        )
-        if relfile == 'NODE.md' or surface:
+        in_surface = parts[0] in ('steps', 'scripts', 'skills', 'agents')
+        surface_file = (len(parts) > 1) and in_surface
+        if relfile == 'NODE.md' or surface_file:
             files.append(relfile)
     rendered = render_seed(sources, files, values=values, path=path, remedy=remedy)
     for relfile, blob in rendered.items():

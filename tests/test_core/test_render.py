@@ -18,7 +18,7 @@ import tomli_w
 
 import fractal.core.render
 from fractal.core.node import Node
-from fractal.core.render import _VarTemplate, render_seed
+from fractal.core.render import _VarTemplate
 
 __all__ = [
     'test_var_template_matches_envsubst',
@@ -71,6 +71,7 @@ def test_var_template_matches_envsubst(template: str) -> None:
 @pytest.mark.parametrize('reverse', [False, True])
 def test_seed_composes_selected_outputs_from_literal_inputs(reverse: bool) -> None:
     """Includes share immutable source and data across independently rendered outputs."""
+    # compose outputs from shared helpers and literal inputs
     sources = {
         'NODE.md': (
             b"{% extends '_partials/base.md' %}"
@@ -104,7 +105,13 @@ def test_seed_composes_selected_outputs_from_literal_inputs(reverse: bool) -> No
     files = ['NODE.md', 'steps/01-summary.md']
     if reverse:
         files.reverse()
-    rendered = render_seed(sources, files, values=values, path='nodes/worker')
+    rendered = fractal.core.render.render_seed(
+        sources=sources,
+        files=files,
+        values=values,
+        path='nodes/worker',
+    )
+    # verify deployed bytes and unchanged include source
     summary = b'mission: {{ untouched }} | <a & b> | $VAR ${CURRENT_BRANCH%.*} $$\n'
     assert rendered == {
         'NODE.md': (
@@ -145,13 +152,19 @@ def test_seed_isolates_import_state_between_outputs(files: list[str]) -> None:
             b'{% endmacro %}'
         ),
     }
-    rendered = render_seed(sources, files, values={}, path='nodes/worker')
+    rendered = fractal.core.render.render_seed(
+        sources=sources,
+        files=files,
+        values={},
+        path='nodes/worker',
+    )
     expected = dict.fromkeys(files, b'1 2\n')
     assert rendered == expected
 
 
 def test_seed_replays_native_values_with_stable_table_order() -> None:
     """TOML round-trips preserve rendering, including nested table iteration."""
+    # render tables with scalar and nested values
     values = {
         'profile': {'nested': {'z': 2, 'a': 1}, 'enabled': False},
         'targets': [{'z': 2, 'a': 1}, {'b': 4, 'a': 3}],
@@ -165,8 +178,19 @@ def test_seed_replays_native_values_with_stable_table_order() -> None:
         ),
     }
     recorded = tomllib.loads(tomli_w.dumps(values))
-    seeded = render_seed(sources, ['NODE.md'], values=values, path='nodes/worker')
-    replayed = render_seed(sources, ['NODE.md'], values=recorded, path='nodes/worker')
+    seeded = fractal.core.render.render_seed(
+        sources=sources,
+        files=['NODE.md'],
+        values=values,
+        path='nodes/worker',
+    )
+    # replay the serialized inputs without changing caller-owned table order
+    replayed = fractal.core.render.render_seed(
+        sources=sources,
+        files=['NODE.md'],
+        values=recorded,
+        path='nodes/worker',
+    )
     expected = {
         'NODE.md': b'enabled,nested\na,z\na,z;a,b;\n4.5 2026-09-04 2026\n',
     }
@@ -178,10 +202,13 @@ def test_seed_replays_native_values_with_stable_table_order() -> None:
 @pytest.mark.parametrize(
     argnames=('body', 'message'),
     argvalues=[
+        # missing inputs and invalid syntax
         (b'header\n{{ mission }}', '_partials/body.md:2'),
         (b'header\n{% if %}', '_partials/body.md:2'),
+        # include names escaping the bundle
         (b"header\n{% include '../secret.md' %}", '_partials/body.md:2'),
         (b"header\n{% include '/secret.md' %}", '_partials/body.md:2'),
+        # expression and source decoding failures
         (b'header\n{{ 1 / 0 }}', '_partials/body.md:2'),
         (b'header\n{{ "text" + 1 }}', '_partials/body.md:2'),
         (b'header\n\xff', '_partials/body.md:2: source is not UTF-8'),
@@ -195,9 +222,9 @@ def test_seed_reports_the_source_of_rendering_errors(body: bytes, message: str) 
         'secret.md': b'not reachable through an absolute or traversing name',
     }
     with pytest.raises(ValueError) as exc:
-        render_seed(
-            sources,
-            ['NODE.md'],
+        fractal.core.render.render_seed(
+            sources=sources,
+            files=['NODE.md'],
             values={},
             path='nodes/worker',
             remedy='add the input to the recorded [values] table',
@@ -214,14 +241,21 @@ def test_seed_names_the_output_for_unencodable_text() -> None:
     """Unencodable Jinja results identify the output whose bytes cannot be written."""
     sources = {'NODE.md': b'{{ "\\ud800" }}'}
     with pytest.raises(ValueError, match=r'Template file nodes/worker/NODE\.md:'):
-        render_seed(sources, ['NODE.md'], values={}, path='nodes/worker')
+        fractal.core.render.render_seed(
+            sources=sources,
+            files=['NODE.md'],
+            values={},
+            path='nodes/worker',
+        )
 
 
 @pytest.mark.parametrize(
     argnames='expression',
     argvalues=[
+        # direct and joined missing values
         'missing',
         '[missing] | join(",")',
+        # container representations and explicit string conversion
         '[missing]',
         '{"value": missing}',
         '[missing] | string',
@@ -238,22 +272,37 @@ def test_seed_requires_values_displayed_through_containers(expression: str) -> N
             b'{% if false %}{{ missing }}{% endif %}\n'
         ),
     }
-    rendered = render_seed(sources, ['optional.md'], values={}, path='nodes/worker')
+    # allow explicitly optional inputs
+    rendered = fractal.core.render.render_seed(
+        sources=sources,
+        files=['optional.md'],
+        values={},
+        path='nodes/worker',
+    )
     assert rendered == {'optional.md': b'False fallback\n'}
+    # refuse missing values in displayed data
     with pytest.raises(ValueError, match="'missing' is undefined"):
-        render_seed(sources, ['NODE.md'], values={}, path='nodes/worker')
+        fractal.core.render.render_seed(
+            sources=sources,
+            files=['NODE.md'],
+            values={},
+            path='nodes/worker',
+        )
 
 
 @pytest.mark.parametrize(
     argnames='expression',
     argvalues=[
+        # mutation and randomness
         'targets.append("extra")',
         'targets | random',
         'lipsum()',
+        # date methods and locale-sensitive formatting
         'created.today()',
         'created.strftime("%B")',
         '"{0:%B}".format(created)',
         '"{created:%B}".format_map({"created": created})',
+        # clock and timezone access
         'timestamp.now()',
         'timestamp.astimezone()',
         'timestamp.tzinfo.tzname(timestamp)',
@@ -266,9 +315,9 @@ def test_seed_refuses_mutation_and_ambient_state(expression: str) -> None:
     )
     source = '{{ ' + expression + ' }}'
     with pytest.raises(ValueError, match=r'nodes/worker/NODE\.md:1'):
-        render_seed(
-            {'NODE.md': source.encode('utf-8')},
-            ['NODE.md'],
+        fractal.core.render.render_seed(
+            sources={'NODE.md': source.encode('utf-8')},
+            files=['NODE.md'],
             values=values,
             path='nodes/worker',
         )
@@ -278,10 +327,13 @@ def test_seed_refuses_mutation_and_ambient_state(expression: str) -> None:
 @pytest.mark.parametrize(
     argnames=('source', 'expected'),
     argvalues=[
+        # absent and present trailing newlines
         (b'plain', b'plain'),
         (b'plain\n', b'plain\n'),
+        # source newline normalization with literal value bytes
         (b'plain\r\n{{ value }}\r\n', b'plain\nfirst\r\nsecond\n'),
         (b'plain\r{{ value }}\r', b'plain\nfirst\r\nsecond\n'),
+        # block whitespace controls and literal braces
         (b'  {% if true %}\nbody\n{% endif %}\n', b'  \nbody\n\n'),
         (b'  {%- if true -%}\nbody\n{%- endif -%}\n', b'body'),
         (b'{% raw %}{{ x }}{% endraw %} {# hidden #}', b'{{ x }} '),
@@ -292,9 +344,9 @@ def test_seed_preserves_text_with_jinja_whitespace_rules(
     expected: bytes,
 ) -> None:
     """Jinja normalizes source newlines while values and explicit spacing stay literal."""
-    rendered = render_seed(
-        {'NODE.md': source},
-        ['NODE.md'],
+    rendered = fractal.core.render.render_seed(
+        sources={'NODE.md': source},
+        files=['NODE.md'],
         values={'value': 'first\r\nsecond'},
         path='nodes/worker',
     )

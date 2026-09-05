@@ -1715,8 +1715,8 @@ def test_init_template_preset_caps_refuse_like_flags(
 
 
 @pytest.mark.parametrize(
-    'step',
-    [
+    argnames='step',
+    argvalues=[
         '---\ndetached: true\n---\n# go detached\n',
         '---\ndetached:\n---\n# go detached\n',
         '# go detached\n\n---\ndetached: true\n---\n',
@@ -2138,6 +2138,7 @@ def test_init_template_defaults_and_includes_replay(
     """Committed includes and native inputs reproduce the selected seed bytes."""
     from fractal.core.template import diff
 
+    # commit defaults, helper sources, and deployment outputs
     Node(git_repo).init(agent='claude', user=True)
     commit = _commit_template(
         git_repo,
@@ -2179,6 +2180,7 @@ def test_init_template_defaults_and_includes_replay(
         'details = { nested = { name = "example" }, label = "report" }\n',
         encoding='utf-8',
     )
+    # refuse source-only entries in the deployment listing
     outputs = ['NODE.md', 'steps/01-GO.md', 'steps/02-CHECK.md']
     for entry in ('README.md', '_partials'):
         with pytest.raises(ValueError, match='entry is source-only'):
@@ -2187,6 +2189,7 @@ def test_init_template_defaults_and_includes_replay(
                 template=f'{git_repo}/templates/crew@{commit}',
                 include=[entry],
             )
+    # seed selected outputs from the pinned source and layered inputs
     Node(git_repo).init(
         name='crew',
         template=f'{git_repo}/templates/crew@{commit}',
@@ -2205,6 +2208,7 @@ def test_init_template_defaults_and_includes_replay(
     assert not (node_dir / 'steps' / '99-UNUSED.md').exists()
     assert not (node_dir / '_partials').exists()
     assert not (node_dir / 'README.md').exists()
+    # replay the complete recorded values without drift
     record = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
     assert record['include'] == outputs
     assert record['values'] == {
@@ -2224,6 +2228,7 @@ def test_init_template_validates_rendered_step_settings(
     """Invalid rendered overrides fail before init or reseed changes a node."""
     import tomli_w
 
+    # commit valid defaults for each rendered step setting
     Node(git_repo).init(agent='claude', user=True)
     _commit_template(
         git_repo,
@@ -2242,6 +2247,7 @@ def test_init_template_validates_rendered_step_settings(
             ),
         },
     )
+    # refuse invalid overrides before creating live artifacts
     template = f'{git_repo}/templates/crew'
     for value, message in (
         ('runner="missing_agent"', 'Unsupported agent'),
@@ -2253,6 +2259,7 @@ def test_init_template_validates_rendered_step_settings(
             Node(git_repo).init(name='crew', template=template, sets=[value])
         assert not (git_repo / '.worktrees' / 'main.crew').exists()
         assert not Node(git_repo).db.exists('nodes', where={'node': 'main.crew'})
+    # seed valid defaults and make the recorded timeout invalid
     Node(git_repo).init(name='crew', template=template)
     child = Node(git_repo / '.worktrees' / 'main.crew')
     step = child.node_dir / 'steps' / '01-GO.md'
@@ -2262,6 +2269,7 @@ def test_init_template_validates_rendered_step_settings(
     data['values']['duration'] = 'invalid'
     record.write_text(tomli_w.dumps(data), encoding='utf-8')
     record_bytes = record.read_bytes()
+    # refuse replay without rewriting the step or record
     with pytest.raises(ValueError, match='timeout must be a duration'):
         child.reseed()
     assert step.read_bytes() == before

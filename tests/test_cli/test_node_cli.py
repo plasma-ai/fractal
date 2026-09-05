@@ -88,6 +88,7 @@ __all__ = [
     'test_diff_stays_clean_after_the_template_folder_moves',
     'test_diff_never_judges_a_root_file_named_like_a_surface',
     'test_diff_and_reseed_name_the_record_remedy_for_a_missing_value',
+    'test_reseed_keeps_recorded_values_and_adds_new_defaults',
     'test_reseed_restores_the_seed_surfaces_and_records_the_event',
     'test_reseed_ref_reads_another_commit_and_keeps_exclusions',
     'test_reseed_refuses_a_missing_path_at_a_ref_and_re_points',
@@ -2078,6 +2079,7 @@ def test_reseed_keeps_recorded_values_and_adds_new_defaults(
     repoint: bool,
 ) -> None:
     """An explicit refresh adds defaults for new inputs and preserves chosen values."""
+    # seed defaults with an explicit role override
     root = repo['root']
     files = {
         'config.json': '{}\n',
@@ -2116,10 +2118,12 @@ def test_reseed_keeps_recorded_values_and_adds_new_defaults(
         )
         files['steps/01-GO.md'] = '{{ mission }}: {{ role }}: {{ ending }}\n'
         commit = _commit_template(root, target, files)
+        # replay the recorded revision without applying target defaults
         plain = _run(root, 'node', 'reseed', 'main.defaults')
         assert plain.returncode == 0, plain.stdout + plain.stderr
         assert record.read_bytes() == initial_record
         assert step.read_text(encoding='utf-8') == 'original: writer\n'
+        # refresh the source while preserving recorded values and the charter
         refresh = ['--template', f'{target}@main'] if repoint else ['--ref', 'main']
         updated = _run(root, 'node', 'reseed', 'main.defaults', *refresh)
         assert updated.returncode == 0, updated.stdout + updated.stderr

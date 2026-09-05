@@ -79,7 +79,7 @@ class _SeedEnvironment(ImmutableSandboxedEnvironment):
 
     def is_safe_callable(self: _SeedEnvironment, obj: Any) -> bool:
         """Refuse string formatting that invokes locale-aware date formatting."""
-        # Jinja wraps str.format; its datetime format specs read the host locale.
+        # unwrap Jinja's str.format wrapper; date format specs read the host locale
         method = getattr(obj, '__wrapped__', obj)
         if isinstance(getattr(method, '__self__', None), str):
             if method.__name__ in ('format', 'format_map'):
@@ -180,9 +180,9 @@ def render_seed(
             if isinstance(e, jinja2.TemplateNotFound):
                 message = f'included source not found: {e.name!r}'
             elif isinstance(e, jinja2.UndefinedError):
-                fix = (
-                    remedy or 'supply it with --set KEY=<TOML value> or a --values file'
-                )
+                fix = remedy
+                if not fix:
+                    fix = 'supply it with --set KEY=<TOML value> or a --values file'
                 message = f'{message}; {fix}'
             raise ValueError(f'Template file {location}: {message}.') from e
     return rendered

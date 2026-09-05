@@ -136,25 +136,25 @@ def node_init(app: typer.Typer) -> typer.Typer:
     # include option
     include_help = (
         'Deploy only these template-relative output paths (repeatable;'
-        ' mutex with --exclude). Jinja includes still read the full bundle.'
+        ' mutex with --exclude; Jinja includes still read the full bundle).'
     )
     include = typer.Option(None, '--include', help=include_help)
     # exclude option
     exclude_help = (
         'Skip deployment of these template-relative output paths (repeatable;'
-        ' mutex with --include). Their source remains available to Jinja includes.'
+        ' mutex with --include; source remains available to Jinja includes).'
     )
     exclude = typer.Option(None, '--exclude', help=exclude_help)
     # values option
     values_help = (
-        'TOML input values for seed-time Jinja rendering; override the'
-        " template's _template.toml defaults. Values are literal data."
+        'Literal TOML input values for seed-time Jinja rendering'
+        " (override the template's _template.toml defaults)."
     )
     values = typer.Option(None, '--values', help=values_help)
     # set option
     sets_help = (
-        'Input KEY=<TOML literal> (repeatable; wins over --values);'
-        ' quote text, e.g. --set \'role="reviewer"\', or --set enabled=false.'
+        'Input KEY=<TOML literal> (repeatable; wins over --values;'
+        ' quote text, e.g. --set \'role="reviewer"\', or --set enabled=false).'
     )
     sets = typer.Option(None, '--set', help=sets_help)
     # pin option

@@ -1668,8 +1668,8 @@ class Node:
                     template_bundle,
                     agent=agent,
                     provider=provider,
-                    detached=detached,
                     root=parent.db.path.parent,
+                    detached=detached,
                 )
             # default the display title to the de-slugged node name
             if title is None:
@@ -2318,8 +2318,8 @@ class Node:
                         bundle,
                         agent=self.agent_effective(),
                         provider=self.provider_effective(),
-                        detached=self.config.get('detached'),
                         root=self.db.path.parent,
+                        detached=self.config.get('detached'),
                     )
                     node_md = bundle / 'NODE.md'
                     if values.get('pin') is not None or node_md.is_file():
