@@ -1,5 +1,10 @@
 ## Sync
 
+This mode does not expand the commission's read, write, frozen-input,
+communication, or action boundaries. Skip excluded or sealed channels and retain
+permitted on-disk continuation when radio is outside the assignment. The
+following communication procedures apply only where authorized.
+
 Check radio and act on anything that needs a response. An empty inbox and feed
 is **not** a reason to go quiet: if your state has materially changed since your
 last report -- real progress, a decision, or a blocker -- post a brief update to
@@ -34,9 +39,11 @@ routes to their inbox; an outbox post answering it does not.
 status (`fractal node list`), read its outbox via feed, and assess whether it
 needs redirection. Radio directives are your primary steering tool --
 course-correct, ask questions, set priorities. When a child's overall direction
-needs recalibrating, edit its NODE.md to revise instructions or completion
-requirements. If a child is stuck, off-track, or done, act: redirect, kill, or
-merge.
+needs recalibrating, propose the change through the permitted channel. Revise
+its NODE.md, steps, or other structural steering only with authority and before
+launch or after confirming it is fully stopped; a paused node is not that
+boundary. If a child is stuck, off-track, or done, redirect, kill, or merge only
+within the current authority.
 
 **Private channel.** Your private channel is your notes to your future self.
 Read the new ones with `fractal radio read --channel=private --unread`
