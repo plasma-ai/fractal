@@ -7,7 +7,8 @@ refuse a slash branch with the rule named, record a sub-project target under
 its subdir, flag an adopted wiki index that lacks the tool's frontmatter
 stamps or a ``.gitattributes`` that lacks the wiki merge driver line without
 rewriting either, and sweep everything init itself wrote -- never the user's
-own pending edits -- into the baseline commit.
+own pending edits, never the wiki's per-machine Obsidian config -- into the
+baseline commit.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ __all__ = [
     'test_init_warns_about_a_missing_wiki_merge_driver_line',
     'test_commit_init_sweeps_the_gitattributes_edit',
     'test_commit_init_never_sweeps_user_gitattributes_edits',
+    'test_commit_init_keeps_the_obsidian_config_out_of_the_baseline',
 ]
 
 
@@ -344,6 +346,30 @@ def test_commit_init_never_sweeps_user_gitattributes_edits(
     committed = _git(repo, 'show', 'HEAD:.gitattributes').stdout
     assert '*.jpg' not in committed
     assert attributes.read_text(encoding='utf-8') == '*.png binary\n*.jpg binary\n'
+
+
+def test_commit_init_keeps_the_obsidian_config_out_of_the_baseline(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The baseline tracks the wiki but not its ``.obsidian/`` vault config.
+
+    ``wiki init`` materializes ``wiki/.obsidian/`` (plugin settings and,
+    online, the vendored plugin code) as per-machine state that fractal's
+    own exclude block ignores. The baseline force-adds the wiki past host
+    ignore rules, so the sweep must bar the directory itself, or the vault
+    rides into history and every later plugin update lands as a diff.
+    """
+    repo = _init_repo(tmp_path / 'repo')
+    assert _run(repo, 'init').returncode == 0
+    # precondition: init materialized the vault config beside the index
+    assert (repo / 'wiki' / '.obsidian').is_dir()
+    result = _run(repo, 'commit', 'configure main', '--init')
+    assert result.returncode == 0, result.stderr
+    committed = _git(repo, 'show', '--stat', '--name-only', '--format=', 'HEAD')
+    assert 'wiki/_index.md' in committed.stdout
+    assert '.obsidian' not in committed.stdout
+    # and the tree still reads clean: the vault stays ignored, not pending
+    assert _git(repo, 'status', '--porcelain').stdout.strip() == ''
 
 
 # ------ helpers

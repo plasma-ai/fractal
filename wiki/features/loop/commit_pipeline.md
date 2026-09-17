@@ -64,16 +64,16 @@ database and its sidecars, the status and pause markers, the headless runtime
 marker and its appended output (`.headless`, `headless.log`), the config write
 lock (`config.json.lock`), crash-stranded atomic-write temp files,
 engine-materialized system skills (`skills/.system/`), and the wiki tool's
-self-ignored derived cache (`.wiki/cache/`) never ride a work commit -- the
-baseline's force-add included. A cache a baseline once force-tracked is dropped
-from the index by the next work commit; the on-disk copy stays, and the cache's
-own ignore holds from there. Two advisory guards warn without blocking:
-workspace files silently eaten by host ignore rules are counted and reported
-(fractal's own runtime ignores -- the managed `info/exclude` block by its line
-span, so a user line sharing the file still alarms -- and self-managing ignored
-directories stay silent), and any staged file at or over 10MB is listed by name
--- an oversized file is usually an accident, but large commits are also
-legitimate.
+self-ignored derived cache (`.wiki/cache/`) and per-machine Obsidian vault
+config (`.obsidian/`) never ride a work commit -- the baseline's force-add
+included. A cache a baseline once force-tracked is dropped from the index by the
+next work commit; the on-disk copy stays, and the cache's own ignore holds from
+there. Two advisory guards warn without blocking: workspace files silently eaten
+by host ignore rules are counted and reported (fractal's own runtime ignores --
+the managed `info/exclude` block by its line span, so a user line sharing the
+file still alarms -- and self-managing ignored directories stay silent), and any
+staged file at or over 10MB is listed by name -- an oversized file is usually an
+accident, but large commits are also legitimate.
 
 ## The estate content law
 

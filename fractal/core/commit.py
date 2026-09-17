@@ -54,6 +54,10 @@ _STAGE_EXCLUDES = (
     # per-file listings, its contents
     ':!**/.wiki/cache',
     ':!**/.wiki/cache/**',
+    # the wiki tool's per-machine Obsidian vault config -- the dir entry and,
+    # for per-file listings, its contents
+    ':!**/.obsidian',
+    ':!**/.obsidian/**',
 )
 
 
