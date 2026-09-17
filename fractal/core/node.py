@@ -2618,9 +2618,9 @@ class Node:
                     notices.append(f'{key}: {prior} -> {value}')
         # a non-positive ceiling launches straight into a degenerate $0 finish, so
         # reject it; a missing ceiling means uncapped -- allowed but warned loudly
-        # since spend is then untracked, bounded only by --max-iters/--timeout (a
-        # token-priced agent with no priced model can only run this way -- a
-        # cost cap would force it onto a priced model)
+        # since spend is then bounded only by --max-iters/--timeout (a token-priced
+        # agent with no model set can only run this way -- a cost cap requires a
+        # model)
         max_cost = self.config.get('max_cost')
         if max_cost is not None and max_cost <= 0:
             raise RuntimeError(
@@ -2631,7 +2631,7 @@ class Node:
         if max_cost is None:
             self.log(
                 message=f'Warning: starting {self.branch} without a cost cap;'
-                ' spend is untracked and bounded only by --max-iters/--timeout.',
+                ' spend is bounded only by --max-iters/--timeout.',
                 level=logging.WARNING,
             )
         # re-validate the rest of the config the loop reads -- the documented

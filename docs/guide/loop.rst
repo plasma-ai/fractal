@@ -487,9 +487,9 @@ For an enforcing agent the budget is passed as a hard flag; an agent that
 stops itself at that budget records a *clean completed* step — a budget stop
 is neither a failure nor a goal-met completion. For non-enforcing agents the
 cap is advisory: the loop warns after the fact when a step's recorded cost
-exceeded ``max_step_cost``, and warns once per run when caps are armed with
-no timeout at all (one runaway step could then overshoot without bound — the
-warning names ``step_timeout`` as the remedy).
+exceeded ``max_step_cost``, and warns once per loop process when caps are
+armed with no timeout at all (one runaway step could then overshoot without
+bound — the warning names ``step_timeout`` as the remedy).
 
 Reserve mode and how a budget ends a run
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -80,17 +80,22 @@ the subtree ceiling directly, so a long iteration stops queuing steps as soon as
 descendants blow the budget rather than waiting for the boundary.
 
 Enforcement is only as good as the ledger: armed caps over fully-untracked spend
-([[features/cost/measurement|measurement]]) can never trip, and the loop warns
-once per run; caps paired with an agent that takes no budget flag and no timeout
+([[features/cost/measurement|measurement]]) can never trip, and a run that mixes
+priced and unpriced steps stands against them undercounted, since a `NULL`-cost
+step adds nothing to the guards' figure; the loop warns once per loop process in
+either case. Caps paired with an agent that takes no budget flag and no timeout
 draw the same one-time warning, since one runaway step could overshoot every cap
 unbounded. A failed ledger read holds the last good figure rather than
-re-inflating headroom.
+re-inflating headroom, and before the run's first good reading it holds the
+probes outright -- the reserve-entry probe included, so unknown spend never
+reads as drained -- and the untracked warning waits for a successful read to
+prove the spend untracked, never firing for a contention window.
 
 ## Preflight guarantees
 
 A token-priced agent cannot run without pricing: the loop refreshes the LiteLLM
 cache at run start and aborts preflight when no table can be fetched and none is
 cached (a stale cache degrades to a warning -- see
-[[features/cost/pricing|pricing]]). When a token-priced agent has no model set
-and no cap is configured, the loop warns that spend will go untracked rather
-than silently booking `$0`.
+[[features/cost/pricing|pricing]]). The refresh runs whether or not a model is
+configured: a token-priced agent with no model set is priced at the served model
+its session record names.

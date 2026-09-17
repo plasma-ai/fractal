@@ -378,7 +378,7 @@ describes how spend is measured and how the caps are enforced.
      - Per-**run** spend ceiling for the node's subtree (its own steps plus
        descendant runs). Re-armed at every launch — it is not a lifetime
        budget. Starting an uncapped node is allowed but logs a loud warning:
-       spend is untracked and bounded only by ``max_iters``/``timeout``.
+       spend is bounded only by ``max_iters``/``timeout``.
    * - ``max_iter_cost``
      - ``null``
      - Per-iteration cap. Requires ``max_cost`` and must not exceed it.

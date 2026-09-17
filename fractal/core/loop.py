@@ -365,6 +365,7 @@ class Loop:
         self._budget_stem = ''
         self._cap_overshoot = ''
         self._untracked_warned = False
+        self._unpriced_warned = False
         # per-surface latches for the live-retune rejections (warn once per
         # distinct value, not once per iteration)
         self._warned: dict[str, str] = {}
@@ -693,16 +694,6 @@ class Loop:
                     'Warning: could not refresh pricing; using cached pricing.json.',
                     file=sys.stderr,
                 )
-        # warn when the agent's cost is priced from a model but none is set
-        # (and no cap forces the issue) -- its spend would silently go untracked
-        caps = (self._max_cost, self._max_iter_cost, self._max_step_cost)
-        no_caps = all(cap is None for cap in caps)
-        if self._agent.needs_pricing and not self._node_model and no_caps:
-            print(
-                f'Warning: no model set for {self._agent.name}; its cost'
-                ' cannot be priced and will not be tracked',
-                file=sys.stderr,
-            )
         # provider preflight via the seam: the binary must be on PATH, and a
         # token-priced agent with an explicit model is probed once (some codex
         # accounts reject some explicit models; the pricing check only proves
@@ -1751,8 +1742,12 @@ class Loop:
             # (may drain mid-iteration); the boundary then ends the run,
             # never self-stop here
             if not self._reserve and self._max_cost is not None:
-                remaining = self._run_remaining()
-                if remaining <= self._reserve_budget:
+                # a failed read before the run's first good reading, or an
+                # untracked run, reads None and holds -- never enter RESERVE
+                # on unknown spend
+                spent = self._run_spent()
+                reserve_floor = float(self._max_cost) - self._reserve_budget
+                if spent is not None and spent >= reserve_floor:
                     self._reserve = True
             # enter RESERVE when an ancestor's budget abort left a pending
             # finish -- the current iteration is the run's last (the
@@ -3482,9 +3477,13 @@ class Loop:
         """Return the run's subtree spend at the ledger's display precision.
 
         Budgets are per-run (runs are isolated); ``None`` when the
-        spend is untracked. A failed read warns and returns the last
-        good reading -- never ``None``, which reads as untracked and
-        would disarm the budget probes for a mere contention window.
+        spend is untracked, which under armed caps warns once per loop
+        process from here -- the one place a successful read proves it,
+        and only once an ended NULL-cost row does (an open step reads as
+        unknown too). A failed read warns and returns the last good
+        reading, or ``None`` before the run's first successful read;
+        the budget probes hold on ``None`` either way, so a contention
+        window neither disarms them for good nor blames unpriced steps.
         Cost is recorded, never estimated: an ended step with a NULL
         cost (killed before its usage flush) counts as zero, not an
         imputed per-step figure -- NULL is the ledger's honest signal
@@ -3493,12 +3492,30 @@ class Loop:
         try:
             spent = self.node.cost.spent(run_id=self._run_id)
             if spent == 0.0 and self.node.cost.untracked(run_id=self._run_id):
+                # an open step reads as unknown too -- warn only over an ended
+                # NULL row, the spend that is unknowable for good
+                unpriced = self.node.cost.unpriced(run_id=self._run_id)
+                if self._max_cost is not None and unpriced:
+                    self._warn_untracked_spend()
                 return None
         except Exception:
             self._warn_unreadable_spend()
             return self._last_run_spent
         self._last_run_spent = round(spent, 4)
         return self._last_run_spent
+
+    def _run_unpriced(self: Loop) -> Optional[int]:
+        """Return the run's count of ended steps with no recorded cost.
+
+        ``None`` when the read fails -- never ``0``, which reads as "no
+        unpriced steps". Advisory input to the budget probes only: a
+        failed read must not add a second warning beside the spend
+        reader's own.
+        """
+        try:
+            return self.node.cost.unpriced(run_id=self._run_id)
+        except Exception:
+            return None
 
     def _run_remaining(self: Loop) -> float:
         """Return the run's remaining budget, clamped at 0 (display precision).
@@ -3597,8 +3614,12 @@ class Loop:
             return False
         spent = self._run_spent()
         if spent is None:
-            self._warn_untracked_spend()
             return False
+        # the latch spares the count once the warning has fired
+        if not self._unpriced_warned:
+            unpriced = self._run_unpriced()
+            if unpriced:
+                self._warn_unpriced_spend(unpriced)
         if spent >= float(self._max_cost):
             self._send_budget_finish(
                 f'Subtree cost budget reached'
@@ -3636,8 +3657,12 @@ class Loop:
             return False
         spent = self._run_spent()
         if spent is None:
-            self._warn_untracked_spend()
             return False
+        # the latch spares the count once the warning has fired
+        if not self._unpriced_warned:
+            unpriced = self._run_unpriced()
+            if unpriced:
+                self._warn_unpriced_spend(unpriced)
         if spent >= float(self._max_cost) - self._reserve_budget:
             self._send_budget_finish(
                 f'Total cost budget reserve reached'
@@ -3677,7 +3702,7 @@ class Loop:
         self._budget_stem = stem
 
     def _warn_soft_cap(self: Loop) -> None:
-        """Scream once per run when armed caps have no in-step brake.
+        """Scream once per loop process when armed caps have no in-step brake.
 
         A non-enforcing agent takes no per-step budget flag, so its cap
         is checked only between steps -- with no run/iter/step timeout
@@ -3706,12 +3731,14 @@ class Loop:
         )
 
     def _warn_untracked_spend(self: Loop) -> None:
-        """Scream once per run when armed caps read untracked spend.
+        """Scream once per loop process when armed caps read untracked spend.
 
-        Shared by both budget probes: an all-NULL run counts $0 in the
-        guards, so neither can ever trip -- advisory only, never a
-        block (the edge only arises from runs whose real un-metered
-        spend is near zero).
+        Fired from the spend reader, where a successful read proves the
+        run untracked -- never from a failed read, which warns for
+        itself: an all-NULL run counts $0 in the guards, so neither
+        budget probe can ever trip. Advisory only, never a block (the
+        edge only arises from runs whose real un-metered spend is near
+        zero).
         """
         if self._untracked_warned:
             return
@@ -3721,8 +3748,24 @@ class Loop:
             ' (unpriced steps); budget guards cannot trip.'
         )
 
+    def _warn_unpriced_spend(self: Loop, count: int) -> None:
+        """Scream once per loop process when armed caps read unpriced steps.
+
+        Shared by both budget probes: a NULL-cost step adds nothing to the
+        guards' figure, so a run mixing priced and unpriced steps stands
+        against its caps undercounted -- advisory only, never a block.
+        """
+        if self._unpriced_warned:
+            return
+        self._unpriced_warned = True
+        s = 's' if count != 1 else ''
+        print(
+            f'WARNING: cost caps are set but {count} step{s} in this run'
+            ' recorded no cost (NULL); budget guards undercount.'
+        )
+
     def _warn_unreadable_spend(self: Loop) -> None:
-        """Scream once per run when a cost-ledger read fails.
+        """Scream once per loop process when a cost-ledger read fails.
 
         Shared by every budget reader: the failed read falls back to
         the last good reading rather than the full cap, so the guards

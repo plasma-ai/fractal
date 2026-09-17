@@ -61,6 +61,7 @@ __all__ = [
     'test_preflight_probe_rides_the_step_marker',
     'test_preflight_abort_honors_a_kill_that_reaped_the_probe',
     'test_boot_reaps_an_orphaned_probe_group',
+    'test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -70,8 +71,11 @@ __all__ = [
     'test_soft_cap_warning_fires_once_for_unbraked_caps',
     'test_step_budget_reserve_window_floors_at_remaining',
     'test_boundary_checks_read_live_caps',
-    'test_untracked_spend_under_caps_warns_once',
+    'test_unpriced_spend_under_caps_warns_once',
+    'test_priced_first_step_never_reads_as_untracked',
     'test_failed_cost_reads_hold_the_last_good_reading',
+    'test_failed_cost_read_before_the_first_good_reading_holds',
+    'test_failed_cost_read_at_the_iteration_top_never_enters_reserve',
     'test_cap_gate_demands_a_priced_model_from_tracking_gaps',
     'test_pending_finish_winds_down_in_reserve_for_budget_cascades',
     'test_pending_finish_between_iterations_starts_none',
@@ -1342,6 +1346,35 @@ def test_boot_reaps_an_orphaned_probe_group(
         leader.wait()
 
 
+def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A codex node with no configured model still refreshes the price table.
+
+    A token-priced step is priced at the served model its own session
+    record names, so the table is needed whether or not a model is
+    configured: the refresh (and its no-cache abort) gates the boot the
+    same way it does for a pinned model, and the boot claims nothing
+    about the spend going untracked.
+    """
+    _configure(loop_node, agent='codex')
+    loop = Loop(loop_node)
+    # `sh` stands in for the codex binary; with no model there is no probe
+    monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+    refreshed: list[Optional[str]] = []
+
+    def fake_update(max_age: Optional[str] = None) -> str:
+        refreshed.append(max_age)
+        return 'fresh'
+
+    monkeypatch.setattr(pricing, 'update', fake_update)
+    loop._preflight()
+    assert refreshed == [None]
+    assert 'will not be tracked' not in capsys.readouterr().err
+
+
 # ------ boot latch
 
 
@@ -1551,7 +1584,7 @@ def test_soft_cap_warning_fires_once_for_unbraked_caps(
     out = capsys.readouterr().out
     assert 'overshoot' in out
     assert '--step-timeout' in out
-    # once per run: the iteration-top re-check stays silent
+    # once per loop process: the iteration-top re-check stays silent
     loop._warn_soft_cap()
     assert 'overshoot' not in capsys.readouterr().out
     # any armed timeout silences a fresh boot
@@ -1603,36 +1636,84 @@ def test_boundary_checks_read_live_caps(loop_node: Node) -> None:
     assert uncapped._check_subtree_ceiling() is True
 
 
-def test_untracked_spend_under_caps_warns_once(
+@pytest.mark.parametrize(
+    argnames=('priced_costs', 'warning'),
+    argvalues=[
+        # every step NULL: the whole run's spend is untracked
+        ([], "WARNING: cost caps are set but this run's spend is untracked"),
+        # a priced step beside the NULL one: the guards undercount
+        ([1.0], 'WARNING: cost caps are set but 1 step in this run recorded no cost'),
+    ],
+    ids=['untracked', 'mixed'],
+)
+def test_unpriced_spend_under_caps_warns_once(
     loop_node: Node,
     capsys: pytest.CaptureFixture,
+    priced_costs: list[float],
+    warning: str,
 ) -> None:
-    """Armed caps over untracked spend warn once per run and never block.
+    """Armed caps over unpriced spend warn once per loop process and never block.
 
-    An all-NULL run counts $0 in the guards, so neither boundary check
-    can ever trip; the first probe says so loudly (advisory only) and
-    the latch keeps every later probe quiet. An uncapped run has
-    nothing inert to warn about.
+    A NULL-cost step adds nothing to the guards' figure: an all-NULL run
+    counts $0, so neither boundary check can ever trip, and a run mixing
+    priced and unpriced steps stands against its caps undercounted. The
+    first probe says so loudly (advisory only) and the latch keeps every
+    later probe quiet. An uncapped run has nothing inert to warn about.
     """
     node = loop_node
     _configure(node, max_cost=5.0)
     loop = MockLoop(node)
     loop._run_id = node.record.run_start()
+    for cost in priced_costs:
+        _record_step_cost(node, run_id=loop._run_id, cost=cost)
     _record_unpriced_step(node, run_id=loop._run_id)
-    # the first probe warns without tripping ...
+    # the first probe warns without tripping -- one warning, never the
+    # other branch's beside it ...
     assert loop._check_subtree_ceiling() is False
-    warning = "WARNING: cost caps are set but this run's spend is untracked"
-    assert warning in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert warning in out
+    assert out.count('WARNING:') == 1
     # ... and the latch keeps the other boundary check quiet
     assert loop._check_reserve_boundary() is False
     assert capsys.readouterr().out == ''
-    # the same untracked spend on an uncapped run stays quiet
+    # the same unpriced spend on an uncapped run stays quiet
     _configure(node, max_cost=None)
     uncapped = MockLoop(node)
     uncapped._run_id = node.record.run_start()
+    for cost in priced_costs:
+        _record_step_cost(node, run_id=uncapped._run_id, cost=cost)
     _record_unpriced_step(node, run_id=uncapped._run_id)
     assert uncapped._check_reserve_boundary() is False
     assert capsys.readouterr().out == ''
+
+
+def test_priced_first_step_never_reads_as_untracked(
+    loop_node: Node,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A capped run whose every step prices itself never warns of untracked spend.
+
+    While a step's prompt is built its row is open and cost-NULL, which the
+    ledger reads as unknown but not as spend unknowable for good; the
+    once-per-loop-process warning stays unspent for a run that later turns out
+    genuinely untracked.
+    """
+    _configure(loop_node, max_iters=1, max_cost=5.0)
+
+    class _PricingLoop(MockLoop):
+        """Mock loop whose every launch flushes a cost onto its step row."""
+
+        def _launch(
+            self: _PricingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Price the step, then run the scripted outcome."""
+            self.node.record.step_cost(step_id=self._step_id, cost=0.5)
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = _PricingLoop(loop_node)
+    assert loop.run() == 0
+    assert len(loop.launched) > 0
+    assert 'untracked' not in capsys.readouterr().out
 
 
 def test_failed_cost_reads_hold_the_last_good_reading(
@@ -1645,8 +1726,8 @@ def test_failed_cost_reads_hold_the_last_good_reading(
     A failed read must not size the per-step leash at the full cap
     ("nothing spent") or read as untracked spend: the leash and the
     boundary probes hold the last good reading until the ledger reads
-    again, and the once-per-run warning names the read failure instead
-    of blaming unpriced steps.
+    again, and the once-per-loop-process warning names the read failure
+    instead of blaming unpriced steps.
     """
     node = loop_node
     _configure(node, max_cost=10.0, max_iter_cost=1.0, reserve_budget=1.0)
@@ -1682,6 +1763,143 @@ def test_failed_cost_reads_hold_the_last_good_reading(
     # attribution stays honest -- no unpriced-steps (untracked) blame
     assert loop._check_reserve_boundary() is True
     assert 'untracked' not in capsys.readouterr().out
+
+
+def test_failed_cost_read_before_the_first_good_reading_holds(
+    loop_node: Node,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed read with no prior good reading holds without blaming steps.
+
+    Before the run's first successful read there is no last good figure
+    to fall back on: the probe holds (never trips), the warning names
+    the read failure, and the untracked-spend warning stays unspent --
+    it fires once the ledger reads again and proves the run untracked,
+    not for a contention window it never saw through.
+    """
+    node = loop_node
+    _configure(node, max_cost=5.0)
+    loop = MockLoop(node)
+    loop._run_id = node.record.run_start()
+    _record_unpriced_step(node, run_id=loop._run_id)
+
+    # the DB is contended from the run's first probe
+    def locked_read(*args: Any, **kwargs: Any) -> Any:
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr(node.db, 'read', locked_read)
+    assert loop._check_subtree_ceiling() is False
+    out = capsys.readouterr().out
+    assert 'WARNING: cost read failed' in out
+    assert 'untracked' not in out
+    # the ledger recovers: the same probe reads the spend, proves it
+    # untracked and warns -- the failed read spent no latch
+    monkeypatch.undo()
+    assert loop._check_reserve_boundary() is False
+    warning = "WARNING: cost caps are set but this run's spend is untracked"
+    assert warning in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    argnames=('resume', 'failing'),
+    argvalues=[
+        # a fresh run: the iteration-start spend read and the probe's own
+        # read both fail, so no good reading exists to hold
+        (False, ('spent', 'remaining')),
+        # a resumed run over an unpriced step: the spend reads untracked
+        # (None, never priming a last good reading), so one failed headroom
+        # read is all it takes
+        (True, ('remaining',)),
+    ],
+    ids=['fresh_both_reads_fail', 'resume_single_read_fails'],
+)
+def test_failed_cost_read_at_the_iteration_top_never_enters_reserve(
+    loop_node: Node,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
+    failing: tuple[str, ...],
+) -> None:
+    """A contended ledger at the iteration top never flips the run into RESERVE.
+
+    Unknown spend is not drained spend: a failed read before the run's
+    first good reading holds the reserve-entry probe like every other
+    budget probe, so the step launches with its plain prompt (no Reserve
+    Mode doc) and its approval gate still waits. Entering RESERVE on
+    ignorance would run the iteration as a wind-down and skip every
+    approval gate in it.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    (node.node_dir / 'steps' / '02-EXECUTE.md').write_text(
+        '---\nrequires_approval: true\n---\n# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
+    _configure(node, max_cost=5.0)
+    if resume:
+
+        class _Parking(MockLoop):
+            """Run step 1 unpriced (NULL cost) and park the run before step 2."""
+
+            def _launch(
+                self: _Parking, step: Step, prompt: str, **kwargs: Any
+            ) -> StepResult:
+                """Request the pause the pre-step check parks on."""
+                self.node.record.signal_set('pause', 'operator')
+                return super()._launch(step, prompt, **kwargs)
+
+        assert _Parking(node).run() == 0
+        assert node.status() == 'paused'
+        capsys.readouterr()
+        monkeypatch.setenv('_NODE', f'{node.node_dir}')
+    # the ledger is contended from the iteration start until the step is
+    # under way -- every named read raises like a lock timeout would
+    contended = {'on': True}
+
+    def contend(real: Any) -> Any:
+        """Wrap a ledger reader to fail while the contention window is open."""
+
+        def locked_read(*args: Any, **kwargs: Any) -> Any:
+            if contended['on']:
+                raise sqlite3.OperationalError('database is locked')
+            return real(*args, **kwargs)
+
+        return locked_read
+
+    for name in failing:
+        monkeypatch.setattr(node.cost, name, contend(getattr(node.cost, name)))
+    prompts: list[str] = []
+    approvals: list[str] = []
+
+    class _Recovering(MockLoop):
+        """Mock loop whose ledger reads again once a step is under way."""
+
+        def _run_step(self: _Recovering, step: Step) -> StepResult:
+            """Lift the contention before the step's own leash reads."""
+            contended['on'] = False
+            return super()._run_step(step)
+
+        def _launch(
+            self: _Recovering, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the prompt, then price the step."""
+            prompts.append(prompt)
+            self.node.record.step_cost(step_id=self._step_id, cost=0.5)
+            return super()._launch(step, prompt, **kwargs)
+
+        def _wait_for_approval(self: _Recovering, step: Step) -> str:
+            """Record the gate instead of polling it."""
+            approvals.append(self._step_label)
+            return 'approved'
+
+    loop = _Recovering(node, resume=resume)
+    assert loop.run() == 0
+    # the probe held: the steps launched plain and the gate still waited
+    assert loop._reserve is False
+    assert prompts
+    assert all('Reserve Mode' not in prompt for prompt in prompts)
+    assert approvals == ['step 2 of 2 (EXECUTE)']
 
 
 def test_cap_gate_demands_a_priced_model_from_tracking_gaps(

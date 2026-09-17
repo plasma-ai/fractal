@@ -25,6 +25,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Added
 
+- The loop warns once per loop process when cost caps are set and the run mixes
+  priced and unpriced steps: a `NULL`-cost step adds nothing to the budget
+  guards' figure, so the caps undercount. An all-unpriced run keeps its own
+  warning.
 - `node start --headless` / `--tmux`: the loop runs in a detached process group
   instead of a tmux session, its output appended to the node's `headless.log`
   with one `=== Launched ... ===` banner per launch, so a tree runs on a host
@@ -285,6 +289,17 @@ may include breaking changes, each listed under a Breaking heading.
 - `node retire` refuses an already-retired node
   (`Cannot retire: node is already retired.`), so the recorded pre-retire status
   stays the real one and `unretire` restores it exactly.
+- A cost-ledger read that fails before the run's first good reading holds the
+  budget probes without blaming unpriced steps: the untracked-spend warning
+  fires only once a successful read proves the run untracked, so a contention
+  window at run start spends neither that warning's once-per-loop-process latch
+  nor its attribution.
+- The reserve-entry probe at each iteration top reads the run's spend through
+  the same guarded reader as the other budget probes and holds on unknown spend,
+  so a ledger read that fails before the run's first good reading — one failed
+  read is enough on a resumed run whose steps are all unpriced — never enters
+  RESERVE, which would run the iteration as a wind-down with every approval gate
+  skipped.
 - The pricing refresh reports an unwritable cache directory (a read-only or
   foreign-owned `~/.fractal`, a full disk) as a failed fetch — `stale` with a
   cache, `missing` without — so the loop's preflight aborts with
@@ -321,6 +336,17 @@ may include breaking changes, each listed under a Breaking heading.
   when no table can be fetched and none is cached
   (`Could not fetch pricing and no cached pricing.json exists.`), as a node with
   a pinned model does.
+- The
+  `no model set for <agent>; its cost cannot be priced and will not be tracked`
+  preflight warning is removed: with no model set the spend is priced at the
+  served model, a served model missing from the table is reported per step
+  (`codex usage unpriced: ...`), and a cost cap over a model-less token-priced
+  agent is still refused at the step launch.
+- `node init`'s uncapped-spend advisory
+  (`Warning: no --max-cost/--max-iters -- this node can run and spend without bound.`)
+  fires for a token-priced agent with no model set, since its spend is priced at
+  the served model, and stays quiet only for a model — pinned by flag, by
+  template preset, or by `--inherit config` — that the price table lacks.
 - `node merge` holds the squash to the node's commit scope: before committing,
   the staged paths outside `.fractal/` are judged by the node's scope roots and
   its project wiki (a repo-root node without a scope is unrestricted; a
