@@ -149,13 +149,14 @@ is judged by its own group instead — tmux's "no such session" defers to a live
 or unverified group, and with no tmux answer at all the recorded group is the
 whole answer, while a socket-less node with no `.pgid` record then stays
 unknown. The group probe compares the leader's start instant with the `.pgid`
-record's timestamp to fence PID reuse, and arbitrates a group owned by another
-user the same way. Only a failed `ps` is inconclusive: reconciliation keeps the
-run active, teardown refuses, kill refuses and names the `ps -p` check and the
-record to clear, and reaping spares any group it cannot positively identify. The
-scripts' own `kill -0` checks are handle-selection gates, never identity
-verdicts — identity is judged only by this Python law, `Node._kill`'s flock'd
-vet included.
+record's timestamp to fence PID reuse — a group that outlived its leader is
+proven by a surviving member, never by the id alone, since a reaped group's id
+still answers `killpg` — and arbitrates a group owned by another user the same
+way. Only a failed `ps` is inconclusive: reconciliation keeps the run active,
+teardown refuses, kill refuses and names the `ps -p` check and the record to
+clear, and reaping spares any group it cannot positively identify. The scripts'
+own `kill -0` checks are handle-selection gates, never identity verdicts —
+identity is judged only by this Python law, `Node._kill`'s flock'd vet included.
 
 The crashed-but-active heal holds no flock over its probe, so it fences its own
 writes instead: it fingerprints `.pgid`/`.step_pgid` before probing, re-verifies

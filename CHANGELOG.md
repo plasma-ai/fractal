@@ -300,6 +300,19 @@ may include breaking changes, each listed under a Breaking heading.
   read is enough on a resumed run whose steps are all unpriced — never enters
   RESERVE, which would run the iteration as a wind-down with every approval gate
   skipped.
+- The process-group identity check arbitrates a leaderless group by its members:
+  when `ps -p` finds no leader for a recorded `.pgid`/`.step_pgid` group, the
+  group counts as alive only if a process-table walk lists a member in it, so a
+  reaped loop whose group id still answers `killpg` for a few milliseconds
+  during another walk is judged dead instead of standing down the crash heal or
+  a lifecycle refusal until the next probe.
+- The process-group identity check reads the leader's start instant in UTC: `ps`
+  prints a local wall-clock instant, ambiguous through the hour a DST fall-back
+  repeats, so a loop or agent group spawned in that hour's first pass dates no
+  later than its own record instead of reading as a recycled id for the whole
+  run — which would reap the live loop's record through the crash heal and close
+  its rows while it keeps running, boot a second loop over it on a later
+  `start`, and drop the record before `kill` signals.
 - The pricing refresh reports an unwritable cache directory (a read-only or
   foreign-owned `~/.fractal`, a full disk) as a failed fetch — `stale` with a
   cache, `missing` without — so the loop's preflight aborts with

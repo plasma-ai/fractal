@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import contextlib
 import fcntl
 import functools
@@ -6715,10 +6716,11 @@ def _group_alive(pgid_file: pathlib.Path) -> Optional[bool]:
     dates it by its mtime. Alive is not identity: a recycled id answers
     ``killpg`` from an unrelated group, so a live group counts only when
     :func:`_recorded_group` dates its leader no later than the record.
-    ``EPERM`` proves the group exists but belongs to another user; the loop
-    runs as the operator, so ``ps`` -- which reads any user's process --
-    arbitrates that group the same way. Only a failed ``ps`` leaves the
-    answer open.
+    ``EPERM`` names a group that belongs to another user -- or a reaped
+    leader's id that still answers while another process-table walk holds
+    it; the loop runs as the operator, so ``ps`` -- which reads any user's
+    process -- arbitrates that group the same way. Only a failed ``ps``
+    leaves the answer open.
 
     Args:
         pgid_file: The record to probe.
@@ -6750,10 +6752,11 @@ def _recorded_group(pgid: int, recorded_at: float) -> Optional[bool]:
     A group id is its leader's pid, and the leader is already running when
     the loop records it -- so a leader ``ps`` dates *after* the record is a
     recycled pid fronting an unrelated group. A group that outlived its
-    leader still matches: the OS cannot re-issue the id while any member
-    survives. No answer to arbitrate with (``ps`` failed, an unparseable
-    instant) is inconclusive, so lifecycle probes never mistake ignorance for
-    proof that the loop died.
+    leader is proven by its members: the OS cannot re-issue the id while any
+    member survives, so a leaderless id with no member left is a reaped group
+    that still answers ``killpg``, not a live one. No answer to arbitrate
+    with (``ps`` failed, an unparseable instant) is inconclusive, so
+    lifecycle probes never mistake ignorance for proof that the loop died.
 
     Args:
         pgid: A live process group id (its leader's pid).
@@ -6764,8 +6767,11 @@ def _recorded_group(pgid: int, recorded_at: float) -> Optional[bool]:
         cannot be verified.
 
     """
-    # ask ps for the leader's start instant (LC_ALL pins the format)
-    env = {**os.environ, 'LC_ALL': 'C'}
+    # ask ps for the leader's start instant (LC_ALL pins the format, TZ the
+    # zone: a local-time lstart is ambiguous through the hour a fall-back
+    # repeats, and mktime would date a first-pass leader an hour late --
+    # after its own record)
+    env = {**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'}
     try:
         result = subprocess.run(
             ['ps', '-p', f'{pgid}', '-o', 'lstart='],
@@ -6776,15 +6782,30 @@ def _recorded_group(pgid: int, recorded_at: float) -> Optional[bool]:
     except OSError:
         return None
     lstart = result.stdout.strip()
-    # ps reports an unmatched selection as one with no output: the live group
-    # outlived its leader, which pins its identity; every other failed or empty
-    # answer is inconclusive
+    # ps reports an unmatched selection as one with no output: either the
+    # live group outlived its leader (its members pin its identity) or a
+    # reaped leader's id still answers killpg while another process-table
+    # walk holds the group -- the member list arbitrates; every other
+    # failed or empty answer is inconclusive
     if result.returncode == 1 and not lstart and not result.stderr.strip():
-        return True
+        try:
+            members = subprocess.run(
+                ['ps', '-A', '-o', 'pid=,pgid='],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        except OSError:
+            return None
+        if members.returncode != 0:
+            return None
+        # the group lives while any process still names it
+        pgids = {row.split()[-1] for row in members.stdout.splitlines() if row.strip()}
+        return f'{pgid}' in pgids
     if result.returncode != 0 or not lstart:
         return None
     try:
-        started = time.mktime(time.strptime(lstart, '%a %b %d %H:%M:%S %Y'))
+        started = calendar.timegm(time.strptime(lstart, '%a %b %d %H:%M:%S %Y'))
     except ValueError:
         return None
     # a second of slack: lstart floors to the second, and the record
