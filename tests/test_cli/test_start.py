@@ -159,6 +159,9 @@ def test_headless_start_runs_without_tmux(repo: dict) -> None:
     assert pgid_gone, log.read_text(encoding='utf-8')
     first = log.read_text(encoding='utf-8')
     assert first
+    # the transcript carries the loop's own output, never an interpreter
+    # warning raised on the way into the entry point
+    assert 'RuntimeWarning' not in first, first
 
     # the log appends across launches: a continue keeps the first run's
     # transcript in place and opens with its own banner

@@ -2829,7 +2829,7 @@ class Node:
         """Start the loop in its own process group, recording it before it boots.
 
         The ``start.sh`` headless arm's handoff (``node _launch``). The argv
-        pins the invoking interpreter (``sys.executable -m fractal.cli.main``)
+        pins the invoking interpreter (``sys.executable -m fractal``)
         so the loop runs this installation's fractal, not whatever ``fractal``
         a PATH shim or a fronted foreign install resolves to. Writes the
         ``.headless`` marker beside the ``.pgid`` record: the marker is the
@@ -2966,7 +2966,7 @@ class Node:
             loop_args = [
                 sys.executable,
                 '-m',
-                'fractal.cli.main',
+                'fractal',
                 'node',
                 '_loop',
                 f'--path={self._root}',
