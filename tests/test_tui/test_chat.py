@@ -12,6 +12,7 @@ included.
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import sys
 from typing import Optional
 
@@ -48,6 +49,8 @@ __all__ = [
     'test_chat_turn_cancel_kills_without_error',
     'test_chat_turn_surfaces_launch_failure_as_an_error_event',
     'test_chat_turn_degrades_a_raising_parser',
+    'test_chat_turn_closes_on_a_finalizer_result',
+    'test_chat_turn_degrades_a_raising_finalizer',
     'test_chat_controller_owns_the_turn_lifecycle',
     'test_chat_controller_queues_sends_fifo',
     'test_chat_controller_clocks_the_watchdog',
@@ -266,6 +269,33 @@ class _RaisingAgent(ClaudeAgent):
     __parser__ = _RaisingParser
 
 
+class _FinishingAgent(ClaudeAgent):
+    """A backend whose finalizer closes the drained stream with a settled result."""
+
+    # the cost the settled result carries; None settles with no cost fact
+    cost: Optional[float] = 0.5
+
+    def _finish_stream(
+        self: _FinishingAgent,
+        parser: StreamParser,
+        process: Optional[subprocess.Popen],
+    ) -> list[StreamEvent]:
+        """Close on a fixed result carrying the configured cost."""
+        return [StreamEvent(kind='result', cost=self.cost, duration=2.0)]
+
+
+class _RaisingFinalizerAgent(ClaudeAgent):
+    """A backend whose finalizer raises once the stream drains."""
+
+    def _finish_stream(
+        self: _RaisingFinalizerAgent,
+        parser: StreamParser,
+        process: Optional[subprocess.Popen],
+    ) -> list[StreamEvent]:
+        """Raise after the drain."""
+        raise ValueError('accounting storage unavailable')
+
+
 def _agent(node_dir: pathlib.Path) -> ClaudeAgent:
     """A real claude backend bound to a throwaway node."""
     return ClaudeAgent(Node(node_dir), 'claude')
@@ -339,12 +369,12 @@ def test_chat_turn_summarizes_only_the_final_opencode_step(
 
 
 def test_chat_turn_codex_result_closes_the_turn_once(tmp_path: pathlib.Path) -> None:
-    """Codex's terminal result (final=False) closes the turn once, cleanly.
+    """Codex's terminal result closes the turn once, cleanly.
 
-    Codex omits ``final`` on its result (no authoritative cost rides its
-    stream), so the close gate treats a non-opencode result as terminal --
-    the turn closes on its own result, not the kill/truncated-stream
-    fallback, and renders exactly one closing line.
+    Codex emits its result from the post-drain finish frame, marked final
+    with its settled cost, so the close gate treats it as terminal -- the
+    turn closes on its own result, not the kill/truncated-stream fallback,
+    and renders exactly one closing line.
     """
     code = (
         'import json\n'
@@ -417,6 +447,42 @@ def test_chat_turn_degrades_a_raising_parser(tmp_path: pathlib.Path) -> None:
     events = list(ChatTurn(_command(code), agent).events())
     assert [event.kind for event in events] == ['error', 'meta']
     assert 'stream parse error: unexpected shape' in events[0].text
+
+
+@pytest.mark.parametrize(
+    argnames=('cost', 'close'),
+    argvalues=[
+        pytest.param(0.5, 'done · 2.0s · $0.50', id='priced'),
+        pytest.param(None, 'done · 2.0s · $?', id='unpriced'),
+    ],
+)
+def test_chat_turn_closes_on_a_finalizer_result(
+    cost: Optional[float],
+    close: str,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A result the finalizer emits after exit closes the turn once.
+
+    A backend that prices after its process exits (codex) emits no result
+    from ``feed``; the post-drain ``finish_stream`` frame is the turn's
+    close, rendered exactly once on wall time and cost -- ``$?`` when the
+    result settles with no cost fact, matching the CLI's final close.
+    """
+    code = "import json\nprint(json.dumps({'type': 'system', 'session_id': 's-1'}))\n"
+    agent = _FinishingAgent(Node(tmp_path), 'claude')
+    agent.cost = cost
+    events = list(ChatTurn(_command(code), agent).events())
+    assert [event.kind for event in events] == ['session', 'meta']
+    assert events[1].text == close
+
+
+def test_chat_turn_degrades_a_raising_finalizer(tmp_path: pathlib.Path) -> None:
+    """A finalizer that raises degrades to an error event, never a raise."""
+    code = "print('one line')\n"
+    agent = _RaisingFinalizerAgent(Node(tmp_path), 'claude')
+    events = list(ChatTurn(_command(code), agent).events())
+    assert [event.kind for event in events] == ['error', 'meta']
+    assert 'stream finalization error: accounting storage unavailable' in events[0].text
 
 
 # ------ ChatController (framework-free turn state)

@@ -209,10 +209,11 @@ class StreamRenderer:
             # the preview's own leading newline closes any open text run
             self._streaming = False
             print(f'\n{color}{preview}{label}{_RESET}', end='', flush=True)
-        # the closing summary -- the facts vary per provider (a codex result
-        # closes on wall time and carries no authoritative cost), so a final
-        # result summarizes turns/duration/cost while a per-turn close prints
-        # the recorded turn cost alone -- an absent cost reads '$?', never $0
+        # the closing summary -- the facts vary per provider (codex settles its
+        # cost after exit and counts no turns), so a final result summarizes
+        # whichever of turns/duration/cost it carries while a per-turn close
+        # prints the recorded turn cost alone -- an absent cost reads '$?',
+        # never $0
         elif event.kind == 'result':
             self._break()
             cost_str = f'${event.cost:.4f}' if event.cost is not None else '$?'

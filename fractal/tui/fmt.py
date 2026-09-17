@@ -242,13 +242,14 @@ def chat_summary(
 ) -> str:
     """Return a chat result's closing summary line.
 
-    A turn-counting result (claude) closes on turns/duration/cost (``$?``
-    when there is no cost fact); a wall-time result (codex) closes on
-    duration alone.
+    A turn-counting result (claude) closes on turns/duration/cost; a result
+    without a turn count (codex) closes on duration and cost. An absent
+    cost fact reads ``$?``, never ``$0`` -- the same placeholder the CLI's
+    final close prints.
     """
-    if turns is None:
-        return chat_meta(duration)
     cost_str = f'${cost:.2f}' if cost is not None else '$?'
+    if turns is None:
+        return f'done {theme.SEP} {duration:.1f}s {theme.SEP} {cost_str}'
     return (
         f'done {theme.SEP} {turns} turns {theme.SEP}'
         f' {duration:.1f}s {theme.SEP} {cost_str}'

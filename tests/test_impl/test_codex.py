@@ -7,15 +7,30 @@ default, the dated-rollout transcript layout, the account model
 preflight, and the auth write-through and instructions-carry seeding.
 Stream-level cases drive the base ``Agent.stream`` driver against a real
 node ledger.
+
+The rollout-pricing harness is a real offline process standing in for
+codex: a python one-liner that appends captured rollout records under
+the node's codex home and prints captured ``--json`` frames, so the
+fresh and resumed runs travel the public ``Agent.stream`` path -- spawn
+through the seam, drain, ``finish_stream`` -- against a real node
+ledger. The rollouts are trimmed copies of real codex 0.154 sessions (a
+fresh run resumed once; a run that spawned a sub-agent thread, with the
+child's own rollout) with their message bodies cut and every record kind
+and usage key kept.
 """
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import json
+import logging
 import os
 import pathlib
+import re
 import signal
 import subprocess
+import sys
 import tomllib
 import uuid
 from collections.abc import Callable, Iterator
@@ -25,17 +40,18 @@ import pytest
 
 from fractal.cli.utils import StreamRenderer
 from fractal.core import pricing
-from fractal.core.agent import Invocation
+from fractal.core.agent import Invocation, StreamEvent, StreamResult
 from fractal.core.node import Node
 from fractal.impl import codex
 from fractal.impl.codex import CodexAgent, CodexParser
+
+from .rollouts import resumed_thread, spawned_thread, spawning_thread
 
 __all__ = [
     'test_capability_flags_report_provider_facts_codex',
     'test_parser_maps_the_stream_protocol_codex',
     'test_parser_captures_the_thread_from_thread_started_only',
-    'test_parser_keeps_the_invocation_maximum',
-    'test_parser_flushes_terminal_usage_snapshots',
+    'test_parser_never_prices_unbound_wire_totals',
     'test_parser_unpriced_model_records_no_cost_codex',
     'test_parser_surfaces_error_frames_codex',
     'test_parser_tolerates_garbage_codex',
@@ -46,10 +62,15 @@ __all__ = [
     'test_compute_cost_floors_uncached_at_zero',
     'test_compute_cost_tolerates_explicit_null_buckets_codex',
     'test_compute_cost_unpriced_model_returns_none_codex',
-    'test_stream_records_cost_model_and_session_codex',
+    'test_stream_without_process_records_session_but_not_wire_cost',
     'test_stream_detached_keeps_session_unpersisted_codex',
-    'test_stream_records_each_resumed_invocation_cost_codex',
     'test_stream_fails_on_error_frames_codex',
+    'test_stream_prices_each_invocation_from_its_own_rollout_records',
+    'test_filtered_rollout_kinds_are_never_decoded',
+    'test_unbound_or_incomplete_evidence_leaves_the_step_unpriced',
+    'test_sub_agent_spawn_leaves_the_step_unpriced_until_the_next_turn',
+    'test_nonzero_exit_closes_unpriced_and_silent',
+    'test_host_spawn_override_delegating_to_super_is_priced',
     'test_invocation_modes_build_the_pinned_argv_codex',
     'test_invocation_overlay_beats_a_colliding_ambient_var',
     'test_routed_invocation_splices_the_provider_table',
@@ -100,6 +121,126 @@ _USAGE_SECOND = {
 }
 _USAGE_SECOND_COST = 300 * 1e-6 + 30 * 8e-6
 
+# the captured session's thread and served model, with a distinct (cheaper)
+# cache-read rate so the resumed run's cached reads price visibly
+_SESSION = '01a0a77b-851d-72c3-af39-9cea6836708c'
+_MODEL = 'gpt-6-astra'
+_INPUT_RATE = 1e-5
+_CACHED_RATE = 1e-6
+_OUTPUT_RATE = 5e-5
+_RATES = {
+    'input_cost_per_token': _INPUT_RATE,
+    'cache_read_input_token_cost': _CACHED_RATE,
+    'output_cost_per_token': _OUTPUT_RATE,
+}
+# the captured --json stdout of the fresh run and of the resumed run: a
+# resumed run's turn.completed total is the whole thread's, not its own
+_FRESH_USAGE = {
+    'input_tokens': 16_201,
+    'cached_input_tokens': 0,
+    'cache_write_input_tokens': 0,
+    'output_tokens': 5,
+    'reasoning_output_tokens': 0,
+}
+_CUMULATIVE_USAGE = {
+    'input_tokens': 33_790,
+    'cached_input_tokens': 16_000,
+    'cache_write_input_tokens': 0,
+    'output_tokens': 11,
+    'reasoning_output_tokens': 0,
+}
+_FRESH_WIRE = [
+    {'type': 'thread.started', 'thread_id': _SESSION},
+    {'type': 'turn.started'},
+    {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'ok'}},
+    {'type': 'turn.completed', 'usage': _FRESH_USAGE},
+]
+_RESUMED_WIRE = [
+    {'type': 'thread.started', 'thread_id': _SESSION},
+    {'type': 'turn.started'},
+    {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'ok again'}},
+    {'type': 'turn.completed', 'usage': _CUMULATIVE_USAGE},
+]
+# the usage of the one record the resumed run appends to the rollout
+_RESUMED_USAGE = {
+    'input_tokens': 17_589,
+    'cached_input_tokens': 16_000,
+    'output_tokens': 6,
+}
+# the prices of the fresh run, of the resumed run's own record and of the
+# cumulative total its stdout reports, at the fixture rates
+_FRESH_COST = (
+    (_FRESH_USAGE['input_tokens'] - _FRESH_USAGE['cached_input_tokens']) * _INPUT_RATE
+    + _FRESH_USAGE['cached_input_tokens'] * _CACHED_RATE
+    + _FRESH_USAGE['output_tokens'] * _OUTPUT_RATE
+)
+_RESUMED_COST = (
+    (_RESUMED_USAGE['input_tokens'] - _RESUMED_USAGE['cached_input_tokens'])
+    * _INPUT_RATE
+    + _RESUMED_USAGE['cached_input_tokens'] * _CACHED_RATE
+    + _RESUMED_USAGE['output_tokens'] * _OUTPUT_RATE
+)
+_CUMULATIVE_COST = (
+    (_CUMULATIVE_USAGE['input_tokens'] - _CUMULATIVE_USAGE['cached_input_tokens'])
+    * _INPUT_RATE
+    + _CUMULATIVE_USAGE['cached_input_tokens'] * _CACHED_RATE
+    + _CUMULATIVE_USAGE['output_tokens'] * _OUTPUT_RATE
+)
+
+# the captured session that spawned a sub-agent thread: its thread, its served
+# model, and the --json stdout of its one run
+_SPAWN_SESSION = '01a0ad03-a64b-7d23-884c-dd31547ddbea'
+_SPAWN_MODEL = 'gpt-5.6-luna'
+_SPAWN_USAGE = [
+    record['payload']
+    for record in spawning_thread
+    if record['type'] == 'token_usage_record'
+]
+_SPAWN_WIRE = [
+    {'type': 'thread.started', 'thread_id': _SPAWN_SESSION},
+    {'type': 'turn.started'},
+    {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'DONE'}},
+    {'type': 'turn.completed', 'usage': _SPAWN_USAGE[-1]['thread_token_usage']},
+]
+
+# the offline stand-in for codex: appends the given rollout records under the
+# node's codex home (or damages the file first), opens or grows a spawned
+# thread's rollout beside it, prints the given stdout lines and exits as told
+_WRITER = """\
+import json, pathlib, sys
+data = json.loads(sys.argv[1])
+path = pathlib.Path(data['path'])
+lines = [json.dumps(record) for record in data['records']]
+if data.get('pad'):
+    lines.insert(1, '{"type": "response_item", "payload": ' + 'x' * data['pad'] + '}')
+if data.get('malformed'):
+    lines.append('{"type": "token_usage_record", "payload": ')
+raw = ''.join(line + '\\n' for line in lines)
+if not data.get('missing'):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if data.get('rotate') and path.exists():
+        path.rename(path.with_suffix('.old'))
+        path.write_bytes(path.with_suffix('.old').read_bytes())
+    if data.get('rewrite') and path.exists():
+        path.write_bytes(path.read_bytes().replace(b'task_started', b'TASK_STARTED'))
+    if data.get('truncate') and path.exists():
+        path.write_bytes(b'')
+    with path.open('a') as file:
+        file.write(raw)
+    if data.get('duplicate'):
+        twin = path.parents[3] / '2026/09/16' / path.name
+        twin.parent.mkdir(parents=True, exist_ok=True)
+        twin.write_text(raw)
+    if data.get('spawned'):
+        child = pathlib.Path(data['spawned']['path'])
+        rows = [json.dumps(record) for record in data['spawned']['records']]
+        with child.open('a') as file:
+            file.write(''.join(row + '\\n' for row in rows))
+for frame in data['wire']:
+    print(frame if isinstance(frame, str) else json.dumps(frame), flush=True)
+sys.exit(data.get('exit_code', 0))
+"""
+
 
 @pytest.fixture
 def router(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Router]:
@@ -145,6 +286,13 @@ def router(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Router]:
         process.stdout.close()
 
 
+@pytest.fixture
+def backend(node_with_db: Node, monkeypatch: pytest.MonkeyPatch) -> CodexAgent:
+    """Return a codex backend on a real ledger over a frozen price table."""
+    monkeypatch.setattr(pricing, '_load', lambda: {_MODEL: _RATES})
+    return CodexAgent(node_with_db, 'codex')
+
+
 def test_capability_flags_report_provider_facts_codex(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -181,6 +329,7 @@ def test_parser_maps_the_stream_protocol_codex() -> None:
         {'type': 'turn.completed', 'usage': {}},
     ]
     events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events.extend(parser.finish())
     assert [event.kind for event in events] == ['session', 'tool', 'text', 'result']
     session, tool, text, result = events
     assert session.session == 'thr-1'
@@ -211,58 +360,24 @@ def test_parser_captures_the_thread_from_thread_started_only() -> None:
     assert parser.session == 'thr-1'
 
 
-def test_parser_keeps_the_invocation_maximum(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Zero/empty or shrinking terminal snapshots never erase known usage.
+def test_parser_never_prices_unbound_wire_totals() -> None:
+    """Exec totals stay diagnostic until a process-bound finalizer validates usage.
 
-    Codex emits a zeroed ``turn.completed`` on some error/cancel paths;
-    pricing it as $0 would erase the invocation's known spend. A zeroed
-    first snapshot must leave the cost NULL (unknowable), never record
-    a known $0.
+    The finalizer's close is the invocation's final frame either way.
     """
-    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
     parser = CodexParser(model='o3')
-    frames = [
-        {'type': 'turn.completed', 'usage': {}},
-        {'type': 'turn.completed', 'usage': _USAGE_SECOND},
-        {'type': 'turn.completed', 'usage': {}},
-        {'type': 'turn.completed', 'usage': _USAGE_FIRST},
+    usages = [{}, _USAGE_SECOND, {}, _USAGE_FIRST]
+    events = [
+        event
+        for usage in usages
+        for event in parser.feed(json.dumps({'type': 'turn.completed', 'usage': usage}))
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
-    # the leading zeroed turn closes with no cost fact at all
-    assert events[0].kind == 'result'
-    assert events[0].cost is None
-    costs = [event.cost for event in events if event.kind == 'cost']
-    assert costs == [pytest.approx(_USAGE_SECOND_COST)]
-    assert parser.cost == pytest.approx(_USAGE_SECOND_COST)
-
-
-def test_parser_flushes_terminal_usage_snapshots(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Each growing terminal snapshot flushes the invocation's whole cost.
-
-    Same durability property as the claude per-event flush: if the stream
-    reader dies by signal mid-stream, the last known invocation cost
-    must already be on the step row -- and summing repeated snapshots
-    would over-bill.
-    """
-    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
-    parser = CodexParser(model='o3')
-    frames = [
-        {'type': 'turn.completed', 'usage': _USAGE_FIRST},
-        {'type': 'turn.completed', 'usage': _USAGE_SECOND},
-    ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
-    costs = [event.cost for event in events if event.kind == 'cost']
-    assert costs == [
-        pytest.approx(_USAGE_FIRST_COST),
-        pytest.approx(_USAGE_SECOND_COST),
-    ]
-    # each turn's result carries the recorded turn cost (the renderer's
-    # '— $X.XXXX' close reads it off the event)
-    assert [event.cost for event in events if event.kind == 'result'] == costs
+    assert not events
+    (result,) = parser.finish()
+    assert result.kind == 'result'
+    assert result.final
+    assert result.cost is None
+    assert parser.cost is None
 
 
 def test_parser_unpriced_model_records_no_cost_codex(
@@ -273,6 +388,7 @@ def test_parser_unpriced_model_records_no_cost_codex(
     parser = CodexParser(model='mystery')
     frames = [{'type': 'turn.completed', 'usage': _USAGE_FIRST}]
     events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events.extend(parser.finish())
     assert [event.kind for event in events] == ['result']
     assert parser.cost is None
 
@@ -314,6 +430,15 @@ def test_parser_tolerates_garbage_codex() -> None:
     assert [event for line in junk for event in parser.feed(line)] == []
     assert parser.session is None
     assert parser.cost is None
+    # junk ahead of a complete turn leaves it whole for the finalizer to price
+    frames = [
+        {'type': 'thread.started', 'thread_id': 'thr-1'},
+        {'type': 'turn.started'},
+        {'type': 'turn.completed', 'usage': _USAGE_FIRST},
+    ]
+    for line in _lines(frames):
+        parser.feed(line)
+    assert parser.turn_usage() == _USAGE_FIRST
 
 
 def test_parser_tolerates_present_null_payloads_codex() -> None:
@@ -353,11 +478,13 @@ def test_events_render_through_the_production_renderer_codex(
     for line in _lines(frames):
         for event in parser.feed(line):
             render(event)
+    for event in parser.finish():
+        render(event)
     captured = capsys.readouterr()
     assert 'Done.' in captured.out
-    # the turn closes on the recorded turn cost alone -- '$?' when there is
-    # no cost fact, never $0 and never the wall time
-    assert '— $?' in captured.out
+    # the settled result is final: the close carries the wall time and the
+    # cost fact -- '$?' when there is none, never $0
+    assert re.search(r'— \d+\.\ds, \$\?', captured.out)
     assert 'agent error: rate limited' in captured.err
 
 
@@ -446,11 +573,11 @@ def test_compute_cost_unpriced_model_returns_none_codex(
     assert codex._compute_cost(_USAGE_FIRST, None) is None
 
 
-def test_stream_records_cost_model_and_session_codex(
+def test_stream_without_process_records_session_but_not_wire_cost(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The driver stamps the real thread id and records the priced invocation."""
+    """The driver stamps the thread while unbound usage remains unknown."""
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
     node = node_with_db
     backend = CodexAgent(node, 'codex')
@@ -468,11 +595,11 @@ def test_stream_records_cost_model_and_session_codex(
     assert row['agent'] == 'codex'
     assert row['session'] == 'thr_abc'
     assert row['model'] == 'o3'
-    assert row['cost'] == pytest.approx(_USAGE_SECOND_COST)
+    assert row['cost'] is None
     # the thread persists for the next continuous step, and rides the result
     assert node.sessions.get('codex') == 'thr_abc'
     assert result.session == 'thr_abc'
-    assert result.cost == pytest.approx(_USAGE_SECOND_COST)
+    assert result.cost is None
 
 
 def test_stream_detached_keeps_session_unpersisted_codex(node_with_db: Node) -> None:
@@ -487,56 +614,6 @@ def test_stream_detached_keeps_session_unpersisted_codex(node_with_db: Node) -> 
     assert node.sessions.get('codex') is None
 
 
-def test_stream_records_each_resumed_invocation_cost_codex(
-    node_with_db: Node,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Resuming one thread records each invocation's full token-priced cost.
-
-    Cached context persists across calls while usage resets. A cheaper
-    resumed invocation still contributes its own spend to the run total.
-    """
-    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
-    node = node_with_db
-    backend = CodexAgent(node, 'codex')
-    steps = _steps(node, 3)
-    usages = [
-        {
-            'input_tokens': 580_339,
-            'cached_input_tokens': 503_424,
-            'output_tokens': 4_548,
-        },
-        {
-            'input_tokens': 1_076_747,
-            'cached_input_tokens': 1_060_992,
-            'output_tokens': 6_880,
-        },
-        {
-            'input_tokens': 760_746,
-            'cached_input_tokens': 744_320,
-            'output_tokens': 4_876,
-        },
-    ]
-    expected_costs = [1.499974, 1.562542, 1.152380]
-    # stream a fresh call followed by two calls resuming the same thread
-    for step_id, usage in zip(steps, usages, strict=True):
-        session = node.sessions.get('codex')
-        invocation = backend.invocation('continue', session=session)
-        if session is not None:
-            assert invocation.argv[1:4] == ('exec', 'resume', 't1')
-        frames = [
-            {'type': 'thread.started', 'thread_id': 't1'},
-            {'type': 'turn.completed', 'usage': usage},
-        ]
-        backend.stream(_lines(frames), step_id=step_id, model='gpt-6-astra')
-        node.record.step_end(step_id=step_id, status='completed', exit_code=0)
-    # the ledger retains every call's full cost, including the cheaper last call
-    rows = [node.db.read('steps', where={'step_id': step_id})[0] for step_id in steps]
-    assert [row['session'] for row in rows] == ['t1', 't1', 't1']
-    assert [row['cost'] for row in rows] == pytest.approx(expected_costs)
-    assert node.cost.spent(run_id=rows[0]['run_id']) == pytest.approx(4.214896)
-
-
 def test_stream_fails_on_error_frames_codex(node_with_db: Node) -> None:
     """A stream-borne error fails the step even after a fully drained stdout."""
     backend = CodexAgent(node_with_db, 'codex')
@@ -546,6 +623,289 @@ def test_stream_fails_on_error_frames_codex(node_with_db: Node) -> None:
         match='codex reported an error: model not supported',
     ):
         backend.stream(_lines(frames))
+
+
+@pytest.mark.parametrize(
+    argnames='configured',
+    argvalues=[None, 'gpt-5-codex', _MODEL],
+    ids=['unconfigured', 'other-pin', 'served-pin'],
+)
+def test_stream_prices_each_invocation_from_its_own_rollout_records(
+    backend: CodexAgent,
+    caplog: pytest.LogCaptureFixture,
+    configured: Optional[str],
+) -> None:
+    """A step records its own tokens and the served model, never the stdout total."""
+    fresh, resumed = _split(resumed_thread)
+    # the fresh run prices the one turn its rollout records, through wire noise
+    first = _named_step(backend, 'FIRST')
+    wire = ['not json', '{"type": "item.started", "item": null}', *_FRESH_WIRE]
+    command = _command(backend, fresh, wire)
+    result, events = _drive(backend, command, step_id=first, model=configured)
+    assert result.session == _SESSION
+    assert result.model == _MODEL
+    assert result.cost == pytest.approx(_FRESH_COST)
+    # the resumed run prices only the record it appended (_RESUMED_USAGE)
+    second = _named_step(backend, 'SECOND')
+    command = _command(backend, resumed, _RESUMED_WIRE, resume=True)
+    result, events = _drive(backend, command, step_id=second, model=configured)
+    assert result.model == _MODEL
+    assert result.cost == pytest.approx(_RESUMED_COST)
+    assert result.cost != pytest.approx(_CUMULATIVE_COST)
+    # the figure rides the post-drain result frame once, onto the step row
+    assert [event.cost for event in events if event.cost is not None] == [
+        pytest.approx(_RESUMED_COST)
+    ]
+    # the served model rides a session stamp once -- thread.started's when the
+    # launch configured it, the finish frame's otherwise -- onto the step row
+    stamps = [event.model for event in events if event.kind == 'session']
+    assert stamps[-1] == _MODEL
+    assert stamps.count(_MODEL) == 1
+    rows = [
+        backend.node.db.read('steps', where={'step_id': step})[0]
+        for step in (first, second)
+    ]
+    assert [row['cost'] for row in rows] == pytest.approx([_FRESH_COST, _RESUMED_COST])
+    assert [row['model'] for row in rows] == [_MODEL, _MODEL]
+    assert not [event for event in events if event.kind == 'error']
+    assert 'unpriced' not in caplog.text
+
+
+def test_filtered_rollout_kinds_are_never_decoded(backend: CodexAgent) -> None:
+    """A window prices past an undecodable line of a kind it does not read."""
+    fresh, resumed = _split(resumed_thread)
+    # the padding is a multi-megabyte response_item line whose body is not JSON
+    pad = 2 << 20
+    first = _named_step(backend, 'FIRST')
+    command = _command(backend, fresh, _FRESH_WIRE, pad=pad)
+    result, _ = _drive(backend, command, step_id=first)
+    assert result.cost == pytest.approx(_FRESH_COST)
+    second = _named_step(backend, 'SECOND')
+    command = _command(backend, resumed, _RESUMED_WIRE, resume=True, pad=pad)
+    result, _ = _drive(backend, command, step_id=second)
+    assert result.cost == pytest.approx(_RESUMED_COST)
+
+
+@pytest.mark.parametrize(
+    argnames=('fault', 'diagnostic'),
+    argvalues=[
+        # the rollout cannot be found or bound to the process
+        ('missing', 'No rollout names the thread'),
+        ('preexisting', 'Rollout predates the spawn'),
+        ('ambiguous', 'Several rollouts name the thread'),
+        ('rotated', 'Resumed rollout was replaced'),
+        ('truncated', 'Resumed rollout was truncated'),
+        ('changed_prefix', 'Resumed rollout prefix changed'),
+        # the window does not describe one complete, fully counted turn
+        ('two_turns', 'exactly one completed turn'),
+        ('aborted', 'interrupted turn'),
+        ('foreign_session', 'belongs to another thread'),
+        ('thread_counter', 'disagrees with the thread counter'),
+        ('no_records', 'codex 0.153 or newer required'),
+        ('no_context', 'exactly one served model'),
+        ('two_models', 'exactly one served model'),
+        # a record of a counted kind does not decode
+        ('malformed_record', 'Expecting value'),
+        # the served model has no rates
+        ('no_rates', 'has no pricing entry'),
+    ],
+    ids=[
+        'missing',
+        'preexisting',
+        'ambiguous',
+        'rotated',
+        'truncated',
+        'changed-prefix',
+        'two-turns',
+        'aborted',
+        'foreign-session',
+        'thread-counter',
+        'no-records',
+        'no-context',
+        'two-models',
+        'malformed-record',
+        'no-rates',
+    ],
+)
+def test_unbound_or_incomplete_evidence_leaves_the_step_unpriced(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fault: str,
+    diagnostic: str,
+) -> None:
+    """Evidence that cannot be bound to the process records NULL and logs why."""
+    fresh, resumed = _split(resumed_thread)
+    records, wire, options = copy.deepcopy(fresh), _FRESH_WIRE, {}
+    # a resume fault needs the fresh run's rollout in place first
+    resume = fault in ('rotated', 'truncated', 'changed_prefix')
+    if resume:
+        _drive(backend, _command(backend, fresh, _FRESH_WIRE))
+        records, wire = copy.deepcopy(resumed), _RESUMED_WIRE
+    # each fault damages the evidence in one place: the file, the window, or the rates
+    if fault == 'missing':
+        options['missing'] = True
+    elif fault == 'preexisting':
+        _drive(backend, _command(backend, fresh, _FRESH_WIRE))
+    elif fault == 'ambiguous':
+        options['duplicate'] = True
+    elif fault == 'rotated':
+        options['rotate'] = True
+    elif fault == 'truncated':
+        options['truncate'] = True
+    elif fault == 'changed_prefix':
+        options['rewrite'] = True
+    elif fault == 'two_turns':
+        records.append(
+            copy.deepcopy(records[_find(records, 'event_msg', subtype='task_started')])
+        )
+    elif fault == 'aborted':
+        records.append({'type': 'event_msg', 'payload': {'type': 'turn_aborted'}})
+    elif fault == 'foreign_session':
+        usage = records[_find(records, 'token_usage_record')]['payload']
+        usage['session_id'] = 'elsewhere'
+    elif fault == 'thread_counter':
+        usage = records[_find(records, 'token_usage_record')]['payload']
+        usage['thread_token_usage']['input_tokens'] += 1
+    elif fault == 'no_records':
+        records.pop(_find(records, 'token_usage_record'))
+    elif fault == 'no_context':
+        records.pop(_find(records, 'turn_context'))
+    elif fault == 'two_models':
+        context = copy.deepcopy(records[_find(records, 'turn_context')])
+        context['payload']['model'] = 'other-model'
+        records.insert(_find(records, 'turn_context') + 1, context)
+    elif fault == 'malformed_record':
+        options['malformed'] = True
+    elif fault == 'no_rates':
+        monkeypatch.setattr(pricing, '_load', lambda: {})
+    # the faulted run streams onto a fresh step row and leaves it unpriced
+    step = _named_step(backend, 'UNPRICED')
+    command = _command(backend, records, wire, resume=resume, **options)
+    result, events = _drive(backend, command, step_id=step)
+    assert result.cost is None
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
+    # the step completes: the reason is a warning on the agent's logger, never
+    # an error frame
+    assert not [event for event in events if event.kind == 'error']
+    warnings = [
+        record.message for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].startswith('codex usage unpriced: ')
+    assert diagnostic in warnings[0]
+
+
+def test_sub_agent_spawn_leaves_the_step_unpriced_until_the_next_turn(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Spawning or driving a sub-agent thread records NULL; an untouched child prices.
+
+    The spawning turn records NULL. The thread's next turn resumes beside
+    the child's rollout, which predates it untouched, and prices its own
+    turn alone; a turn that drives the child again grows that rollout past
+    its captured length, and records NULL like the spawn did.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
+    # the run's own rollout is complete, but the child's opens beside it
+    first = _named_step(backend, 'SPAWNING')
+    command = _command(
+        backend=backend,
+        records=spawning_thread,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        spawned=spawned_thread,
+    )
+    result, events = _drive(backend, command, step_id=first, model=_SPAWN_MODEL)
+    assert result.cost is None
+    assert backend.node.db.read('steps', where={'step_id': first})[0]['cost'] is None
+    assert not [event for event in events if event.kind == 'error']
+    warnings = [
+        record.message for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert warnings == [
+        'codex usage unpriced:'
+        ' Rollout spawned sub-agent threads (their usage is unpriced).'
+    ]
+    # the thread's next run resumes beside the child's rollout, which predates
+    # it, and prices its own turn alone
+    caplog.clear()
+    second = _named_step(backend, 'RESUMED')
+    turn = _second_turn(spawning_thread)
+    command = _command(backend, turn, _SPAWN_WIRE, thread=_SPAWN_SESSION, resume=True)
+    result, _ = _drive(backend, command, step_id=second, model=_SPAWN_MODEL)
+    # the replayed turn's own usage is the whole captured thread's
+    assert result.cost == pytest.approx(_price(_SPAWN_USAGE[-1]['thread_token_usage']))
+    assert result.model == _SPAWN_MODEL
+    assert 'unpriced' not in caplog.text
+    # a later turn drives the child again: its rollout grows past the captured
+    # length, and the parent's own complete turn is refused as partial
+    caplog.clear()
+    third = _named_step(backend, 'DRIVING')
+    driving = _second_turn(spawning_thread, after=turn)
+    grown = _second_turn(spawned_thread)
+    command = _command(
+        backend=backend,
+        records=driving,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        spawned=grown,
+        resume=True,
+    )
+    result, _ = _drive(backend, command, step_id=third, model=_SPAWN_MODEL)
+    assert result.cost is None
+    assert backend.node.db.read('steps', where={'step_id': third})[0]['cost'] is None
+    warnings = [
+        record.message for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert warnings == [
+        'codex usage unpriced:'
+        ' Rollout spawned sub-agent threads (their usage is unpriced).'
+    ]
+
+
+def test_nonzero_exit_closes_unpriced_and_silent(
+    backend: CodexAgent,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A process that exits non-zero closes with no cost and no diagnostic."""
+    fresh, _ = _split(resumed_thread)
+    step = _named_step(backend, 'FAILED')
+    command = _command(backend, fresh, _FRESH_WIRE, exit_code=3)
+    result, events = _drive(backend, command, step_id=step)
+    assert result.session == _SESSION
+    assert result.cost is None
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
+    # the loop attributes the exit; the stream just closes on wall time
+    assert [event.kind for event in events] == ['session', 'text', 'result']
+    assert 'unpriced' not in caplog.text
+
+
+def test_host_spawn_override_delegating_to_super_is_priced(
+    backend: CodexAgent,
+) -> None:
+    """A host that redirects execution through super keeps the rollout pricing."""
+
+    class _WrappingCodexAgent(CodexAgent):
+        """A host backend launching codex behind a wrapper binary."""
+
+        def _spawn(
+            self: _WrappingCodexAgent,
+            invocation: Invocation,
+            **kwargs: Any,
+        ) -> subprocess.Popen:
+            """Prefix the argv with a wrapper, then delegate."""
+            wrapped = dataclasses.replace(invocation, argv=('env', *invocation.argv))
+            return super()._spawn(wrapped, **kwargs)
+
+    fresh, _ = _split(resumed_thread)
+    custom = _WrappingCodexAgent(backend.node, 'codex')
+    result, events = _drive(custom, _command(custom, fresh, _FRESH_WIRE))
+    assert result.cost == pytest.approx(_FRESH_COST)
+    assert result.model == _MODEL
+    assert not [event for event in events if event.kind == 'error']
 
 
 def test_invocation_modes_build_the_pinned_argv_codex(node_with_db: Node) -> None:
@@ -1015,3 +1375,126 @@ def _steps(node: Node, count: int) -> list[int]:
         )
         for step in range(1, count + 1)
     ]
+
+
+def _named_step(backend: CodexAgent, name: str) -> int:
+    """Open a run/iteration chain carrying one step row named ``name``."""
+    node = backend.node
+    run = node.record.run_start()
+    iteration = node.record.iter_start(run_id=run, iter=1)
+    return node.record.step_start(run_id=run, iter_id=iteration, step=1, step_name=name)
+
+
+def _split(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split the captured rollout into the fresh run's records and the resume's."""
+    cut = _find(records, 'event_msg', subtype='task_complete') + 1
+    return records[:cut], records[cut:]
+
+
+def _second_turn(
+    records: list[dict],
+    *,
+    after: Optional[list[dict]] = None,
+) -> list[dict]:
+    """Replay a captured thread's one turn as its next, its counter carried on.
+
+    The counter carries on from the last one in ``after`` -- a turn replayed
+    before this one, the captured records themselves by default.
+    """
+    source = records if after is None else after
+    counters = [
+        record['payload']['thread_token_usage']
+        for record in source
+        if record['type'] == 'token_usage_record'
+    ]
+    baseline = counters[-1]
+    turn = copy.deepcopy(records[1:])
+    for record in turn:
+        if record['type'] != 'token_usage_record':
+            continue
+        thread = record['payload']['thread_token_usage']
+        record['payload']['thread_token_usage'] = {
+            key: count + baseline[key] for key, count in thread.items()
+        }
+    return turn
+
+
+def _price(usage: dict[str, int]) -> float:
+    """Price one usage counter at the fixture rates."""
+    return (
+        (usage['input_tokens'] - usage['cached_input_tokens']) * _INPUT_RATE
+        + usage['cached_input_tokens'] * _CACHED_RATE
+        + usage['output_tokens'] * _OUTPUT_RATE
+    )
+
+
+def _find(records: list[dict], kind: str, *, subtype: Optional[str] = None) -> int:
+    """Return the index of the first record of ``kind`` (and payload ``subtype``)."""
+    for index, record in enumerate(records):
+        if record['type'] != kind:
+            continue
+        if (subtype is None) or (record['payload'].get('type') == subtype):
+            return index
+    raise LookupError(f'no {kind} record')
+
+
+def _command(
+    backend: CodexAgent,
+    records: list[dict],
+    wire: list[Any],
+    *,
+    thread: str = _SESSION,
+    spawned: Optional[list[dict]] = None,
+    resume: bool = False,
+    **options: Any,
+) -> Invocation:
+    """Build the stand-in invocation appending ``records`` and printing ``wire``."""
+    path = (
+        backend.config_dir
+        / 'sessions/2026/09/15'
+        / f'rollout-2026-09-15T17-51-25-{thread}.jsonl'
+    )
+    data = {'path': str(path), 'records': records, 'wire': wire, **options}
+    # a spawned thread's rollout lands beside its parent's, named by its own id
+    # -- its opening metadata on the spawn, its counter rows on a later turn
+    if spawned is not None:
+        if spawned[0]['type'] == 'session_meta':
+            child = spawned[0]['payload']['id']
+        else:
+            counter = spawned[_find(spawned, 'token_usage_record')]
+            child = counter['payload']['thread_id']
+        data['spawned'] = {
+            'path': str(path.with_name(f'rollout-2026-09-15T17-51-29-{child}.jsonl')),
+            'records': spawned,
+        }
+    session = thread if resume else None
+    command = backend.invocation('offline fixture', session=session)
+    argv = (sys.executable, '-c', _WRITER, json.dumps(data))
+    return dataclasses.replace(command, argv=argv)
+
+
+def _drive(
+    backend: CodexAgent,
+    command: Invocation,
+    *,
+    step_id: Optional[int] = None,
+    model: Optional[str] = _MODEL,
+) -> tuple[StreamResult, list[StreamEvent]]:
+    """Spawn the stand-in through the seam and stream it to completion."""
+    process = backend.spawn(command, stderr=subprocess.PIPE)
+    events: list[StreamEvent] = []
+    try:
+        result = backend.stream(
+            process.stdout,
+            process=process,
+            step_id=step_id,
+            model=model,
+            render=events.append,
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
+    return result, events

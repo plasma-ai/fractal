@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import pathlib
 import socket
 import urllib.request
@@ -26,6 +27,7 @@ __all__ = [
     'test_update_refreshes_the_in_process_rates',
     'test_update_caps_the_fetch_with_a_socket_timeout',
     'test_update_degrades_when_the_fetch_fails',
+    'test_update_degrades_when_the_cache_dir_is_unwritable',
     'test_update_rejects_a_malformed_max_age',
     'test_rates_returns_priced_entries_only',
     'test_load_degrades_to_empty_on_missing_or_corrupt_cache',
@@ -159,6 +161,39 @@ def test_update_degrades_when_the_fetch_fails(
     assert pricing.update() == expected
     # the aborted temp file never survives
     assert list(cache.parent.glob(f'.{cache.name}-*')) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root ignores directory modes')
+@pytest.mark.parametrize(
+    argnames=('cached', 'expected'),
+    argvalues=[
+        pytest.param(True, 'stale', id='stale'),
+        pytest.param(False, 'missing', id='missing'),
+    ],
+)
+def test_update_degrades_when_the_cache_dir_is_unwritable(
+    cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cached: bool,
+    expected: str,
+) -> None:
+    """An unwritable cache dir degrades like a failed fetch, never raising.
+
+    A read-only or foreign-owned home refuses the temp file before any fetch
+    runs; the loop's preflight abort reads the same ``stale``/``missing``
+    answer a failed fetch gives, so the refusal must report through it
+    rather than escape as a raw ``OSError`` ahead of the run row.
+    """
+    if cached:
+        cache.write_text(json.dumps(_RATES), encoding='utf-8')
+    monkeypatch.setattr(urllib.request, 'urlretrieve', _unexpected_fetch)
+    cache.parent.chmod(0o500)
+    try:
+        assert pricing.update() == expected
+        # nothing was staged in the refused dir
+        assert list(cache.parent.glob(f'.{cache.name}-*')) == []
+    finally:
+        cache.parent.chmod(0o700)
 
 
 @pytest.mark.parametrize('cached', [True, False], ids=['cache', 'no_cache'])

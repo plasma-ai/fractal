@@ -35,6 +35,15 @@ delegates to its private hook, which the subclass implements:
 - the parser is a stream-parser subclass fed the subprocess's output line by
   line, emitting typed stream events (session, cost, actions); a backend may
   swap parsers per route;
+- the spawn hook creates the process; a backend may bind per-process accounting
+  there (codex captures its rollout window around the launch), so a host
+  override rewrites the invocation and delegates to the base hook rather than
+  calling `Popen` itself;
+- the stream finalization hook receives the drained parser and the exited
+  process; `Agent.stream(..., process=process)` drives it, and a consumer
+  feeding a parser directly (the TUI) calls
+  `finish_stream(parser, process=process)` itself after draining. The parser's
+  `finish()` emits any deferred terminal event;
 - the configured-model and rates hooks back cost accounting: the former resolves
   the model the provider's own config defaults to, the latter maps a model to
   its pricing;

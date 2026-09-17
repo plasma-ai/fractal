@@ -285,9 +285,24 @@ may include breaking changes, each listed under a Breaking heading.
 - `node retire` refuses an already-retired node
   (`Cannot retire: node is already retired.`), so the recorded pre-retire status
   stays the real one and `unretire` restores it exactly.
+- The pricing refresh reports an unwritable cache directory (a read-only or
+  foreign-owned `~/.fractal`, a full disk) as a failed fetch — `stale` with a
+  cache, `missing` without — so the loop's preflight aborts with
+  `Could not fetch pricing and no cached pricing.json exists.` and an exited run
+  row, instead of a raw `PermissionError` escaping ahead of the run row and
+  stranding `.status` at `idle`.
 
 ### Changed
 
+- `codex` steps are priced from the per-response usage records codex writes to
+  its session log during the step, read once the process exits, so a resumed
+  thread's step records its own tokens rather than the cumulative total codex
+  reports on stdout. A step that exits non-zero records `NULL` cost silently
+  (the exit is the loop's to attribute); one that exits cleanly but runs on
+  codex older than 0.153 (whose log carries no per-response records), whose log
+  cannot be bound to its process, or whose turn spawned or drove sub-agent
+  threads (each child writes its own log, and that spend is not priced), records
+  `NULL` cost — never `$0` — and logs the reason.
 - `codex` preflight: the model-acceptance probe runs as the leader of its own
   process group, recorded in `.step_pgid` for the probe's lifetime so `kill`
   reaps it by the same handle as a step, and is cancelled after the preflight
@@ -300,6 +315,12 @@ may include breaking changes, each listed under a Breaking heading.
   was probed) before it records anything of its own, logging an `orphan` event:
   the probe runs before the `active` stamp, so no crash heal judges it, and the
   next boot would otherwise overwrite its only handle.
+- The run-start pricing refresh runs for every step that runs a token-priced
+  agent, configured model or not, since a `codex` step is priced at the served
+  model its session log names; a `codex` node with no model set aborts preflight
+  when no table can be fetched and none is cached
+  (`Could not fetch pricing and no cached pricing.json exists.`), as a node with
+  a pinned model does.
 - `node merge` holds the squash to the node's commit scope: before committing,
   the staged paths outside `.fractal/` are judged by the node's scope roots and
   its project wiki (a repo-root node without a scope is unrestricted; a

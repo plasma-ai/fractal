@@ -255,8 +255,7 @@ class ChatTurn:
                 # a result closes the turn unless it is a mid-run step_finish
                 # frame from a results-per-step backend (opencode; its final
                 # frame sets final=True); every other backend emits one
-                # terminal result; codex's carries final=False for cost reasons
-                # but is still the turn's end
+                # terminal result, from feed() here or from finish_stream below
                 is_result = event.kind == 'result'
                 is_final = event.final or not self._agent.results_per_step
                 terminal = is_result and is_final
@@ -265,6 +264,18 @@ class ChatTurn:
                 yield from _chat_events(event, terminal=terminal)
         returncode = process.wait()
         drain.join(timeout=1.0)
+        try:
+            parsed = self._agent.finish_stream(self._parser, process=process)
+        except Exception as error:
+            parsed = [
+                StreamEvent(kind='error', message=f'stream finalization error: {error}')
+            ]
+        # no per-step results arrive after exit -- any result here closes the turn
+        for event in parsed:
+            terminal = event.kind == 'result'
+            if terminal:
+                closed = True
+            yield from _chat_events(event, terminal=terminal)
         if returncode != 0 and not self._cancelled:
             tail = ' '.join(line.strip() for line in self._stderr if line.strip())
             detail = f': {tail}' if tail else ''
@@ -461,7 +472,11 @@ def _chat_events(event: StreamEvent, *, terminal: bool = True) -> list[ChatEvent
     summary line -- opencode emits a result per step_finish, so its
     mid-run frames arrive non-terminal and render nothing but any failure
     detail. A turn-counting result (claude) closes on turns/duration/cost,
-    a wall-time result (codex) on duration alone.
+    a result without a turn count (codex) on duration and cost, an absent
+    cost fact reading ``$?``; a turn whose stream and finalizer carried no
+    result at all -- a failed launch, a kill, a truncated stream -- closes on
+    wall clock alone (codex's finalizer always results, so its cut-short
+    turns close ``$?``).
     """
     if event.kind == 'session':
         return [ChatEvent(kind='session', text=event.session)]

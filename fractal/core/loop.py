@@ -654,11 +654,11 @@ class Loop:
         retire that landed during the probe keeps its own terminal.
         """
         node = self.node
-        # pricing.json is needed when a step will run an agent that needs
-        # pricing with a model to price -- the step's own model, the node
-        # default, or a routed backend's pinned default; an agent that
-        # reports its own cost natively, or a token-priced agent with no
-        # model, gives pricing nothing to do
+        # pricing.json is needed when a step will run an agent whose cost is
+        # priced from the LiteLLM table -- a token-priced agent prices at the
+        # served model its own session record names, configured model or
+        # not, and a routed backend chain-prices its result usage; an agent
+        # that reports its own cost natively gives pricing nothing to do
         self._needs_pricing = False
         for path in sorted((node.node_dir / 'steps').glob('*.md')):
             # step files are hand-edited: a bad byte must abort through the
@@ -677,7 +677,7 @@ class Loop:
             except ValueError:
                 continue
             if not backend.tracks_cost():
-                if step.model or self._node_model or backend.provider is not None:
+                if backend.needs_pricing or backend.provider is not None:
                     self._needs_pricing = True
                     break
         # refresh model pricing before the run; a fetch failure with no cache
@@ -2721,6 +2721,7 @@ class Loop:
         try:
             result = agent.stream(
                 process.stdout,
+                process=process,
                 step_id=self._step_id,
                 model=record_model,
                 detached=self._step_detached,

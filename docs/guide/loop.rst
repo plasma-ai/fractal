@@ -628,7 +628,9 @@ subtree cost accounting). An iteration row records the agent, model, and — in
 continuous mode — the iteration's session id. A step row is booked **per
 launch attempt** with the step number and name, status, a binary exit code,
 the agent/model/session, the cost (flushed as the stream reports it, so even
-a killed step keeps its last figure), and a short reason in its metadata.
+a killed step keeps its last figure — except ``codex``, which prices the
+whole invocation after a clean exit and records none for a killed step), and
+a short reason in its metadata.
 
 Step rows land with these statuses:
 

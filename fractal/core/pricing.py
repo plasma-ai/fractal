@@ -34,8 +34,9 @@ def update(max_age: Optional[str] = None) -> str:
 
     Returns:
         ``'fresh'`` (cache new enough, no fetch), ``'fetched'``
-        (downloaded), ``'stale'`` (fetch failed but a cache exists), or
-        ``'missing'`` (fetch failed and no cache exists).
+        (downloaded), ``'stale'`` (fetch or cache write failed but a cache
+        exists), or ``'missing'`` (fetch or cache write failed and no cache
+        exists).
 
     """
     # resolve pricing.json path
@@ -55,12 +56,19 @@ def update(max_age: Optional[str] = None) -> str:
     import socket
     import urllib.request
 
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        dir=cache.parent,
-        prefix=f'.{cache.name}-',
-        suffix='.tmp',
-    )
+    # an unwritable cache dir (read-only or foreign-owned home, full disk)
+    # degrades like a failed fetch, so the loop's preflight abort names it
+    # instead of a raw OSError escaping ahead of the run row and stranding
+    # .status at idle
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=cache.parent,
+            prefix=f'.{cache.name}-',
+            suffix='.tmp',
+        )
+    except OSError:
+        return 'stale' if cache.exists() else 'missing'
     os.close(fd)
     # urlretrieve has no timeout arg, so cap the connection via the default
     # socket timeout (restored after): a stalled fetch must not wedge the loop

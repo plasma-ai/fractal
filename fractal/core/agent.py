@@ -210,7 +210,7 @@ class StreamEvent:
 
     ``kind`` is one of: ``'session' | 'text' | 'tool' | 'tool_result' |
     'cost' | 'result' | 'error'``. Fields are populated per kind; absent
-    facts stay ``None`` (a codex result carries no cost). Consumers
+    facts stay ``None`` (a result with no cost fact reads ``$?``). Consumers
     (renderer, TUI bubbles, record verbs) branch on ``kind`` only --
     never on the provider.
     """
@@ -307,6 +307,10 @@ class StreamParser:
     def feed(self: StreamParser, line: str) -> list[StreamEvent]:
         """Parse one stdout line into normalized events. Hook for backends."""
         raise AbstractMethodError(self)
+
+    def finish(self: StreamParser) -> list[StreamEvent]:
+        """Close the drained stream. Hook for deferred terminal events."""
+        return []
 
 
 class Agent:
@@ -605,11 +609,17 @@ class Agent:
         argv/cwd/env, ``stdin=DEVNULL`` (the prompt is the only input
         channel), and ``stdout=PIPE`` in text mode for ``stream``.
 
-        Override in a host to redirect execution::
+        A backend may bind per-process accounting here (codex captures its
+        rollout window around the launch), so a host override rewrites the
+        invocation and delegates to ``super()._spawn`` rather than calling
+        ``Popen`` itself. Override in a host to redirect execution::
 
             def _spawn(self, invocation, **kwargs):
-                argv = ('sandbox-exec', *invocation.argv)
-                return subprocess.Popen(argv, cwd=invocation.cwd, **kwargs)
+                wrapped = dataclasses.replace(
+                    invocation,
+                    argv=('sandbox-exec', *invocation.argv),
+                )
+                return super()._spawn(wrapped, **kwargs)
         """
         return subprocess.Popen(
             invocation.argv,
@@ -631,10 +641,54 @@ class Agent:
         """Return a fresh stream parser (constructed from ``__parser__``)."""
         return self.__parser__(model=model)
 
+    def finish_stream(
+        self: Agent,
+        parser: StreamParser,
+        *,
+        process: Optional[subprocess.Popen] = None,
+    ) -> list[StreamEvent]:
+        """Finalize a drained stream: waits on the process, then ``_finish_stream``.
+
+        The driver drains stdout before calling this (waiting first would
+        deadlock a full pipe) and keeps ownership of deadline and pipe
+        cleanup. ``process`` is ``None`` for a driver that fed lines without
+        spawning; the hook then closes the parser with no process-bound
+        accounting.
+        """
+        if process is not None:
+            process.wait()
+        events = self._finish_stream(parser, process)
+        parser.session = _sanitize(parser.session)
+        parser.model = _sanitize(parser.model)
+        return [_sanitize_event(event) for event in events]
+
+    def _finish_stream(
+        self: Agent,
+        parser: StreamParser,
+        process: Optional[subprocess.Popen],
+    ) -> list[StreamEvent]:
+        """Hook for post-exit accounting.
+
+        Default: the parser's ``finish()`` events. Override in a backend
+        whose price needs the exited process (codex reads its session log),
+        returning the deferred terminal events; a step it cannot price
+        leaves ``parser.cost`` ``None`` and logs the reason, never raising::
+
+            def _finish_stream(self, parser, process):
+                if process is not None and process.returncode == 0:
+                    try:
+                        parser.cost = self._price(process.pid)
+                    except (OSError, ValueError) as e:
+                        self.log(f'usage unpriced: {e}', logging.WARNING)
+                return parser.finish()
+        """
+        return parser.finish()
+
     def stream(
         self: Agent,
         lines: Iterable[str],
         *,
+        process: Optional[subprocess.Popen] = None,
         step_id: Optional[int] = None,
         model: Optional[str] = None,
         detached: bool = False,
@@ -644,8 +698,10 @@ class Agent:
 
         Fires ``on_call`` at entry and ``on_call_success``/
         ``on_call_failure`` at exit; dispatches each parsed event to its
-        hook (``on_session`` once, ``on_action`` per tool, ``on_error``
-        per stream-borne failure, ``on_budget`` on a budget stop), the
+        hook (``on_session`` per session stamp -- once as the stream opens,
+        and again from the finish frame when a backend learns the served
+        model only after exit; ``on_action`` per tool, ``on_error`` per
+        stream-borne failure, ``on_budget`` on a budget stop), the
         render callback, and -- when ``step_id`` is given -- the record
         verbs (session stamped as the stream opens; each cost figure
         flushed immediately, so a signal-killed reader still recorded
@@ -653,6 +709,8 @@ class Agent:
 
         Args:
             lines: The agent's stdout, line by line.
+            process: The actual spawned process, for post-exit accounting.
+                The driver drains its stdout before waiting on it.
             step_id: Step row to record against; ``None`` records
                 nothing (a live chat writes nothing).
             model: Configured-model fallback for the parser (the
@@ -673,12 +731,18 @@ class Agent:
         """
         # fresh parser per call; state accumulates for attribution after draining
         parser = self.parser(model=model)
+
+        def frames() -> Iterable[list[StreamEvent]]:
+            for line in lines:
+                yield parser.feed(line)
+            yield self.finish_stream(parser, process=process)
+
         # open the call pairing
         call_event = self.on_call(session=None, model=model)
         try:
-            # drive the parser line by line, dispatching each semantic frame
-            for line in lines:
-                events = parser.feed(line)
+            # drive the parser line by line and through the post-drain finish
+            # frame, dispatching each semantic frame
+            for events in frames():
                 # neutralize lone surrogates at the parse boundary -- in each
                 # event AND the parser's own state (session/model are read
                 # directly below and for the drained result) -- so no utf-8

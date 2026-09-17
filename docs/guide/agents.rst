@@ -180,13 +180,19 @@ node's ``.codex`` directory serves as its ``CODEX_HOME``, with
 ``auth.json`` symlinked to the global home (``~/.codex``, or
 ``$CODEX_HOME`` when set in the launching environment) — credentials
 are shared, never copied, and token refreshes update the global file.
-Cost is token-priced from the pricing cache, so recorded spend (and any
-cost cap) requires a model with a pricing entry. ``codex`` sessions
-(threads) cannot be forked — resume them in place instead. When an
-explicit model is configured, ``fractal node start`` runs a bounded probe
-invocation before the run, because some accounts reject models the
-pricing table can price — a rejection relays ``codex``'s own diagnostic.
-Supports the ``openrouter`` route.
+Cost is token-priced from the pricing cache: spend is priced at the served
+model the session log names, and a cost cap requires a configured model with
+a pricing entry. Token counts come from the session log under the node's
+``.codex`` home, read once the process exits, so a resumed thread's step
+records its own tokens; a log that cannot be bound to the step's process, a
+turn that spawned or drove sub-agent threads (their usage is unpriced), or a
+log from ``codex`` older than 0.153, which carries no per-response usage,
+records no cost and logs the reason. ``codex`` sessions (threads) cannot be
+forked — resume them in place instead. When an explicit model is
+configured, ``fractal node start`` runs a bounded probe invocation before
+the run, because some accounts reject models the pricing table can price — a
+rejection relays ``codex``'s own diagnostic. Supports the ``openrouter``
+route.
 
 grok
 ~~~~
@@ -277,9 +283,11 @@ timeout is cancelled — TERM, a short grace, then KILL on the whole group.
 Costs
 -----
 
-Every step row carries the spend the backend's stream reported, flushed
-figure by figure as it arrives — a killed or timed-out step keeps the last
-figure recorded. Read spend with the cost commands (full surfaces in
+Every step row carries the spend the backend reported. Cost-reporting
+backends flush each figure as it arrives — a killed or timed-out step
+keeps the last figure recorded — while ``codex`` prices the whole
+invocation once its process exits cleanly, so an interrupted ``codex``
+step records no cost. Read spend with the cost commands (full surfaces in
 :doc:`/cli/node`):
 
 .. code-block:: console

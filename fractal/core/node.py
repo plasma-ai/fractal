@@ -6229,7 +6229,7 @@ class Node:
         # spawns a single process (no start_new_session), so kill the PID
         # directly, not its group
         try:
-            result = backend.stream(proc.stdout, render=render)
+            result = backend.stream(proc.stdout, process=proc, render=render)
         except BaseException:
             if proc.poll() is None:
                 try:

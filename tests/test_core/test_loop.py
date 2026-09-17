@@ -25,6 +25,7 @@ import pytest
 
 from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
 from fractal.core import pricing, worktree
+from fractal.core.agent import StreamEvent
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
@@ -51,6 +52,7 @@ __all__ = [
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
     'test_agent_stderr_tolerates_non_utf8_output',
+    'test_launch_prices_the_step_from_the_finish_frame',
     'test_agent_launch_failure_books_a_failed_step',
     'test_setup_tolerates_non_utf8_output',
     'test_unsupported_provider_frontmatter_refuses_the_step',
@@ -956,6 +958,67 @@ def test_agent_stderr_tolerates_non_utf8_output(
     step = loop_node.db.read('steps', where={'step': 1})[0]
     assert step['status'] == 'failed'
     assert 'agent error' in (step['metadata'] or '')
+
+
+def test_launch_prices_the_step_from_the_finish_frame(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The launch hands its exited process to the finish frame and books its cost.
+
+    A backend that prices from the exited process (codex reads its session
+    log) emits the figure on the post-drain finish frame only when the
+    driver streams with the live process, so the launch must pass it and
+    record the cost that frame carries onto the step row.
+    """
+    monkeypatch.setenv('_NODE', '')
+    cost = 0.25
+
+    class _ExitPricedAgent(SampleAgent):
+        """A backend pricing the step from its exited process."""
+
+        def spawn(
+            self: _ExitPricedAgent,
+            invocation: Any,
+            *,
+            start_new_session: bool = True,
+            stderr: Any = None,
+        ) -> subprocess.Popen:
+            """Print one text frame and exit 0."""
+            frame = json.dumps({'kind': 'text', 'text': 'ok'})
+            return subprocess.Popen(
+                ['printf', '%s\\n', frame],
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                start_new_session=start_new_session,
+            )
+
+        def _finish_stream(
+            self: _ExitPricedAgent,
+            parser: Any,
+            process: Optional[subprocess.Popen],
+        ) -> list[StreamEvent]:
+            """Price the step only from a process that exited 0."""
+            if process is None or process.returncode != 0:
+                return parser.finish()
+            parser.cost = cost
+            return [StreamEvent(kind='result', cost=cost)]
+
+    class _ExitPricedLoop(MockLoop):
+        """Mock loop that swaps in the exit-priced agent for the real launch."""
+
+        def _launch(
+            self: _ExitPricedLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Run the REAL launch so the finish frame rides the live process."""
+            kwargs['agent'] = _ExitPricedAgent(self.node)
+            return Loop._launch(self, step, prompt, **kwargs)
+
+    loop = _ExitPricedLoop(loop_node)
+    assert loop.run() == 0
+    # the step completed and the finish frame's figure is its recorded cost
+    step = loop_node.db.read('steps', where={'step': 1})[0]
+    assert (step['status'], step['cost']) == ('completed', pytest.approx(cost))
 
 
 def test_agent_launch_failure_books_a_failed_step(

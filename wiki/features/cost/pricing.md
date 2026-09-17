@@ -25,9 +25,11 @@ output rates; a model absent from the table -- or present without any rate keys
 The table refreshes by fetching to a temp file and swapping it in atomically, so
 an interrupted download never leaves a corrupt cache. A refresh reports one of
 four outcomes: `fresh` (cache newer than the requested max age, no fetch),
-`fetched` (downloaded), `stale` (fetch failed but a cache exists), or `missing`
-(fetch failed and no cache exists). The fetch is bounded by a short timeout so a
-stalled network never wedges the loop.
+`fetched` (downloaded), `stale` (fetch or cache write failed but a cache
+exists), or `missing` (fetch or cache write failed and no cache exists) -- an
+unwritable cache directory degrades like a failed fetch, so the loop's preflight
+abort names it rather than a raw error escaping ahead of the run row. The fetch
+is bounded by a short timeout so a stalled network never wedges the loop.
 
 The loop refreshes the table for token-priced agents at run start and again at
 each iteration top (the latter bounded by a 24-hour max age, so a long-running

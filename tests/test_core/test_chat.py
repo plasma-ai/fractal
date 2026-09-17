@@ -255,11 +255,11 @@ class _FakeProc:
     def __init__(self: _FakeProc, stdout_text: str, returncode: int) -> None:
         """Initialize ``_FakeProc``."""
         self.stdout = io.StringIO(stdout_text)
-        self._returncode = returncode
+        self.returncode = returncode
 
     def wait(self: _FakeProc) -> int:
         """Return the canned exit code."""
-        return self._returncode
+        return self.returncode
 
 
 def _patch_popen(
