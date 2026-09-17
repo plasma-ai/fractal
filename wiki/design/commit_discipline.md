@@ -83,6 +83,14 @@ silently discarded by the next relaunch's clean — is strictly worse than an
 unreviewed commit. A backstop-labeled commit in history is a signal that an
 iteration went wrong, not a license to skip the commit step.
 
+Material a node must keep off its branch belongs in a `.gitignore`-ignored path
+or outside the worktree: the dirty check never sees an ignored path, the
+backstop's `git add` never stages one, and the relaunch clean never removes one,
+so keeping private files out of a save needs no configuration. A
+`.git/info/exclude` line alone does not hold a node record inside the node
+directory — the record pass force-adds node records that only a machine-local
+layer fences, on the work commit and the backstop alike.
+
 ## Merge discipline: no-fast-forward in, squash out
 
 Child work crosses two boundaries, and each gets a different merge shape because

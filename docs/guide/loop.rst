@@ -613,6 +613,13 @@ never ran. Backstop commits bypass hooks and lint by design (``--no-verify``)
 and fold the staging notices and a capped diffstat into the body, so the save
 describes itself in git history alone.
 
+Material a node must keep off its branch belongs in a ``.gitignore``-ignored
+path or outside the worktree: the dirty check never sees an ignored path, the
+backstop never stages one, and the ``--continue`` clean never removes one. A
+``.git/info/exclude`` line alone does not hold a node record inside the node
+directory — every commit's record pass force-adds node records that only a
+machine-local layer fences (step 3 above).
+
 Pause is the one path that never commits: the dirty worktree *is* the frozen
 mid-step state that resume continues from. ``fractal node start --continue``
 is the path that discards it (it restores the worktree with a clean), after
