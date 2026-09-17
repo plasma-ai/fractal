@@ -6545,10 +6545,11 @@ class Node:
         orphan with no worktree): removes the subtree's ``nodes`` rows and its
         subscriptions in both directions. Everything else -- runs, steps,
         events, messages -- persists, so history outlives the node. The
-        ``delete`` event is logged on the parent when it is still reachable;
-        a missing parent (e.g. a hand-removed ``.fractal``) is warned about,
-        not fatal -- the teardown already happened, so crashing would leave a
-        half-deleted tree.
+        ``delete`` event is logged on the parent when it is still reachable
+        -- a root parent by config, branch-pinned at the repo root, since it
+        owns no worktree off its branch; a missing parent (e.g. a
+        hand-removed ``.fractal``) is warned about, not fatal -- the teardown
+        already happened, so crashing would leave a half-deleted tree.
 
         Args:
             db: The central database (captured before any teardown).
@@ -6570,7 +6571,15 @@ class Node:
             return
         parent_branch, _ = parts
         parent_worktree_dir = fractal.util.git.find_worktree(repo_dir, parent_branch)
-        parent = cls(parent_worktree_dir) if parent_worktree_dir else None
+        if parent_worktree_dir:
+            parent = cls(parent_worktree_dir)
+        elif '.' not in parent_branch:
+            # the root owns no worktree unless the main checkout sits on its
+            # branch; its config anchors at the repo root under its own
+            # branch, so it resolves branch-pinned (mirrors user_nodes)
+            parent = cls(repo_dir, branch=parent_branch)
+        else:
+            parent = None
         if parent is not None and parent.exists():
             event_id = parent.record.event_start('delete', metadata=branch)
             if event_id is not None:

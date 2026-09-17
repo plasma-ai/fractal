@@ -423,7 +423,8 @@ def test_reset_off_branch_counts_nodes_and_clears_the_registry(
     On a non-init branch the confirmation must still count the real nodes
     (the count is the authorization to kill them), and the accepted teardown
     must still sweep the registry -- a surviving row would resurrect old
-    history under a later re-init of the name.
+    history under a later re-init of the name -- and log the delete on the
+    root, which owns no worktree off its branch but is reachable by config.
     """
     repo = _seed_repo(tmp_path / 'sideworked')
     assert _run(repo, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
@@ -436,10 +437,16 @@ def test_reset_off_branch_counts_nodes_and_clears_the_registry(
     # the accepted teardown still sweeps the registry rows
     accepted = _run(repo, 'reset', stdin='y\n')
     assert accepted.returncode == 0, accepted.stderr
+    assert 'is missing' not in accepted.stderr, accepted.stderr
     assert not (repo / '.worktrees' / 'main.task').exists()
     _git(repo, 'checkout', 'main')
     assert (repo / '.fractal' / 'main' / '.db').is_file()
     assert Node(repo).db.read('nodes') == []
+    # the teardown is on the record: the root logged the subtree's delete
+    deletes = Node(repo).db.read('events', where={'event': 'delete'})
+    assert [(row['node'], row['metadata']) for row in deletes] == [
+        ('main', 'main.task')
+    ]
 
 
 def test_destroy_off_branch_removes_the_user_data(tmp_path: pathlib.Path) -> None:
