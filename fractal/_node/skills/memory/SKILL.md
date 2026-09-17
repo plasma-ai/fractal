@@ -33,7 +33,7 @@ Run `wiki --help` and `wiki <command> --help` for the CLI.
 - **Pages need `desc:` frontmatter.** A page without it (a near-miss key like
   `description:` counts as without) is invisible to `wiki map`; after adding or
   moving pages, run `wiki update --path=$MEMORY_DIR` so they gain frontmatter
-  and index entries.
+  and index entries. Quote a one-line `desc:` that contains `: ` or ` #`.
 - **Fold at phase ends.** When a phase or a child's run ends, collapse its pages
   into durable facts and delete the rest -- memory carries what is still true,
   not what happened.
@@ -46,4 +46,6 @@ Run `wiki --help` and `wiki <command> --help` for the CLI.
   factor overflow into child pages.
 - **Wikilinks stay within one wiki.** Reference anything outside this wiki --
   the project wiki, source files, configs -- in plain text or backticks, never
-  as a wikilink. `wiki lint` flags out-of-wiki wikilinks as stale.
+  as a wikilink; `wiki lint` notes a wikilink that points outside the wiki.
+  Write in-wiki links prefix-free (`[[state]]`, never `[[./state]]` or
+  `[[../state]]`).

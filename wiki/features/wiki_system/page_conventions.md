@@ -31,8 +31,9 @@ and merging (see [[features/wiki_system/merge_behavior]]):
 - **Authored** — `title`, `desc`, `created`, `category`, `tags`, and `sources`
   belong to the author. `desc` is human-readable prose (complete sentences
   ending in a period), written as a YAML block scalar (`|`) once it passes ~100
-  characters. A `title` supplies the page's H1; without one, update rewrites the
-  H1 to the page name.
+  characters; a one-line `desc` containing `: ` or ` #` is quoted, since the
+  unquoted form is invalid YAML. A `title` supplies the page's H1; without one,
+  update rewrites the H1 to the page name.
 
 ## Page body
 
@@ -47,13 +48,15 @@ hand-editing the index.
 
 `[[...]]` links target pages in the *same* wiki only. Anything outside it —
 source files, configs, or the other knowledge store — is referenced in plain
-text or backticks; `wiki lint` flags out-of-wiki wikilinks as stale. Link only
-to pages that already exist: a forward link to a page a sibling branch has not
-yet merged is a stale-link note until the merge lands. Label a sibling-branch
-index link with the bare branch name (`[[features/chat/_index|chat]]`) and a
-link that crosses top-level branches with the trailing-slash path
-(`[[features/radio/_index|features/radio/]]`), keeping labels short enough to
-survive the formatter's wrap.
+text or backticks; `wiki lint` notes a wikilink that points outside the wiki.
+In-wiki links are written prefix-free from the wiki root, never with a `./` or
+`../` prefix, which reads from the page's folder and marks a link that leaves
+the wiki. Link only to pages that already exist: a forward link to a page a
+sibling branch has not yet merged is a stale-link note until the merge lands.
+Label a sibling-branch index link with the bare branch name
+(`[[features/chat/_index|chat]]`) and a link that crosses top-level branches
+with the trailing-slash path (`[[features/radio/_index|features/radio/]]`),
+keeping labels short enough to survive the formatter's wrap.
 
 ## Authoring pitfalls
 

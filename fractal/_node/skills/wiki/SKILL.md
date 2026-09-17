@@ -44,6 +44,8 @@ real defects, and separates issues (must fix) from advisory notes. Work the loop
 -- edit pages, `wiki update`, `wiki lint` -- until clean (clean = lint exits 0;
 scripts branch on the exit code, not the prose summary); lint validates
 structure, not content truth, so verify facts against your sources yourself.
+Frontmatter is read as strict YAML: quote a one-line `desc:` that contains `: `
+or ` #` (`desc: "Note: x."`), since the unquoted form is invalid YAML.
 
 ## Cross-linking
 
@@ -55,7 +57,7 @@ sibling links are an expected transient, not a failure -- `wiki lint` reports a
 stale link in index or page prose as an advisory note (exit 0), so never stall
 an iteration chasing them. Broken links in the generated index link block -- the
 rows `wiki update` maintains -- are the exception: each is a hard issue, fixed
-by repairing the target or removing the row with `wiki update --prune`. The
+by repairing the target or by rerunning `wiki update`, which prunes the row. The
 **parent** reconciles stale sibling links when children merge up: indexes
 refresh mechanically at commit and merge, so its integration job is repairing or
 pruning what lint reports, not rerunning `wiki update` -- plus refreshing any
@@ -65,8 +67,11 @@ for a page that has since merged).
 Wikilinks also stay inside the wiki you are writing in. A `[[...]]` link targets
 another page in the same wiki; anything outside it -- source files, configs, or
 the other knowledge base (project wiki vs. memory) -- is referenced in plain
-text or backticks, never linked. `wiki lint` notes out-of-wiki wikilinks as
-stale.
+text or backticks, never linked; `wiki lint` notes a wikilink that points
+outside the wiki. Write in-wiki links prefix-free, from the wiki root
+(`[[overview]]`, `[[core/overview]]`), never `[[./overview]]` or
+`[[../overview]]` -- a `./` or `../` target reads from the page's folder and
+marks a link that leaves the wiki, so lint reports one that lands inside it.
 
 ## Structure
 

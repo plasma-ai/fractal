@@ -16,9 +16,9 @@ updated: 2026-07-21T04:51:58Z
 
 `wiki update` rewrites whatever drifted from the generated form: index link
 blocks, regenerated frontmatter fields, and CRLF line endings. It restores a
-missing `.wiki/settings.json` and preserves broken links by default — `--prune`
-removes them instead. `--check` reports pending changes without writing (exit 1
-when anything would change), and narration condenses to one count line per
+missing `.wiki/settings.json` and prunes index rows whose target is gone,
+announcing each removal. `--check` reports pending changes without writing (exit
+1 when anything would change), and narration condenses to one count line per
 category unless `--full` prints every line.
 
 `wiki lint` is the companion check: it reports what update would rewrite plus
@@ -26,7 +26,7 @@ real defects, separating **issues** (must fix; exit 1) from **notes** (advisory,
 on stderr; never the exit code). Stale links in prose are notes — an expected
 transient while sibling branches build pages in parallel — while a broken row in
 a generated index link block is a hard issue, fixed by repairing the target or
-removing the row with `wiki update --prune`. Lint validates structure, not
+by the next `wiki update`, which prunes the row. Lint validates structure, not
 content truth.
 
 The working loop is edit, `wiki update --path=<root>`,
