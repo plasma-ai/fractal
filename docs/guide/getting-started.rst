@@ -134,7 +134,10 @@ branch you are on. Concretely, it writes:
   ``config.json`` and the central SQLite database (``.db``) that records the
   whole tree;
 - ``wiki/`` — the project wiki scaffold, if one does not already exist (a
-  committed knowledge base shared by all nodes);
+  committed knowledge base shared by all nodes); an existing project wiki is
+  adopted as is, and a non-empty ``wiki/`` that is not a project wiki refuses
+  init — move it aside or convert it with ``wiki init --path=wiki``, then
+  re-run;
 - a repo-local git exclude block (in ``.git/info/exclude``), so fractal's
   runtime artifacts stay out of your commits by default (``fractal track``
   opts the seed directory back in).

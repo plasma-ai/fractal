@@ -500,8 +500,8 @@ Integration and teardown
 
 .. code-block:: console
 
-   $ fractal node merge [NODE] [--continue] [--ignore-scope] [--delete]
-         [--force|-f]
+   $ fractal node merge [NODE] [--continue] [--ignore-scope]
+         [--validate <script>] [--delete] [--force|-f]
 
 Squash-merge the node's branch into its merge target — the configured
 ``base`` when set, else the dotted parent. One squash commit lands on the
@@ -650,6 +650,19 @@ overwrites it.
    scope roots and its project wiki (``.fractal/`` paths are never judged; the
    worktree-root ``.gitattributes`` is admitted only as init's own
    ``merge=wiki`` edit).
+
+``--validate <script>``
+   Run a repository gate on the destination before the squash commit. Bash
+   runs ``<script>``, a path relative to the target worktree root, from that
+   root after the ``.fractal/`` restore, footprint check, and wiki index
+   refresh — on a fresh merge and on ``--continue`` alike (repeat the flag
+   with the continue). The script must exit 0 without changing the staged
+   tree or leaving tracked unstaged changes; the merge stages none of its
+   output. A failing script restores a fresh merge's target and, with
+   ``--continue``, leaves the staged resolution in place for repair. A no-op
+   merge (``Nothing to merge``) skips it. An absolute path, a ``..``
+   component, a symlink script, or a path escaping the target worktree is
+   refused.
 
 ``--delete``
    Delete the node (worktree, branch, and whole subtree) after a successful

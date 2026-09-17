@@ -63,6 +63,13 @@ and the radio, but runs no loop of its own (see
   inside the seed directory itself, so ``.fractal/<branch>/`` is
   git-ignored by default (``fractal track`` removes that file to opt in).
 
+An existing project wiki (a ``wiki/`` carrying ``_index.md``) is adopted as
+is — init rewrites nothing in it. It warns when ``wiki/_index.md`` carries no
+frontmatter stamps (run ``wiki update --path=wiki`` and commit the result
+before initializing nodes) and when ``.gitattributes`` lacks the
+``**/_index.md merge=wiki`` line (append it and commit), since sibling nodes
+otherwise conflict on the index when they merge.
+
 The command ends by printing the required next step: the baseline commit
 (``fractal commit "<message>" --init``). Node worktrees can only branch
 from a committed tree.
@@ -102,6 +109,11 @@ Refuses when:
   (run ``fractal init`` from the main checkout);
 - the branch is already mapped to a different project — one branch maps to
   a single project;
+- ``<project>/wiki/`` exists, is not empty, and is not a project wiki (it
+  carries no ``.wiki/`` marker): adopting it would rewrite its files in place.
+  Move the directory aside and re-run init, or convert it first with
+  ``wiki init --path=wiki``; the refusal lands after the data directory is
+  written, and the re-run completes the partial init;
 - the command runs from a draining seat (an agent invocation of a
   ``fractal node start --continue --drain`` run, or any process in its
   process group — see ``--drain`` in :doc:`/cli/node`): a drain forbids

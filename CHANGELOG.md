@@ -11,17 +11,19 @@ may include breaking changes, each listed under a Breaking heading.
 
 - Seed templates use Jinja syntax: `{% ... %}` statements and `{# ... #}`
   comments are active, source line endings normalize to LF, and trailing
-  newlines are retained. Development template records are replayed through this
-  same renderer. `--set KEY=VALUE` requires a TOML literal: text is quoted as
-  `--set 'role="reviewer"'`, while `--set enabled=false` supplies a boolean; an
-  unquoted text value refuses.
+  newlines are retained. `--set KEY=VALUE` requires a TOML literal: text is
+  quoted as `--set 'role="reviewer"'`, while `--set enabled=false` supplies a
+  boolean; an unquoted text value refuses.
 - `node init --template=<path>[@<ref>]` replaces `--steps` and `--profile`, and
   the `.fractal/profiles/` location goes away with no successor: a template is
   any tracked folder holding `config.json`, so a steps-only template is such a
   folder holding `steps/`, and an ad hoc step set is committed on the spawning
   node's own branch before the spawn (its children fork from that tip). A
   template is read from git at the child's fork commit — seeding from an
-  uncommitted directory is gone with the flags.
+  uncommitted directory is gone with the flags. A 1.2.0 tree with
+  `.fractal/profiles/<name>/` moves each profile folder out of `.fractal/` (a
+  path under it is node machinery, which `--template` refuses), adds a
+  `config.json` to it, and commits it before naming it with `--template=<path>`.
 
 ### Added
 
@@ -135,6 +137,15 @@ may include breaking changes, each listed under a Breaking heading.
   every materialize — init, `node diff`, and `node reseed` alike — naming the
   file; credentials never deploy from a template — a node links its own at seed
   time.
+- `node merge --validate <script>`: runs a repository gate on the destination
+  before the squash commit — bash runs `<script>`, a path relative to the target
+  worktree root, from that root after the `.fractal/` restore and wiki index
+  refresh, on a fresh merge and on `--continue` alike. The script must exit 0
+  without changing the staged tree or leaving tracked unstaged changes (the
+  merge stages none of its output); a failure restores a fresh merge's target
+  and, on `--continue`, leaves the staged resolution in place for repair. A
+  no-op merge (`Nothing to merge`) skips it. An absolute path, a `..` component,
+  a symlink script, or a path escaping the target worktree is refused.
 
 ### Fixed
 
@@ -248,6 +259,10 @@ may include breaking changes, each listed under a Breaking heading.
   judged by the target's state, not by git's exit code, and a squash that fails
   after git wrote the index (a stale or unwritable `SQUASH_MSG`) is reset and
   its markers cleared, reported as failed after staging.
+- A fresh `node merge` that exits at `Nothing to merge` now clears git's
+  `SQUASH_MSG`/`MERGE_MSG`/`AUTO_MERGE` markers in the target, so a later bare
+  `git commit` there no longer prefills the stale squash message (1.0.0 through
+  1.2.0 left them behind).
 - `fractal init` warns when an adopted `wiki/_index.md` carries no frontmatter
   stamps, naming the `wiki update --path=wiki` and commit to run before
   initializing nodes, instead of letting sibling nodes conflict on its
@@ -414,6 +429,16 @@ may include breaking changes, each listed under a Breaking heading.
   the user node the node's own seed is then stripped, while a node target keeps
   the copy it tracks) and continues with a warning naming the paths, while any
   other conflict fails and restores the target.
+- Every mode prompt (`CHAT`, `CONTINUE`, `DETACHED`, `DRAIN`, `META`, `RESERVE`,
+  `RESUME`, `SYNC`) holds the mode inside the commission's boundaries — frozen
+  input, sealed or excluded channels, permitted reads, and commit and merge
+  authority — and RESERVE's first step is `Commit only when authorized`, with
+  useful artifacts otherwise retained at the commissioned private handoff path,
+  rather than a blanket instruction to bring whatever is open to a committed
+  state.
+- Runtime dependencies gain `jinja2>=3.1,<4` (the template renderer) and
+  `tomli-w>=1,<2` (the `_template.toml` record writer); environments synced
+  before this release need a `uv sync` or a reinstall.
 
 ## [1.2.0] - 2026-08-24
 
