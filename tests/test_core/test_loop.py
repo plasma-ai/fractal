@@ -18,17 +18,20 @@ import signal
 import sqlite3
 import subprocess
 import time
+from collections.abc import Callable, Iterator
 from typing import Any, Optional
 
 import pytest
 
 from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
-from fractal.core import pricing
+from fractal.core import pricing, worktree
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
 from fractal.exceptions import _Abort
+from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
+from fractal.impl.codex import CodexAgent
 from tests._helpers import _age_run, _past_timestamp, _stub_run_script
 
 from ._agents import SampleAgent
@@ -53,6 +56,9 @@ __all__ = [
     'test_unsupported_provider_frontmatter_refuses_the_step',
     'test_discover_steps_orders_and_validates_prefixes',
     'test_preflight_aborts_on_a_non_utf8_step_file',
+    'test_preflight_probe_rides_the_step_marker',
+    'test_preflight_abort_honors_a_kill_that_reaped_the_probe',
+    'test_boot_reaps_an_orphaned_probe_group',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -221,6 +227,45 @@ def loop_node(node_with_db: Node) -> Node:
     _seed_steps(node_with_db, ['01-PLAN.md', '02-EXECUTE.md'])
     _configure(node_with_db, max_iters=1, sync=False, local=True)
     return node_with_db
+
+
+@pytest.fixture
+def hung_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[Callable[[Loop], list[subprocess.Popen]]]:
+    """Yield a router aiming a loop's probe at a ``sleep`` that never answers; reap after.
+
+    The stand-in keeps the production spawn shape (its own session, merged
+    stderr, a text pipe) so the probe's wait and group tail run against a
+    real process, and the returned log holds every probe launched.
+    """
+    spawned: list[subprocess.Popen] = []
+
+    def route(loop: Loop) -> list[subprocess.Popen]:
+        def fake_spawn(invocation: Any, **kwargs: Any) -> subprocess.Popen:
+            process = subprocess.Popen(
+                ['sh', '-c', 'exec sleep 60'],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                text=True,
+                errors='replace',
+                **kwargs,
+            )
+            spawned.append(process)
+            return process
+
+        monkeypatch.setattr(loop._agent, '_spawn', fake_spawn)
+        return spawned
+
+    yield route
+    # the stand-in led its own group: sweep whatever a probe left behind
+    for process in spawned:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+        process.stdout.close()
 
 
 # ------ step parsing and discovery
@@ -1057,6 +1102,181 @@ def test_preflight_aborts_on_a_non_utf8_step_file(
     assert (run['status'], run['exit_code']) == ('exited', 1)
     assert '01-PLAN.md' in run['metadata']
     assert 'not valid UTF-8' in capsys.readouterr().err
+
+
+def test_preflight_probe_rides_the_step_marker(
+    loop_node: Node,
+    hung_probe: Callable[[Loop], list[subprocess.Popen]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The codex probe's group is on the step marker while it runs, then reaped.
+
+    The probe runs before the ``active`` stamp, so ``kill`` is the one
+    signal that can reach it (pause is refused until the stamp lands):
+    ``.step_pgid`` names the probe's own group for exactly its lifetime,
+    a hung probe's timeout reaps that whole group, and the boot aborts
+    on a closed ``exited`` run row naming the timeout.
+    """
+    _configure(loop_node, model='gpt-5-codex')
+    monkeypatch.setattr(codex, '_PREFLIGHT_TIMEOUT', 1)
+    # the -SIGTERM assertion below needs TERM to end `sleep` inside
+    # the grace -- milliseconds when idle, so 2s is a wide margin
+    # for scheduler lag under the parallel suite
+    monkeypatch.setattr(codex, '_PREFLIGHT_GRACE', 2)
+    loop = Loop(loop_node)
+    # `sh` stands in for the codex binary, routed to a probe that never answers
+    monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+    spawned = hung_probe(loop)
+    # read the marker the instant the loop records the live probe
+    marker = loop_node.node_dir / STEP_PGID_FILE
+    register = loop._register_probe
+    seen: dict[str, str] = {}
+
+    def recording(process: subprocess.Popen) -> None:
+        register(process)
+        seen['marker'] = marker.read_text(encoding='utf-8').strip()
+
+    monkeypatch.setattr(loop, '_register_probe', recording)
+    with pytest.raises(_Abort):
+        loop._preflight()
+    # the marker named the probe's own group while it ran, and is gone
+    (probe,) = spawned
+    assert seen['marker'] == f'{probe.pid}'
+    assert not marker.exists()
+    # the timeout reaped the whole group
+    assert probe.returncode == -signal.SIGTERM
+    with pytest.raises(ProcessLookupError):
+        os.killpg(probe.pid, 0)
+    # the abort closed an exited run row naming the timeout
+    run = loop_node.db.read('runs', where={'node': loop_node.branch})[0]
+    assert (run['status'], run['metadata']) == (
+        'exited',
+        'codex preflight timed out',
+    )
+    assert loop_node.status() == 'exited'
+    assert 'Error: codex preflight timed out' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames='resume',
+    argvalues=[False, True],
+    ids=['fresh_boot', 'resume_boot'],
+)
+def test_preflight_abort_honors_a_kill_that_reaped_the_probe(
+    loop_node: Node,
+    hung_probe: Callable[[Loop], list[subprocess.Popen]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    resume: bool,
+) -> None:
+    """A kill that reaps the probe stands the boot down as killed.
+
+    ``kill`` stamps an idle or paused target ``killed`` under the flock and
+    then reaps the probe's group, so the probe exits ``-SIGTERM`` and the
+    preflight aborts. The abort must honor that stamp like the boot stamp
+    does: the node stays ``killed`` (never relabeled ``exited``), a fresh
+    boot's run row names the stand-down rather than blaming codex for the
+    reaped probe, and a resume boot records no re-park ``pause`` event
+    over the kill.
+    """
+    _configure(loop_node, model='gpt-5-codex')
+    if resume:
+        loop_node.status_set('active')
+        run_id = loop_node.record.run_start()
+        loop_node.status_set('paused')
+    loop = Loop(loop_node, resume=resume)
+    # `sh` stands in for the codex binary, routed to a probe that never answers
+    monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+    spawned = hung_probe(loop)
+    register = loop._register_probe
+
+    def killing(process: subprocess.Popen) -> None:
+        register(process)
+        # a kill during the probe: the flock'd stamp lands first, then the
+        # reap ends only the probe's group -- the loop itself survives
+        with worktree.lock(loop_node.repo_dir):
+            loop_node.status_set('killed')
+        os.killpg(process.pid, signal.SIGTERM)
+
+    monkeypatch.setattr(loop, '_register_probe', killing)
+    with pytest.raises(_Abort):
+        loop._preflight()
+    # the reap ended the probe, and the kill's stamp stands
+    (probe,) = spawned
+    assert probe.returncode == -signal.SIGTERM
+    assert loop_node.status() == 'killed'
+    assert '=== Stood down at boot: node was killed ===' in capsys.readouterr().out
+    # no re-park event is recorded over the kill
+    events = loop_node.db.read('events', where={'node': loop_node.branch})
+    assert 'pause' not in [event['event'] for event in events]
+    runs = loop_node.db.read('runs', where={'node': loop_node.branch})
+    if resume:
+        # the paused run is left as the kill found it
+        (run,) = runs
+        assert (run['run_id'], run['ended_at']) == (run_id, None)
+    else:
+        # the closed run row names the stand-down, not the probe
+        (run,) = runs
+        assert (run['status'], run['metadata']) == ('exited', 'killed before boot')
+
+
+@pytest.mark.parametrize(
+    argnames='alive',
+    argvalues=[True, False],
+    ids=['live_probe', 'dead_probe'],
+)
+def test_boot_reaps_an_orphaned_probe_group(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    alive: bool,
+) -> None:
+    """A boot reaps a live probe group a dead boot left on the step marker.
+
+    The probe runs before ``.pgid`` and the ``active`` stamp, so a pane
+    killed out of band during it leaves the node ``idle`` with the probe's
+    group alive under ``.step_pgid`` -- a state the crashed-active heal
+    never judges and a plain ``start`` is allowed on. The next boot would
+    otherwise record its own probe over that handle and strand the orphan
+    for good; instead it reaps the recorded group first, logging the
+    ``orphan`` event ahead of any run row and self-attributed like every
+    other event the loop writes (a bare launch exports ``_NODE`` itself),
+    and passes a dead record by without one.
+    """
+    node = loop_node
+    marker = node.node_dir / STEP_PGID_FILE
+    # a bare `node _loop` launch: no launcher exported the owning node
+    monkeypatch.delenv('_NODE', raising=False)
+    # a real same-user leader in its own group, recorded after its spawn
+    # like the probe is; the dead arm reaps it before the boot
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    marker.write_text(f'{leader.pid}\n', encoding='utf-8')
+    if not alive:
+        os.killpg(leader.pid, signal.SIGKILL)
+        leader.wait()
+    loop = MockLoop(node)
+    try:
+        assert loop.run() == 0
+        assert loop.launched
+        events = node.db.read('events', where={'event': 'orphan'})
+        if alive:
+            # the reap ended the planted group ...
+            assert leader.wait(timeout=5) != 0
+            with pytest.raises(ProcessLookupError):
+                os.killpg(leader.pid, 0)
+            # ... and audited it before the run row existed, as the node
+            (event,) = events
+            assert event['metadata'] == f'reaped pgid {leader.pid}'
+            assert event['run_id'] is None
+            assert event['actor'] == node.branch
+        else:
+            assert events == []
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
 
 
 # ------ boot latch

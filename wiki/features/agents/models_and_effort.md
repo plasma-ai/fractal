@@ -103,3 +103,9 @@ priceable, not that the account accepts it) — a defaulted model skips the prob
 On the openrouter route the preflight instead fails fast when the API key is
 missing, and probe failures name the route-specific causes. The base preflight
 also validates that the bound route is one the backend supports.
+
+The codex probe leads its own process group and rides the node's `.step_pgid`
+marker for its lifetime, so `kill` reaps it like a step (pause is refused until
+the loop stamps the node active, which happens after preflight); a probe that
+does not answer within the preflight timeout (`_PREFLIGHT_TIMEOUT`) is cancelled
+— TERM, a short grace (`_PREFLIGHT_GRACE`), then KILL on the whole group.

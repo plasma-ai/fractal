@@ -6,6 +6,8 @@ import json
 import os
 import pathlib
 import re
+import subprocess
+from collections.abc import Callable
 from typing import Any, Optional
 
 import fractal.core.pricing
@@ -421,7 +423,12 @@ class ClaudeAgent(Agent):
             return model is not None and self._rates(model) is not None
         return super().tracks_cost(model)
 
-    def _preflight(self: ClaudeAgent, model: Optional[str]) -> None:
+    def _preflight(
+        self: ClaudeAgent,
+        model: Optional[str],
+        *,
+        register: Optional[Callable[[subprocess.Popen], None]] = None,
+    ) -> None:
         """Probe the openrouter route's key presence before a run."""
         # the openrouter route runs on the key alone -- fail fast when the
         # environment cannot possibly authenticate

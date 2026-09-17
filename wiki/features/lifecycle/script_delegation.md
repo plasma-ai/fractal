@@ -127,10 +127,14 @@ launch or an inconclusive probe records nothing and the loop is judged by its
 group), `.headless` (the node's backend record — written by the headless
 launcher beside `.pgid`, it outlives the run, survives heals and kills, and only
 a tmux launch clears it), `.pgid` and `.step_pgid` (process groups for liveness
-and pause/kill reaping), `.pgid.lock` (the launch handoff's flock sidecar),
-`.paused` (the tree-wide pause latch beside the central database) and
-`.pause_abort`. Signals the loop observes — finish, stop, pause — take effect at
-iteration or step boundaries; the escalation path that does not wait is kill.
+and pause/kill reaping — the step marker also names the codex preflight probe's
+group for the probe's lifetime, which `kill` reaps by that handle and a later
+boot, finding it live under an idle node, reaps as an orphan through the crash
+heal's cadence before recording its own), `.pgid.lock` (the launch handoff's
+flock sidecar), `.paused` (the tree-wide pause latch beside the central
+database) and `.pause_abort`. Signals the loop observes — finish, stop, pause —
+take effect at iteration or step boundaries; the escalation path that does not
+wait is kill.
 
 Liveness is one law (`Node._loop_alive`). A `.headless` node is judged by its
 recorded `.pgid` process group alone and tmux is never asked, so a host without

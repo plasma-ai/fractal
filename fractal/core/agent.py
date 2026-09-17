@@ -1009,7 +1009,12 @@ class Agent:
         rows = self.node.db.read(query=query, params=params)
         return bool(rows)
 
-    def preflight(self: Agent, model: Optional[str] = None) -> None:
+    def preflight(
+        self: Agent,
+        model: Optional[str] = None,
+        *,
+        register: Optional[Callable[[subprocess.Popen], None]] = None,
+    ) -> None:
         """Fail fast before a run.
 
         Checks the agent binary is on ``PATH``, fires ``on_preflight``,
@@ -1018,6 +1023,10 @@ class Agent:
 
         Args:
             model: The model the run will use, for provider probes.
+            register: Handed a spawned probe process before the backend
+                waits on it, so the supervising loop can record the
+                probe's process group under its own marker; ``None``
+                records nothing.
 
         Raises:
             RuntimeError: For an unsupported provider route, a missing
@@ -1037,14 +1046,22 @@ class Agent:
             raise RuntimeError(f'{self.parts[0]} is not installed.')
         # fire the preflight event, then delegate provider probes to the hook
         self.on_preflight()
-        return self._preflight(model)
+        return self._preflight(model, register=register)
 
-    def _preflight(self: Agent, model: Optional[str]) -> None:
+    def _preflight(
+        self: Agent,
+        model: Optional[str],
+        *,
+        register: Optional[Callable[[subprocess.Popen], None]] = None,
+    ) -> None:
         """Hook for provider-specific probes. Default is a no-op.
 
-        Override in a backend to relay provider diagnostics::
+        A backend that spawns a probe routes it through ``spawn`` (so a
+        host's ``_spawn`` override covers it) and calls ``register`` with
+        the process before waiting on it. Override in a backend to relay
+        provider diagnostics::
 
-            def _preflight(self, model):
+            def _preflight(self, model, *, register=None):
                 probe = subprocess.run([*self.parts, 'auth'], check=False)
                 if probe.returncode != 0:
                     raise RuntimeError('Provider is not authenticated.')

@@ -14,15 +14,18 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import tomllib
 import uuid
+from collections.abc import Callable, Iterator
 from typing import Any, Optional
 
 import pytest
 
 from fractal.cli.utils import StreamRenderer
 from fractal.core import pricing
+from fractal.core.agent import Invocation
 from fractal.core.node import Node
 from fractal.impl import codex
 from fractal.impl.codex import CodexAgent, CodexParser
@@ -60,7 +63,13 @@ __all__ = [
     'test_seed_skips_uncarriable_instructions_codex',
     'test_transcript_globs_the_dated_rollouts',
     'test_preflight_probes_model_acceptance',
+    'test_preflight_timeout_reaps_a_term_ignoring_probe',
+    'test_preflight_timeout_never_kills_a_group_term_ended',
 ]
+
+# a stand-in router: run a backend's spawns as a real `sh` body, logging each
+# launch as its invocation and the live process
+_Router = Callable[[CodexAgent, str], list[tuple[Invocation, subprocess.Popen]]]
 
 # pricing with a distinct (cheaper) cache rate so an unfloored cached>input
 # would go negative -- used by the cost-guard regression tests
@@ -90,6 +99,50 @@ _USAGE_SECOND = {
     'output_tokens': 30,
 }
 _USAGE_SECOND_COST = 300 * 1e-6 + 30 * 8e-6
+
+
+@pytest.fixture
+def router(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Router]:
+    """Yield a router running a backend's spawns as a real ``sh``; reap them after.
+
+    The stand-in keeps the production spawn shape (its own session, merged
+    stderr, a text pipe) so the probe's wait and group tail run against a
+    real process, and the returned log lets a test check the argv the
+    backend would have launched.
+    """
+    spawned: list[subprocess.Popen] = []
+
+    def route(
+        backend: CodexAgent,
+        script: str,
+    ) -> list[tuple[Invocation, subprocess.Popen]]:
+        probes: list[tuple[Invocation, subprocess.Popen]] = []
+
+        def fake_spawn(invocation: Invocation, **kwargs: Any) -> subprocess.Popen:
+            process = subprocess.Popen(
+                ['sh', '-c', script],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                text=True,
+                errors='replace',
+                **kwargs,
+            )
+            probes.append((invocation, process))
+            spawned.append(process)
+            return process
+
+        monkeypatch.setattr(backend, '_spawn', fake_spawn)
+        return probes
+
+    yield route
+    # the stand-in led its own group: sweep whatever a probe left behind
+    for process in spawned:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+        process.stdout.close()
 
 
 def test_capability_flags_report_provider_facts_codex(
@@ -579,6 +632,7 @@ def test_routed_invocation_splices_the_provider_table(node_with_db: Node) -> Non
 
 def test_routed_preflight_demands_the_key_and_names_openrouter_causes(
     node_with_db: Node,
+    router: _Router,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The routed preflight fails fast keyless and swaps the cause list."""
@@ -591,14 +645,7 @@ def test_routed_preflight_demands_the_key_and_names_openrouter_causes(
         backend.preflight('openai/gpt-5.3-codex')
     # with the key, a rejecting probe relays openrouter causes, not codex login
     monkeypatch.setenv('OPENROUTER_API_KEY', 'sk-or-sentinel')
-    monkeypatch.setattr(
-        backend,
-        'spawn',
-        lambda invocation, **kwargs: _MockProbe(
-            output='401 unauthorized\n',
-            returncode=1,
-        ),
-    )
+    router(backend, _script(lines=['401 unauthorized'], exit_code=1))
     with pytest.raises(RuntimeError, match='OpenRouter dashboard'):
         backend.preflight('openai/gpt-5.3-codex')
 
@@ -828,34 +875,30 @@ def test_transcript_globs_the_dated_rollouts(node_with_db: Node) -> None:
 
 def test_preflight_probes_model_acceptance(
     node_with_db: Node,
-    monkeypatch: pytest.MonkeyPatch,
+    router: _Router,
 ) -> None:
     """The bounded probe relays codex's own cause, and skips without a model."""
     # `sh` stands in for the codex binary so the PATH check passes
     backend = CodexAgent(node_with_db, 'sh')
-    probes: list[Any] = []
-    probe = _MockProbe()
-
-    def fake_spawn(invocation: Any, **kwargs: Any) -> _MockProbe:
-        probes.append(invocation)
-        return probe
-
-    monkeypatch.setattr(backend, '_spawn', fake_spawn)
+    probes = router(backend, _script())
     # no explicit model: nothing can be rejected, so nothing spawns
     backend.preflight()
     assert probes == []
-    # an accepted model probes once, through the standard invocation shape
+    # an accepted model probes once, through the standard invocation shape,
+    # and the probe is reaped
     backend.preflight('gpt-5-codex')
-    (invocation,) = probes
+    ((invocation, probe),) = probes
     assert 'exec' in invocation.argv
     assert invocation.argv[invocation.argv.index('-m') + 1] == 'gpt-5-codex'
     assert invocation.argv[-1] == 'reply with: ok'
+    assert probe.returncode == 0, invocation.argv
     # a rejection relays codex's own message, leading with the short reason
     # the loop persists, then the neutral cause list
-    probe = _MockProbe(
-        output='{"type": "error", "message": "model not supported"}',
-        returncode=1,
+    script = _script(
+        lines=['{"type": "error", "message": "model not supported"}'],
+        exit_code=1,
     )
+    router(backend, script)
     with pytest.raises(RuntimeError) as rejected:
         backend.preflight('o3')
     detail = str(rejected.value)
@@ -863,44 +906,95 @@ def test_preflight_probes_model_acceptance(
     assert reason == "codex preflight failed for model 'o3'"
     assert 'model not supported' in detail
     assert 'expired/invalid auth' in detail
-    # a hung probe times out distinctly from a rejection, and is reaped
-    probe = _MockProbe(hang=True)
+
+
+def test_preflight_timeout_reaps_a_term_ignoring_probe(
+    node_with_db: Node,
+    router: _Router,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that ignores TERM draws the KILL after the grace, group and all."""
+    backend = CodexAgent(node_with_db, 'sh')
+    # the -SIGKILL assertion below needs `trap '' TERM` installed before
+    # TERM lands -- milliseconds after spawn when idle, so 1s is a wide
+    # margin for scheduler lag under the parallel suite
+    monkeypatch.setattr(codex, '_PREFLIGHT_TIMEOUT', 1)
+    # the grace only has to run out: TERM is ignored, so the group never
+    # goes away and the KILL follows regardless of its length
+    monkeypatch.setattr(codex, '_PREFLIGHT_GRACE', 0.2)
+    probes = router(backend, _script(hang=True, ignore_term=True))
+    # a hung probe times out distinctly from a rejection
     with pytest.raises(RuntimeError, match='timed out'):
-        backend.preflight('o3')
-    assert probe.killed
+        backend.preflight('gpt-5-codex')
+    # TERM was ignored, so the KILL after the grace ended the whole group
+    ((_, probe),) = probes
+    assert probe.returncode == -signal.SIGKILL, probe.pid
+    with pytest.raises(ProcessLookupError):
+        os.killpg(probe.pid, 0)
+
+
+def test_preflight_timeout_never_kills_a_group_term_ended(
+    node_with_db: Node,
+    router: _Router,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe whose group TERM ends within the grace draws no KILL at all.
+
+    The grace loop proves the group gone before the KILL, and a gone group's
+    id may already lead an unrelated process, so nothing is signaled again.
+    """
+    backend = CodexAgent(node_with_db, 'sh')
+    monkeypatch.setattr(codex, '_PREFLIGHT_TIMEOUT', 0.2)
+    # the no-KILL assertion below needs TERM to end `sleep` inside the
+    # grace -- milliseconds when idle, so 5s is a wide margin for
+    # scheduler lag under the parallel suite
+    monkeypatch.setattr(codex, '_PREFLIGHT_GRACE', 5)
+    sent: list[int] = []
+    killpg = os.killpg
+
+    def record(pgid: int, sig: int) -> None:
+        sent.append(sig)
+        killpg(pgid, sig)
+
+    monkeypatch.setattr(os, 'killpg', record)
+    probes = router(backend, _script(hang=True))
+    with pytest.raises(RuntimeError, match='timed out'):
+        backend.preflight('gpt-5-codex')
+    # TERM ended the group, so the grace loop broke off before any KILL
+    ((_, probe),) = probes
+    assert probe.returncode == -signal.SIGTERM, probe.pid
+    assert signal.SIGTERM in sent
+    assert signal.SIGKILL not in sent
 
 
 # ------ helpers
 
 
-class _MockProbe:
-    """Stand-in for the preflight subprocess (canned output and exit code)."""
+def _script(
+    *,
+    lines: Optional[list[str]] = None,
+    exit_code: int = 0,
+    hang: bool = False,
+    ignore_term: bool = False,
+) -> str:
+    """Build the shell body a stand-in probe runs.
 
-    def __init__(
-        self: _MockProbe,
-        output: str = '',
-        returncode: int = 0,
-        hang: bool = False,
-    ) -> None:
-        """Initialize ``_MockProbe``."""
-        self._output = output
-        self.returncode = returncode
-        self._hang = hang
-        self.killed = False
+    ``lines`` print one per line; ``hang`` then sleeps as the group leader
+    instead of exiting (``ignore_term`` makes it ignore TERM so only KILL
+    ends it).
+    """
+    parts = [f"printf '%s\\n' {_quote(line)}" for line in lines or []]
+    if hang:
+        if ignore_term:
+            parts.append("trap '' TERM")
+        parts.append('exec sleep 60')
+    parts.append(f'exit {exit_code}')
+    return '; '.join(parts)
 
-    def communicate(
-        self: _MockProbe,
-        timeout: Optional[float] = None,
-    ) -> tuple[str, None]:
-        """Return the canned output; a bounded wait on a hung probe raises."""
-        # only the bounded wait hangs -- the post-kill reap returns
-        if self._hang and timeout is not None:
-            raise subprocess.TimeoutExpired(cmd='codex', timeout=timeout)
-        return self._output, None
 
-    def kill(self: _MockProbe) -> None:
-        """Record the kill."""
-        self.killed = True
+def _quote(text: str) -> str:
+    """Single-quote ``text`` for ``sh``."""
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 def _lines(frames: list[dict[str, Any]]) -> list[str]:

@@ -496,6 +496,16 @@ class Loop:
         # before the re-entry exec, but set it here too so a
         # direct launch self-identifies
         os.environ['_NODE'] = f'{node.node_dir}'
+        # a live .step_pgid at boot is a dead boot's orphan probe: the probe
+        # runs before the active stamp, so the crashed-active heal never
+        # judges it, and this boot's _register_probe would replace its only
+        # handle -- reap it through the crash heal's cadence first, with the
+        # .pgid slot blanked (that record is this boot's own, or was judged
+        # just above); after the _NODE export, so the orphan event
+        # self-attributes like every other event this loop writes
+        _, probe_entry = node._records_snapshot()
+        if probe_entry is not None:
+            node._reap_orphan((None, probe_entry))
         if self._continue:
             self._clean_worktree()
         self._labels()
@@ -640,7 +650,8 @@ class Loop:
     def _preflight(self: Loop) -> None:
         """Fail fast (step files, binary, pricing, provider probe via seam hooks).
 
-        Aborts stamp ``exited`` + reason, never strand ``idle``.
+        Aborts stamp ``exited`` + reason, never strand ``idle``; a kill or
+        retire that landed during the probe keeps its own terminal.
         """
         node = self.node
         # pricing.json is needed when a step will run an agent that needs
@@ -697,13 +708,35 @@ class Loop:
         # accounts reject some explicit models; the pricing check only proves
         # the model priceable, not that the account accepts it) -- the abort
         # persists the probe's first line as the reason and relays the full
-        # diagnosis on stderr
+        # diagnosis on stderr; the probe's group rides the step marker while
+        # it runs so kill.sh can reap it (pause is refused until the active
+        # stamp, which lands after this returns)
         try:
-            self._agent.preflight(self._node_model or None)
+            model = self._node_model or None
+            self._agent.preflight(model, register=self._register_probe)
         except RuntimeError as error:
             print(f'Error: {error}', file=sys.stderr)
             reason, *_ = f'{error}'.split('\n')
             self._abort_preflight(reason)
+        finally:
+            # the probe is over -- drop the group handle so a later kill can
+            # never signal a recycled pgid
+            (node.node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
+
+    def _register_probe(self: Loop, process: subprocess.Popen) -> None:
+        """Record the preflight probe as the leader of its own process group.
+
+        ``kill.sh`` reaps this handle -- the one signal legal before the
+        ``active`` stamp -- so a kill during the probe ends codex's whole
+        subtree along with the loop.
+        """
+        try:
+            (self.node.node_dir / STEP_PGID_FILE).write_text(
+                f'{process.pid}\n',
+                encoding='utf-8',
+            )
+        except OSError:
+            pass
 
     def _abort_preflight(
         self: Loop,
@@ -720,7 +753,9 @@ class Loop:
         (surfaced by ``node activity``) and stamp the honest terminal
         ``exited``, which both names the failure and unwedges recovery
         (``--continue`` accepts ``exited``; a plain start refuses with a
-        restart hint rather than silently re-failing).
+        restart hint rather than silently re-failing). A kill or retire
+        that landed during the probe keeps its own terminal, and the row
+        names the stand-down rather than the probe it reaped.
 
         ``force_record`` overrides the resume-preserve guard for a resume
         boot that has no paused run to protect (``_adopt`` found none open):
@@ -743,15 +778,41 @@ class Loop:
             # the very recovery this guard preserves; best-effort like the
             # boot-path writes below: a transient DB error must not turn the
             # clean park into a crash (the node stays paused either way)
+            stood_down = ''
             try:
-                event_id = self.node.record.event_start(
-                    'pause',
-                    metadata=f'resume preflight failed: {reason}',
-                )
-                self.node.record.event_end(event_id=event_id, status='completed')
+                with worktree.lock(self.node.repo_dir):
+                    # re-read under the lock -- a kill or retire that landed
+                    # since the probe stamped its terminal under this flock
+                    # and owns the park, so record no re-park event over it
+                    stood_down = self.node.status()
+                    if stood_down not in ('retired', 'killed'):
+                        event_id = self.node.record.event_start(
+                            'pause',
+                            metadata=f'resume preflight failed: {reason}',
+                        )
+                        self.node.record.event_end(
+                            event_id=event_id, status='completed'
+                        )
             except Exception:
                 pass
+            if stood_down in ('retired', 'killed'):
+                print(f'=== Stood down at boot: node was {stood_down} ===')
             raise _Abort
+        # a kill or retire that landed during the probe already stamped its
+        # terminal under the flock -- honor it like the boot stamp does, and
+        # blame the row on the stand-down, not on the probe it reaped
+        stood_down = ''
+        try:
+            with worktree.lock(self.node.repo_dir):
+                if (status := self.node.status()) in ('retired', 'killed'):
+                    stood_down = status
+                else:
+                    self.node.status_set('exited')
+        except Exception:
+            pass
+        if stood_down:
+            print(f'=== Stood down at boot: node was {stood_down} ===')
+            reason = f'{stood_down} before boot'
         # record the reason on a closed run row -- the durable home
         # `node status`/`activity` surface it from
         try:
@@ -762,10 +823,6 @@ class Loop:
                 exit_code=1,
                 metadata=reason,
             )
-        except Exception:
-            pass
-        try:
-            self.node.status_set('exited')
         except Exception:
             pass
         raise _Abort

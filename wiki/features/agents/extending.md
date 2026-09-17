@@ -41,7 +41,10 @@ delegates to its private hook, which the subclass implements:
 - the transcript hook (with its fallback) locates a session's transcript file —
   the seam the project-files surface fronts (see
   [[features/files/transcripts]]);
-- the preflight hook probes provider readiness before a run commits;
+- the preflight hook probes provider readiness before a run commits; a backend
+  that spawns a probe routes it through the spawn verb and hands the live
+  process to the caller's `register` callback before waiting on it, so the loop
+  can record its group under the node's own marker;
 - the seeding hook materializes the provider's config directory in a new node,
   receiving the parent node's data directory so files an inherited config
   references — codex's relative model instructions file — travel with the config

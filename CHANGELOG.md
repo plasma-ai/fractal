@@ -288,6 +288,18 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
+- `codex` preflight: the model-acceptance probe runs as the leader of its own
+  process group, recorded in `.step_pgid` for the probe's lifetime so `kill`
+  reaps it by the same handle as a step, and is cancelled after the preflight
+  timeout without an answer — TERM, a short grace, then KILL on the whole group.
+  A kill or retire that lands during the probe stands the boot down as that
+  terminal — the run row names it (`killed before boot`) rather than the probe,
+  and a resume boot records no `pause` event over it.
+- The loop boot reaps a live process group left under `.step_pgid` by a boot
+  that died during its preflight probe (a pane killed out of band while codex
+  was probed) before it records anything of its own, logging an `orphan` event:
+  the probe runs before the `active` stamp, so no crash heal judges it, and the
+  next boot would otherwise overwrite its only handle.
 - `node merge` holds the squash to the node's commit scope: before committing,
   the staged paths outside `.fractal/` are judged by the node's scope roots and
   its project wiki (a repo-root node without a scope is unrestricted; a

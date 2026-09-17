@@ -265,6 +265,15 @@ preserved instead: the node stays ``paused``, the reason lands on a
 resume in a fixed environment re-adopts the run. Steps that override the
 agent or provider re-validate at their own launch.
 
+A kill or retire that lands during the probe stands the boot down as that
+terminal — the run row names it (``killed before boot``) rather than the
+probe, and a resume boot records no ``pause`` event over it.
+
+The ``codex`` probe leads its own process group, recorded in the node's
+``.step_pgid`` for the probe's lifetime so ``kill`` reaps it by the same
+handle as a step; a probe that does not answer within the preflight
+timeout is cancelled — TERM, a short grace, then KILL on the whole group.
+
 Costs
 -----
 

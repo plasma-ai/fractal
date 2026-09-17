@@ -6,9 +6,11 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import time
 import tomllib
+from collections.abc import Callable
 from typing import Any, Optional
 
 import fractal.core.pricing
@@ -29,6 +31,9 @@ _NO_FORK = (
 # bound the model preflight probe so a hung codex (network/auth stall)
 # cannot wedge a run start
 _PREFLIGHT_TIMEOUT = 60
+# TERM-to-KILL grace for the probe's own process group -- mirrors the loop's
+# _KILL_GRACE_SECONDS for a step group
+_PREFLIGHT_GRACE = 10
 
 
 class CodexParser(StreamParser):
@@ -222,7 +227,12 @@ class CodexAgent(Agent):
         """Resolve pricing through the codex slug-alias chain."""
         return _rates(model)
 
-    def _preflight(self: CodexAgent, model: Optional[str]) -> None:
+    def _preflight(
+        self: CodexAgent,
+        model: Optional[str],
+        *,
+        register: Optional[Callable[[subprocess.Popen], None]] = None,
+    ) -> None:
         """Probe codex's acceptance of an explicit model for this account.
 
         Some codex accounts reject some explicit models (e.g. a
@@ -232,7 +242,10 @@ class CodexAgent(Agent):
         model priceable, not that codex accepts it. One bounded probe,
         built and spawned through the standard triads so a host's
         ``_spawn`` override covers it too; an uncapped codex with no
-        model skips the probe and runs fine.
+        model skips the probe and runs fine. The probe leads its own
+        process group, handed to ``register`` before the first wait, so
+        a timeout reaps codex's whole subtree and the loop can record
+        the group for ``kill.sh``.
         """
         # the openrouter route runs on the key alone -- fail fast when the
         # environment cannot possibly authenticate
@@ -248,15 +261,51 @@ class CodexAgent(Agent):
         # capture the probe's output (codex emits the authoritative cause --
         # e.g. a 400 'model not supported with a ChatGPT account' -- on its
         # --json stream) so a rejection relays codex's reason rather than a
-        # hedged guess, merging stderr in so it rides alongside
+        # hedged guess, merging stderr in so it rides alongside; the probe
+        # leads its own group like a step invocation does
         invocation = self.invocation('reply with: ok', model=model)
-        process = self.spawn(invocation, stderr=subprocess.STDOUT)
+        process = self.spawn(
+            invocation,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        # hand the live probe to the loop before the first wait, so its group
+        # is on record for as long as it runs
+        if register is not None:
+            register(process)
         try:
             output, _ = process.communicate(timeout=_PREFLIGHT_TIMEOUT)
         except subprocess.TimeoutExpired as e:
-            # a hung probe never responded -- distinct from an actual
-            # rejection; the first line is the short reason callers persist
-            process.kill()
+            # a hung probe never responded -- distinct from an actual rejection;
+            # TERM the whole group and KILL any survivor after a short grace,
+            # since a TERM-trapping grandchild holding the pipe would block the
+            # reap below; the first line is the short reason callers persist
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            deadline = time.monotonic() + _PREFLIGHT_GRACE
+            gone = False
+            while time.monotonic() < deadline:
+                # reap the leader (clears its zombie so the group probe below
+                # reads true), then check the whole group: a survivor that
+                # traps TERM must still draw the KILL
+                process.poll()
+                try:
+                    os.killpg(process.pid, 0)
+                except ProcessLookupError:
+                    gone = True
+                    break
+                except PermissionError:
+                    pass
+                time.sleep(0.1)
+            # a group the grace proved gone is never signaled again -- its id
+            # may already lead an unrelated process
+            if not gone:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
             process.communicate()
             raise RuntimeError(
                 'codex preflight timed out\n'
