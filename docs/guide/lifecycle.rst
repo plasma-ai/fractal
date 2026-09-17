@@ -261,8 +261,8 @@ the command line instead of inside a dying tmux pane. Start also refuses:
   re-authorize spend. A refused or failed continue rolls the retune back.
 
 A start with no ``max_cost`` at all is allowed but warns loudly — spend is
-then untracked, bounded only by ``max_iters`` and ``timeout``. Continuing
-from ``killed`` surfaces the recorded kill attribution as a notice. Every
+then bounded only by ``max_iters`` and ``timeout``. Continuing from
+``killed`` surfaces the recorded kill attribution as a notice. Every
 successful launch logs a completed ``start`` event (metadata ``continue`` on
 continues), so the event log carries the node's restart chain.
 

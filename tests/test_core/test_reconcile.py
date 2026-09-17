@@ -34,8 +34,10 @@ __all__ = [
     'test_reconcile_requires_a_definitive_tmux_answer',
     'test_tmux_probe_falls_back_on_a_record_unlinked_mid_probe',
     'test_recorded_group_returns_unknown_on_failed_identity_probe',
-    'test_recorded_group_accepts_a_confirmed_missing_leader',
+    'test_recorded_group_arbitrates_a_missing_leader_by_membership',
+    'test_recorded_group_dates_the_leader_in_utc',
     'test_foreign_owned_group_is_arbitrated_by_its_leader',
+    'test_foreign_owned_memberless_group_reads_dead',
     'test_reconcile_requires_a_definitive_headless_identity',
     'test_headless_liveness_reconciles_a_dead_process_group',
     'test_headless_liveness_never_asks_tmux',
@@ -387,21 +389,91 @@ def test_recorded_group_returns_unknown_on_failed_identity_probe(
     assert _recorded_group(4242, time.time()) is None
 
 
-def test_recorded_group_accepts_a_confirmed_missing_leader(
+@pytest.mark.parametrize(
+    argnames=('stdout', 'returncode', 'expected'),
+    argvalues=[
+        ('  99 4242\n  17    17\n', 0, True),
+        ('  17    17\n', 0, False),
+        ('', 2, None),
+    ],
+    ids=['member', 'memberless', 'walk-failed'],
+)
+def test_recorded_group_arbitrates_a_missing_leader_by_membership(
     monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    returncode: int,
+    expected: Optional[bool],
 ) -> None:
-    """A selection miss identifies a live group that outlived its leader."""
+    """A selection miss is judged by the group's members, never trusted.
 
-    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+    The leader's pid is unmatched both for a live group that outlived its
+    leader and for a reaped group whose id still answers ``killpg`` during
+    another process-table walk; only a member left in the group proves the
+    first, and a failed walk leaves the answer open.
+    """
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if argv[:2] == ['ps', '-p']:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=1,
+                stdout='',
+                stderr='',
+            )
+        stderr = 'ps failed\n' if returncode else ''
         return subprocess.CompletedProcess(
-            args=['ps'],
-            returncode=1,
-            stdout='',
-            stderr='',
+            args=argv,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
         )
 
     monkeypatch.setattr('fractal.core.node.subprocess.run', run)
-    assert _recorded_group(4242, time.time()) is True
+    assert _recorded_group(4242, time.time()) is expected
+
+
+@pytest.mark.parametrize(
+    argnames='recycled',
+    argvalues=[False, True],
+    ids=['recorded', 'recycled'],
+)
+def test_recorded_group_dates_the_leader_in_utc(
+    monkeypatch: pytest.MonkeyPatch,
+    recycled: bool,
+) -> None:
+    """A leader spawned in a fall-back's repeated hour dates before its record.
+
+    ``ps`` prints a leader's start as wall-clock time with no zone, so
+    through the hour a DST fall-back repeats that instant names two moments
+    an hour apart -- read as local time, a first-pass leader can date an
+    hour after its own record, and the live loop is judged a recycled id.
+    The check asks for the instant in UTC, where every second is one
+    moment, and a leader whose record predates it still reads as recycled.
+    """
+    # a zone whose fall-back lands seconds from now, at noon local time: the
+    # present hour occurs twice, the leader spawns in its first pass, and a
+    # local-time parse of that instant dates it in the second
+    end = time.time() + 10.0
+    west = time.gmtime(end).tm_hour - 12
+    local = time.gmtime(end - west * 3600)
+    when = f'{local.tm_hour}:{local.tm_min:02d}:{local.tm_sec:02d}'
+    zone = f'STD{west + 1}DST{west},0/0,{local.tm_yday - 1}/{when}'
+    monkeypatch.setenv('TZ', zone)
+    time.tzset()
+    leader = subprocess.Popen(['sleep', '60'], start_new_session=True)
+    try:
+        # the record follows its leader's spawn; a recycled id's record
+        # predates the leader fronting it
+        recorded_at = time.time() - (2400.0 if recycled else 0.0)
+        assert _recorded_group(leader.pid, recorded_at) is (not recycled)
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
+        monkeypatch.undo()
+        time.tzset()
 
 
 @pytest.mark.parametrize(
@@ -435,6 +507,40 @@ def test_foreign_owned_group_is_arbitrated_by_its_leader(
         lambda pgid, recorded_at: recorded,
     )
     assert node._loop_alive() is expected
+
+
+def test_foreign_owned_memberless_group_reads_dead(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``EPERM`` over a group with no leader and no members is a dead loop.
+
+    A reaped leader's id keeps answering ``killpg`` with ``EPERM`` for a few
+    milliseconds while another process-table walk holds the group, so the
+    refusal alone is not proof of life: the member walk finds nothing, and
+    the liveness probe reads the group as gone.
+    """
+    node = node_with_db
+    (node.node_dir / HEADLESS_FILE).write_text('headless\n', encoding='utf-8')
+    (node.node_dir / PGID_FILE).write_text('4242\n', encoding='utf-8')
+
+    def foreign_group(pgid: int, sig: int) -> NoReturn:
+        raise PermissionError
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        selecting = argv[:2] == ['ps', '-p']
+        returncode = 1 if selecting else 0
+        stdout = '' if selecting else '  17    17\n'
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=returncode,
+            stdout=stdout,
+            stderr='',
+        )
+
+    monkeypatch.setattr('fractal.core.node.os.killpg', foreign_group)
+    monkeypatch.setattr('fractal.core.node.subprocess.run', run)
+    assert node._loop_alive() is False
 
 
 def test_reconcile_requires_a_definitive_headless_identity(

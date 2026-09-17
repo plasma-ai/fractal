@@ -25,6 +25,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Added
 
+- The loop warns once per loop process when cost caps are set and the run mixes
+  priced and unpriced steps: a `NULL`-cost step adds nothing to the budget
+  guards' figure, so the caps undercount. An all-unpriced run keeps its own
+  warning.
 - `node start --headless` / `--tmux`: the loop runs in a detached process group
   instead of a tmux session, its output appended to the node's `headless.log`
   with one `=== Launched ... ===` banner per launch, so a tree runs on a host
@@ -285,9 +289,77 @@ may include breaking changes, each listed under a Breaking heading.
 - `node retire` refuses an already-retired node
   (`Cannot retire: node is already retired.`), so the recorded pre-retire status
   stays the real one and `unretire` restores it exactly.
+- A cost-ledger read that fails before the run's first good reading holds the
+  budget probes without blaming unpriced steps: the untracked-spend warning
+  fires only once a successful read proves the run untracked, so a contention
+  window at run start spends neither that warning's once-per-loop-process latch
+  nor its attribution.
+- The reserve-entry probe at each iteration top reads the run's spend through
+  the same guarded reader as the other budget probes and holds on unknown spend,
+  so a ledger read that fails before the run's first good reading — one failed
+  read is enough on a resumed run whose steps are all unpriced — never enters
+  RESERVE, which would run the iteration as a wind-down with every approval gate
+  skipped.
+- The process-group identity check arbitrates a leaderless group by its members:
+  when `ps -p` finds no leader for a recorded `.pgid`/`.step_pgid` group, the
+  group counts as alive only if a process-table walk lists a member in it, so a
+  reaped loop whose group id still answers `killpg` for a few milliseconds
+  during another walk is judged dead instead of standing down the crash heal or
+  a lifecycle refusal until the next probe.
+- The process-group identity check reads the leader's start instant in UTC: `ps`
+  prints a local wall-clock instant, ambiguous through the hour a DST fall-back
+  repeats, so a loop or agent group spawned in that hour's first pass dates no
+  later than its own record instead of reading as a recycled id for the whole
+  run — which would reap the live loop's record through the crash heal and close
+  its rows while it keeps running, boot a second loop over it on a later
+  `start`, and drop the record before `kill` signals.
+- The pricing refresh reports an unwritable cache directory (a read-only or
+  foreign-owned `~/.fractal`, a full disk) as a failed fetch — `stale` with a
+  cache, `missing` without — so the loop's preflight aborts with
+  `Could not fetch pricing and no cached pricing.json exists.` and an exited run
+  row, instead of a raw `PermissionError` escaping ahead of the run row and
+  stranding `.status` at `idle`.
 
 ### Changed
 
+- `codex` steps are priced from the per-response usage records codex writes to
+  its session log during the step, read once the process exits, so a resumed
+  thread's step records its own tokens rather than the cumulative total codex
+  reports on stdout. A step that exits non-zero records `NULL` cost silently
+  (the exit is the loop's to attribute); one that exits cleanly but runs on
+  codex older than 0.153 (whose log carries no per-response records), whose log
+  cannot be bound to its process, or whose turn spawned or drove sub-agent
+  threads (each child writes its own log, and that spend is not priced), records
+  `NULL` cost — never `$0` — and logs the reason.
+- `codex` preflight: the model-acceptance probe runs as the leader of its own
+  process group, recorded in `.step_pgid` for the probe's lifetime so `kill`
+  reaps it by the same handle as a step, and is cancelled after the preflight
+  timeout without an answer — TERM, a short grace, then KILL on the whole group.
+  A kill or retire that lands during the probe stands the boot down as that
+  terminal — the run row names it (`killed before boot`) rather than the probe,
+  and a resume boot records no `pause` event over it.
+- The loop boot reaps a live process group left under `.step_pgid` by a boot
+  that died during its preflight probe (a pane killed out of band while codex
+  was probed) before it records anything of its own, logging an `orphan` event:
+  the probe runs before the `active` stamp, so no crash heal judges it, and the
+  next boot would otherwise overwrite its only handle.
+- The run-start pricing refresh runs for every step that runs a token-priced
+  agent, configured model or not, since a `codex` step is priced at the served
+  model its session log names; a `codex` node with no model set aborts preflight
+  when no table can be fetched and none is cached
+  (`Could not fetch pricing and no cached pricing.json exists.`), as a node with
+  a pinned model does.
+- The
+  `no model set for <agent>; its cost cannot be priced and will not be tracked`
+  preflight warning is removed: with no model set the spend is priced at the
+  served model, a served model missing from the table is reported per step
+  (`codex usage unpriced: ...`), and a cost cap over a model-less token-priced
+  agent is still refused at the step launch.
+- `node init`'s uncapped-spend advisory
+  (`Warning: no --max-cost/--max-iters -- this node can run and spend without bound.`)
+  fires for a token-priced agent with no model set, since its spend is priced at
+  the served model, and stays quiet only for a model — pinned by flag, by
+  template preset, or by `--inherit config` — that the price table lacks.
 - `node merge` holds the squash to the node's commit scope: before committing,
   the staged paths outside `.fractal/` are judged by the node's scope roots and
   its project wiki (a repo-root node without a scope is unrestricted; a

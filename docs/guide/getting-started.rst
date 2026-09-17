@@ -167,7 +167,7 @@ and underscores.
 Always cap a new node: budgets default to unlimited, and one iteration is
 several agent invocations. The command warns on stderr when neither
 ``--max-cost`` nor ``--max-iters`` is given (unless the agent's spend is
-untracked — e.g. ``codex`` without a priced model).
+untracked — e.g. ``codex`` pinned to a model the price table lacks).
 
 .. code-block:: console
 

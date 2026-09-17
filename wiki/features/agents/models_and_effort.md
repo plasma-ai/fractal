@@ -70,15 +70,17 @@ substitute — so the served model is read off each *real top-level* assistant r
 CLI's injected error stand-ins), and non-string wire noise; omp reads it off
 each `turn_end` frame, and grok off its terminal frame's sole `modelUsage` key —
 its only model report, and a multi-entry usage is ambiguous (an auxiliary model
-beside the serving one), so it names no served model. Beside the row's last-wins
-stamp, every distinct model the stream names rides the launch's served-model
-record (`StreamResult.models`), which is what the loop's model-drop enforcement
+beside the serving one), so it names no served model; codex's stream never names
+a model, so its served model is read off its session log's `turn_context` once
+the invocation reconciles after exit. Beside the row's last-wins stamp, every
+distinct model the stream names rides the launch's served-model record
+(`StreamResult.models`), which is what the loop's model-drop enforcement
 compares against a step's pin (see [[features/loop/steps|steps]]) — the row
 alone would read a substitution the stream recovered from as clean. Backends
-whose stream never names a served model (codex, opencode) leave the record
-empty, which the drop check reads as unknown rather than as a match. Each
-backend resolves its configured model from its own vendor config, best-effort —
-an unreadable or malformed file simply names no model:
+whose stream never names a served model (opencode) leave the record empty, which
+the drop check reads as unknown rather than as a match. Each backend resolves
+its configured model from its own vendor config, best-effort — an unreadable or
+malformed file simply names no model:
 
 - claude walks its settings chain (the node agent dir's local settings over its
   `settings.json`, then the user's `~/.claude/settings.json`); the first file
@@ -103,3 +105,9 @@ priceable, not that the account accepts it) — a defaulted model skips the prob
 On the openrouter route the preflight instead fails fast when the API key is
 missing, and probe failures name the route-specific causes. The base preflight
 also validates that the bound route is one the backend supports.
+
+The codex probe leads its own process group and rides the node's `.step_pgid`
+marker for its lifetime, so `kill` reaps it like a step (pause is refused until
+the loop stamps the node active, which happens after preflight); a probe that
+does not answer within the preflight timeout (`_PREFLIGHT_TIMEOUT`) is cancelled
+— TERM, a short grace (`_PREFLIGHT_GRACE`), then KILL on the whole group.

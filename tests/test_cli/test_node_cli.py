@@ -61,7 +61,7 @@ __all__ = [
     'test_init_scaffolds_ignored_tmp_scratch_dir',
     'test_engine_system_skills_ignored',
     'test_init_uncapped_priced_agent_warns',
-    'test_init_uncapped_unpriced_agent_stays_quiet',
+    'test_init_uncapped_warning_spares_only_an_unpriced_pin',
     'test_init_uncapped_warning_reads_the_spawning_parents_agent',
     'test_init_uncapped_warning_reads_a_template_preset_cap',
     'test_init_blind_seeds_no_subs_and_start_sweeps',
@@ -785,8 +785,9 @@ def test_engine_system_skills_ignored(repo: dict) -> None:
         ([], True),
         (['--max-cost', '1'], False),
         (['--max-iters', '3'], False),
+        (['--provider', 'openrouter', '--model', 'mystery-model'], False),
     ],
-    ids=['uncapped', 'max-cost', 'max-iters'],
+    ids=['uncapped', 'max-cost', 'max-iters', 'openrouter-pin'],
 )
 def test_init_uncapped_priced_agent_warns(
     repo: dict,
@@ -797,7 +798,9 @@ def test_init_uncapped_priced_agent_warns(
 
     With neither ``--max-cost`` nor ``--max-iters`` the node can spend
     without bound, so init says so -- one advisory line naming both flags,
-    never a block (the command still succeeds).
+    never a block (the command still succeeds). A pin the price table lacks
+    on the openrouter route leaves no spend to meter, so that node stays
+    quiet.
     """
     root = repo['root']
     spawn = _run(root, 'node', 'init', 'capchk', '--agent', 'claude', *flags)
@@ -812,38 +815,92 @@ def test_init_uncapped_priced_agent_warns(
     assert _run(root, 'node', 'delete', 'main.capchk', '--force').returncode == 0
 
 
-def test_init_uncapped_unpriced_agent_stays_quiet(repo: dict) -> None:
-    """An agent fractal cannot price skips the uncapped warning.
+@pytest.mark.parametrize(
+    argnames=('flags', 'template', 'warns'),
+    argvalues=[
+        ([], False, True),
+        (['--model', 'mystery-model'], False, False),
+        ([], True, False),
+    ],
+    ids=['served-model', 'flag-pin', 'preset-pin'],
+)
+def test_init_uncapped_warning_spares_only_an_unpriced_pin(
+    repo: dict,
+    flags: list[str],
+    template: bool,
+    warns: bool,
+) -> None:
+    """A token-priced agent warns uncapped unless its pinned model is unpriced.
 
-    ``codex`` usage is priced through the pricing cache keyed by model; with
-    no ``--model`` there is no rate to meter spend against, so the uncapped
-    warning would name a spend fractal never tracks -- init stays quiet.
+    ``codex`` spend is priced at the served model its session log names, so a
+    node with no ``--model`` spends tracked money and draws the advisory like
+    a native agent; only a model the price table lacks leaves no spend to
+    meter, and init stays quiet for that pin whether a flag or a template
+    preset supplies it.
     """
     root = repo['root']
-    spawn = _run(root, 'node', 'init', 'quietchk', '--agent', 'codex')
-    assert spawn.returncode == 0, spawn.stderr
-    assert '--max-cost' not in spawn.stderr
-    # clean up so the shared module fixture is left as other tests expect
-    assert _run(root, 'node', 'delete', 'main.quietchk', '--force').returncode == 0
+    # a preset pin is read back from the child's merged config -- the template
+    # deploys from the fork commit, so it is committed first
+    if template:
+        preset = {'config.json': '{"model": "mystery-model"}\n'}
+        _commit_template(root, 'templates/pinned', preset)
+        flags = [*flags, '--template', 'templates/pinned']
+    spawn = _run(root, 'node', 'init', 'quietchk', '--agent', 'codex', *flags)
+    try:
+        assert spawn.returncode == 0, spawn.stderr
+        warnings = [
+            line
+            for line in spawn.stderr.splitlines()
+            if '--max-cost' in line and '--max-iters' in line
+        ]
+        assert len(warnings) == (1 if warns else 0), spawn.stderr
+    finally:
+        # clean up so the shared module fixture is left as other tests expect
+        _run(root, 'node', 'delete', 'main.quietchk', '--force')
 
 
-def test_init_uncapped_warning_reads_the_spawning_parents_agent(repo: dict) -> None:
+@pytest.mark.parametrize(
+    argnames='pin',
+    argvalues=[
+        ['--model', 'mystery-model'],
+        ['--inherit', 'config'],
+    ],
+    ids=['flag-pin', 'inherit-pin'],
+)
+def test_init_uncapped_warning_reads_the_spawning_parents_agent(
+    repo: dict,
+    pin: list[str],
+) -> None:
     """The uncapped warning meters the calling node's agent, not the root's.
 
     An agent spawns children under itself (``_NODE``), so init inherits that
-    node's agent -- the warning must read the same chain. A codex (unpriced)
-    parent spawning an uncapped child stays quiet even though the root default
-    is a priced claude.
+    node's agent -- the warning must read the same chain. A codex parent
+    spawning an uncapped child pinned to a model the price table lacks,
+    whether by flag or by ``--inherit config``, stays quiet even though the
+    root default is a native claude, which tracks every pin and would warn.
     """
     root = repo['root']
-    assert _run(root, 'node', 'init', 'coparent', '--agent', 'codex').returncode == 0
-    parent_dir = root / '.worktrees' / 'main.coparent' / '.fractal' / 'main.coparent'
-    spawn = _run(root, 'node', 'init', 'gchild', _NODE=str(parent_dir))
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'coparent',
+        '--agent',
+        'codex',
+        '--model',
+        'mystery-model',
+    )
     assert spawn.returncode == 0, spawn.stderr
-    # the effective agent is the codex parent's -- unpriced, so no warning
-    assert '--max-cost' not in spawn.stderr
-    # clean up so the shared module fixture is left as other tests expect
-    assert _run(root, 'node', 'delete', 'main.coparent', '--force').returncode == 0
+    parent_dir = root / '.worktrees' / 'main.coparent' / '.fractal' / 'main.coparent'
+    try:
+        spawn = _run(root, 'node', 'init', 'gchild', *pin, _NODE=str(parent_dir))
+        assert spawn.returncode == 0, spawn.stderr
+        # the effective agent is the codex parent's -- the pin is unpriced there,
+        # so no warning
+        assert '--max-cost' not in spawn.stderr
+    finally:
+        # clean up so the shared module fixture is left as other tests expect
+        _run(root, 'node', 'delete', 'main.coparent', '--force')
 
 
 def test_init_uncapped_warning_reads_a_template_preset_cap(repo: dict) -> None:

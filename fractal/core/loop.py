@@ -365,6 +365,7 @@ class Loop:
         self._budget_stem = ''
         self._cap_overshoot = ''
         self._untracked_warned = False
+        self._unpriced_warned = False
         # per-surface latches for the live-retune rejections (warn once per
         # distinct value, not once per iteration)
         self._warned: dict[str, str] = {}
@@ -496,6 +497,16 @@ class Loop:
         # before the re-entry exec, but set it here too so a
         # direct launch self-identifies
         os.environ['_NODE'] = f'{node.node_dir}'
+        # a live .step_pgid at boot is a dead boot's orphan probe: the probe
+        # runs before the active stamp, so the crashed-active heal never
+        # judges it, and this boot's _register_probe would replace its only
+        # handle -- reap it through the crash heal's cadence first, with the
+        # .pgid slot blanked (that record is this boot's own, or was judged
+        # just above); after the _NODE export, so the orphan event
+        # self-attributes like every other event this loop writes
+        _, probe_entry = node._records_snapshot()
+        if probe_entry is not None:
+            node._reap_orphan((None, probe_entry))
         if self._continue:
             self._clean_worktree()
         self._labels()
@@ -640,14 +651,15 @@ class Loop:
     def _preflight(self: Loop) -> None:
         """Fail fast (step files, binary, pricing, provider probe via seam hooks).
 
-        Aborts stamp ``exited`` + reason, never strand ``idle``.
+        Aborts stamp ``exited`` + reason, never strand ``idle``; a kill or
+        retire that landed during the probe keeps its own terminal.
         """
         node = self.node
-        # pricing.json is needed when a step will run an agent that needs
-        # pricing with a model to price -- the step's own model, the node
-        # default, or a routed backend's pinned default; an agent that
-        # reports its own cost natively, or a token-priced agent with no
-        # model, gives pricing nothing to do
+        # pricing.json is needed when a step will run an agent whose cost is
+        # priced from the LiteLLM table -- a token-priced agent prices at the
+        # served model its own session record names, configured model or
+        # not, and a routed backend chain-prices its result usage; an agent
+        # that reports its own cost natively gives pricing nothing to do
         self._needs_pricing = False
         for path in sorted((node.node_dir / 'steps').glob('*.md')):
             # step files are hand-edited: a bad byte must abort through the
@@ -666,7 +678,7 @@ class Loop:
             except ValueError:
                 continue
             if not backend.tracks_cost():
-                if step.model or self._node_model or backend.provider is not None:
+                if backend.needs_pricing or backend.provider is not None:
                     self._needs_pricing = True
                     break
         # refresh model pricing before the run; a fetch failure with no cache
@@ -682,28 +694,40 @@ class Loop:
                     'Warning: could not refresh pricing; using cached pricing.json.',
                     file=sys.stderr,
                 )
-        # warn when the agent's cost is priced from a model but none is set
-        # (and no cap forces the issue) -- its spend would silently go untracked
-        caps = (self._max_cost, self._max_iter_cost, self._max_step_cost)
-        no_caps = all(cap is None for cap in caps)
-        if self._agent.needs_pricing and not self._node_model and no_caps:
-            print(
-                f'Warning: no model set for {self._agent.name}; its cost'
-                ' cannot be priced and will not be tracked',
-                file=sys.stderr,
-            )
         # provider preflight via the seam: the binary must be on PATH, and a
         # token-priced agent with an explicit model is probed once (some codex
         # accounts reject some explicit models; the pricing check only proves
         # the model priceable, not that the account accepts it) -- the abort
         # persists the probe's first line as the reason and relays the full
-        # diagnosis on stderr
+        # diagnosis on stderr; the probe's group rides the step marker while
+        # it runs so kill.sh can reap it (pause is refused until the active
+        # stamp, which lands after this returns)
         try:
-            self._agent.preflight(self._node_model or None)
+            model = self._node_model or None
+            self._agent.preflight(model, register=self._register_probe)
         except RuntimeError as error:
             print(f'Error: {error}', file=sys.stderr)
             reason, *_ = f'{error}'.split('\n')
             self._abort_preflight(reason)
+        finally:
+            # the probe is over -- drop the group handle so a later kill can
+            # never signal a recycled pgid
+            (node.node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
+
+    def _register_probe(self: Loop, process: subprocess.Popen) -> None:
+        """Record the preflight probe as the leader of its own process group.
+
+        ``kill.sh`` reaps this handle -- the one signal legal before the
+        ``active`` stamp -- so a kill during the probe ends codex's whole
+        subtree along with the loop.
+        """
+        try:
+            (self.node.node_dir / STEP_PGID_FILE).write_text(
+                f'{process.pid}\n',
+                encoding='utf-8',
+            )
+        except OSError:
+            pass
 
     def _abort_preflight(
         self: Loop,
@@ -720,7 +744,9 @@ class Loop:
         (surfaced by ``node activity``) and stamp the honest terminal
         ``exited``, which both names the failure and unwedges recovery
         (``--continue`` accepts ``exited``; a plain start refuses with a
-        restart hint rather than silently re-failing).
+        restart hint rather than silently re-failing). A kill or retire
+        that landed during the probe keeps its own terminal, and the row
+        names the stand-down rather than the probe it reaped.
 
         ``force_record`` overrides the resume-preserve guard for a resume
         boot that has no paused run to protect (``_adopt`` found none open):
@@ -743,15 +769,41 @@ class Loop:
             # the very recovery this guard preserves; best-effort like the
             # boot-path writes below: a transient DB error must not turn the
             # clean park into a crash (the node stays paused either way)
+            stood_down = ''
             try:
-                event_id = self.node.record.event_start(
-                    'pause',
-                    metadata=f'resume preflight failed: {reason}',
-                )
-                self.node.record.event_end(event_id=event_id, status='completed')
+                with worktree.lock(self.node.repo_dir):
+                    # re-read under the lock -- a kill or retire that landed
+                    # since the probe stamped its terminal under this flock
+                    # and owns the park, so record no re-park event over it
+                    stood_down = self.node.status()
+                    if stood_down not in ('retired', 'killed'):
+                        event_id = self.node.record.event_start(
+                            'pause',
+                            metadata=f'resume preflight failed: {reason}',
+                        )
+                        self.node.record.event_end(
+                            event_id=event_id, status='completed'
+                        )
             except Exception:
                 pass
+            if stood_down in ('retired', 'killed'):
+                print(f'=== Stood down at boot: node was {stood_down} ===')
             raise _Abort
+        # a kill or retire that landed during the probe already stamped its
+        # terminal under the flock -- honor it like the boot stamp does, and
+        # blame the row on the stand-down, not on the probe it reaped
+        stood_down = ''
+        try:
+            with worktree.lock(self.node.repo_dir):
+                if (status := self.node.status()) in ('retired', 'killed'):
+                    stood_down = status
+                else:
+                    self.node.status_set('exited')
+        except Exception:
+            pass
+        if stood_down:
+            print(f'=== Stood down at boot: node was {stood_down} ===')
+            reason = f'{stood_down} before boot'
         # record the reason on a closed run row -- the durable home
         # `node status`/`activity` surface it from
         try:
@@ -762,10 +814,6 @@ class Loop:
                 exit_code=1,
                 metadata=reason,
             )
-        except Exception:
-            pass
-        try:
-            self.node.status_set('exited')
         except Exception:
             pass
         raise _Abort
@@ -1694,8 +1742,12 @@ class Loop:
             # (may drain mid-iteration); the boundary then ends the run,
             # never self-stop here
             if not self._reserve and self._max_cost is not None:
-                remaining = self._run_remaining()
-                if remaining <= self._reserve_budget:
+                # a failed read before the run's first good reading, or an
+                # untracked run, reads None and holds -- never enter RESERVE
+                # on unknown spend
+                spent = self._run_spent()
+                reserve_floor = float(self._max_cost) - self._reserve_budget
+                if spent is not None and spent >= reserve_floor:
                     self._reserve = True
             # enter RESERVE when an ancestor's budget abort left a pending
             # finish -- the current iteration is the run's last (the
@@ -2664,6 +2716,7 @@ class Loop:
         try:
             result = agent.stream(
                 process.stdout,
+                process=process,
                 step_id=self._step_id,
                 model=record_model,
                 detached=self._step_detached,
@@ -3424,9 +3477,13 @@ class Loop:
         """Return the run's subtree spend at the ledger's display precision.
 
         Budgets are per-run (runs are isolated); ``None`` when the
-        spend is untracked. A failed read warns and returns the last
-        good reading -- never ``None``, which reads as untracked and
-        would disarm the budget probes for a mere contention window.
+        spend is untracked, which under armed caps warns once per loop
+        process from here -- the one place a successful read proves it,
+        and only once an ended NULL-cost row does (an open step reads as
+        unknown too). A failed read warns and returns the last good
+        reading, or ``None`` before the run's first successful read;
+        the budget probes hold on ``None`` either way, so a contention
+        window neither disarms them for good nor blames unpriced steps.
         Cost is recorded, never estimated: an ended step with a NULL
         cost (killed before its usage flush) counts as zero, not an
         imputed per-step figure -- NULL is the ledger's honest signal
@@ -3435,12 +3492,30 @@ class Loop:
         try:
             spent = self.node.cost.spent(run_id=self._run_id)
             if spent == 0.0 and self.node.cost.untracked(run_id=self._run_id):
+                # an open step reads as unknown too -- warn only over an ended
+                # NULL row, the spend that is unknowable for good
+                unpriced = self.node.cost.unpriced(run_id=self._run_id)
+                if self._max_cost is not None and unpriced:
+                    self._warn_untracked_spend()
                 return None
         except Exception:
             self._warn_unreadable_spend()
             return self._last_run_spent
         self._last_run_spent = round(spent, 4)
         return self._last_run_spent
+
+    def _run_unpriced(self: Loop) -> Optional[int]:
+        """Return the run's count of ended steps with no recorded cost.
+
+        ``None`` when the read fails -- never ``0``, which reads as "no
+        unpriced steps". Advisory input to the budget probes only: a
+        failed read must not add a second warning beside the spend
+        reader's own.
+        """
+        try:
+            return self.node.cost.unpriced(run_id=self._run_id)
+        except Exception:
+            return None
 
     def _run_remaining(self: Loop) -> float:
         """Return the run's remaining budget, clamped at 0 (display precision).
@@ -3539,8 +3614,12 @@ class Loop:
             return False
         spent = self._run_spent()
         if spent is None:
-            self._warn_untracked_spend()
             return False
+        # the latch spares the count once the warning has fired
+        if not self._unpriced_warned:
+            unpriced = self._run_unpriced()
+            if unpriced:
+                self._warn_unpriced_spend(unpriced)
         if spent >= float(self._max_cost):
             self._send_budget_finish(
                 f'Subtree cost budget reached'
@@ -3578,8 +3657,12 @@ class Loop:
             return False
         spent = self._run_spent()
         if spent is None:
-            self._warn_untracked_spend()
             return False
+        # the latch spares the count once the warning has fired
+        if not self._unpriced_warned:
+            unpriced = self._run_unpriced()
+            if unpriced:
+                self._warn_unpriced_spend(unpriced)
         if spent >= float(self._max_cost) - self._reserve_budget:
             self._send_budget_finish(
                 f'Total cost budget reserve reached'
@@ -3619,7 +3702,7 @@ class Loop:
         self._budget_stem = stem
 
     def _warn_soft_cap(self: Loop) -> None:
-        """Scream once per run when armed caps have no in-step brake.
+        """Scream once per loop process when armed caps have no in-step brake.
 
         A non-enforcing agent takes no per-step budget flag, so its cap
         is checked only between steps -- with no run/iter/step timeout
@@ -3648,12 +3731,14 @@ class Loop:
         )
 
     def _warn_untracked_spend(self: Loop) -> None:
-        """Scream once per run when armed caps read untracked spend.
+        """Scream once per loop process when armed caps read untracked spend.
 
-        Shared by both budget probes: an all-NULL run counts $0 in the
-        guards, so neither can ever trip -- advisory only, never a
-        block (the edge only arises from runs whose real un-metered
-        spend is near zero).
+        Fired from the spend reader, where a successful read proves the
+        run untracked -- never from a failed read, which warns for
+        itself: an all-NULL run counts $0 in the guards, so neither
+        budget probe can ever trip. Advisory only, never a block (the
+        edge only arises from runs whose real un-metered spend is near
+        zero).
         """
         if self._untracked_warned:
             return
@@ -3663,8 +3748,24 @@ class Loop:
             ' (unpriced steps); budget guards cannot trip.'
         )
 
+    def _warn_unpriced_spend(self: Loop, count: int) -> None:
+        """Scream once per loop process when armed caps read unpriced steps.
+
+        Shared by both budget probes: a NULL-cost step adds nothing to the
+        guards' figure, so a run mixing priced and unpriced steps stands
+        against its caps undercounted -- advisory only, never a block.
+        """
+        if self._unpriced_warned:
+            return
+        self._unpriced_warned = True
+        s = 's' if count != 1 else ''
+        print(
+            f'WARNING: cost caps are set but {count} step{s} in this run'
+            ' recorded no cost (NULL); budget guards undercount.'
+        )
+
     def _warn_unreadable_spend(self: Loop) -> None:
-        """Scream once per run when a cost-ledger read fails.
+        """Scream once per loop process when a cost-ledger read fails.
 
         Shared by every budget reader: the failed read falls back to
         the last good reading rather than the full cap, so the guards

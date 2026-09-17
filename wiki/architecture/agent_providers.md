@@ -42,7 +42,12 @@ owns:
   cost, result, error. Every consumer (the renderer, TUI bubbles, the record
   verbs) branches on the event kind only, never on the provider. Parsed strings
   are sanitized once, centrally, so no downstream sink can meet an unencodable
-  surrogate.
+  surrogate. The shared `finish_stream` seam waits for the actual process after
+  stdout drains, then runs provider finalization and the parser's deferred
+  terminal events. The caller retains deadline and pipe cleanup. Process-bound
+  evidence stays attached to its own invocation, so parsers may be constructed
+  either before or after spawning without sharing mutable accounting state
+  through their Agent instance.
 
 - **Cost and session policy.** Capability attributes declare how a backend
   reports cost (per-invocation figures or cumulative thread totals, and whether

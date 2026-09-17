@@ -43,10 +43,10 @@ The one hard element is delegated, not improvised: agents that accept a per-step
 budget flag get a leash — the smallest of the run's remaining minus the reserve,
 the iteration's live headroom, and the per-step cap — enforced by the agent
 itself inside the step. For agents with no such flag the caps stay soft, and the
-loop warns once per run when soft caps are armed with no timeout, naming the
-step timeout as the available in-step brake. This split keeps the guarantee
-proportional to what each provider can actually enforce, instead of pretending
-one mechanism covers all.
+loop warns once per loop process when soft caps are armed with no timeout,
+naming the step timeout as the available in-step brake. This split keeps the
+guarantee proportional to what each provider can actually enforce, instead of
+pretending one mechanism covers all.
 
 A budget stop is a *designed* landing, not a failure: the run closes `exited`
 with exit code `0`, distinguishing "ran out of budget with work possibly

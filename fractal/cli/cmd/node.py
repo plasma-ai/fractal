@@ -357,9 +357,9 @@ def node_init(app: typer.Typer) -> typer.Typer:
             typer.echo(output)
         # an uncapped node runs and spends without bound -- warn on stderr
         # (advisory, never a block); an agent with no tracked spend to meter
-        # (codex without a priced model) stays quiet
+        # (codex pinned to a model the price table lacks) stays quiet
         if max_cost is None and max_iters is None:
-            unmetered = _spend_unmetered(node, path, name, template, agent, model)
+            unmetered = _spend_unmetered(node, path, name, agent, provider, model)
             if unmetered:
                 typer.echo(
                     'Warning: no --max-cost/--max-iters -- this node can run'
@@ -1603,16 +1603,18 @@ def _spend_unmetered(
     node: Node,
     path: str,
     name: str,
-    template: Optional[str],
     agent: Optional[str],
+    provider: Optional[str],
     model: Optional[str],
 ) -> bool:
     """Return whether a just-initialized uncapped node has tracked spend.
 
     Backs init's uncapped-spend advisory: resolves the parent the child
-    nests under, reads a template child's merged config back for the caps
-    and agent a preset can supply, and probes the parent's agent registry
-    for cost tracking. True means the advisory should print.
+    nests under, reads the child's merged config back for the caps a preset
+    can supply and the agent, route, and model a preset or ``--inherit
+    config`` can supply, and probes the child's route for cost tracking of
+    a pinned model. True means the advisory should print. Reads the pricing
+    cache as it stands; the loop's first preflight is what fetches it.
     """
     # resolve the effective agent the way init does: the flag, else the nearest
     # ancestor's default walked from the calling node (_NODE) the child nests
@@ -1632,19 +1634,23 @@ def _spend_unmetered(
                 parent = candidate
     if parent is None or not parent.exists():
         parent = node
-    # a template preset can cap or re-agent what the flags left unset -- the
-    # child's stored config holds the merged values, so read them back rather
-    # than warn a preset-capped node it is unbounded
+    # a template preset can cap, re-agent, route, or pin what the flags left
+    # unset, and --inherit config can re-agent, route, or pin -- the child's
+    # stored config holds the merged values, so read them back rather than
+    # warn a preset-capped or inherited-pin node it is unbounded
     max_cost = None
     max_iters = None
-    if template is not None:
-        child_branch = f'{parent.branch}.{name}'
-        child = Node(node.repo_dir / WORKTREES_FOLDER / child_branch)
-        if child.exists():
-            max_cost = child.config.get('max_cost')
-            max_iters = child.config.get('max_iters')
-            if agent is None:
-                agent = child.config.get('agent')
+    child_branch = f'{parent.branch}.{name}'
+    child = Node(node.repo_dir / WORKTREES_FOLDER / child_branch)
+    if child.exists():
+        max_cost = child.config.get('max_cost')
+        max_iters = child.config.get('max_iters')
+        if agent is None:
+            agent = child.config.get('agent')
+        if provider is None:
+            provider = child.config.get('provider')
+        if model is None:
+            model = child.config.get('model')
     effective_agent = agent or parent.agent_effective()
     tracked = True
     # the probe anchors the agent registry's database on an initialized node,
@@ -1653,9 +1659,12 @@ def _spend_unmetered(
     # advisory never fails a spawn that succeeded
     if effective_agent and parent.exists():
         # an unregistered backend reads as tracked -- unknown spend earns the
-        # warning, never a block
+        # warning, never a block; a token-priced agent with no pinned model is
+        # priced at the served model, so only a pin the table lacks is unmetered;
+        # bound on the child's route, since a routed claude is chain-priced like codex
         try:
-            tracked = parent.agent(effective_agent).tracks_cost(model)
+            backend = parent.agent(effective_agent, provider)
+            tracked = model is None or backend.tracks_cost(model)
         except ValueError:
             tracked = True
     return tracked and max_cost is None and max_iters is None

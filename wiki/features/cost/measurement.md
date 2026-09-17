@@ -17,10 +17,10 @@ updated: 2026-07-21T04:49:55Z
 ***
 
 Every dollar fractal accounts for lands on a **step row** in the central
-database. As an agent invocation streams, each cost figure the stream yields is
-flushed to the step's row immediately -- the reader can die at any moment, and
-an already-flushed figure survives. A final result frame settles the figure;
-until then the row carries the running accrual. Attribution is therefore
+database. Cost-reporting providers flush their stream's figures immediately --
+the reader can die at any moment, and an already-flushed figure survives.
+Providers that require complete invocation evidence defer their first price
+until that evidence validates after process exit. Attribution is therefore
 step-granular: iterations and runs never store their own cost, they are sums
 over their steps.
 
@@ -41,10 +41,32 @@ amounts already recorded for earlier steps of the same session. A settled figure
 is floored at zero: a provider-side credit or accounting anomaly never records
 negative spend.
 
-Codex reports usage for one invocation, including when `exec resume` continues
-an existing thread. Cached context can carry across invocations, but the usage
-total starts fresh. Each step records its whole priced usage, and the run's
-spend is the sum of those independent invocation costs.
+Codex is priced from the per-response `token_usage_record` rows it writes to its
+session log (`CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`), not from its
+`exec --json` total, which on a resumed thread covers every earlier invocation.
+Before spawning, the backend captures the log's state -- the files present and,
+for a resume, the thread's file identity, byte length, content hash and
+cumulative counter -- and once the process exits `0` it streams the thread's log
+once (hashing the captured prefix and decoding only the record kinds the window
+reads, so a long-lived thread costs one pass over its bytes, never its parsed
+history), sums the rows appended since, deduplicated by response id, checks that
+the window holds exactly one completed turn on the reported thread and that the
+sum equals the thread counter's growth, and prices the sum at the rates of the
+served model the window's `turn_context` names (cached input at its cache-read
+rate; a mismatch with the pin is the loop's model-drop check to judge, never a
+reason to refuse). A step that fails any of those checks -- a missing, replaced
+or rewritten log, an interrupted or doubled turn, another thread's records, a
+sum the thread counter disputes, an unpriced model, a turn that spawned or drove
+sub-agent threads (each child writes its own log, whose usage the window never
+sums, so the parent's figure alone would be partial), or a log with no
+per-response records at all (codex older than 0.153 writes none) -- records
+`NULL` cost and logs `codex usage unpriced: <reason>` at warning level on the
+agent's logger, while a step whose process exits non-zero records `NULL`
+silently: the exit is the loop's to attribute. An earlier interrupted turn need
+not be complete -- its captured counter is the resume baseline, and its own step
+stays unpriced. A child log that predates the spawn is bound by its captured
+length: left untouched, the thread's next turn prices as usual; appended to (a
+child the turn drives again), it refuses the step like a new one.
 
 ## Rollups and the per-run subtree
 
@@ -80,8 +102,10 @@ Zero and unknowable are never conflated:
   `$0` -- a knowable nothing-spent, never `NULL`.
 - `NULL` cost is reserved for unknowable spend: a launched step whose usage
   never flushed -- a kill before the first flush, a post-launch death before the
-  stream opened, or an untracked agent's rows. Ended rows only: an open step is
-  merely not priced *yet*.
+  stream opened, or an untracked agent's rows -- or whose invocation evidence
+  did not validate (the codex attribution above;
+  [[features/cost/budgets|budgets]] covers how armed caps read such rows). Ended
+  rows only: an open step is merely not priced *yet*.
 - `cost spent` prints `untracked` instead of `$0.0000` when the scope has
   `NULL`-cost steps and no step recorded a real figure. Zero-cost rows are
   neutral -- they prove nothing was spent, not that spend was tracked -- so they
@@ -97,8 +121,8 @@ outside the step ledger and is not included in the recorded run spend.
 
 ## Finality
 
-An open step's row carries only what has already been flushed, not the
-in-progress accrual -- so an active node's figure is always a floor, and cost
-figures are final only once the node reaches a terminal registry status. The
-loop's startup preflight warns when a token-priced agent runs with no model set
-and no caps configured: its spend would silently go untracked.
+An open step's row carries only what its provider has established. Codex keeps
+the row unpriced throughout execution and publishes no partial accrual. A
+terminal node can still have unresolved costs; terminal status alone does not
+complete missing accounting evidence. A token-priced agent with no model set is
+priced at the served model its session record names.

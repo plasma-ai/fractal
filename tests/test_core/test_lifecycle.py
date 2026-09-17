@@ -893,9 +893,9 @@ def test_start_without_max_cost_warns_and_runs(
 ) -> None:
     """Start without a cost cap runs uncapped, warning instead of refusing.
 
-    A token-priced agent with no priced model can only run uncapped, so a
+    A token-priced agent with no model set can only run uncapped, so a
     missing ``max_cost`` does not block start -- it proceeds with a loud
-    warning that spend is untracked.
+    warning that spend is bounded only by the iteration and time limits.
     """
     node = node_with_db
     # idle and non-user, with no max_cost configured (fixture default)

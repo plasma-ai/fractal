@@ -487,9 +487,9 @@ For an enforcing agent the budget is passed as a hard flag; an agent that
 stops itself at that budget records a *clean completed* step — a budget stop
 is neither a failure nor a goal-met completion. For non-enforcing agents the
 cap is advisory: the loop warns after the fact when a step's recorded cost
-exceeded ``max_step_cost``, and warns once per run when caps are armed with
-no timeout at all (one runaway step could then overshoot without bound — the
-warning names ``step_timeout`` as the remedy).
+exceeded ``max_step_cost``, and warns once per loop process when caps are
+armed with no timeout at all (one runaway step could then overshoot without
+bound — the warning names ``step_timeout`` as the remedy).
 
 Reserve mode and how a budget ends a run
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -613,6 +613,13 @@ never ran. Backstop commits bypass hooks and lint by design (``--no-verify``)
 and fold the staging notices and a capped diffstat into the body, so the save
 describes itself in git history alone.
 
+Material a node must keep off its branch belongs in a ``.gitignore``-ignored
+path or outside the worktree: the dirty check never sees an ignored path, the
+backstop never stages one, and the ``--continue`` clean never removes one. A
+``.git/info/exclude`` line alone does not hold a node record inside the node
+directory — every commit's record pass force-adds node records that only a
+machine-local layer fences (step 3 above).
+
 Pause is the one path that never commits: the dirty worktree *is* the frozen
 mid-step state that resume continues from. ``fractal node start --continue``
 is the path that discards it (it restores the worktree with a clean), after
@@ -628,7 +635,9 @@ subtree cost accounting). An iteration row records the agent, model, and — in
 continuous mode — the iteration's session id. A step row is booked **per
 launch attempt** with the step number and name, status, a binary exit code,
 the agent/model/session, the cost (flushed as the stream reports it, so even
-a killed step keeps its last figure), and a short reason in its metadata.
+a killed step keeps its last figure — except ``codex``, which prices the
+whole invocation after a clean exit and records none for a killed step), and
+a short reason in its metadata.
 
 Step rows land with these statuses:
 

@@ -127,10 +127,14 @@ launch or an inconclusive probe records nothing and the loop is judged by its
 group), `.headless` (the node's backend record — written by the headless
 launcher beside `.pgid`, it outlives the run, survives heals and kills, and only
 a tmux launch clears it), `.pgid` and `.step_pgid` (process groups for liveness
-and pause/kill reaping), `.pgid.lock` (the launch handoff's flock sidecar),
-`.paused` (the tree-wide pause latch beside the central database) and
-`.pause_abort`. Signals the loop observes — finish, stop, pause — take effect at
-iteration or step boundaries; the escalation path that does not wait is kill.
+and pause/kill reaping — the step marker also names the codex preflight probe's
+group for the probe's lifetime, which `kill` reaps by that handle and a later
+boot, finding it live under an idle node, reaps as an orphan through the crash
+heal's cadence before recording its own), `.pgid.lock` (the launch handoff's
+flock sidecar), `.paused` (the tree-wide pause latch beside the central
+database) and `.pause_abort`. Signals the loop observes — finish, stop, pause —
+take effect at iteration or step boundaries; the escalation path that does not
+wait is kill.
 
 Liveness is one law (`Node._loop_alive`). A `.headless` node is judged by its
 recorded `.pgid` process group alone and tmux is never asked, so a host without
@@ -145,13 +149,14 @@ is judged by its own group instead — tmux's "no such session" defers to a live
 or unverified group, and with no tmux answer at all the recorded group is the
 whole answer, while a socket-less node with no `.pgid` record then stays
 unknown. The group probe compares the leader's start instant with the `.pgid`
-record's timestamp to fence PID reuse, and arbitrates a group owned by another
-user the same way. Only a failed `ps` is inconclusive: reconciliation keeps the
-run active, teardown refuses, kill refuses and names the `ps -p` check and the
-record to clear, and reaping spares any group it cannot positively identify. The
-scripts' own `kill -0` checks are handle-selection gates, never identity
-verdicts — identity is judged only by this Python law, `Node._kill`'s flock'd
-vet included.
+record's timestamp to fence PID reuse — a group that outlived its leader is
+proven by a surviving member, never by the id alone, since a reaped group's id
+still answers `killpg` — and arbitrates a group owned by another user the same
+way. Only a failed `ps` is inconclusive: reconciliation keeps the run active,
+teardown refuses, kill refuses and names the `ps -p` check and the record to
+clear, and reaping spares any group it cannot positively identify. The scripts'
+own `kill -0` checks are handle-selection gates, never identity verdicts —
+identity is judged only by this Python law, `Node._kill`'s flock'd vet included.
 
 The crashed-but-active heal holds no flock over its probe, so it fences its own
 writes instead: it fingerprints `.pgid`/`.step_pgid` before probing, re-verifies
