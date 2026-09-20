@@ -81,6 +81,9 @@ class CodexParser(StreamParser):
         self._turns = 0
         self._completed = 0
         self._wire_usage: Any = None
+        # error frames seen inside the active turn -- codex retries a stream
+        # error behind one and completes the turn (recover_errors)
+        self._provisional_errors = 0
 
     def feed(self: CodexParser, line: str) -> list[StreamEvent]:
         """Parse one codex JSONL line into normalized events."""
@@ -138,14 +141,39 @@ class CodexParser(StreamParser):
             self._wire_usage = event.get('usage')
         # surface errors -- codex reports these on the JSON stream, not
         # stderr, so without this a failed turn leaves no explanation in the
-        # output; the errors list fails the step after the stream drains
+        # output; an error frame inside the active turn may be a retried
+        # stream error, which recover_errors() settles once codex has exited
         elif event_type in ('error', 'turn.failed'):
             error = event.get('error')
             error_message = error.get('message') if isinstance(error, dict) else error
             detail = event.get('message') or error_message or 'unknown error'
             self.errors.append(str(detail))
+            active = (self._threads, self._turns, self._completed) == (1, 1, 0)
+            if (event_type == 'error') and active:
+                self._provisional_errors += 1
             return [StreamEvent(kind='error', message=str(detail))]
         return []
+
+    def recover_errors(self: CodexParser) -> None:
+        """Clear the error frames one completed turn recovered from.
+
+        Codex reports a retried stream error and a fatal one on the same
+        ``error`` frame and tells them apart by exit status alone (a fatal
+        error, a failed turn, or an interrupted turn exits 1), so the
+        caller invokes this only after observing exit zero: when every
+        recorded error is an ``error`` frame inside the one active turn
+        and the stream describes that turn completing, the errors clear.
+        A ``turn.failed`` frame, an error outside the turn, or an
+        incomplete turn keeps them.
+        """
+        if not self.errors or (len(self.errors) != self._provisional_errors):
+            return
+        try:
+            self.turn_usage()
+        except ValueError:
+            return
+        self.errors.clear()
+        self._provisional_errors = 0
 
     def turn_usage(self: CodexParser) -> Any:
         """Return the wire usage of the stream's one complete turn.
@@ -215,12 +243,15 @@ class CodexAgent(Agent):
         """Price the invocation from its rollout window once codex exits 0.
 
         A non-zero exit is the loop's to attribute, so the stream closes
-        unpriced and silent; a clean exit whose usage cannot be bound to the
-        process logs the reason at WARNING and leaves the cost ``None``.
+        unpriced and silent; a clean exit first clears the error frames the
+        completed turn recovered from (``recover_errors``), then prices; a
+        clean exit whose usage cannot be bound to the process logs the
+        reason at WARNING and leaves the cost ``None``.
         """
         parser = typing.cast(CodexParser, parser)
         if process is None or process.returncode != 0:
             return parser.finish()
+        parser.recover_errors()
         events: list[StreamEvent] = []
         try:
             window = _WINDOWS.pop(process, None)

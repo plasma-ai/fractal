@@ -42,6 +42,7 @@ from fractal.cli.utils import StreamRenderer
 from fractal.core import pricing
 from fractal.core.agent import Invocation, StreamEvent, StreamResult
 from fractal.core.node import Node
+from fractal.exceptions import AgentStreamError
 from fractal.impl import codex
 from fractal.impl.codex import CodexAgent, CodexParser
 
@@ -70,6 +71,10 @@ __all__ = [
     'test_unbound_or_incomplete_evidence_leaves_the_step_unpriced',
     'test_sub_agent_spawn_leaves_the_step_unpriced_until_the_next_turn',
     'test_nonzero_exit_closes_unpriced_and_silent',
+    'test_stream_recovers_error_frames_inside_a_completed_turn',
+    'test_recovered_error_frames_without_rollout_evidence_stay_unpriced',
+    'test_unrecovered_error_frames_fail_the_step',
+    'test_bare_stream_keeps_error_frames_fatal',
     'test_host_spawn_override_delegating_to_super_is_priced',
     'test_invocation_modes_build_the_pinned_argv_codex',
     'test_invocation_overlay_beats_a_colliding_ambient_var',
@@ -161,6 +166,11 @@ _RESUMED_WIRE = [
     {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'ok again'}},
     {'type': 'turn.completed', 'usage': _CUMULATIVE_USAGE},
 ]
+# the fresh run's frames by role, the error frame codex writes when it retries
+# a stream error inside the turn, and the frame that fails the turn
+_OPEN, _TURN, _TEXT, _DONE = _FRESH_WIRE
+_RECONNECT = {'type': 'error', 'message': 'Reconnecting... 1/5'}
+_TURN_FAILED = {'type': 'turn.failed', 'error': {'message': 'boom'}}
 # the usage of the one record the resumed run appends to the rollout
 _RESUMED_USAGE = {
     'input_tokens': 17_589,
@@ -881,6 +891,107 @@ def test_nonzero_exit_closes_unpriced_and_silent(
     # the loop attributes the exit; the stream just closes on wall time
     assert [event.kind for event in events] == ['session', 'text', 'result']
     assert 'unpriced' not in caplog.text
+
+
+def test_stream_recovers_error_frames_inside_a_completed_turn(
+    backend: CodexAgent,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retried errors behind a completed turn and exit 0 leave the step priced."""
+    fresh, _ = _split(resumed_thread)
+    wire = [
+        _OPEN,
+        _TURN,
+        _RECONNECT,
+        {'type': 'error', 'message': 'quota exhausted'},
+        _TEXT,
+        _DONE,
+    ]
+    step = _named_step(backend, 'RECOVERED')
+    command = _command(backend, fresh, wire)
+    result, events = _drive(backend, command, step_id=step)
+    assert result.cost == pytest.approx(_FRESH_COST)
+    row = backend.node.db.read('steps', where={'step_id': step})[0]
+    assert row['cost'] == pytest.approx(_FRESH_COST)
+    # each error frame rendered as it arrived; the terminal frame closes priced
+    assert [event.kind for event in events] == [
+        'session',
+        'error',
+        'error',
+        'text',
+        'result',
+    ]
+    assert [event.message for event in events if event.kind == 'error'] == [
+        'Reconnecting... 1/5',
+        'quota exhausted',
+    ]
+    assert 'unpriced' not in caplog.text
+
+
+def test_recovered_error_frames_without_rollout_evidence_stay_unpriced(
+    backend: CodexAgent,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Recovery settles the outcome only; the cost still needs the rollout."""
+    fresh, _ = _split(resumed_thread)
+    wire = [_OPEN, _TURN, _RECONNECT, _TEXT, _DONE]
+    step = _named_step(backend, 'RECOVERED_UNPRICED')
+    command = _command(backend, fresh, wire, missing=True)
+    result, events = _drive(backend, command, step_id=step)
+    assert result.cost is None
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
+    assert [event.kind for event in events] == ['session', 'error', 'text', 'result']
+    assert 'codex usage unpriced: No rollout names the thread' in caplog.text
+
+
+@pytest.mark.parametrize(
+    argnames=('wire', 'exit_code', 'detail'),
+    argvalues=[
+        # a failed turn, even behind a completion and a clean exit
+        ([_OPEN, _TURN, _TURN_FAILED, _TEXT, _DONE], 0, 'boom'),
+        # a retried error mixed with a failed turn keeps every recorded error
+        (
+            [_OPEN, _TURN, _RECONNECT, _TURN_FAILED, _TEXT, _DONE],
+            0,
+            'Reconnecting... 1/5; boom',
+        ),
+        # an error before the turn opens or after it completes
+        ([_OPEN, _RECONNECT, _TURN, _TEXT, _DONE], 0, 'Reconnecting... 1/5'),
+        ([_OPEN, _TURN, _TEXT, _DONE, _RECONNECT], 0, 'Reconnecting... 1/5'),
+        # a turn that never completes
+        ([_OPEN, _TURN, _RECONNECT, _TEXT], 0, 'Reconnecting... 1/5'),
+        # a retried error on a process that exits non-zero
+        ([_OPEN, _TURN, _RECONNECT, _TEXT, _DONE], 3, 'Reconnecting... 1/5'),
+    ],
+    ids=[
+        'turn-failed',
+        'mixed-fatal',
+        'before-turn',
+        'after-turn',
+        'incomplete-turn',
+        'nonzero-exit',
+    ],
+)
+def test_unrecovered_error_frames_fail_the_step(
+    backend: CodexAgent,
+    wire: list[dict[str, Any]],
+    exit_code: int,
+    detail: str,
+) -> None:
+    """Recovery needs the error inside the turn, the turn completed, and exit 0."""
+    fresh, _ = _split(resumed_thread)
+    step = _named_step(backend, 'FATAL')
+    command = _command(backend, fresh, wire, exit_code=exit_code)
+    with pytest.raises(AgentStreamError, match=re.escape(detail)):
+        _drive(backend, command, step_id=step)
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
+
+
+def test_bare_stream_keeps_error_frames_fatal(backend: CodexAgent) -> None:
+    """Without a process there is no exit status to observe, so nothing recovers."""
+    wire = [_OPEN, _TURN, _RECONNECT, _TEXT, _DONE]
+    with pytest.raises(AgentStreamError, match='Reconnecting'):
+        backend.stream(_lines(wire))
 
 
 def test_host_spawn_override_delegating_to_super_is_priced(

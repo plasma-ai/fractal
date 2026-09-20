@@ -3277,11 +3277,11 @@ def test_failed_step_stderr_snapshot_and_exit_coded_reason(repo: dict) -> None:
 def test_stream_borne_failure_reason_carries_the_cause(repo: dict) -> None:
     """A stream-borne failure's step row names the cause; the iter stays short.
 
-    An agent that reports its failure on the JSON stream and exits 0 (the
-    codex shape) leaves a blank ``.err`` capture, so the stream exception is
-    the only diagnosis. The step row's reason carries the one-line cause, the
-    iteration rollup keeps the short ``agent error`` label, and the
-    ``tmp/err/`` snapshot holds the full traceback.
+    An agent that reports its failure on the JSON stream and exits 0 leaves a
+    blank ``.err`` capture, so the stream exception is the only diagnosis. The
+    step row's reason carries the one-line cause, the iteration rollup keeps
+    the short ``agent error`` label, and the ``tmp/err/`` snapshot holds the
+    full traceback.
     """
     steps = {'01-boom.md': f'# Boom\n\nStream-failing step. {_STREAM_ERROR_MARKER}\n'}
     node = _make_node(

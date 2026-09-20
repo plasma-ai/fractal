@@ -2,8 +2,9 @@
 name: features/agents/providers
 desc: |
   The supported agent backends, the registry in the core agent module that
-  resolves a base command to its backend class, and the provider routes a
-  backend may expose beside its vendor-native endpoint.
+  resolves a base command to its backend class, the provider routes a backend
+  may expose beside its vendor-native endpoint, and when codex's in-turn error
+  frames recover after a clean exit.
 created: 2026-07-21T05:04:16Z
 updated: 2026-07-21T05:04:16Z
 ---
@@ -82,3 +83,22 @@ computes from the authoritative frames only.
 The route a node actually runs is configuration: the `provider` config key
 carries the node's effective route, alongside `agent`, `model`, and `effort`
 (see [[features/agents/models_and_effort]]).
+
+## Codex stream recovery
+
+Codex's `exec --json` stream reports a retried stream error and a fatal one on
+the same frame — a top-level `error` frame carrying only a `message` — and tells
+them apart by exit status alone: a fatal error, a failed turn, or an interrupted
+turn exits `1`, and `turn.completed` is emitted only for a turn that completed.
+Fractal renders every `error` and `turn.failed` frame as it arrives, then
+settles the outcome after exit. An `error` frame inside the one active turn —
+after `thread.started` named the thread and `turn.started` opened the turn,
+before `turn.completed` — is provisional: when codex exits `0` and the stream
+describes that one turn completing, the recorded errors clear and the step books
+completed. A `turn.failed` frame, an error outside the active turn, an error in
+a turn that never completes, or a non-zero exit keeps the step failed.
+
+Recovery settles the stream outcome only. Cost still requires the
+invocation-bound rollout evidence described in [[features/cost/measurement]]; a
+recovered step whose rollout cannot be bound closes unpriced with the usual
+`codex usage unpriced: <reason>` warning.

@@ -14,6 +14,14 @@ may include breaking changes, each listed under a Breaking heading.
   `_index.md` merge driver fractal installs unions both sides' link rows, both
   wiki 1.3 behaviors.
 
+### Fixed
+
+- A codex `error` frame inside the active turn — the frame codex writes when it
+  retries a stream error and then completes the turn — no longer fails a step
+  whose process exits 0; the recovered step is priced normally. A `turn.failed`
+  frame, an error frame outside the active turn, an error frame in a turn that
+  never completes, or a non-zero exit still fails the step unpriced.
+
 ## [1.3.0] - 2026-09-17
 
 ### Breaking
