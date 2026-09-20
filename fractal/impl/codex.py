@@ -81,8 +81,8 @@ class CodexParser(StreamParser):
         self._turns = 0
         self._completed = 0
         self._wire_usage: Any = None
-        # canonical error notifications seen inside the active turn; they may
-        # recover after a valid completion and a clean exit (_recover_errors)
+        # error frames seen inside the active turn -- codex retries a stream
+        # error behind one and completes the turn (recover_errors)
         self._provisional_errors = 0
 
     def feed(self: CodexParser, line: str) -> list[StreamEvent]:
@@ -141,44 +141,36 @@ class CodexParser(StreamParser):
             self._wire_usage = event.get('usage')
         # surface errors -- codex reports these on the JSON stream, not
         # stderr, so without this a failed turn leaves no explanation in the
-        # output; only canonical notifications inside the active turn may
-        # recover after a valid completion and successful process exit
+        # output; an error frame inside the active turn may be a retried
+        # stream error, which recover_errors() settles once codex has exited
         elif event_type in ('error', 'turn.failed'):
             error = event.get('error')
             error_message = error.get('message') if isinstance(error, dict) else error
             detail = event.get('message') or error_message or 'unknown error'
             self.errors.append(str(detail))
             active = (self._threads, self._turns, self._completed) == (1, 1, 0)
-            canonical = event_type == 'error' and set(event) == {'type', 'message'}
-            message = event.get('message')
-            if canonical and active and isinstance(message, str) and message.strip():
+            if (event_type == 'error') and active:
                 self._provisional_errors += 1
             return [StreamEvent(kind='error', message=str(detail))]
         return []
 
-    def _recover_errors(self: CodexParser) -> None:
-        """Settle provisional notifications once the driver has observed exit zero.
+    def recover_errors(self: CodexParser) -> None:
+        """Clear the error frames one completed turn recovered from.
 
-        Codex writes transient ``{"type": "error", "message": ...}`` frames
-        (reconnects, retries) on the stream and then completes the turn. When
-        every recorded error is such a notification inside the active turn,
-        the stream describes one complete turn with sound wire usage, and the
-        process exited zero, the notifications are not a failure and clear.
-        Anything else stays fatal. An error frame carrying any key beyond
-        ``type`` and ``message`` is not provisional, so a new field on codex's
-        error frames disables recovery by design and the step stays failed.
-        The usage soundness check bounds reasoning output by output and leaves
-        the other counts checked only for shape.
+        Codex reports a retried stream error and a fatal one on the same
+        ``error`` frame and tells them apart by exit status alone (a fatal
+        error, a failed turn, or an interrupted turn exits 1), so the
+        caller invokes this only after observing exit zero: when every
+        recorded error is an ``error`` frame inside the one active turn
+        and the stream describes that turn completing, the errors clear.
+        A ``turn.failed`` frame, an error outside the turn, or an
+        incomplete turn keeps them.
         """
-        if not self.errors or len(self.errors) != self._provisional_errors:
+        if not self.errors or (len(self.errors) != self._provisional_errors):
             return
         try:
-            usage = self.turn_usage()
+            self.turn_usage()
         except ValueError:
-            return
-        if not _valid_wire_usage(usage):
-            return
-        if usage.get('reasoning_output_tokens', 0) > usage['output_tokens']:
             return
         self.errors.clear()
         self._provisional_errors = 0
@@ -204,16 +196,7 @@ class CodexParser(StreamParser):
         """Close the drained stream on its settled cost and wall time."""
         wall = time.monotonic() - self._started
         self.final = True
-        return [
-            StreamEvent(
-                kind='result',
-                cost=self.cost,
-                final=True,
-                duration=wall,
-                failed=bool(self.errors),
-                message='; '.join(self.errors) or None,
-            )
-        ]
+        return [StreamEvent(kind='result', cost=self.cost, final=True, duration=wall)]
 
 
 class CodexAgent(Agent):
@@ -260,15 +243,15 @@ class CodexAgent(Agent):
         """Price the invocation from its rollout window once codex exits 0.
 
         A non-zero exit is the loop's to attribute, so the stream closes
-        unpriced and silent; a clean exit first settles provisional error
-        notifications (``_recover_errors``), then prices; a clean exit whose
-        usage cannot be bound to the process logs the reason at WARNING and
-        leaves the cost ``None``.
+        unpriced and silent; a clean exit first clears the error frames the
+        completed turn recovered from (``recover_errors``), then prices; a
+        clean exit whose usage cannot be bound to the process logs the
+        reason at WARNING and leaves the cost ``None``.
         """
         parser = typing.cast(CodexParser, parser)
         if process is None or process.returncode != 0:
             return parser.finish()
-        parser._recover_errors()
+        parser.recover_errors()
         events: list[StreamEvent] = []
         try:
             window = _WINDOWS.pop(process, None)
@@ -819,27 +802,6 @@ def _validate_usage(value: Any, /) -> dict[str, int]:
             )
         result[key] = count
     return result
-
-
-def _valid_wire_usage(usage: Any) -> bool:
-    """Return whether ``usage`` is a codex usage object with sound token counts.
-
-    Every count present must be a non-negative integer (never a bool); the
-    input and output counts must be present.
-    """
-    if not isinstance(usage, dict):
-        return False
-    required = ('input_tokens', 'output_tokens')
-    optional = (
-        'cached_input_tokens',
-        'cache_write_input_tokens',
-        'reasoning_output_tokens',
-    )
-    for key in (*required, *optional):
-        value = usage.get(key, None if key in required else 0)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return False
-    return True
 
 
 def _window(

@@ -2,10 +2,9 @@
 name: features/agents/providers
 desc: |
   The supported agent backends, the registry in the core agent module that
-  resolves a base command to its backend class, and the provider routes a
-  backend may expose beside its vendor-native endpoint. It also states when
-  codex's transient in-turn error notifications recover after a clean exit and
-  which shapes stay fatal.
+  resolves a base command to its backend class, the provider routes a backend
+  may expose beside its vendor-native endpoint, and when codex's in-turn error
+  frames recover after a clean exit.
 created: 2026-07-21T05:04:16Z
 updated: 2026-07-21T05:04:16Z
 ---
@@ -87,22 +86,19 @@ carries the node's effective route, alongside `agent`, `model`, and `effort`
 
 ## Codex stream recovery
 
-Codex's `exec --json` stream can report errors while a turn is still active.
-Fractal displays each diagnostic immediately. A canonical top-level `error`
-frame, containing only `type` and a nonblank string `message`, remains
-provisional inside the single active turn. It recovers only when that same
-correctly ordered turn completes with valid usage and the actual process exits
-with status zero. Recovery depends on the frame structure and terminal outcome,
-not the diagnostic's wording.
+Codex's `exec --json` stream reports a retried stream error and a fatal one on
+the same frame — a top-level `error` frame carrying only a `message` — and tells
+them apart by exit status alone: a fatal error, a failed turn, or an interrupted
+turn exits `1`, and `turn.completed` is emitted only for a turn that completed.
+Fractal renders every `error` and `turn.failed` frame as it arrives, then
+settles the outcome after exit. An `error` frame inside the one active turn —
+after `thread.started` named the thread and `turn.started` opened the turn,
+before `turn.completed` — is provisional: when codex exits `0` and the stream
+describes that one turn completing, the recorded errors clear and the step books
+completed. A `turn.failed` frame, an error outside the active turn, an error in
+a turn that never completes, or a non-zero exit keeps the step failed.
 
-A `turn.failed` frame stays fatal even if followed by a completion. Errors
-outside the active turn, after its terminal frame, with malformed or additional
-fields, or without a valid completion and known successful exit remain fatal.
-The final stream result carries the remaining failure detail for every caller,
-including direct chat finalization.
-
-Recovery establishes the stream outcome only. Cost still requires the complete
-invocation-bound rollout, model and rate evidence described in
-[[features/cost/measurement]]. Missing evidence leaves cost `NULL`. Malformed
-streams without an error retain their accounting-only unpriced diagnostic; the
-model-acceptance preflight has its own stricter validation contract.
+Recovery settles the stream outcome only. Cost still requires the
+invocation-bound rollout evidence described in [[features/cost/measurement]]; a
+recovered step whose rollout cannot be bound closes unpriced with the usual
+`codex usage unpriced: <reason>` warning.

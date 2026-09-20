@@ -43,7 +43,10 @@ delegates to its private hook, which the subclass implements:
   process; `Agent.stream(..., process=process)` drives it, and a consumer
   feeding a parser directly (the TUI) calls
   `finish_stream(parser, process=process)` itself after draining. The parser's
-  `finish()` emits any deferred terminal event;
+  `finish()` emits any deferred terminal event, and a backend settles the
+  parser's recorded errors here once the exit status is known — codex clears the
+  in-turn error frames a completed turn recovered from (see
+  [[features/agents/providers]]);
 - the configured-model and rates hooks back cost accounting: the former resolves
   the model the provider's own config defaults to, the latter maps a model to
   its pricing;

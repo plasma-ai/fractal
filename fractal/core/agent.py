@@ -302,7 +302,7 @@ class StreamParser:
         self.cost: Optional[float] = None  # running figure (None = no fact yet)
         self.final: bool = False  # a result frame settled the cost
         self.budget_stopped: bool = False
-        self.errors: list[str] = []  # stream-borne failures (codex)
+        self.errors: list[str] = []  # stream-borne errors, settled by finalization
 
     def feed(self: StreamParser, line: str) -> list[StreamEvent]:
         """Parse one stdout line into normalized events. Hook for backends."""
@@ -681,6 +681,11 @@ class Agent:
                     except (OSError, ValueError) as e:
                         self.log(f'usage unpriced: {e}', logging.WARNING)
                 return parser.finish()
+
+        A backend whose stream reports recoverable errors settles
+        ``parser.errors`` here too, once the exit status is known (codex
+        clears the in-turn error frames a completed turn recovered from);
+        only the errors still recorded afterwards fail the step.
         """
         return parser.finish()
 
@@ -701,7 +706,7 @@ class Agent:
         hook (``on_session`` per session stamp -- once as the stream opens,
         and again from the finish frame when a backend learns the served
         model only after exit; ``on_action`` per tool, ``on_error`` per
-        stream-borne failure, ``on_budget`` on a budget stop), the
+        stream-borne error frame, ``on_budget`` on a budget stop), the
         render callback, and -- when ``step_id`` is given -- the record
         verbs (session stamped as the stream opens; each cost figure
         flushed immediately, so a signal-killed reader still recorded
@@ -775,11 +780,10 @@ class Agent:
                     # presentation callback
                     if render is not None:
                         render(event)
-            # errors still recorded once stdout drains and the provider's
-            # finish settles fail the turn for every provider (else the step
-            # records completed/exit 0); the parser collects error detail raw,
-            # so sanitize the joined message -- the loop folds it into the
-            # step-row failure detail (SQLite)
+            # errors still recorded after the finish frame fail the turn for
+            # every provider (else the step records completed/exit 0); the
+            # parser collects error detail raw, so sanitize the joined message
+            # -- the loop folds it into the step-row failure detail (SQLite)
             if parser.errors:
                 detail = _sanitize('; '.join(parser.errors))
                 raise AgentStreamError(f'{self.name} reported an error: {detail}')

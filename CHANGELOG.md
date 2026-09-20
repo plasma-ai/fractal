@@ -7,21 +7,20 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
-### Fixed
-
-- Codex's transient in-turn error notifications (a two-key
-  `{"type": "error", "message": ...}` frame inside the active turn) no longer
-  fail a step that then completes its turn and exits 0; the recovered step is
-  priced normally. A `turn.failed` frame, an error frame with extra fields or an
-  empty message, a notification outside the active turn, an incomplete turn,
-  malformed usage, or a non-zero exit still fail the step unpriced.
-
 ### Changed
 
 - The `plasma-wiki` runtime requirement is `>=1.3,<2`: the seeded wiki skill
   relies on `wiki update` pruning stale index rows without a flag, and the
   `_index.md` merge driver fractal installs unions both sides' link rows, both
   wiki 1.3 behaviors.
+
+### Fixed
+
+- A codex `error` frame inside the active turn — the frame codex writes when it
+  retries a stream error and then completes the turn — no longer fails a step
+  whose process exits 0; the recovered step is priced normally. A `turn.failed`
+  frame, an error frame outside the active turn, an error frame in a turn that
+  never completes, or a non-zero exit still fails the step unpriced.
 
 ## [1.3.0] - 2026-09-17
 
