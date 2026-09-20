@@ -4,7 +4,7 @@ desc: |
   Agent providers and routes: the supported agent backends, model and
   effort overrides, and how a new provider slots in.
 created: 2026-07-21T04:35:35Z
-updated: 2026-07-25T02:13:07Z
+updated: 2026-09-20T02:11:36Z
 ---
 
 # features/agents
@@ -24,7 +24,8 @@ defaults to, and how the served model is recorded off the stream.
 [[features/agents/providers|providers]]: The supported agent backends, the
 registry in the core agent module that resolves a base command to its backend
 class, and the provider routes a backend may expose beside its vendor-native
-endpoint.
+endpoint. It also states when codex's transient in-turn error notifications
+recover after a clean exit and which shapes stay fatal.
 
 ***
 

@@ -7,6 +7,15 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex's transient in-turn error notifications (a two-key
+  `{"type": "error", "message": ...}` frame inside the active turn) no longer
+  fail a step that then completes its turn and exits 0; the recovered step is
+  priced normally. A `turn.failed` frame, an error frame with extra fields or an
+  empty message, a notification outside the active turn, an incomplete turn,
+  malformed usage, or a non-zero exit still fail the step unpriced.
+
 ### Changed
 
 - The `plasma-wiki` runtime requirement is `>=1.3,<2`: the seeded wiki skill

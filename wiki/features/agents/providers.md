@@ -3,7 +3,9 @@ name: features/agents/providers
 desc: |
   The supported agent backends, the registry in the core agent module that
   resolves a base command to its backend class, and the provider routes a
-  backend may expose beside its vendor-native endpoint.
+  backend may expose beside its vendor-native endpoint. It also states when
+  codex's transient in-turn error notifications recover after a clean exit and
+  which shapes stay fatal.
 created: 2026-07-21T05:04:16Z
 updated: 2026-07-21T05:04:16Z
 ---
@@ -82,3 +84,25 @@ computes from the authoritative frames only.
 The route a node actually runs is configuration: the `provider` config key
 carries the node's effective route, alongside `agent`, `model`, and `effort`
 (see [[features/agents/models_and_effort]]).
+
+## Codex stream recovery
+
+Codex's `exec --json` stream can report errors while a turn is still active.
+Fractal displays each diagnostic immediately. A canonical top-level `error`
+frame, containing only `type` and a nonblank string `message`, remains
+provisional inside the single active turn. It recovers only when that same
+correctly ordered turn completes with valid usage and the actual process exits
+with status zero. Recovery depends on the frame structure and terminal outcome,
+not the diagnostic's wording.
+
+A `turn.failed` frame stays fatal even if followed by a completion. Errors
+outside the active turn, after its terminal frame, with malformed or additional
+fields, or without a valid completion and known successful exit remain fatal.
+The final stream result carries the remaining failure detail for every caller,
+including direct chat finalization.
+
+Recovery establishes the stream outcome only. Cost still requires the complete
+invocation-bound rollout, model and rate evidence described in
+[[features/cost/measurement]]. Missing evidence leaves cost `NULL`. Malformed
+streams without an error retain their accounting-only unpriced diagnostic; the
+model-acceptance preflight has its own stricter validation contract.

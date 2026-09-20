@@ -724,9 +724,8 @@ class Agent:
             The stream outcome, read off the drained parser state.
 
         Raises:
-            AgentStreamError: When the stream carried error frames (codex
-                errors ride the JSON stream and must fail the step even
-                after a fully drained stdout).
+            AgentStreamError: When provider errors remain unresolved after
+                stdout drains and provider finalization completes.
 
         """
         # fresh parser per call; state accumulates for attribution after draining
@@ -776,10 +775,11 @@ class Agent:
                     # presentation callback
                     if render is not None:
                         render(event)
-            # stream-borne errors fail the turn even after a fully drained
-            # stdout (else the step records completed/exit 0); the parser
-            # collects error detail raw, so sanitize the joined message --
-            # the loop folds it into the step-row failure detail (SQLite)
+            # errors still recorded once stdout drains and the provider's
+            # finish settles fail the turn for every provider (else the step
+            # records completed/exit 0); the parser collects error detail raw,
+            # so sanitize the joined message -- the loop folds it into the
+            # step-row failure detail (SQLite)
             if parser.errors:
                 detail = _sanitize('; '.join(parser.errors))
                 raise AgentStreamError(f'{self.name} reported an error: {detail}')
