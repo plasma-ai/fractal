@@ -165,6 +165,111 @@ may include breaking changes, each listed under a Breaking heading.
   no-op merge (`Nothing to merge`) skips it. An absolute path, a `..` component,
   a symlink script, or a path escaping the target worktree is refused.
 
+### Changed
+
+- `codex` steps are priced from the per-response usage records codex writes to
+  its session log during the step, read once the process exits, so a resumed
+  thread's step records its own tokens rather than the cumulative total codex
+  reports on stdout. A step that exits non-zero records `NULL` cost silently
+  (the exit is the loop's to attribute); one that exits cleanly but runs on
+  codex older than 0.153 (whose log carries no per-response records), whose log
+  cannot be bound to its process, or whose turn spawned or drove sub-agent
+  threads (each child writes its own log, and that spend is not priced), records
+  `NULL` cost — never `$0` — and logs the reason.
+- `codex` preflight: the model-acceptance probe runs as the leader of its own
+  process group, recorded in `.step_pgid` for the probe's lifetime so `kill`
+  reaps it by the same handle as a step, and is cancelled after the preflight
+  timeout without an answer — TERM, a short grace, then KILL on the whole group.
+  A kill or retire that lands during the probe stands the boot down as that
+  terminal — the run row names it (`killed before boot`) rather than the probe,
+  and a resume boot records no `pause` event over it.
+- The loop boot reaps a live process group left under `.step_pgid` by a boot
+  that died during its preflight probe (a pane killed out of band while codex
+  was probed) before it records anything of its own, logging an `orphan` event:
+  the probe runs before the `active` stamp, so no crash heal judges it, and the
+  next boot would otherwise overwrite its only handle.
+- The run-start pricing refresh runs for every step that runs a token-priced
+  agent, configured model or not, since a `codex` step is priced at the served
+  model its session log names; a `codex` node with no model set aborts preflight
+  when no table can be fetched and none is cached
+  (`Could not fetch pricing and no cached pricing.json exists.`), as a node with
+  a pinned model does.
+- The
+  `no model set for <agent>; its cost cannot be priced and will not be tracked`
+  preflight warning is removed: with no model set the spend is priced at the
+  served model, a served model missing from the table is reported per step
+  (`codex usage unpriced: ...`), and a cost cap over a model-less token-priced
+  agent is still refused at the step launch.
+- `node init`'s uncapped-spend advisory
+  (`Warning: no --max-cost/--max-iters -- this node can run and spend without bound.`)
+  fires for a token-priced agent with no model set, since its spend is priced at
+  the served model, and stays quiet only for a model — pinned by flag, by
+  template preset, or by `--inherit config` — that the price table lacks.
+- `node merge` holds the squash to the node's commit scope: before committing,
+  the staged paths outside `.fractal/` are judged by the node's scope roots and
+  its project wiki (a repo-root node without a scope is unrestricted; a
+  sub-project node without one is bounded to its project directory) — the same
+  law `fractal commit` applies — and a path outside them refuses the merge. The
+  worktree-root `.gitattributes` is admitted, at merge and at `fractal commit`
+  alike, only when the whole change is init's own edit — HEAD's content followed
+  by exactly the two lines the wiki tool appends (`# Wiki index merge driver`,
+  `**/_index.md merge=wiki`); any other added or removed line makes it an
+  ordinary out-of-scope path. The refusal names the paths and both remedies:
+  widen the scope with
+  `fractal node config set scope=<dirs> --path=<node worktree>` and commit it
+  with `fractal commit "widen scope" --path=<node worktree>` (an uncommitted
+  config change makes the rerun skip the merge-base advance), or rerun with
+  `node merge --ignore-scope`, which lands the paths. A fresh merge restores the
+  target on refusal; a `--continue` leaves the staged squash in place on every
+  refusal, and its footprint remedies are `--continue --ignore-scope` or
+  widening the scope and redoing the squash, since the widening commit lands
+  after the hand squash. `--continue` also refuses unstaged tracked changes in
+  the target (a hand-resolved squash must be fully staged: save any copy you
+  need, stage the paths that belong to the resolution, and discard the rest with
+  `git -C <target worktree> checkout -- <path>` — the merge restores every
+  `.fractal/` path to the target's HEAD) and a node commit newer than the hand
+  squash (an iteration or a nested child's merge landed after the operator's
+  `git merge --squash`; the refusal names the redo,
+  `git -C <target worktree> reset --hard HEAD && git -C <target worktree> merge --squash <branch>`).
+- Leaked seeds on the user node are named and, where the merge owns them,
+  cleared: before a squash into the user node, `node merge` judges the root's
+  committed tree for seed directories of the root's own dotted nodes
+  (`.fractal/<target>.*/`, so a `--base` merge into another tree's root judges
+  that root) — the root owns no seed, so every one is a leak. Exactly what the
+  strip removes — the merging node's seed at its own project prefix and its
+  descendants' seeds at any depth — is named in one warning
+  (`tracks seeds of <branch> or its descendants, leaked by an earlier merge: <dirs>; this merge removes them`);
+  the rest, a same-named copy of the node's seed under another project prefix
+  (the node re-created at a different project path) included, get a second
+  warning with a
+  `git -C <target worktree> rm -r -- <dirs> && git -C <target worktree> commit -m 'drop leaked node seeds'`
+  remedy line that removes them from the tree and from the root worktree's disk
+  (the copies are never live seeds, which sit in each node's own worktree; the
+  check reads the committed tree, so a `--continue` never reports the
+  hand-staged seed). A node target is not judged, since its branch legitimately
+  carries other nodes' seeds (its ancestors' by fork, its descendants' by
+  PREPARE merges, a sibling's by the merge-base advance). Whether the target is
+  the user node is read from the repo's record of the target branch (so a root
+  checked out in a linked worktree is still stripped and leak-checked), and a
+  direct `merge.sh` call that cannot read the target's node config warns
+  `could not read <target>'s node config; treating it as a node target` instead
+  of judging it silently. A fresh squash whose only conflicts sit under
+  `.fractal/` outside the node's scope roots resolves to the target's content (a
+  path the target tracks returns to its content, a path it lacks is removed; on
+  the user node the node's own seed is then stripped, while a node target keeps
+  the copy it tracks) and continues with a warning naming the paths, while any
+  other conflict fails and restores the target.
+- Every mode prompt (`CHAT`, `CONTINUE`, `DETACHED`, `DRAIN`, `META`, `RESERVE`,
+  `RESUME`, `SYNC`) holds the mode inside the commission's boundaries — frozen
+  input, sealed or excluded channels, permitted reads, and commit and merge
+  authority — and RESERVE's first step is `Commit only when authorized`, with
+  useful artifacts otherwise retained at the commissioned private handoff path,
+  rather than a blanket instruction to bring whatever is open to a committed
+  state.
+- Runtime dependencies gain `jinja2>=3.1,<4` (the template renderer) and
+  `tomli-w>=1,<2` (the `_template.toml` record writer); environments synced
+  before this release need a `uv sync` or a reinstall.
+
 ### Fixed
 
 - `node merge` advances the node's merge-base with the target's content: after
@@ -353,111 +458,6 @@ may include breaking changes, each listed under a Breaking heading.
   row, instead of a raw `PermissionError` escaping ahead of the run row and
   stranding `.status` at `idle`.
 
-### Changed
-
-- `codex` steps are priced from the per-response usage records codex writes to
-  its session log during the step, read once the process exits, so a resumed
-  thread's step records its own tokens rather than the cumulative total codex
-  reports on stdout. A step that exits non-zero records `NULL` cost silently
-  (the exit is the loop's to attribute); one that exits cleanly but runs on
-  codex older than 0.153 (whose log carries no per-response records), whose log
-  cannot be bound to its process, or whose turn spawned or drove sub-agent
-  threads (each child writes its own log, and that spend is not priced), records
-  `NULL` cost — never `$0` — and logs the reason.
-- `codex` preflight: the model-acceptance probe runs as the leader of its own
-  process group, recorded in `.step_pgid` for the probe's lifetime so `kill`
-  reaps it by the same handle as a step, and is cancelled after the preflight
-  timeout without an answer — TERM, a short grace, then KILL on the whole group.
-  A kill or retire that lands during the probe stands the boot down as that
-  terminal — the run row names it (`killed before boot`) rather than the probe,
-  and a resume boot records no `pause` event over it.
-- The loop boot reaps a live process group left under `.step_pgid` by a boot
-  that died during its preflight probe (a pane killed out of band while codex
-  was probed) before it records anything of its own, logging an `orphan` event:
-  the probe runs before the `active` stamp, so no crash heal judges it, and the
-  next boot would otherwise overwrite its only handle.
-- The run-start pricing refresh runs for every step that runs a token-priced
-  agent, configured model or not, since a `codex` step is priced at the served
-  model its session log names; a `codex` node with no model set aborts preflight
-  when no table can be fetched and none is cached
-  (`Could not fetch pricing and no cached pricing.json exists.`), as a node with
-  a pinned model does.
-- The
-  `no model set for <agent>; its cost cannot be priced and will not be tracked`
-  preflight warning is removed: with no model set the spend is priced at the
-  served model, a served model missing from the table is reported per step
-  (`codex usage unpriced: ...`), and a cost cap over a model-less token-priced
-  agent is still refused at the step launch.
-- `node init`'s uncapped-spend advisory
-  (`Warning: no --max-cost/--max-iters -- this node can run and spend without bound.`)
-  fires for a token-priced agent with no model set, since its spend is priced at
-  the served model, and stays quiet only for a model — pinned by flag, by
-  template preset, or by `--inherit config` — that the price table lacks.
-- `node merge` holds the squash to the node's commit scope: before committing,
-  the staged paths outside `.fractal/` are judged by the node's scope roots and
-  its project wiki (a repo-root node without a scope is unrestricted; a
-  sub-project node without one is bounded to its project directory) — the same
-  law `fractal commit` applies — and a path outside them refuses the merge. The
-  worktree-root `.gitattributes` is admitted, at merge and at `fractal commit`
-  alike, only when the whole change is init's own edit — HEAD's content followed
-  by exactly the two lines the wiki tool appends (`# Wiki index merge driver`,
-  `**/_index.md merge=wiki`); any other added or removed line makes it an
-  ordinary out-of-scope path. The refusal names the paths and both remedies:
-  widen the scope with
-  `fractal node config set scope=<dirs> --path=<node worktree>` and commit it
-  with `fractal commit "widen scope" --path=<node worktree>` (an uncommitted
-  config change makes the rerun skip the merge-base advance), or rerun with
-  `node merge --ignore-scope`, which lands the paths. A fresh merge restores the
-  target on refusal; a `--continue` leaves the staged squash in place on every
-  refusal, and its footprint remedies are `--continue --ignore-scope` or
-  widening the scope and redoing the squash, since the widening commit lands
-  after the hand squash. `--continue` also refuses unstaged tracked changes in
-  the target (a hand-resolved squash must be fully staged: save any copy you
-  need, stage the paths that belong to the resolution, and discard the rest with
-  `git -C <target worktree> checkout -- <path>` — the merge restores every
-  `.fractal/` path to the target's HEAD) and a node commit newer than the hand
-  squash (an iteration or a nested child's merge landed after the operator's
-  `git merge --squash`; the refusal names the redo,
-  `git -C <target worktree> reset --hard HEAD && git -C <target worktree> merge --squash <branch>`).
-- Leaked seeds on the user node are named and, where the merge owns them,
-  cleared: before a squash into the user node, `node merge` judges the root's
-  committed tree for seed directories of the root's own dotted nodes
-  (`.fractal/<target>.*/`, so a `--base` merge into another tree's root judges
-  that root) — the root owns no seed, so every one is a leak. Exactly what the
-  strip removes — the merging node's seed at its own project prefix and its
-  descendants' seeds at any depth — is named in one warning
-  (`tracks seeds of <branch> or its descendants, leaked by an earlier merge: <dirs>; this merge removes them`);
-  the rest, a same-named copy of the node's seed under another project prefix
-  (the node re-created at a different project path) included, get a second
-  warning with a
-  `git -C <target worktree> rm -r -- <dirs> && git -C <target worktree> commit -m 'drop leaked node seeds'`
-  remedy line that removes them from the tree and from the root worktree's disk
-  (the copies are never live seeds, which sit in each node's own worktree; the
-  check reads the committed tree, so a `--continue` never reports the
-  hand-staged seed). A node target is not judged, since its branch legitimately
-  carries other nodes' seeds (its ancestors' by fork, its descendants' by
-  PREPARE merges, a sibling's by the merge-base advance). Whether the target is
-  the user node is read from the repo's record of the target branch (so a root
-  checked out in a linked worktree is still stripped and leak-checked), and a
-  direct `merge.sh` call that cannot read the target's node config warns
-  `could not read <target>'s node config; treating it as a node target` instead
-  of judging it silently. A fresh squash whose only conflicts sit under
-  `.fractal/` outside the node's scope roots resolves to the target's content (a
-  path the target tracks returns to its content, a path it lacks is removed; on
-  the user node the node's own seed is then stripped, while a node target keeps
-  the copy it tracks) and continues with a warning naming the paths, while any
-  other conflict fails and restores the target.
-- Every mode prompt (`CHAT`, `CONTINUE`, `DETACHED`, `DRAIN`, `META`, `RESERVE`,
-  `RESUME`, `SYNC`) holds the mode inside the commission's boundaries — frozen
-  input, sealed or excluded channels, permitted reads, and commit and merge
-  authority — and RESERVE's first step is `Commit only when authorized`, with
-  useful artifacts otherwise retained at the commissioned private handoff path,
-  rather than a blanket instruction to bring whatever is open to a committed
-  state.
-- Runtime dependencies gain `jinja2>=3.1,<4` (the template renderer) and
-  `tomli-w>=1,<2` (the `_template.toml` record writer); environments synced
-  before this release need a `uv sync` or a reinstall.
-
 ## [1.2.0] - 2026-08-24
 
 ### Breaking
@@ -533,6 +533,88 @@ may include breaking changes, each listed under a Breaking heading.
   facts and the loop's own recorded reason strings, null when nothing is
   recorded (a reconcile-healed crash) and on every other status, so machine
   consumers stop literal-matching the `detail` prose to tell landings apart.
+
+### Changed
+
+- `node list`'s documented schema matches what it prints: the `detail` and
+  `spend` columns are listed, and the `detail` vocabulary is enumerated (pending
+  signals, exit reasons, `run exhausted:`, `orphaned`, `model drop`,
+  `iteration gap`, `PAUSED: billing`).
+
+- The wiki contract tests pin plasma-wiki's new merge and lint contracts (the
+  union merge driver — both sides' link rows survive an `_index.md` merge,
+  deduplicated, with `wiki update` re-sorting and pruning stale rows — and typed
+  lint issues with exit 0 clean / 1 issues / 2 command error). The suite now
+  requires a plasma-wiki carrying those contracts (newer than 1.2.0); no fractal
+  runtime code needed changes — it consumes lint by boolean exit code only,
+  which is unchanged.
+
+- The census distinguishes the two `completed` landings: a run that ended on its
+  iteration cap surfaces as `run exhausted: Reached max iterations (N)` in the
+  `node list`/`node status` detail column, while a drained finish stays bare — a
+  run-out lane (usually a re-continue candidate) can no longer pass as
+  done-conditions-met; `--continue` keeps looping per its per-run `max_iters`,
+  pinned by test.
+
+- The seeded COMMIT step's sign-off is unconditional: the parent-is-root
+  conditional is gone, so a finishing node posts its sign-off (and any
+  operator-ordered signal with it) whatever its position in the tree — the
+  mechanical cause of silently dropped ordered signals at closeout. Existing
+  nodes keep their seeded step copies; re-seed (`node init --reset`/`--steps`)
+  to pick the new text up.
+
+- Model pins are honored or the step fails loudly: the ambient
+  `CLAUDE_CODE_SUBAGENT_MODEL` forcing var is unset at invocation compose (like
+  the effort knobs) and removed from the seeded node settings — it silently
+  rerouted every pinned fan-out sub-agent onto the session model once — and a
+  model drop the one re-dispatch cannot resolve now books the step and iteration
+  failed with the drop named, never a clean completion over wrong-model output
+  (the node is never killed: the loop warns at the next iteration start and
+  moves on). The iteration row records the model that actually served when its
+  steps agree, so divergence from the pin is visible in the row and the
+  `node list` detail column.
+
+- Config edits take effect live at each key's natural boundary — pacing
+  (`interval`/`sleep`) now re-reads at the next sleep call and `iter_timeout` at
+  the next iteration, joining the already-live
+  `max_iters`/`step_timeout`/`wait`/cost caps — and the per-key boundary table
+  is documented, so a mid-run edit can never silently no-op.
+
+- Seat-death backstop commits carry their context: the auto force-commit's
+  subject names the step it follows (`auto after EXECUTE`) and its body the step
+  and the newest plan's title — buried real work no longer costs archaeology at
+  forensics and merge screens.
+
+- fractal owns its estate staging: any estate file an ignore rule held out of a
+  commit is re-evaluated against fractal-normal rules alone (the shipped exclude
+  template plus committed per-directory `.gitignore` files) and force-added when
+  only a machine-local layer — a foreign `info/exclude` line,
+  `core.excludesFile` — held it, so one stray broad exclude can no longer
+  silently unstage (or hard-fail) the records canon requires nodes to commit;
+  the generated exclude block and the stage excludes also cover the legacy
+  `registry.db` spelling and its SQLite sidecars (`registry.db-*`), mirroring
+  the modern `.db`/`.db-*` pair — a hot WAL or journal swept into a commit is a
+  torn byte capture of a database another process is mid-write on.
+
+- Radio listings are read-your-writes and watermarked: `messages`, `sent`,
+  `feed`, `thread`, and `subs` resolve the acting node exactly like the writing
+  verbs (loop-exported `_NODE` first, else the cwd; `--path` still selects
+  another mailbox), so a delivered send is visible in its sender's own next
+  outbox listing; every listing closes with an
+  `as of <instant> (acting as <branch>)` freshness watermark on stderr — the
+  recorded cut to quote when grading from a listing, read before the query so a
+  row a concurrent sender lands mid-render is never endorsed as absent.
+
+- `node stop`'s wait-for-the-seat contract is pinned by test and documented: a
+  stop landing mid-step waits for the in-flight agent to complete — it never
+  signals or tears the running seat (`node kill` remains the immediate path) —
+  and the docs now state prominently that stop cascades over the target's entire
+  subtree, children first.
+
+- `node kill` lands on `idle` nodes: a booting spawn is reaped and a
+  never-started spawn is stamped `killed` so it can never activate — an unwanted
+  spawn no longer gets a head start while an operator poll-watches for its
+  activation.
 
 ### Fixed
 
@@ -790,88 +872,6 @@ may include breaking changes, each listed under a Breaking heading.
   on-disk copy), and the merge re-checks the staged squash after the parent's
   wiki refresh — a squash the refresh fully reverts lands on the designed
   "Nothing to merge" no-op instead of dying on the empty index.
-
-### Changed
-
-- `node list`'s documented schema matches what it prints: the `detail` and
-  `spend` columns are listed, and the `detail` vocabulary is enumerated (pending
-  signals, exit reasons, `run exhausted:`, `orphaned`, `model drop`,
-  `iteration gap`, `PAUSED: billing`).
-
-- The wiki contract tests pin plasma-wiki's new merge and lint contracts (the
-  union merge driver — both sides' link rows survive an `_index.md` merge,
-  deduplicated, with `wiki update` re-sorting and pruning stale rows — and typed
-  lint issues with exit 0 clean / 1 issues / 2 command error). The suite now
-  requires a plasma-wiki carrying those contracts (newer than 1.2.0); no fractal
-  runtime code needed changes — it consumes lint by boolean exit code only,
-  which is unchanged.
-
-- The census distinguishes the two `completed` landings: a run that ended on its
-  iteration cap surfaces as `run exhausted: Reached max iterations (N)` in the
-  `node list`/`node status` detail column, while a drained finish stays bare — a
-  run-out lane (usually a re-continue candidate) can no longer pass as
-  done-conditions-met; `--continue` keeps looping per its per-run `max_iters`,
-  pinned by test.
-
-- The seeded COMMIT step's sign-off is unconditional: the parent-is-root
-  conditional is gone, so a finishing node posts its sign-off (and any
-  operator-ordered signal with it) whatever its position in the tree — the
-  mechanical cause of silently dropped ordered signals at closeout. Existing
-  nodes keep their seeded step copies; re-seed (`node init --reset`/`--steps`)
-  to pick the new text up.
-
-- Model pins are honored or the step fails loudly: the ambient
-  `CLAUDE_CODE_SUBAGENT_MODEL` forcing var is unset at invocation compose (like
-  the effort knobs) and removed from the seeded node settings — it silently
-  rerouted every pinned fan-out sub-agent onto the session model once — and a
-  model drop the one re-dispatch cannot resolve now books the step and iteration
-  failed with the drop named, never a clean completion over wrong-model output
-  (the node is never killed: the loop warns at the next iteration start and
-  moves on). The iteration row records the model that actually served when its
-  steps agree, so divergence from the pin is visible in the row and the
-  `node list` detail column.
-
-- Config edits take effect live at each key's natural boundary — pacing
-  (`interval`/`sleep`) now re-reads at the next sleep call and `iter_timeout` at
-  the next iteration, joining the already-live
-  `max_iters`/`step_timeout`/`wait`/cost caps — and the per-key boundary table
-  is documented, so a mid-run edit can never silently no-op.
-
-- Seat-death backstop commits carry their context: the auto force-commit's
-  subject names the step it follows (`auto after EXECUTE`) and its body the step
-  and the newest plan's title — buried real work no longer costs archaeology at
-  forensics and merge screens.
-
-- fractal owns its estate staging: any estate file an ignore rule held out of a
-  commit is re-evaluated against fractal-normal rules alone (the shipped exclude
-  template plus committed per-directory `.gitignore` files) and force-added when
-  only a machine-local layer — a foreign `info/exclude` line,
-  `core.excludesFile` — held it, so one stray broad exclude can no longer
-  silently unstage (or hard-fail) the records canon requires nodes to commit;
-  the generated exclude block and the stage excludes also cover the legacy
-  `registry.db` spelling and its SQLite sidecars (`registry.db-*`), mirroring
-  the modern `.db`/`.db-*` pair — a hot WAL or journal swept into a commit is a
-  torn byte capture of a database another process is mid-write on.
-
-- Radio listings are read-your-writes and watermarked: `messages`, `sent`,
-  `feed`, `thread`, and `subs` resolve the acting node exactly like the writing
-  verbs (loop-exported `_NODE` first, else the cwd; `--path` still selects
-  another mailbox), so a delivered send is visible in its sender's own next
-  outbox listing; every listing closes with an
-  `as of <instant> (acting as <branch>)` freshness watermark on stderr — the
-  recorded cut to quote when grading from a listing, read before the query so a
-  row a concurrent sender lands mid-render is never endorsed as absent.
-
-- `node stop`'s wait-for-the-seat contract is pinned by test and documented: a
-  stop landing mid-step waits for the in-flight agent to complete — it never
-  signals or tears the running seat (`node kill` remains the immediate path) —
-  and the docs now state prominently that stop cascades over the target's entire
-  subtree, children first.
-
-- `node kill` lands on `idle` nodes: a booting spawn is reaped and a
-  never-started spawn is stamped `killed` so it can never activate — an unwanted
-  spawn no longer gets a head start while an operator poll-watches for its
-  activation.
 
 ## [1.1.0] - 2026-07-28
 
