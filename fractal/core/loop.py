@@ -2782,6 +2782,7 @@ class Loop:
                 pass
 
         # attribute the outcome
+        agent_borne = isinstance(stream_error, AgentStreamError)
         if agent_status != 0 and result is not None and result.budget_stopped:
             # the agent stopped because it reached its per-step budget cap
             # (claude exits non-zero + emits result subtype
@@ -2824,24 +2825,33 @@ class Loop:
                     session=session_out,
                     cost=cost_out,
                 )
-            # a stream-consumer failure the handler above SIGKILLed the agent
-            # for surfaces here as a signal death -- defer to the stream_error
-            # branch below so it owns the attribution (right side + traceback),
-            # rather than bury the real fault under a generic 'agent error'; safe
-            # because stream_error is set only on a fractal-side stream failure:
-            # a genuine agent crash closes stdout, so the reader hits EOF and
-            # returns without raising (stream_error stays None -> here)
-            if stream_error is None:
+            # a fractal-side stream-consumer failure the handler above SIGKILLed
+            # the agent for surfaces here as a signal death -- defer to the
+            # stream_error branch below so it owns the attribution rather than
+            # bury the real fault under a generic 'agent error'; an error the
+            # agent named on its own stream is the agent's failure, so the exit
+            # code leads and the stream detail joins the stderr tail in the reason
+            if stream_error is None or agent_borne:
                 # a signal death surfaces as a negative returncode -- report it
                 # in the 128+N convention the exit banner prints
                 exit_code = agent_status if agent_status > 0 else 128 - agent_status
-                _snapshot_err()
-                # the stderr tail rides the durable reason -- the pane is mortal,
-                # and agents put the cause on the last line
+                if agent_borne:
+                    trace = ''.join(traceback.format_exception(stream_error))
+                    _snapshot_err(trace=trace)
+                else:
+                    _snapshot_err()
+                # the stream detail and the stderr tail ride the durable reason
+                # -- the pane is mortal, and agents put the cause on the last line
                 reason = f'agent error (exit {exit_code})'
+                details = []
+                if agent_borne:
+                    details.append(_one_line(f'{stream_error}'))
                 tail = _log_tail(agent.err_path)
                 if tail:
-                    reason = f'{reason}: {tail}'
+                    details.append(tail)
+                if details:
+                    detail = '; '.join(details)
+                    reason = f'{reason}: {detail}'
                 return StepResult(
                     status='failed',
                     exit_code=exit_code,
@@ -2868,7 +2878,6 @@ class Loop:
             print(f'Error: {stream_error}', file=sys.stderr)
             if self._consume_pause_abort():
                 return StepResult(status='paused', session=session_out, cost=cost_out)
-            agent_borne = isinstance(stream_error, AgentStreamError)
             self._fail_reason = 'agent error' if agent_borne else 'stream error'
             _snapshot_err(trace=''.join(traceback.format_exception(stream_error)))
             # the step row carries the exception one-liner (the iter/run

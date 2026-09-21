@@ -22,6 +22,10 @@ may include breaking changes, each listed under a Breaking heading.
   whose process exits 0; the recovered step is priced normally. A `turn.failed`
   frame, an error frame outside the active turn, an error frame in a turn that
   never completes, or a non-zero exit still fails the step unpriced.
+- A step whose agent names an error on its stream and then exits non-zero
+  reports the real exit status: the step banner and the row's reason read
+  `agent error (exit N)` with the stream detail and the stderr tail behind it,
+  instead of the bare `agent error` label that reads as a clean-exit failure.
 
 ## [1.3.0] - 2026-09-17
 

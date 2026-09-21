@@ -29,7 +29,7 @@ from fractal.core.agent import StreamEvent
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
-from fractal.exceptions import _Abort
+from fractal.exceptions import AgentStreamError, _Abort
 from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
 from fractal.impl.codex import CodexAgent
@@ -51,6 +51,7 @@ __all__ = [
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
+    'test_agent_borne_stream_error_keeps_the_exit_code',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
     'test_agent_launch_failure_books_a_failed_step',
@@ -910,6 +911,65 @@ def test_stream_fault_attributes_to_the_stream_side(
         and 'agent error' not in (result.reason or '')
         for result in loop.launch_results
     ), [result.reason for result in loop.launch_results]
+
+
+def test_agent_borne_stream_error_keeps_the_exit_code(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error named on the stream before a non-zero exit names the exit code.
+
+    The exit status is the agent's authoritative verdict and the stream text
+    its explanation, so the step reason leads with the real code, then the
+    stream detail, then the stderr tail -- never the bare stream label that
+    reads as a clean-exit failure.
+    """
+    monkeypatch.setenv('_NODE', '')
+
+    class ErrorFrameAgent(SampleAgent):
+        """A backend that names an error on its stream, then exits 3 with stderr."""
+
+        def spawn(
+            self: ErrorFrameAgent,
+            invocation: Any,
+            *,
+            start_new_session: bool = True,
+            stderr: Any = None,
+        ) -> subprocess.Popen:
+            """Exit 3 with a diagnosis line on stderr."""
+            return subprocess.Popen(
+                ['sh', '-c', 'echo stub crashed >&2; exit 3'],
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                start_new_session=start_new_session,
+            )
+
+        def stream(self: ErrorFrameAgent, stdout: Any, **kwargs: Any) -> Any:
+            """Drain to EOF, wait as ``finish_stream`` does, then report the error."""
+            for _ in stdout:
+                pass
+            kwargs['process'].wait()
+            raise AgentStreamError('sample reported an error: quota exhausted')
+
+    class ErrorFrameLoop(MockLoop):
+        """Mock loop that swaps in the error-frame agent for the real launch."""
+
+        def _launch(
+            self: ErrorFrameLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Run the REAL launch so the attribution executes."""
+            kwargs['agent'] = ErrorFrameAgent(self.node)
+            return Loop._launch(self, step, prompt, **kwargs)
+
+    loop = ErrorFrameLoop(loop_node)
+    assert loop.run() == 0
+    # the real exit code leads; the stream detail and the stderr tail follow
+    # (the row's own markers -- retry, unpriced -- trail the reason)
+    step = loop_node.db.read('steps', where={'step': 1})[0]
+    assert step['status'] == 'failed'
+    assert (step['metadata'] or '').startswith(
+        'agent error (exit 3): sample reported an error: quota exhausted; stub crashed'
+    )
 
 
 def test_agent_stderr_tolerates_non_utf8_output(
