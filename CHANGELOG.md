@@ -9,10 +9,11 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
-- The `plasma-wiki` runtime requirement is `>=1.3,<2`: the seeded wiki skill
-  relies on `wiki update` pruning stale index rows without a flag, and the
+- The `plasma-wiki` runtime requirement is `>=1.5,<2`: the seeded wiki skill
+  relies on `wiki update` pruning stale index rows without a flag and the
   `_index.md` merge driver fractal installs unions both sides' link rows, both
-  wiki 1.3 behaviors.
+  wiki 1.3 behaviors, and 1.5 removes the 1.4 slowdown of `wiki lint` and
+  `wiki update` on wikis of several thousand pages.
 
 ### Fixed
 
