@@ -42,8 +42,9 @@ interface to both knowledge stores. Its verbs:
 - `wiki install` — copy the bundled wiki skill into the Claude Code and Codex
   skill directories (home by default, the project with `--project`; `--link`
   symlinks for editable-install development).
-- `wiki config` — install or refresh the Obsidian integration and the git merge
-  machinery; see [[features/wiki_system/merge_behavior]].
+- `wiki config` — install or refresh the Obsidian integration (it copies the
+  bundled Wiki Root Links plugin from the package and enables it) and the git
+  merge machinery; see [[features/wiki_system/merge_behavior]].
 - `wiki trust` — record a wiki root as trusted in `~/.wiki/settings.json`. A
   `.wiki/wiki.py` hook runs code with the caller's privileges, so every command
   that resolves a wiki refuses to load one from an untrusted root.

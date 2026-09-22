@@ -46,6 +46,6 @@ Run `wiki --help` and `wiki <command> --help` for the CLI.
   factor overflow into child pages.
 - **Wikilinks stay within one wiki.** Reference anything outside this wiki --
   the project wiki, source files, configs -- in plain text or backticks, never
-  as a wikilink; `wiki lint` notes a wikilink that points outside the wiki.
-  Write in-wiki links prefix-free (`[[state]]`, never `[[./state]]` or
-  `[[../state]]`).
+  as a wikilink; `wiki lint` fails a wikilink that points outside the wiki (the
+  `outside_link` issue). Write in-wiki links prefix-free (`[[state]]`, never
+  `[[./state]]` or `[[../state]]`).
