@@ -27,8 +27,9 @@ may include breaking changes, each listed under a Breaking heading.
   home does not hold as a root, or a sub-agent of another kind — review,
   compact, memory consolidation — on the step's thread) refuses the step with
   `codex usage unpriced: Rollout window saw a rollout it cannot explain: <file>`.
-  Another root's log beside the step's, or any sub-agent log naming that root,
-  new or grown, is ignored.
+  Another plain-source root's log beside the step's, or any sub-agent log naming
+  that root, new or grown, is ignored; a root with an object source (custom,
+  internal) is not recognized and its logs refuse the step.
 - The `plasma-wiki` runtime requirement is `>=1.5,<2`: the seeded wiki skill
   relies on `wiki update` pruning stale index rows without a flag and the
   `_index.md` merge driver fractal installs unions both sides' link rows, both

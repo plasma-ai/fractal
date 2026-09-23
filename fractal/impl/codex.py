@@ -814,21 +814,25 @@ def _spawned_rollouts(
         if record.get('type') != 'session_meta':
             raise ValueError(unexplained)
         source = payload.get('source')
-        # a root's rows and its descendants' name the root, never this thread
-        if not isinstance(source, dict):
-            continue
-        subagent = source.get('subagent')
+        subagent = source.get('subagent') if isinstance(source, dict) else None
         spawn = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
         thread = payload.get('id')
         root = payload.get('session_id')
-        # another root's sub-agent, spawned or otherwise, is that root's spend
+        # a root's rows and its descendants' name the root, never this thread:
+        # another root's rollout, or its sub-agent's, spawned or otherwise, is
+        # that root's spend
         if root != session:
             if not _is_root(home, root):
                 raise ValueError(unexplained)
             continue
-        # a sub-agent of another kind (review, compact, memory consolidation)
-        # on this thread is spend the window cannot place
+        # a root naming this thread as its session, or a sub-agent of another
+        # kind (review, compact, memory consolidation) on this thread, is spend
+        # the window cannot place
         if not isinstance(spawn, dict) or not isinstance(thread, str):
+            raise ValueError(unexplained)
+        # a copy of this thread's own rollout behind a spawn first line is no
+        # spawned thread
+        if thread == session:
             raise ValueError(unexplained)
         # one thread writes one rollout: a twin is not the captured file
         if thread in threads:
@@ -839,8 +843,8 @@ def _spawned_rollouts(
         # a forked thread copies its source's history ahead of its own
         # records, from the ordinal codex stamps on the metadata
         start = payload.get('subagent_history_start_ordinal')
-        # bool is an int subclass, and no ordinal is a bool
-        if type(start) is not int:
+        # bool is an int subclass, and no ordinal is a bool or negative
+        if (type(start) is not int) or (start < 0):
             start = 0
         spawned[path] = (thread, known.get(path, 0), start)
     return spawned
@@ -849,8 +853,9 @@ def _spawned_rollouts(
 def _is_root(home: pathlib.Path, session: Any, /) -> bool:
     """Return whether ``session`` names a root thread's rollout under ``home``.
 
-    A root's session metadata opens with a plain ``source`` (``exec``,
-    ``cli``); a spawned thread's carries the spawn object.
+    A root's session metadata names ``session`` as its own id and opens with
+    a plain string ``source`` (``exec``, ``cli``); a spawned thread's carries
+    the spawn object. A rollout that cannot be found or read is no root.
     """
     if not isinstance(session, str):
         return False
@@ -859,11 +864,14 @@ def _is_root(home: pathlib.Path, session: Any, /) -> bool:
         with path.open('rb') as handle:
             record = _read_record(handle.readline())
         payload = _read_payload(record)
-    except ValueError:
+    except (OSError, ValueError):
         return False
     if record.get('type') != 'session_meta':
         return False
-    return not isinstance(payload.get('source'), dict)
+    # the rollout is found by its name: its own metadata must name the session
+    if payload.get('id') != session:
+        return False
+    return isinstance(payload.get('source'), str)
 
 
 def _counter_at(handle: typing.BinaryIO, size: int) -> tuple[dict[str, int], str]:

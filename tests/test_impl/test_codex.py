@@ -73,6 +73,7 @@ __all__ = [
     'test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced',
     'test_spawned_threads_price_at_their_own_model_beside_sibling_roots',
     'test_a_driven_fork_is_read_from_its_captured_length',
+    'test_an_unopenable_child_rollout_leaves_the_step_unpriced',
     'test_nonzero_exit_closes_unpriced_and_silent',
     'test_stream_recovers_error_frames_inside_a_completed_turn',
     'test_recovered_error_frames_without_rollout_evidence_stay_unpriced',
@@ -229,7 +230,7 @@ _SPAWN_WIRE = [
 # node's codex home (or damages the file first), opens or grows the child
 # rollouts beside it (a row given as text lands as that line; a child may be
 # emptied first, left empty, left without its final newline, or twinned under
-# another date), prints the given stdout lines and exits as told
+# another date and timestamp), prints the given stdout lines and exits as told
 _WRITER = """\
 import json, pathlib, sys
 data = json.loads(sys.argv[1])
@@ -266,7 +267,8 @@ if not data.get('missing'):
         with child_path.open('a') as file:
             file.write(text)
         if child.get('twin'):
-            twin = child_path.parents[3] / '2026/09/16' / child_path.name
+            name = child_path.name.replace('17-51-29', '17-52-00')
+            twin = child_path.parents[3] / '2026/09/16' / name
             twin.parent.mkdir(parents=True, exist_ok=True)
             twin.write_text(text)
 for frame in data['wire']:
@@ -731,7 +733,8 @@ def test_filtered_rollout_kinds_are_never_decoded(backend: CodexAgent) -> None:
         ('changed_prefix', 'Resumed rollout prefix changed'),
         # the window does not describe one complete, fully counted turn
         ('two_turns', 'exactly one completed turn'),
-        ('aborted', 'interrupted turn'),
+        ('turn_aborted', 'interrupted turn'),
+        ('error', 'interrupted turn'),
         ('foreign_session', 'belongs to another thread'),
         ('thread_counter', 'disagrees with the thread counter'),
         ('no_records', 'codex 0.153 or newer required'),
@@ -750,7 +753,8 @@ def test_filtered_rollout_kinds_are_never_decoded(backend: CodexAgent) -> None:
         'truncated',
         'changed-prefix',
         'two-turns',
-        'aborted',
+        'turn-aborted',
+        'error',
         'foreign-session',
         'thread-counter',
         'no-records',
@@ -792,8 +796,8 @@ def test_unbound_or_incomplete_evidence_leaves_the_step_unpriced(
         records.append(
             copy.deepcopy(records[_find(records, 'event_msg', subtype='task_started')])
         )
-    elif fault == 'aborted':
-        records.append({'type': 'event_msg', 'payload': {'type': 'turn_aborted'}})
+    elif fault in ('turn_aborted', 'error'):
+        records.append({'type': 'event_msg', 'payload': {'type': fault}})
     elif fault == 'foreign_session':
         usage = records[_find(records, 'token_usage_record')]['payload']
         usage['session_id'] = 'elsewhere'
@@ -904,15 +908,21 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         # the thread writes
         ('foreign_root', 'cannot explain'),
         ('child_of_child', 'cannot explain'),
+        ('sourceless_root', 'cannot explain'),
+        ('pattern_root', 'cannot explain'),
+        ('unreadable_root', 'cannot explain'),
         ('foreign_kind', 'cannot explain'),
+        ('plain_source_own_thread', 'cannot explain'),
+        ('own_thread_spawn', 'cannot explain'),
         ('unexplained', 'cannot explain'),
         ('torn_meta', 'cannot explain'),
         ('blank_first_line', 'cannot explain'),
         ('twin_child', 'Several rollouts name spawned thread'),
-        # a driven child's file is not the one captured
+        # a driven child's file is not the one captured, or grew by no turn
         ('shrunk', 'shorter than its captured length'),
         ('torn_prefix', 'does not end on a line'),
         ('emptied', 'cannot explain'),
+        ('grown_passive', 'does not end on a completed turn'),
         # the child's segment is not one complete, fully counted stretch
         ('open_turn', 'does not end on a completed turn'),
         ('turn_aborted', 'interrupted turn'),
@@ -926,9 +936,10 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         ('no_rates', 'has no pricing entry'),
         # the fork's history start is read exactly: one line short lands on
         # the copied interrupted turn, one past the child's own turn context
-        # loses its served model
+        # loses its served model, and a negative one reads from the first line
         ('fork_start_short', 'interrupted turn'),
         ('fork_start_long', 'exactly one served model'),
+        ('negative_ordinal', 'interrupted turn'),
         # the child's segment names one served model
         ('no_context', 'exactly one served model'),
         ('two_models', 'exactly one served model'),
@@ -940,7 +951,12 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         'list-turn',
         'foreign-root',
         'child-of-child',
+        'sourceless-root',
+        'pattern-root',
+        'unreadable-root',
         'foreign-kind',
+        'plain-source-own-thread',
+        'own-thread-spawn',
         'unexplained',
         'torn-meta',
         'blank-first-line',
@@ -948,6 +964,7 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         'shrunk',
         'torn-prefix',
         'emptied',
+        'grown-passive',
         'open-turn',
         'turn-aborted',
         'error',
@@ -958,6 +975,7 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         'no-rates',
         'fork-start-short',
         'fork-start-long',
+        'negative-ordinal',
         'no-context',
         'two-models',
     ],
@@ -992,15 +1010,46 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         sibling = _as_thread(spawned_thread, str(uuid.uuid4()), root=_SPAWN_SESSION)
         child[0]['payload']['session_id'] = sibling[0]['payload']['id']
         children = [child, sibling]
+    # the child names a session the home holds as no root: a rollout opening
+    # without a plain source, one its name only matches as a glob pattern, or
+    # one whose path cannot be read
+    elif fault == 'sourceless_root':
+        root = str(uuid.uuid4())
+        sibling = _as_thread(spawning_thread, root)
+        del sibling[0]['payload']['source']
+        wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
+        command = _command(backend, sibling, wire, thread=root)
+        _drive(backend, command, model=_SPAWN_MODEL)
+        child[0]['payload']['session_id'] = root
+    elif fault == 'pattern_root':
+        child[0]['payload']['session_id'] = _SPAWN_SESSION[:-1] + '?'
+    elif fault == 'unreadable_root':
+        root = str(uuid.uuid4())
+        directory = (
+            backend.config_dir
+            / 'sessions/2026/09/15'
+            / f'rollout-2026-09-15T17-51-29-{root}.jsonl'
+        )
+        directory.mkdir(parents=True)
+        child[0]['payload']['session_id'] = root
     # a sub-agent of another kind on this thread is not a spawn the window prices
     elif fault == 'foreign_kind':
         child[0]['payload']['source'] = {'subagent': 'review'}
+    # a root naming this thread as its session is no sibling root
+    elif fault == 'plain_source_own_thread':
+        child[0]['payload']['source'] = 'exec'
+    # a copy of the step's own log behind a spawn first line is no spawned thread
+    elif fault == 'own_thread_spawn':
+        forged = copy.deepcopy(spawning_thread)
+        forged[0]['payload']['source'] = child[0]['payload']['source']
+        child = {'records': forged, 'name': _SPAWN_CHILD}
     elif fault == 'twin_child':
         child = {'records': child, 'twin': True}
     # a spawning step opens the child (torn: its last line unterminated), and
     # the resume that drives the thread finds the child shrunk below its
-    # captured length or emptied, or grows it across that unterminated line
-    elif fault in ('shrunk', 'torn_prefix', 'emptied'):
+    # captured length or emptied, grows it across that unterminated line, or
+    # grows it by one passive record and no turn
+    elif fault in ('shrunk', 'torn_prefix', 'emptied', 'grown_passive'):
         setup = {'records': spawned_thread, 'torn': fault == 'torn_prefix'}
         command = _command(
             backend=backend,
@@ -1017,6 +1066,12 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
             child = {'records': [spawned_thread[0]], 'truncate': True}
         elif fault == 'emptied':
             child = {'records': [spawned_thread[0]], 'truncate': True, 'empty': True}
+        elif fault == 'grown_passive':
+            settings = {
+                'type': 'event_msg',
+                'payload': {'type': 'thread_settings_applied'},
+            }
+            child = {'records': [settings], 'name': _SPAWN_CHILD}
         else:
             child = _on_turn(_second_turn(spawned_thread), str(uuid.uuid4()), root=turn)
     elif fault == 'unexplained':
@@ -1046,6 +1101,8 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
     elif fault == 'fork_start_long':
         own = _FORK_START + 1 + _find(spawned_thread[1:], 'turn_context')
         child = _forked(spawned_thread, start=own + 1)
+    elif fault == 'negative_ordinal':
+        child = _forked(spawned_thread, start=-1)
     elif fault == 'no_context':
         child.pop(_find(child, 'turn_context'))
     elif fault == 'two_models':
@@ -1139,12 +1196,14 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
     # `tests/test_impl/rollouts/`
     elif case == 'forked':
         children = [_forked(spawned_thread)]
-    # codex pre-empts a child's turn normally: a second start before the turn
-    # completes is no fault
+    # codex pre-empts a child's turn normally: a second start, on a turn of its
+    # own, before the turn completes is no fault
     elif case == 'preempted':
         child = copy.deepcopy(spawned_thread)
         started = child[_find(child, 'event_msg', subtype='task_started')]
-        child.insert(_find(child, 'turn_context'), copy.deepcopy(started))
+        restarted = copy.deepcopy(started)
+        restarted['payload']['turn_id'] = str(uuid.uuid4())
+        child.insert(_find(child, 'turn_context'), restarted)
         children = [child]
     # another root's rollout, opened or grown beside the run, is not its spend
     elif case == 'sibling-new':
@@ -1199,30 +1258,51 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
     assert 'unpriced' not in caplog.text
 
 
+@pytest.mark.parametrize(
+    argnames='case',
+    argvalues=['spawned', 'predating'],
+)
 def test_a_driven_fork_is_read_from_its_captured_length(
     backend: CodexAgent,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    case: str,
 ) -> None:
     """A turn driving a forked child sums the rows it appends past the captured length.
 
     The copied history and its ordinal lie in the fork's prefix; the driven
-    segment is read from the captured length, never from the ordinal.
+    segment is read from the captured length, never from the ordinal -- for
+    a fork the thread's first turn opened, and for one the home held before
+    that turn, stamped with an ordinal past every line it will hold.
     """
     monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
     parent_cost = _price(_SPAWN_USAGE[-1]['thread_token_usage'])
     child_cost = _price(_CHILD_USAGE)
-    # the spawning turn opens the fork, read from its history start
+    children = [_forked(spawned_thread)]
+    expected = parent_cost + child_cost
+    # the fork predates the first turn's capture, and that turn leaves it alone
+    if case == 'predating':
+        fork = _forked(spawned_thread, start=_FORK_START + 2 * len(spawned_thread))
+        path = (
+            backend.config_dir
+            / 'sessions/2026/09/15'
+            / f'rollout-2026-09-15T17-51-29-{_SPAWN_CHILD}.jsonl'
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(''.join(json.dumps(record) + '\n' for record in fork))
+        children = []
+        expected = parent_cost
+    # the first turn opens the fork, read from its history start, or runs beside it
     first = _named_step(backend, 'SPAWNING')
     command = _command(
         backend=backend,
         records=spawning_thread,
         wire=_SPAWN_WIRE,
         thread=_SPAWN_SESSION,
-        children=[_forked(spawned_thread)],
+        children=children,
     )
     result, _ = _drive(backend, command, step_id=first, model=_SPAWN_MODEL)
-    assert result.cost == pytest.approx(parent_cost + child_cost)
+    assert result.cost == pytest.approx(expected)
     # the next turn drives the fork: the rows it appends ride the driving turn
     second = _named_step(backend, 'DRIVING')
     turn = str(uuid.uuid4())
@@ -1239,6 +1319,41 @@ def test_a_driven_fork_is_read_from_its_captured_length(
     result, _ = _drive(backend, command, step_id=second, model=_SPAWN_MODEL)
     assert result.cost == pytest.approx(parent_cost + child_cost)
     assert 'unpriced' not in caplog.text
+
+
+def test_an_unopenable_child_rollout_leaves_the_step_unpriced(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A mapped child rollout the window cannot open records NULL and names the log.
+
+    The window maps the spawned rollouts before it opens each one, so a
+    child whose path has become unreadable by then refuses like any other
+    child; the stand-in cannot replace the file between the two reads, so
+    the mapping is stood in for.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
+    directory = (
+        backend.config_dir
+        / 'sessions/2026/09/15'
+        / f'rollout-2026-09-15T17-51-29-{_SPAWN_CHILD}.jsonl'
+    )
+    directory.mkdir(parents=True)
+    mapped = {directory: (_SPAWN_CHILD, 0, 0)}
+    monkeypatch.setattr(codex, '_spawned_rollouts', lambda *args, **kwargs: mapped)
+    step = _named_step(backend, 'UNPRICED')
+    command = _command(backend, spawning_thread, _SPAWN_WIRE, thread=_SPAWN_SESSION)
+    result, events = _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
+    assert result.cost is None
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
+    assert not [event for event in events if event.kind == 'error']
+    warnings = [
+        record.message for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].startswith('codex usage unpriced: Child rollout ')
+    assert f'-{_SPAWN_CHILD}.jsonl' in warnings[0]
 
 
 def test_nonzero_exit_closes_unpriced_and_silent(
@@ -2022,7 +2137,9 @@ def _command(
 
     Each of ``children`` is a rollout the run opens or grows beside its own:
     a spawned thread's, or a sibling root's -- its records, or a dict of them
-    under ``records`` with the writer's per-child flags.
+    under ``records`` with the writer's per-child flags and, when the records
+    name no thread of their own, the thread whose file they land in under
+    ``name``.
     """
     path = (
         backend.config_dir
@@ -2030,14 +2147,16 @@ def _command(
         / f'rollout-2026-09-15T17-51-25-{thread}.jsonl'
     )
     data = {'path': str(path), 'records': records, 'wire': wire, **options}
-    # a child rollout lands beside the run's, named by its own id -- its opening
-    # metadata on the spawn, its counter rows on a later turn -- and one the
-    # home already holds grows
+    # a child rollout lands beside the run's, named by the thread its entry
+    # gives, else by its own id -- its opening metadata on the spawn, its
+    # counter rows on a later turn -- and one the home already holds grows
     data['children'] = []
     for child in children or []:
         entry = dict(child) if isinstance(child, dict) else {'records': child}
         rows = entry['records']
-        if isinstance(rows[0], dict) and rows[0]['type'] == 'session_meta':
+        if 'name' in entry:
+            name = entry.pop('name')
+        elif isinstance(rows[0], dict) and rows[0]['type'] == 'session_meta':
             name = rows[0]['payload']['id']
         else:
             counter = rows[_find(rows, 'token_usage_record')]
