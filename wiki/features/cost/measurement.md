@@ -76,47 +76,56 @@ is read from the history start its metadata names
 is not the child's. A fork whose metadata lacks the ordinal, or carries one that
 is not an integer or is negative, is read from its first line, so a copied
 interrupted turn or another model's turn context refuses it, a refusal and never
-a figure; an oversized ordinal leaves a segment not ending on a completed turn,
-which refuses too. Each child log is summed at its own served model, and a child
-the window cannot bind refuses the step: its rows must name the child and the
-root and ride one of the parent window's turn ids, its segment must end on a
+a figure. An ordinal past the end of the log leaves nothing to read, and the
+segment refuses as not ending on a completed turn; an ordinal inside the child's
+own records drops part of them, and the segment refuses on its counter or its
+turn events; an ordinal the reader cannot take at all refuses through the child
+wrap with the log named. Each child log is summed at its own served model, and a
+child the window cannot bind refuses the step: its rows must name the child and
+the root and ride one of the parent window's turn ids, its segment must end on a
 completed turn and record no interrupted one (codex pre-empts a child's turn
-normally, so starts need not balance completions), it must carry counted rows,
-and their sum must equal the child counter's growth; a child on an unpriced
-model refuses too. A driven child's log that is not the one captured -- shorter
-than its captured length, or grown across an unterminated line -- refuses as
-`Child rollout <file>: <reason>`, and two rollouts naming one spawned thread
-refuse as `Several rollouts name spawned thread <id>: <file>`: one thread writes
-one rollout. Three facts of exec mode are assumed, and each failure refuses
-rather than misprices: a child turn never spans two `codex exec` processes, so a
-driven child's new rows ride the driving turn; a resume appends nothing to a
-child it does not drive, so a lone record grown onto one refuses; and a child
-whose queued input never ran leaves an open turn, which refuses although nothing
-was spent. Any other new or grown log the window cannot explain -- one not
-opening with session metadata, a sub-agent naming a session the home does not
-hold as a root, a sub-agent of another kind (codex's `review`, `compact`,
-`memory_consolidation`) on the step's thread, a plain-source log naming the
-step's thread as its session, or a copy of the step's own log behind a spawn
-first line -- refuses the step as
-`Rollout window saw a rollout it cannot explain: <file>`, while a sibling root's
-log (another `exec`, a chat with the node), or any sub-agent log naming that
-root as its session, new or grown, is skipped: its rows name the root, never the
-step's thread. A root is recognized by a plain string `source` alone: the log
-named by the session must open with session metadata naming that session as its
-own id and a string `source`, so a root with an object `source` (`custom`,
-`internal`), one with no `source` at all, or one the window cannot find or read
-is not recognized, and a log naming it refuses the step. A new log codex has
-opened but not yet written (an empty file) is skipped as no record at all, while
-a captured log found empty, or one opening with a blank line, refuses like any
-other the window cannot explain. A child log untouched by a later turn adds
-nothing to that step. The step row's `model` is the parent's served model, while
-its `cost` includes the child spend priced per child; the loop's model-drop
-check judges the parent's model alone. The window reads the dated
-`sessions/*/*/*/rollout-*.jsonl` tree alone: a child log codex archives or
-writes at another depth is invisible to it, one whose session metadata carries a
-plain string `source` (`exec`, `cli`) and names a root other than the step's
-thread as its session is taken for a sibling root, and such a step prices its
-own rows alone.
+normally, so starts need not balance completions), it must carry counted rows on
+exactly one served model, and their sum must equal the child counter's growth; a
+child on an unpriced model refuses too. A driven child's log that is not the one
+captured -- shorter than its captured length, or grown across an unterminated
+line -- refuses, as does a mapped child log the window cannot open; every
+refusal on a mapped child is logged as `Child rollout <file>: <reason>`. Two
+rollouts new or grown since capture naming one spawned thread refuse the step as
+`Several rollouts name spawned thread <id>: <file>`: one thread writes one
+rollout. Three facts of exec mode are assumed, and each failure refuses rather
+than misprices: a child turn never spans two `codex exec` processes, so a driven
+child's new rows ride the driving turn; a resume appends nothing to a child it
+does not drive, so a lone record grown onto one refuses; and a child whose
+queued input never ran leaves an open turn, which refuses although nothing was
+spent. Any other new or grown log the window cannot explain -- one not opening
+with session metadata, or one naming a session the home does not hold as a
+recognized root -- refuses the step as
+`Rollout window saw a rollout it cannot explain: <file>`. Two rules hold at the
+spawn check: a log naming the step's thread as its session refuses unless its
+`source` carries a spawn object and its metadata names a string thread id other
+than the step's own (so a sub-agent of another kind -- codex's `review`,
+`compact`, `memory_consolidation` -- a plain-source log, or a copy of the step's
+own log behind a spawn first line refuses), and a spawned thread named by two
+such logs refuses. A sibling root's log (another `exec`, a chat with the node),
+or any log naming that root as its session, whatever its own source, new or
+grown, is skipped: its rows name the root, never the step's thread. A root is
+recognized through the session a log names: the home must hold one rollout for
+that session, opening with session metadata that names the session as its own id
+and carries a plain string `source`. A session with no rollout or two, a rollout
+whose metadata names another id or none, a `source` that is an object (`custom`,
+`internal`) or absent, or a rollout the window cannot read is no recognized
+root, and a log naming it -- whatever the log's own source -- refuses the step
+as unexplained. A new log codex has opened but not yet written (an empty file)
+is skipped as no record at all, while a captured log found empty, or one opening
+with a blank line, refuses like any other the window cannot explain. A child log
+untouched by a later turn adds nothing to that step. The step row's `model` is
+the parent's served model, while its `cost` includes the child spend priced per
+child; the loop's model-drop check judges the parent's model alone. The window
+reads the dated `sessions/*/*/*/rollout-*.jsonl` tree alone: a child log codex
+archives or writes at another depth is invisible to it, one whose session
+metadata carries a plain string `source` (`exec`, `cli`) and names a root other
+than the step's thread as its session is taken for a sibling root, and such a
+step prices its own rows alone.
 
 ## Rollups and the per-run subtree
 

@@ -909,6 +909,8 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         ('foreign_root', 'cannot explain'),
         ('child_of_child', 'cannot explain'),
         ('sourceless_root', 'cannot explain'),
+        ('custom_root', 'cannot explain'),
+        ('root_without_session', 'cannot explain'),
         ('pattern_root', 'cannot explain'),
         ('unreadable_root', 'cannot explain'),
         ('foreign_kind', 'cannot explain'),
@@ -952,6 +954,8 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         'foreign-root',
         'child-of-child',
         'sourceless-root',
+        'custom-root',
+        'root-without-session',
         'pattern-root',
         'unreadable-root',
         'foreign-kind',
@@ -1011,15 +1015,31 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         child[0]['payload']['session_id'] = sibling[0]['payload']['id']
         children = [child, sibling]
     # the child names a session the home holds as no root: a rollout opening
-    # without a plain source, one its name only matches as a glob pattern, or
-    # one whose path cannot be read
-    elif fault == 'sourceless_root':
+    # without a plain source or with an object one, one whose own metadata
+    # names no session, one its name only matches as a glob pattern, or one
+    # whose path cannot be read
+    elif fault in ('sourceless_root', 'custom_root'):
         root = str(uuid.uuid4())
         sibling = _as_thread(spawning_thread, root)
-        del sibling[0]['payload']['source']
+        if fault == 'sourceless_root':
+            del sibling[0]['payload']['source']
+        else:
+            sibling[0]['payload']['source'] = {'custom': 'probe'}
         wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
         command = _command(backend, sibling, wire, thread=root)
         _drive(backend, command, model=_SPAWN_MODEL)
+        child[0]['payload']['session_id'] = root
+    elif fault == 'root_without_session':
+        root = str(uuid.uuid4())
+        sibling = _as_thread(spawning_thread, root)
+        del sibling[0]['payload']['id']
+        path = (
+            backend.config_dir
+            / 'sessions/2026/09/15'
+            / f'rollout-2026-09-15T17-51-29-{root}.jsonl'
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(''.join(json.dumps(record) + '\n' for record in sibling))
         child[0]['payload']['session_id'] = root
     elif fault == 'pattern_root':
         child[0]['payload']['session_id'] = _SPAWN_SESSION[:-1] + '?'
@@ -1048,7 +1068,7 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
     # a spawning step opens the child (torn: its last line unterminated), and
     # the resume that drives the thread finds the child shrunk below its
     # captured length or emptied, grows it across that unterminated line, or
-    # grows it by one passive record and no turn
+    # grows it by one record of no counted kind and no turn
     elif fault in ('shrunk', 'torn_prefix', 'emptied', 'grown_passive'):
         setup = {'records': spawned_thread, 'torn': fault == 'torn_prefix'}
         command = _command(
@@ -1067,11 +1087,7 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         elif fault == 'emptied':
             child = {'records': [spawned_thread[0]], 'truncate': True, 'empty': True}
         elif fault == 'grown_passive':
-            settings = {
-                'type': 'event_msg',
-                'payload': {'type': 'thread_settings_applied'},
-            }
-            child = {'records': [settings], 'name': _SPAWN_CHILD}
+            child = {'records': [spawned_thread[2]], 'name': _SPAWN_CHILD}
         else:
             child = _on_turn(_second_turn(spawned_thread), str(uuid.uuid4()), root=turn)
     elif fault == 'unexplained':
@@ -1196,14 +1212,17 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
     # `tests/test_impl/rollouts/`
     elif case == 'forked':
         children = [_forked(spawned_thread)]
-    # codex pre-empts a child's turn normally: a second start, on a turn of its
-    # own, before the turn completes is no fault
+    # codex pre-empts a child's turn normally: a first start pre-empted by a
+    # second, on a turn of its own, which then completes is no fault
     elif case == 'preempted':
         child = copy.deepcopy(spawned_thread)
-        started = child[_find(child, 'event_msg', subtype='task_started')]
-        restarted = copy.deepcopy(started)
-        restarted['payload']['turn_id'] = str(uuid.uuid4())
-        child.insert(_find(child, 'turn_context'), restarted)
+        started = copy.deepcopy(
+            child[_find(child, 'event_msg', subtype='task_started')]
+        )
+        context = copy.deepcopy(child[_find(child, 'turn_context')])
+        root = context['payload']['root_turn_id']
+        child[1:] = _on_turn(child[1:], str(uuid.uuid4()), root=root)
+        child[1:1] = [started, context]
         children = [child]
     # another root's rollout, opened or grown beside the run, is not its spend
     elif case == 'sibling-new':
