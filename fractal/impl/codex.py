@@ -622,7 +622,7 @@ class UsageWindow:
         self: UsageWindow,
         session: str,
     ) -> tuple[dict[str, int], str, dict[pathlib.Path, tuple[dict[str, int], str]]]:
-        """Return the usage and served model of the invocation and of each spawned thread.
+        """Return the invocation's usage and served model, and each spawned thread's.
 
         The invocation's own pair leads; the mapping behind it holds one
         pair per sub-agent rollout the invocation opened or grew, keyed by
@@ -677,22 +677,24 @@ class UsageWindow:
                 if digest.hexdigest() != self.prefix_sha256:
                     raise ValueError('Resumed rollout prefix changed.')
             usage, model, turns = _window(
-                _counted(handle), session=session, baseline=self.baseline
+                _counted(handle),
+                session=session,
+                baseline=self.baseline,
             )
-        # sum each spawned thread's segment past its captured length: the
-        # counter there is its baseline (zeros for a rollout the turn opened),
-        # and its rows must ride this turn; a fork's copied history is not its
-        # segment
+        # sum each spawned thread's segment past its captured length: the counter
+        # there is its baseline (zeros for a rollout the turn opened), its rows
+        # must ride this turn, and a fork's copied history is not its segment
         children: dict[pathlib.Path, tuple[dict[str, int], str]] = {}
         for child, (thread, size, start) in spawned.items():
             try:
                 with child.open('rb') as handle:
                     baseline, _ = _counter_at(handle, size)
-                    # a rollout the turn opened is read past the history a fork
-                    # copied into it; a grown rollout's copy lies in its prefix
-                    lines = (
-                        itertools.islice(handle, start, None) if not size else handle
-                    )
+                    # a grown rollout's copied history lies in its captured prefix
+                    if size:
+                        lines = handle
+                    # a rollout the turn opened is read past a fork's copied history
+                    else:
+                        lines = itertools.islice(handle, start, None)
                     children[child] = _child_window(
                         _counted(lines),
                         thread=thread,
@@ -777,7 +779,7 @@ def _spawned_rollouts(
     known: dict[pathlib.Path, int],
     own: pathlib.Path,
 ) -> dict[pathlib.Path, tuple[str, int, int]]:
-    """Map each rollout ``session`` spawned to its id, captured length and history start.
+    """Map each rollout ``session`` spawned to its id, captured size and history start.
 
     A rollout new or grown since capture is one of three: a thread
     ``session`` spawned, which the mapping holds; a sibling root (``exec``,
@@ -837,15 +839,14 @@ def _spawned_rollouts(
         # a forked thread copies its source's history ahead of its own
         # records, from the ordinal codex stamps on the metadata
         start = payload.get('subagent_history_start_ordinal')
-        spawned[path] = (
-            thread,
-            known.get(path, 0),
-            start if type(start) is int else 0,
-        )
+        # bool is an int subclass, and no ordinal is a bool
+        if type(start) is not int:
+            start = 0
+        spawned[path] = (thread, known.get(path, 0), start)
     return spawned
 
 
-def _is_root(home: pathlib.Path, session: Any) -> bool:
+def _is_root(home: pathlib.Path, session: Any, /) -> bool:
     """Return whether ``session`` names a root thread's rollout under ``home``.
 
     A root's session metadata opens with a plain ``source`` (``exec``,
@@ -860,13 +861,13 @@ def _is_root(home: pathlib.Path, session: Any) -> bool:
         payload = _read_payload(record)
     except ValueError:
         return False
-    return (record.get('type') == 'session_meta') and not isinstance(
-        payload.get('source'), dict
-    )
+    if record.get('type') != 'session_meta':
+        return False
+    return not isinstance(payload.get('source'), dict)
 
 
 def _counter_at(handle: typing.BinaryIO, size: int) -> tuple[dict[str, int], str]:
-    """Return the thread counter a rollout's first ``size`` bytes end on, and their sha256.
+    """Return the thread counter a rollout's first ``size`` bytes end on and its sha256.
 
     The prefix must end on a line: a rollout shorter than ``size``, or one
     whose line crosses that byte, is not the captured file.
@@ -928,7 +929,7 @@ def _validate_usage(value: Any, /) -> dict[str, int]:
     return result
 
 
-def _response(
+def _read_response(
     payload: dict[str, Any],
     *,
     owners: tuple[str, str],
@@ -992,7 +993,7 @@ def _window(
                 turns.add(turn)
         # add each response's usage once, refusing another thread's record
         else:
-            response, usage, thread = _response(payload, owners=(session, session))
+            response, usage, thread = _read_response(payload, owners=(session, session))
             responses[response] = usage
     # bind the records to one completed turn on one served model
     if (started, completed) != (1, 1):
@@ -1049,9 +1050,9 @@ def _child_window(
             models.add(model)
         # add each response's usage once, refusing another thread's or turn's
         else:
-            response, usage, counter = _response(payload, owners=(thread, session))
+            response, usage, counter = _read_response(payload, owners=(thread, session))
             root = payload.get('root_turn_id')
-            if not isinstance(root, str) or root not in turns:
+            if not isinstance(root, str) or (root not in turns):
                 raise ValueError(f'Usage record rides another turn: {root!r}')
             responses[response] = usage
     # bind the segment to a completed turn with counted responses

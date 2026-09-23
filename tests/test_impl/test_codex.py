@@ -72,6 +72,7 @@ __all__ = [
     'test_sub_agent_spawn_prices_the_parent_and_child_rollouts',
     'test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced',
     'test_spawned_threads_price_at_their_own_model_beside_sibling_roots',
+    'test_a_driven_fork_is_read_from_its_captured_length',
     'test_nonzero_exit_closes_unpriced_and_silent',
     'test_stream_recovers_error_frames_inside_a_completed_turn',
     'test_recovered_error_frames_without_rollout_evidence_stay_unpriced',
@@ -1051,6 +1052,7 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         context = copy.deepcopy(child[_find(child, 'turn_context')])
         context['payload']['model'] = 'other-model'
         child.insert(_find(child, 'turn_context') + 1, context)
+    children = children or [child]
     # the spawning run's own turn is complete, and the faulted child leaves the
     # step unpriced
     step = _named_step(backend, 'UNPRICED')
@@ -1059,7 +1061,7 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         records=records,
         wire=_SPAWN_WIRE,
         thread=_SPAWN_SESSION,
-        children=children or [child],
+        children=children,
         resume=resume,
     )
     result, events = _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
@@ -1097,9 +1099,8 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
     case: str,
 ) -> None:
     """Every descendant sums at its own served model; a sibling root's rollout never joins."""
-    monkeypatch.setattr(
-        pricing, '_load', lambda: {_SPAWN_MODEL: _RATES, 'o3': _PRICING['o3']}
-    )
+    table = {_SPAWN_MODEL: _RATES, 'o3': _PRICING['o3']}
+    monkeypatch.setattr(pricing, '_load', lambda: table)
     parent_cost = _price(_SPAWN_USAGE[-1]['thread_token_usage'])
     child_cost = _price(_CHILD_USAGE)
     children = [spawned_thread]
@@ -1119,8 +1120,8 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
     # a child of the child names the root as its session, and sums like one
     elif case == 'nested':
         grandchild = _as_thread(
-            spawned_thread,
-            str(uuid.uuid4()),
+            records=spawned_thread,
+            thread=str(uuid.uuid4()),
             root=_SPAWN_SESSION,
             parent=_SPAWN_CHILD,
             depth=2,
@@ -1152,9 +1153,8 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
         root = str(uuid.uuid4())
         sibling = _as_thread(spawning_thread, root)
         wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
-        _drive(
-            backend, _command(backend, sibling, wire, thread=root), model=_SPAWN_MODEL
-        )
+        command = _command(backend, sibling, wire, thread=root)
+        _drive(backend, command, model=_SPAWN_MODEL)
         children = [spawned_thread, _second_turn(sibling)]
     # a file codex opened beside the run but has not written is no record
     elif case == 'sibling-empty':
@@ -1165,9 +1165,8 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
         root = str(uuid.uuid4())
         sibling = _as_thread(spawning_thread, root)
         wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
-        _drive(
-            backend, _command(backend, sibling, wire, thread=root), model=_SPAWN_MODEL
-        )
+        command = _command(backend, sibling, wire, thread=root)
+        _drive(backend, command, model=_SPAWN_MODEL)
         cousin = _as_thread(spawned_thread, str(uuid.uuid4()), root=root, parent=root)
         children = [spawned_thread, cousin]
     # a sibling root's sub-agent of another kind is that root's spend too
@@ -1175,9 +1174,8 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
         root = str(uuid.uuid4())
         sibling = _as_thread(spawning_thread, root)
         wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
-        _drive(
-            backend, _command(backend, sibling, wire, thread=root), model=_SPAWN_MODEL
-        )
+        command = _command(backend, sibling, wire, thread=root)
+        _drive(backend, command, model=_SPAWN_MODEL)
         review = _as_thread(spawned_thread, str(uuid.uuid4()), root=root)
         review[0]['payload']['source'] = {'subagent': 'review'}
         children = [spawned_thread, review]
@@ -1914,7 +1912,10 @@ def _second_turn(
 
 
 def _on_turn(
-    records: list[dict], turn: str, *, root: Optional[str] = None
+    records: list[dict],
+    turn: str,
+    *,
+    root: Optional[str] = None,
 ) -> list[dict]:
     """Copy ``records`` onto turn ``turn``, its usage rows riding root turn ``root``.
 
@@ -1979,9 +1980,10 @@ def _forked(records: list[dict], *, start: Optional[int] = None) -> list[dict]:
         {'type': 'event_msg', 'payload': {'type': 'turn_aborted'}},
     ]
     history[0]['payload']['model'] = 'o3'
+    ordinal = _FORK_START if start is None else start
     copied[0]['payload'].update(
         forked_from_id=_SPAWN_SESSION,
-        subagent_history_start_ordinal=_FORK_START if start is None else start,
+        subagent_history_start_ordinal=ordinal,
     )
     settings = {'type': 'event_msg', 'payload': {'type': 'thread_settings_applied'}}
     return copied[:1] + history + [settings] + copied[1:]
