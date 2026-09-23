@@ -6,8 +6,9 @@ sandbox_mode = "danger-full-access"
 
 [features]
 fast_mode = false
-# sub-agent threads write rollout logs of their own; the step is priced from
-# the parent thread's log alone, so a node runs none
+# a node's step is one turn on one thread; sub-agent threads would let a
+# step spend several threads' worth before the next cap check, so a node runs
+# none
 multi_agent = false
 multi_agent_v2 = false
 

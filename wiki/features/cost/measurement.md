@@ -69,24 +69,40 @@ thread's, and that spend is the step's. The window maps every log new or grown
 since capture that opens as a thread this one spawned (`session_meta` naming the
 step's thread as its session, at any depth) and sums the rows each appended past
 its captured length -- the counter there is the child's baseline, zeros for a
-log the turn opened -- at the child's own served model's rates. Each child log
-is summed at its own served model, and a child the window cannot bind refuses
-the step: its rows must name the child and the root and ride one of the parent
-window's turn ids, its segment must end on a completed turn and record no
-interrupted one (codex pre-empts a child's turn normally, so starts need not
-balance completions), it must carry counted rows, and their sum must equal the
-child counter's growth; a child on an unpriced model refuses too. Any other new
-or grown log the window cannot explain -- one not opening with session metadata,
-or a spawned thread of a root the home does not hold -- refuses the step as
+log the turn opened -- at the child's own served model's rates. A forked child's
+log copies its source's history ahead of its own records; a log the turn opened
+is read from the history start its metadata names
+(`subagent_history_start_ordinal`), so a copied interrupted turn or turn context
+is not the child's. A fork whose metadata lacks the ordinal is read from its
+first line, so a copied interrupted turn or another model's turn context refuses
+it, a refusal and never a figure. Each child log is summed at its own served
+model, and a child the window cannot bind refuses the step: its rows must name
+the child and the root and ride one of the parent window's turn ids, its segment
+must end on a completed turn and record no interrupted one (codex pre-empts a
+child's turn normally, so starts need not balance completions), it must carry
+counted rows, and their sum must equal the child counter's growth; a child on an
+unpriced model refuses too. Three facts of exec mode are assumed, and each
+failure refuses rather than misprices: a child turn never spans two `codex exec`
+processes, so a driven child's new rows ride the driving turn; a resume appends
+nothing to a child it does not drive, so a lone record grown onto one refuses;
+and a child whose queued input never ran leaves an open turn, which refuses
+although nothing was spent. Any other new or grown log the window cannot explain
+-- one not opening with session metadata, a sub-agent of a root the home does
+not hold, or a sub-agent of another kind (codex's `review`, `compact`,
+`memory_consolidation`) on the step's thread -- refuses the step as
 `Rollout window saw a rollout it cannot explain: <file>`, while a sibling root's
-log (another `exec`, a chat with the node), new or grown, is skipped: its rows
-and its children's name it, never the step's thread. A child log untouched by a
-later turn adds nothing to that step. The step row's `model` is the parent's
-served model, while its `cost` includes the child spend priced per child; the
-loop's model-drop check judges the parent's model alone. The window reads the
-dated `sessions/*/*/*/rollout-*.jsonl` tree alone: a child log codex archives or
-writes at another depth is invisible to it, and such a step prices its own rows
-alone.
+log (another `exec`, a chat with the node), or any sub-agent log naming that
+root as its session, new or grown, is skipped: its rows name the root, never the
+step's thread. A log codex has opened but not yet written (an empty file) is
+skipped as no record at all, while one opening with a blank line refuses like
+any other the window cannot explain. A child log untouched by a later turn adds
+nothing to that step. The step row's `model` is the parent's served model, while
+its `cost` includes the child spend priced per child; the loop's model-drop
+check judges the parent's model alone. The window reads the dated
+`sessions/*/*/*/rollout-*.jsonl` tree alone: a child log codex archives or
+writes at another depth is invisible to it, one whose session metadata carries a
+plain `source` (`exec`, `cli`) is taken for a sibling root, and such a step
+prices its own rows alone.
 
 ## Rollups and the per-run subtree
 

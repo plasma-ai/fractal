@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -680,20 +681,26 @@ class UsageWindow:
             )
         # sum each spawned thread's segment past its captured length: the
         # counter there is its baseline (zeros for a rollout the turn opened),
-        # and its rows must ride this turn
+        # and its rows must ride this turn; a fork's copied history is not its
+        # segment
         children: dict[pathlib.Path, tuple[dict[str, int], str]] = {}
-        for child, (thread, size) in spawned.items():
+        for child, (thread, size, start) in spawned.items():
             try:
                 with child.open('rb') as handle:
                     baseline, _ = _counter_at(handle, size)
+                    # a rollout the turn opened is read past the history a fork
+                    # copied into it; a grown rollout's copy lies in its prefix
+                    lines = (
+                        itertools.islice(handle, start, None) if not size else handle
+                    )
                     children[child] = _child_window(
-                        _counted(handle),
+                        _counted(lines),
                         thread=thread,
                         session=session,
                         baseline=baseline,
                         turns=turns,
                     )
-            except ValueError as e:
+            except (OSError, ValueError) as e:
                 raise ValueError(f'Child rollout {child.name}: {e}') from e
         return usage, model, children
 
@@ -769,16 +776,17 @@ def _spawned_rollouts(
     *,
     known: dict[pathlib.Path, int],
     own: pathlib.Path,
-) -> dict[pathlib.Path, tuple[str, int]]:
-    """Map the rollouts of the threads ``session`` spawned to their ids and captured lengths.
+) -> dict[pathlib.Path, tuple[str, int, int]]:
+    """Map each rollout ``session`` spawned to its id, captured length and history start.
 
     A rollout new or grown since capture is one of three: a thread
     ``session`` spawned, which the mapping holds; a sibling root (``exec``,
-    ``cli``, a chat with the node) or a thread another root in the home
-    spawned, whose rows never name ``session``, which is skipped; or one the
+    ``cli``, a chat with the node) or any sub-agent of another root in the
+    home, whose rows never name ``session``, which is skipped; or one the
     window cannot explain, which refuses the step.
     """
-    spawned: dict[pathlib.Path, tuple[str, int]] = {}
+    spawned: dict[pathlib.Path, tuple[str, int, int]] = {}
+    threads: set[str] = set()
     for path in (home / 'sessions').glob('*/*/*/rollout-*.jsonl'):
         if path == own:
             continue
@@ -792,7 +800,7 @@ def _spawned_rollouts(
         # has opened but not yet written is no record at all
         with path.open('rb') as handle:
             first = handle.readline()
-        if not first.strip():
+        if not first:
             continue
         unexplained = f'Rollout window saw a rollout it cannot explain: {path.name}'
         try:
@@ -810,14 +818,50 @@ def _spawned_rollouts(
         spawn = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
         thread = payload.get('id')
         root = payload.get('session_id')
+        # another root's sub-agent, spawned or otherwise, is that root's spend
+        if root != session:
+            if not _is_root(home, root):
+                raise ValueError(unexplained)
+            continue
+        # a sub-agent of another kind (review, memory consolidation) on this
+        # thread is spend the window cannot place
         if not isinstance(spawn, dict) or not isinstance(thread, str):
             raise ValueError(unexplained)
-        if root == session:
-            spawned[path] = (thread, known.get(path, 0))
-        # another root's spawned thread is that root's spend
-        elif not any((home / 'sessions').glob(f'*/*/*/rollout-*-{root}.jsonl')):
-            raise ValueError(unexplained)
+        # one thread writes one rollout: a twin is not the captured file
+        if thread in threads:
+            raise ValueError(
+                f'Several rollouts name spawned thread {thread!r}: {path.name}'
+            )
+        threads.add(thread)
+        # a forked thread copies its source's history ahead of its own
+        # records, from the ordinal codex stamps on the metadata
+        start = payload.get('subagent_history_start_ordinal')
+        spawned[path] = (
+            thread,
+            known.get(path, 0),
+            start if type(start) is int else 0,
+        )
     return spawned
+
+
+def _is_root(home: pathlib.Path, session: Any) -> bool:
+    """Return whether ``session`` names a root thread's rollout under ``home``.
+
+    A root's session metadata opens with a plain ``source`` (``exec``,
+    ``cli``); a spawned thread's carries the spawn object.
+    """
+    if not isinstance(session, str):
+        return False
+    try:
+        path = _find_rollout(home, session)
+        with path.open('rb') as handle:
+            record = _read_record(handle.readline())
+        payload = _read_payload(record)
+    except ValueError:
+        return False
+    return (record.get('type') == 'session_meta') and not isinstance(
+        payload.get('source'), dict
+    )
 
 
 def _counter_at(handle: typing.BinaryIO, size: int) -> tuple[dict[str, int], str]:
@@ -1006,7 +1050,7 @@ def _child_window(
         else:
             response, usage, counter = _response(payload, owners=(thread, session))
             root = payload.get('root_turn_id')
-            if root not in turns:
+            if not isinstance(root, str) or root not in turns:
                 raise ValueError(f'Usage record rides another turn: {root!r}')
             responses[response] = usage
     # bind the segment to a completed turn with counted responses

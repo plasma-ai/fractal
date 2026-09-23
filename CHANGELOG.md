@@ -10,9 +10,9 @@ may include breaking changes, each listed under a Breaking heading.
 ### Changed
 
 - The packaged codex node seed turns both sub-agent features (`multi_agent` and
-  `multi_agent_v2`) off in its `config.toml`: a sub-agent thread writes a
-  rollout log of its own that the pricing window does not sum, so a node runs
-  none.
+  `multi_agent_v2`) off in its `config.toml`: a node's step is one turn on one
+  thread, and sub-agent threads would let a step spend several threads' worth
+  before the next cap check.
 - `codex` steps whose turn spawns or drives sub-agent threads are priced in
   full: each child's session log is summed past its captured length at the
   child's own served model's rates and added to the step's cost, while the step
@@ -21,10 +21,12 @@ may include breaking changes, each listed under a Breaking heading.
   ending on a completed turn, an interrupted turn, a counter the sum disputes,
   an unpriced child model — records `NULL` cost and logs the reason naming the
   log; a new or grown log the window cannot explain (one not opening with
-  session metadata, or a spawned thread of a root the node's codex home does not
-  hold) refuses the step with
+  session metadata, a sub-agent of a root the node's codex home does not hold,
+  or a sub-agent of another kind — review, memory consolidation — on the step's
+  thread) refuses the step with
   `codex usage unpriced: Rollout window saw a rollout it cannot explain: <file>`.
-  Another root's log beside the step's, new or grown, is ignored.
+  Another root's log beside the step's, or any sub-agent log naming that root,
+  new or grown, is ignored.
 - The `plasma-wiki` runtime requirement is `>=1.5,<2`: the seeded wiki skill
   relies on `wiki update` pruning stale index rows without a flag and the
   `_index.md` merge driver fractal installs unions both sides' link rows, both
