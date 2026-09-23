@@ -213,7 +213,9 @@ _SPAWN_USAGE = [
     if record['type'] == 'token_usage_record'
 ]
 _SPAWN_CHILD = spawned_thread[0]['payload']['id']
-_FORK_START = 7  # session_meta plus the six copied history lines
+# the line a fork's own records begin on: its session metadata plus the six
+# copied history lines
+_FORK_START = 7
 _CHILD_USAGE = next(
     record['payload']['usage']
     for record in spawned_thread
@@ -1014,10 +1016,8 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         sibling = _as_thread(spawned_thread, str(uuid.uuid4()), root=_SPAWN_SESSION)
         child[0]['payload']['session_id'] = sibling[0]['payload']['id']
         children = [child, sibling]
-    # the child names a session the home holds as no root: a rollout opening
-    # without a plain source or with an object one, one whose own metadata
-    # names no session, one its name only matches as a glob pattern, or one
-    # whose path cannot be read
+    # the child names a root the home holds without a plain source, or with
+    # an object one
     elif fault in ('sourceless_root', 'custom_root'):
         root = str(uuid.uuid4())
         sibling = _as_thread(spawning_thread, root)
@@ -1029,6 +1029,7 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         command = _command(backend, sibling, wire, thread=root)
         _drive(backend, command, model=_SPAWN_MODEL)
         child[0]['payload']['session_id'] = root
+    # the child names a root whose own metadata names no session
     elif fault == 'root_without_session':
         root = str(uuid.uuid4())
         sibling = _as_thread(spawning_thread, root)
@@ -1041,8 +1042,10 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         path.parent.mkdir(parents=True)
         path.write_text(''.join(json.dumps(record) + '\n' for record in sibling))
         child[0]['payload']['session_id'] = root
+    # the child names a session a root's name only matches as a glob pattern
     elif fault == 'pattern_root':
         child[0]['payload']['session_id'] = _SPAWN_SESSION[:-1] + '?'
+    # the child names a root whose path cannot be read
     elif fault == 'unreadable_root':
         root = str(uuid.uuid4())
         directory = (
@@ -1087,7 +1090,8 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         elif fault == 'emptied':
             child = {'records': [spawned_thread[0]], 'truncate': True, 'empty': True}
         elif fault == 'grown_passive':
-            child = {'records': [spawned_thread[2]], 'name': _SPAWN_CHILD}
+            message = spawned_thread[_find(spawned_thread, 'response_item')]
+            child = {'records': [message], 'name': _SPAWN_CHILD}
         else:
             child = _on_turn(_second_turn(spawned_thread), str(uuid.uuid4()), root=turn)
     elif fault == 'unexplained':
@@ -1205,11 +1209,9 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
         sibling = _as_thread(spawned_thread, str(uuid.uuid4()), root=_SPAWN_SESSION)
         children = [spawned_thread, sibling]
         expected += child_cost
-    # a forked child copies its source's history -- another model's turn
-    # context and an interrupted turn -- ahead of its own records, which begin
-    # at the history start its metadata names; the fork shape is synthesized
-    # from the captured spawn until a captured fork joins
-    # `tests/test_impl/rollouts/`
+    # a forked child prices from the history start its metadata names; the
+    # fork shape is synthesized from the captured spawn, as the rollouts
+    # package holds no captured fork
     elif case == 'forked':
         children = [_forked(spawned_thread)]
     # codex pre-empts a child's turn normally: a first start pre-empted by a
@@ -1347,22 +1349,37 @@ def test_an_unopenable_child_rollout_leaves_the_step_unpriced(
 ) -> None:
     """A mapped child rollout the window cannot open records NULL and names the log.
 
-    The window maps the spawned rollouts before it opens each one, so a
-    child whose path has become unreadable by then refuses like any other
-    child; the stand-in cannot replace the file between the two reads, so
-    the mapping is stood in for.
+    The window maps the spawned rollouts before it opens each one; a child
+    whose path becomes unreadable between the two refuses like any other.
     """
     monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
-    directory = (
-        backend.config_dir
-        / 'sessions/2026/09/15'
-        / f'rollout-2026-09-15T17-51-29-{_SPAWN_CHILD}.jsonl'
-    )
-    directory.mkdir(parents=True)
-    mapped = {directory: (_SPAWN_CHILD, 0, 0)}
-    monkeypatch.setattr(codex, '_spawned_rollouts', lambda *args, **kwargs: mapped)
+    real = codex._spawned_rollouts
+
+    def unopenable(
+        home: pathlib.Path,
+        session: str,
+        *,
+        known: dict[pathlib.Path, int],
+        own: pathlib.Path,
+    ) -> dict[pathlib.Path, tuple[str, int, int]]:
+        """Map the spawned rollouts, then turn each child's file into a directory."""
+        spawned = real(home, session, known=known, own=own)
+        for child in spawned:
+            child.unlink()
+            child.mkdir()
+        return spawned
+
+    # the shim pins the window between mapping the spawned rollouts and
+    # opening each one: the child's file becomes a directory there
+    monkeypatch.setattr(codex, '_spawned_rollouts', unopenable)
     step = _named_step(backend, 'UNPRICED')
-    command = _command(backend, spawning_thread, _SPAWN_WIRE, thread=_SPAWN_SESSION)
+    command = _command(
+        backend=backend,
+        records=spawning_thread,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        children=[spawned_thread],
+    )
     result, events = _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
     assert result.cost is None
     assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None

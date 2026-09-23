@@ -17,7 +17,7 @@ import tomllib
 import typing
 import weakref
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any, Optional
+from typing import Any, BinaryIO, Optional
 
 import fractal.core.pricing
 from fractal.core.agent import Agent, Invocation, StreamEvent, StreamParser
@@ -57,6 +57,9 @@ _KINDS = ('event_msg', 'turn_context', 'token_usage_record')
 _MARKERS = tuple(f'"{kind}"'.encode() for kind in _KINDS)
 # the read size for hashing a resumed rollout's bound prefix
 _CHUNK = 1 << 20
+# refusal for a new or grown rollout the spawn scan can bind to no thread --
+# its unplaceable-rollout sites all raise it, so the wording stays identical
+_UNEXPLAINED = 'Rollout window saw a rollout it cannot explain: {name!r}'
 
 # the rollout window captured before each spawn, keyed by its live process --
 # an entry dies with the Popen, so a stream abandoned before finish_stream
@@ -285,7 +288,7 @@ class CodexAgent(Agent):
                 priced = _compute_cost(spent, served)
                 if priced is None:
                     raise ValueError(
-                        f'Child rollout {child.name}:'
+                        f'Child rollout {child.name!r}:'
                         f' model {served!r} has no pricing entry.'
                     )
                 cost += priced
@@ -703,7 +706,7 @@ class UsageWindow:
                         turns=turns,
                     )
             except (OSError, ValueError) as e:
-                raise ValueError(f'Child rollout {child.name}: {e}') from e
+                raise ValueError(f'Child rollout {child.name!r}: {e}') from e
         return usage, model, children
 
 
@@ -803,16 +806,13 @@ def _spawned_rollouts(
         # captured file found empty is not the file captured
         with path.open('rb') as handle:
             first = handle.readline()
-        if not first and size is None:
+        if not first and (size is None):
             continue
-        unexplained = f'Rollout window saw a rollout it cannot explain: {path.name}'
+        unexplained = _UNEXPLAINED.format(name=path.name)
         try:
-            record = _read_record(first)
-            payload = _read_payload(record)
+            payload = _read_meta(first)
         except ValueError as e:
             raise ValueError(unexplained) from e
-        if record.get('type') != 'session_meta':
-            raise ValueError(unexplained)
         source = payload.get('source')
         subagent = source.get('subagent') if isinstance(source, dict) else None
         spawn = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
@@ -830,14 +830,13 @@ def _spawned_rollouts(
         # the window cannot place
         if not isinstance(spawn, dict) or not isinstance(thread, str):
             raise ValueError(unexplained)
-        # a copy of this thread's own rollout behind a spawn first line is no
-        # spawned thread
+        # a copy of this thread's rollout behind a spawn first line is no spawned thread
         if thread == session:
             raise ValueError(unexplained)
         # one thread writes one rollout: a twin is not the captured file
         if thread in threads:
             raise ValueError(
-                f'Several rollouts name spawned thread {thread!r}: {path.name}'
+                f'Several rollouts name spawned thread {thread!r}: {path.name!r}'
             )
         threads.add(thread)
         # a forked thread copies its source's history ahead of its own
@@ -862,11 +861,8 @@ def _is_root(home: pathlib.Path, session: Any, /) -> bool:
     try:
         path = _find_rollout(home, session)
         with path.open('rb') as handle:
-            record = _read_record(handle.readline())
-        payload = _read_payload(record)
+            payload = _read_meta(handle.readline())
     except (OSError, ValueError):
-        return False
-    if record.get('type') != 'session_meta':
         return False
     # the rollout is found by its name: its own metadata must name the session
     if payload.get('id') != session:
@@ -874,7 +870,7 @@ def _is_root(home: pathlib.Path, session: Any, /) -> bool:
     return isinstance(payload.get('source'), str)
 
 
-def _counter_at(handle: typing.BinaryIO, size: int) -> tuple[dict[str, int], str]:
+def _counter_at(handle: BinaryIO, size: int) -> tuple[dict[str, int], str]:
     """Return the thread counter a rollout's first ``size`` bytes end on and its sha256.
 
     The prefix must end on a line: a rollout shorter than ``size``, or one
@@ -921,6 +917,14 @@ def _read_payload(record: dict[str, Any], /) -> dict[str, Any]:
     return payload
 
 
+def _read_meta(line: bytes, /) -> dict[str, Any]:
+    """Return the payload of a rollout's opening ``session_meta`` line."""
+    record = _read_record(line)
+    if record.get('type') != 'session_meta':
+        raise ValueError('Rollout does not open with session metadata.')
+    return _read_payload(record)
+
+
 def _validate_usage(value: Any, /) -> dict[str, int]:
     """Read a rollout usage counter into a dict keyed by bucket."""
     if not isinstance(value, dict):
@@ -939,6 +943,7 @@ def _validate_usage(value: Any, /) -> dict[str, int]:
 
 def _read_response(
     payload: dict[str, Any],
+    /,
     *,
     owners: tuple[str, str],
 ) -> tuple[str, dict[str, int], dict[str, int]]:
