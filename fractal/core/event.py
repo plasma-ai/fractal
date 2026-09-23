@@ -143,7 +143,7 @@ class FailureEvent(TerminalEvent):
 def _hints(cls: type) -> tuple[str, ...]:
     """Return a class's annotated payload field names, resolved once.
 
-    ``typing.get_type_hints`` eval()s stringified annotations on every
+    ``typing.get_type_hints`` evaluates stringified annotations on every
     call, and events are emitted per stream frame, so the resolution is
     memoized per class.
     """

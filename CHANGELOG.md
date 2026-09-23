@@ -7,8 +7,23 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Added
+
+- `SECURITY.md` states the supported-versions and private-reporting policy and
+  documents the unattended-permissions operating model that plugin scanners flag
+  in the seeded agent configs.
+- A `scan` workflow runs the HOL Plugin Scanner, pinned to a commit, on every
+  push and pull request against its 80-point, no-high-findings gate, and
+  `.github/dependabot.yml` keeps the workflows' action pins current.
+- The codex plugin manifest carries the plugin directory's publishable metadata:
+  homepage, repository, license, and keywords, plus an `interface` block with
+  the long description, developer name, capabilities, website, privacy, and
+  terms links, and the docs logo, favicon, and TUI screenshot as its assets.
+
 ### Changed
 
+- Every GitHub Actions step is pinned to a full commit SHA, with the release tag
+  alongside, instead of a floating major tag.
 - The packaged codex node seed turns both sub-agent features (`multi_agent` and
   `multi_agent_v2`) off in its `config.toml`: a sub-agent thread writes a
   rollout log of its own that the pricing window does not sum, so a node runs

@@ -4,6 +4,7 @@
 [![build](https://github.com/plasma-ai/fractal/actions/workflows/build.yaml/badge.svg)](https://github.com/plasma-ai/fractal/actions/workflows/build.yaml)
 [![docs](https://github.com/plasma-ai/fractal/actions/workflows/docs.yaml/badge.svg)](https://github.com/plasma-ai/fractal/actions/workflows/docs.yaml)
 [![lint](https://github.com/plasma-ai/fractal/actions/workflows/lint.yaml/badge.svg)](https://github.com/plasma-ai/fractal/actions/workflows/lint.yaml)
+[![scan](https://github.com/plasma-ai/fractal/actions/workflows/scan.yaml/badge.svg)](https://github.com/plasma-ai/fractal/actions/workflows/scan.yaml)
 [![tests](https://github.com/plasma-ai/fractal/actions/workflows/tests.yaml/badge.svg)](https://github.com/plasma-ai/fractal/actions/workflows/tests.yaml)
 [![codecov](https://codecov.io/gh/plasma-ai/fractal/branch/main/graph/badge.svg?token=FB0T12O2ZP)](https://codecov.io/gh/plasma-ai/fractal)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://github.com/pre-commit/pre-commit)

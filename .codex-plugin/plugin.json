@@ -7,10 +7,39 @@
     "email": "eng@plasma.ai",
     "url": "https://plasma.ai"
   },
+  "homepage": "https://docs.plasma.ai/fractal",
+  "repository": "https://github.com/plasma-ai/fractal",
+  "license": "Apache-2.0",
+  "keywords": [
+    "fractal",
+    "agents",
+    "agent-loops",
+    "autonomous",
+    "hierarchical",
+    "worktree",
+    "orchestration"
+  ],
   "skills": "./fractal/skills/",
   "interface": {
     "displayName": "Fractal",
     "shortDescription": "Hierarchical agent loops with recursive self-organization.",
-    "category": "Development"
+    "longDescription": "In a fractal, autonomous agent loops arrange themselves into a tree: a node iterates toward a goal in its own git worktree and spawns child nodes for separable subtasks, so the tree grows to fit the problem rather than a fixed plan. Hard caps (iterations, depth, children, cost, time) keep each loop bounded, and an operator can steer or stop it at any point. Run metadata (including cost) lands in one local SQLite database, which can be interacted with live in a terminal UI.",
+    "developerName": "Plasma AI",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://plasma.ai",
+    "privacyPolicyURL": "https://plasma.ai/privacy",
+    "termsOfServiceURL": "https://plasma.ai/terms",
+    "defaultPrompt": [
+      "Configure and launch a fractal node for this repository, then operate the tree as it works toward the goal I describe"
+    ],
+    "composerIcon": "./docs/_static/favicon.png",
+    "logo": "./docs/_static/logo-light.png",
+    "logoDark": "./docs/_static/logo-dark.png",
+    "screenshots": ["./docs/_static/tui.png"]
   }
 }
