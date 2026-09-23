@@ -227,8 +227,10 @@ class CodexAgent(Agent):
     ) -> subprocess.Popen:
         """Capture the rollout window, then spawn codex.
 
-        A host override of ``_spawn`` must delegate here, or the step
-        records no cost.
+        The window bounds the thread's rollout and every sub-agent rollout
+        the step opens or grows, so the step's figure includes its
+        children's spend. A host override of ``_spawn`` must delegate here,
+        or the step records no cost.
         """
         window = UsageWindow.capture(invocation)
         process = super()._spawn(invocation, **kwargs)
@@ -261,7 +263,7 @@ class CodexAgent(Agent):
                 raise ValueError('stdout reported an error.')
             # stdout must describe one complete turn on a named thread
             parser.turn_usage()
-            usage, model = window.reconcile(typing.cast(str, parser.session))
+            usage, model, children = window.reconcile(typing.cast(str, parser.session))
             # price at the served model's rates -- a mismatch with the pin is
             # the loop's model-drop check to judge, never a reason to refuse;
             # re-stamp the session so the step row records the served model
@@ -275,6 +277,17 @@ class CodexAgent(Agent):
             cost = _compute_cost(usage, model)
             if cost is None:
                 raise ValueError(f'Model {model!r} has no pricing entry.')
+            # add each spawned thread's spend at its own served model's rates;
+            # the step row's model stays the thread's, so the model-drop check
+            # judges the pin alone
+            for child, (spent, served) in children.items():
+                priced = _compute_cost(spent, served)
+                if priced is None:
+                    raise ValueError(
+                        f'Child rollout {child.name}:'
+                        f' model {served!r} has no pricing entry.'
+                    )
+                cost += priced
             parser.cost = cost
         except (OSError, ValueError) as e:
             self.log(f'codex usage unpriced: {e}', logging.WARNING)
@@ -535,7 +548,12 @@ class UsageWindow:
     (``CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl``) while the process
     runs, bound to that process by this window: ``capture`` runs before the
     process starts and ``reconcile`` after it exits, so the records between
-    the two are the invocation's own.
+    the two are the invocation's own. A sub-agent thread the invocation
+    spawns or drives writes its own rollout beside the thread's, and the
+    rows it appends within the window are the step's spend too, summed at
+    the child's own served model. The window reads the dated
+    ``sessions/*/*/*/rollout-*.jsonl`` tree alone: a rollout codex archives
+    or writes at another depth is invisible to it.
     """
 
     # the codex home whose sessions/ tree holds the rollout
@@ -544,7 +562,8 @@ class UsageWindow:
     session: Optional[str]
     # the rollouts present before the spawn and their byte lengths -- a fresh
     # thread's own file joins them, a sub-agent thread the invocation spawns
-    # opens a new one, and one it drives again grows past its captured length
+    # opens a new one, and one it drives again grows past its captured length,
+    # which bounds the child rows the step owns
     existing: dict[pathlib.Path, int]
     # the thread's cumulative counter before the spawn (zeros for a fresh
     # thread) -- the window's summed usage must equal its growth
@@ -582,21 +601,9 @@ class UsageWindow:
             # one pass over its bytes, never its parsed history
             path = _find_rollout(home, invocation.session)
             stat = path.stat()
-            digest = hashlib.sha256()
-            size = 0
             # read the thread counter the rollout ends on
-            baseline = zeros
             with path.open('rb') as handle:
-                for line in handle:
-                    digest.update(line)
-                    size += len(line)
-                    if b'"token_usage_record"' not in line:
-                        continue
-                    record = _read_record(line)
-                    if record.get('type') == 'token_usage_record':
-                        baseline = _validate_usage(
-                            _read_payload(record).get('thread_token_usage')
-                        )
+                baseline, prefix_sha256 = _counter_at(handle, stat.st_size)
             return cls(
                 home=home,
                 session=invocation.session,
@@ -604,19 +611,28 @@ class UsageWindow:
                 baseline=baseline,
                 path=path,
                 identity=(stat.st_dev, stat.st_ino),
-                prefix_sha256=digest.hexdigest(),
-                size=size,
+                prefix_sha256=prefix_sha256,
+                size=stat.st_size,
             )
         except (OSError, ValueError) as e:
             return cls(home, invocation.session, {}, zeros, error=f'{e}')
 
-    def reconcile(self: UsageWindow, session: str) -> tuple[dict[str, int], str]:
-        """Return the usage and served model of the records the invocation appended.
+    def reconcile(
+        self: UsageWindow,
+        session: str,
+    ) -> tuple[dict[str, int], str, dict[pathlib.Path, tuple[dict[str, int], str]]]:
+        """Return the usage and served model of the invocation and of each spawned thread.
+
+        The invocation's own pair leads; the mapping behind it holds one
+        pair per sub-agent rollout the invocation opened or grew, keyed by
+        the rollout.
 
         Raises:
             ValueError: When the rollout for ``session`` cannot be bound to
-                the invocation, the invocation spawned sub-agent threads, or
-                the records do not describe one counted turn.
+                the invocation, the records do not describe one counted
+                turn, or a rollout new or grown since capture is neither a
+                spawned thread's complete counted segment nor a sibling
+                root's.
 
         """
         if self.error is not None:
@@ -627,12 +643,9 @@ class UsageWindow:
             )
         path = _find_rollout(self.home, session)
         # a rollout new or grown since capture that opens as a thread this one
-        # spawned holds sub-agent spend the window never sums -- refuse the
-        # partial sum
-        if _has_spawned_thread(self.home, session, known=self.existing, own=path):
-            raise ValueError(
-                'Rollout spawned sub-agent threads (their usage is unpriced).'
-            )
+        # spawned holds sub-agent spend the step owns; one the window cannot
+        # place refuses the step
+        spawned = _spawned_rollouts(self.home, session, known=self.existing, own=path)
         # stream the rollout once: the bound prefix is hashed as it is read and
         # the window decodes only the lines a counted kind can ride
         with path.open('rb') as handle:
@@ -662,7 +675,27 @@ class UsageWindow:
                     remaining -= len(chunk)
                 if digest.hexdigest() != self.prefix_sha256:
                     raise ValueError('Resumed rollout prefix changed.')
-            return _window(_counted(handle), session=session, baseline=self.baseline)
+            usage, model, turns = _window(
+                _counted(handle), session=session, baseline=self.baseline
+            )
+        # sum each spawned thread's segment past its captured length: the
+        # counter there is its baseline (zeros for a rollout the turn opened),
+        # and its rows must ride this turn
+        children: dict[pathlib.Path, tuple[dict[str, int], str]] = {}
+        for child, (thread, size) in spawned.items():
+            try:
+                with child.open('rb') as handle:
+                    baseline, _ = _counter_at(handle, size)
+                    children[child] = _child_window(
+                        _counted(handle),
+                        thread=thread,
+                        session=session,
+                        baseline=baseline,
+                        turns=turns,
+                    )
+            except ValueError as e:
+                raise ValueError(f'Child rollout {child.name}: {e}') from e
+        return usage, model, children
 
 
 # ------ helper functions
@@ -730,14 +763,22 @@ def _find_rollout(home: pathlib.Path, session: str) -> pathlib.Path:
     return path
 
 
-def _has_spawned_thread(
+def _spawned_rollouts(
     home: pathlib.Path,
     session: str,
     *,
     known: dict[pathlib.Path, int],
     own: pathlib.Path,
-) -> bool:
-    """Return whether a new or grown rollout opens as a thread ``session`` spawned."""
+) -> dict[pathlib.Path, tuple[str, int]]:
+    """Map the rollouts of the threads ``session`` spawned to their ids and captured lengths.
+
+    A rollout new or grown since capture is one of three: a thread
+    ``session`` spawned, which the mapping holds; a sibling root (``exec``,
+    ``cli``, a chat with the node) or a thread another root in the home
+    spawned, whose rows never name ``session``, which is skipped; or one the
+    window cannot explain, which refuses the step.
+    """
+    spawned: dict[pathlib.Path, tuple[str, int]] = {}
     for path in (home / 'sessions').glob('*/*/*/rollout-*.jsonl'):
         if path == own:
             continue
@@ -753,15 +794,53 @@ def _has_spawned_thread(
             first = handle.readline()
         if not first.strip():
             continue
-        record = _read_record(first)
+        unexplained = f'Rollout window saw a rollout it cannot explain: {path.name}'
+        try:
+            record = _read_record(first)
+            payload = _read_payload(record)
+        except ValueError as e:
+            raise ValueError(unexplained) from e
         if record.get('type') != 'session_meta':
+            raise ValueError(unexplained)
+        source = payload.get('source')
+        # a root's rows and its descendants' name the root, never this thread
+        if not isinstance(source, dict):
             continue
-        source = _read_payload(record).get('source')
-        subagent = source.get('subagent') if isinstance(source, dict) else None
+        subagent = source.get('subagent')
         spawn = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
-        if isinstance(spawn, dict) and (spawn.get('parent_thread_id') == session):
-            return True
-    return False
+        thread = payload.get('id')
+        root = payload.get('session_id')
+        if not isinstance(spawn, dict) or not isinstance(thread, str):
+            raise ValueError(unexplained)
+        if root == session:
+            spawned[path] = (thread, known.get(path, 0))
+        # another root's spawned thread is that root's spend
+        elif not any((home / 'sessions').glob(f'*/*/*/rollout-*-{root}.jsonl')):
+            raise ValueError(unexplained)
+    return spawned
+
+
+def _counter_at(handle: typing.BinaryIO, size: int) -> tuple[dict[str, int], str]:
+    """Return the thread counter a rollout's first ``size`` bytes end on, and their sha256.
+
+    The prefix must end on a line: a rollout shorter than ``size``, or one
+    whose line crosses that byte, is not the captured file.
+    """
+    digest = hashlib.sha256()
+    counter: dict[str, int] = dict.fromkeys(_BUCKETS, 0)
+    while handle.tell() < size:
+        line = handle.readline()
+        if not line:
+            raise ValueError('Rollout is shorter than its captured length.')
+        digest.update(line)
+        if b'"token_usage_record"' not in line:
+            continue
+        record = _read_record(line)
+        if record.get('type') == 'token_usage_record':
+            counter = _validate_usage(_read_payload(record).get('thread_token_usage'))
+    if handle.tell() != size:
+        raise ValueError('Rollout prefix does not end on a line.')
+    return counter, digest.hexdigest()
 
 
 def _counted(lines: Iterable[bytes], /) -> Iterator[dict[str, Any]]:
@@ -804,15 +883,42 @@ def _validate_usage(value: Any, /) -> dict[str, int]:
     return result
 
 
+def _response(
+    payload: dict[str, Any],
+    *,
+    owners: tuple[str, str],
+) -> tuple[str, dict[str, int], dict[str, int]]:
+    """Read a usage record's response id, usage and thread counter.
+
+    ``owners`` is the ``(thread_id, session_id)`` pair the record must name:
+    a thread's own rows name it twice, a spawned thread's name the child and
+    the root.
+    """
+    named = (payload.get('thread_id'), payload.get('session_id'))
+    if named != owners:
+        raise ValueError(f'Usage record belongs to another thread: {named!r}')
+    response = payload.get('response_id')
+    if not isinstance(response, str) or not response:
+        raise ValueError('Usage record names no response.')
+    usage = _validate_usage(payload.get('usage'))
+    counter = _validate_usage(payload.get('thread_token_usage'))
+    return response, usage, counter
+
+
 def _window(
     records: Iterable[dict[str, Any]],
     *,
     session: str,
     baseline: dict[str, int],
-) -> tuple[dict[str, int], str]:
-    """Sum the window's per-response usage and bind it to one complete turn."""
+) -> tuple[dict[str, int], str, set[str]]:
+    """Sum the window's per-response usage and bind it to one complete turn.
+
+    Returns the sum, the served model and the turn ids the window's
+    ``turn_context`` records name, which a spawned thread's rows ride.
+    """
     started = 0
     completed = 0
+    turns: set[str] = set()
     models: set[str] = set()
     responses: dict[str, dict[str, int]] = {}
     thread = baseline
@@ -830,22 +936,19 @@ def _window(
                 completed += 1
             elif event in ('turn_aborted', 'error'):
                 raise ValueError('Rollout records an interrupted turn.')
-        # note the served model
+        # note the served model and the turn
         elif kind == 'turn_context':
             model = payload.get('model')
             if not isinstance(model, str) or not model:
                 raise ValueError('Turn context names no served model.')
             models.add(model)
+            turn = payload.get('turn_id')
+            if isinstance(turn, str):
+                turns.add(turn)
         # add each response's usage once, refusing another thread's record
         else:
-            owners = (payload.get('thread_id'), payload.get('session_id'))
-            if owners != (session, session):
-                raise ValueError(f'Usage record belongs to another thread: {owners!r}')
-            response = payload.get('response_id')
-            if not isinstance(response, str) or not response:
-                raise ValueError('Usage record names no response.')
-            responses[response] = _validate_usage(payload.get('usage'))
-            thread = _validate_usage(payload.get('thread_token_usage'))
+            response, usage, thread = _response(payload, owners=(session, session))
+            responses[response] = usage
     # bind the records to one completed turn on one served model
     if (started, completed) != (1, 1):
         raise ValueError(
@@ -858,6 +961,70 @@ def _window(
             'Rollout carries no per-response usage records'
             ' (codex 0.153 or newer required).'
         )
+    total, model = _bind(responses, models, counter=thread, baseline=baseline)
+    return total, model, turns
+
+
+def _child_window(
+    records: Iterable[dict[str, Any]],
+    *,
+    thread: str,
+    session: str,
+    baseline: dict[str, int],
+    turns: set[str],
+) -> tuple[dict[str, int], str]:
+    """Sum a spawned thread's appended usage and bind it to the parent's turns.
+
+    Codex pre-empts a child's turn normally, so the segment need not balance
+    starts against completions: it must end on a completed turn, record no
+    interrupted one, and its rows must ride one of the parent window's
+    ``turns``.
+    """
+    last: Optional[str] = None
+    models: set[str] = set()
+    responses: dict[str, dict[str, int]] = {}
+    counter = baseline
+    for record in records:
+        kind = record.get('type')
+        if kind not in _KINDS:
+            continue
+        payload = _read_payload(record)
+        # note the last turn event, refusing an interrupted turn
+        if kind == 'event_msg':
+            event = payload.get('type')
+            if event in ('task_started', 'task_complete'):
+                last = event
+            elif event in ('turn_aborted', 'error'):
+                raise ValueError('Rollout records an interrupted turn.')
+        # note the served model
+        elif kind == 'turn_context':
+            model = payload.get('model')
+            if not isinstance(model, str) or not model:
+                raise ValueError('Turn context names no served model.')
+            models.add(model)
+        # add each response's usage once, refusing another thread's or turn's
+        else:
+            response, usage, counter = _response(payload, owners=(thread, session))
+            root = payload.get('root_turn_id')
+            if root not in turns:
+                raise ValueError(f'Usage record rides another turn: {root!r}')
+            responses[response] = usage
+    # bind the segment to a completed turn with counted responses
+    if last != 'task_complete':
+        raise ValueError('Rollout segment does not end on a completed turn.')
+    if not responses:
+        raise ValueError('Rollout segment carries no per-response usage records.')
+    return _bind(responses, models, counter=counter, baseline=baseline)
+
+
+def _bind(
+    responses: dict[str, dict[str, int]],
+    models: set[str],
+    *,
+    counter: dict[str, int],
+    baseline: dict[str, int],
+) -> tuple[dict[str, int], str]:
+    """Bind the summed responses to one served model and the counter's growth."""
     if len(models) != 1:
         raise ValueError(
             f'Rollout does not name exactly one served model: {sorted(models)!r}'
@@ -865,7 +1032,7 @@ def _window(
     (model,) = models
     # prove the sum complete: it must equal the thread counter's growth
     total = {key: sum(usage[key] for usage in responses.values()) for key in _BUCKETS}
-    growth = {key: thread[key] - baseline[key] for key in _BUCKETS}
+    growth = {key: counter[key] - baseline[key] for key in _BUCKETS}
     if total != growth:
         raise ValueError(
             f'Summed usage {total!r} disagrees with the thread counter growth'
