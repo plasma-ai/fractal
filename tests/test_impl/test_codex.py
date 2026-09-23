@@ -69,7 +69,11 @@ __all__ = [
     'test_stream_prices_each_invocation_from_its_own_rollout_records',
     'test_filtered_rollout_kinds_are_never_decoded',
     'test_unbound_or_incomplete_evidence_leaves_the_step_unpriced',
-    'test_sub_agent_spawn_leaves_the_step_unpriced_until_the_next_turn',
+    'test_sub_agent_spawn_prices_the_parent_and_child_rollouts',
+    'test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced',
+    'test_spawned_threads_price_at_their_own_model_beside_sibling_roots',
+    'test_a_driven_fork_is_read_from_its_captured_length',
+    'test_an_unopenable_child_rollout_leaves_the_step_unpriced',
     'test_nonzero_exit_closes_unpriced_and_silent',
     'test_stream_recovers_error_frames_inside_a_completed_turn',
     'test_recovered_error_frames_without_rollout_evidence_stay_unpriced',
@@ -199,7 +203,8 @@ _CUMULATIVE_COST = (
 )
 
 # the captured session that spawned a sub-agent thread: its thread, its served
-# model, and the --json stdout of its one run
+# model, the --json stdout of its one run, and the child's thread and the usage
+# of the one row the child's rollout carries
 _SPAWN_SESSION = '01a0ad03-a64b-7d23-884c-dd31547ddbea'
 _SPAWN_MODEL = 'gpt-5.6-luna'
 _SPAWN_USAGE = [
@@ -207,6 +212,15 @@ _SPAWN_USAGE = [
     for record in spawning_thread
     if record['type'] == 'token_usage_record'
 ]
+_SPAWN_CHILD = spawned_thread[0]['payload']['id']
+# the line a fork's own records begin on: its session metadata plus the six
+# copied history lines
+_FORK_START = 7
+_CHILD_USAGE = next(
+    record['payload']['usage']
+    for record in spawned_thread
+    if record['type'] == 'token_usage_record'
+)
 _SPAWN_WIRE = [
     {'type': 'thread.started', 'thread_id': _SPAWN_SESSION},
     {'type': 'turn.started'},
@@ -215,8 +229,10 @@ _SPAWN_WIRE = [
 ]
 
 # the offline stand-in for codex: appends the given rollout records under the
-# node's codex home (or damages the file first), opens or grows a spawned
-# thread's rollout beside it, prints the given stdout lines and exits as told
+# node's codex home (or damages the file first), opens or grows the child
+# rollouts beside it (a row given as text lands as that line; a child may be
+# emptied first, left empty, left without its final newline, or twinned under
+# another date and timestamp), prints the given stdout lines and exits as told
 _WRITER = """\
 import json, pathlib, sys
 data = json.loads(sys.argv[1])
@@ -242,11 +258,21 @@ if not data.get('missing'):
         twin = path.parents[3] / '2026/09/16' / path.name
         twin.parent.mkdir(parents=True, exist_ok=True)
         twin.write_text(raw)
-    if data.get('spawned'):
-        child = pathlib.Path(data['spawned']['path'])
-        rows = [json.dumps(record) for record in data['spawned']['records']]
-        with child.open('a') as file:
-            file.write(''.join(row + '\\n' for row in rows))
+    for child in data.get('children', []):
+        rows = [row if isinstance(row, str) else json.dumps(row) for row in child['records']]
+        child_path = pathlib.Path(child['path'])
+        if child.get('truncate') and child_path.exists():
+            child_path.write_bytes(b'')
+        text = '' if child.get('empty') else ''.join(row + '\\n' for row in rows)
+        if child.get('torn'):
+            text = text[:-1]
+        with child_path.open('a') as file:
+            file.write(text)
+        if child.get('twin'):
+            name = child_path.name.replace('17-51-29', '17-52-00')
+            twin = child_path.parents[3] / '2026/09/16' / name
+            twin.parent.mkdir(parents=True, exist_ok=True)
+            twin.write_text(text)
 for frame in data['wire']:
     print(frame if isinstance(frame, str) else json.dumps(frame), flush=True)
 sys.exit(data.get('exit_code', 0))
@@ -709,7 +735,8 @@ def test_filtered_rollout_kinds_are_never_decoded(backend: CodexAgent) -> None:
         ('changed_prefix', 'Resumed rollout prefix changed'),
         # the window does not describe one complete, fully counted turn
         ('two_turns', 'exactly one completed turn'),
-        ('aborted', 'interrupted turn'),
+        ('turn_aborted', 'interrupted turn'),
+        ('error', 'interrupted turn'),
         ('foreign_session', 'belongs to another thread'),
         ('thread_counter', 'disagrees with the thread counter'),
         ('no_records', 'codex 0.153 or newer required'),
@@ -728,7 +755,8 @@ def test_filtered_rollout_kinds_are_never_decoded(backend: CodexAgent) -> None:
         'truncated',
         'changed-prefix',
         'two-turns',
-        'aborted',
+        'turn-aborted',
+        'error',
         'foreign-session',
         'thread-counter',
         'no-records',
@@ -770,8 +798,8 @@ def test_unbound_or_incomplete_evidence_leaves_the_step_unpriced(
         records.append(
             copy.deepcopy(records[_find(records, 'event_msg', subtype='task_started')])
         )
-    elif fault == 'aborted':
-        records.append({'type': 'event_msg', 'payload': {'type': 'turn_aborted'}})
+    elif fault in ('turn_aborted', 'error'):
+        records.append({'type': 'event_msg', 'payload': {'type': fault}})
     elif fault == 'foreign_session':
         usage = records[_find(records, 'token_usage_record')]['payload']
         usage['session_id'] = 'elsewhere'
@@ -807,74 +835,561 @@ def test_unbound_or_incomplete_evidence_leaves_the_step_unpriced(
     assert diagnostic in warnings[0]
 
 
-def test_sub_agent_spawn_leaves_the_step_unpriced_until_the_next_turn(
+def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
     backend: CodexAgent,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Spawning or driving a sub-agent thread records NULL; an untouched child prices.
+    """A spawn prices parent plus child; an untouched child adds nothing; a driven one adds its rows.
 
-    The spawning turn records NULL. The thread's next turn resumes beside
-    the child's rollout, which predates it untouched, and prices its own
-    turn alone; a turn that drives the child again grows that rollout past
-    its captured length, and records NULL like the spawn did.
+    The spawning turn sums the child rollout it opens beside its own. The
+    thread's next turn resumes beside that rollout, which predates it
+    untouched, and prices its own turn alone; a turn that drives the child
+    again grows its rollout past the captured length, and the rows riding
+    the driving turn join that step.
     """
     monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
-    # the run's own rollout is complete, but the child's opens beside it
+    parent_cost = _price(_SPAWN_USAGE[-1]['thread_token_usage'])
+    child_cost = _price(_CHILD_USAGE)
+    # the run's own rollout is complete, and the child's opens beside it
     first = _named_step(backend, 'SPAWNING')
     command = _command(
         backend=backend,
         records=spawning_thread,
         wire=_SPAWN_WIRE,
         thread=_SPAWN_SESSION,
-        spawned=spawned_thread,
+        children=[spawned_thread],
     )
     result, events = _drive(backend, command, step_id=first, model=_SPAWN_MODEL)
-    assert result.cost is None
-    assert backend.node.db.read('steps', where={'step_id': first})[0]['cost'] is None
+    assert result.cost == pytest.approx(parent_cost + child_cost)
+    assert result.model == _SPAWN_MODEL
     assert not [event for event in events if event.kind == 'error']
-    warnings = [
-        record.message for record in caplog.records if record.levelno == logging.WARNING
-    ]
-    assert warnings == [
-        'codex usage unpriced:'
-        ' Rollout spawned sub-agent threads (their usage is unpriced).'
-    ]
     # the thread's next run resumes beside the child's rollout, which predates
-    # it, and prices its own turn alone
-    caplog.clear()
+    # it untouched, and prices its own turn alone
     second = _named_step(backend, 'RESUMED')
     turn = _second_turn(spawning_thread)
     command = _command(backend, turn, _SPAWN_WIRE, thread=_SPAWN_SESSION, resume=True)
     result, _ = _drive(backend, command, step_id=second, model=_SPAWN_MODEL)
-    # the replayed turn's own usage is the whole captured thread's
-    assert result.cost == pytest.approx(_price(_SPAWN_USAGE[-1]['thread_token_usage']))
-    assert result.model == _SPAWN_MODEL
-    assert 'unpriced' not in caplog.text
-    # a later turn drives the child again: its rollout grows past the captured
-    # length, and the parent's own complete turn is refused as partial
-    caplog.clear()
+    assert result.cost == pytest.approx(parent_cost)
+    # a later turn drives the child again: the rows the child appends ride the
+    # driving turn's id, and the step sums them past the captured length
     third = _named_step(backend, 'DRIVING')
-    driving = _second_turn(spawning_thread, after=turn)
-    grown = _second_turn(spawned_thread)
+    driving_turn = str(uuid.uuid4())
+    driving = _on_turn(_second_turn(spawning_thread, after=turn), driving_turn)
+    grown = _on_turn(_second_turn(spawned_thread), str(uuid.uuid4()), root=driving_turn)
     command = _command(
         backend=backend,
         records=driving,
         wire=_SPAWN_WIRE,
         thread=_SPAWN_SESSION,
-        spawned=grown,
+        children=[grown],
         resume=True,
     )
     result, _ = _drive(backend, command, step_id=third, model=_SPAWN_MODEL)
+    assert result.cost == pytest.approx(parent_cost + child_cost)
+    rows = [
+        backend.node.db.read('steps', where={'step_id': step})[0]
+        for step in (first, second, third)
+    ]
+    assert [row['cost'] for row in rows] == pytest.approx(
+        [parent_cost + child_cost, parent_cost, parent_cost + child_cost]
+    )
+    assert [row['model'] for row in rows] == [_SPAWN_MODEL] * 3
+    assert 'unpriced' not in caplog.text
+
+
+@pytest.mark.parametrize(
+    argnames=('fault', 'diagnostic'),
+    argvalues=[
+        # the child's rows do not belong to this step's thread and turn
+        ('foreign_session', 'belongs to another thread'),
+        ('foreign_thread', 'belongs to another thread'),
+        ('foreign_turn', 'rides another turn'),
+        ('list_turn', 'rides another turn'),
+        # the rollout is not a thread this step spawned, or not the one file
+        # the thread writes
+        ('foreign_root', 'cannot explain'),
+        ('child_of_child', 'cannot explain'),
+        ('sourceless_root', 'cannot explain'),
+        ('custom_root', 'cannot explain'),
+        ('root_without_session', 'cannot explain'),
+        ('pattern_root', 'cannot explain'),
+        ('unreadable_root', 'cannot explain'),
+        ('foreign_kind', 'cannot explain'),
+        ('plain_source_own_thread', 'cannot explain'),
+        ('own_thread_spawn', 'cannot explain'),
+        ('unexplained', 'cannot explain'),
+        ('torn_meta', 'cannot explain'),
+        ('blank_first_line', 'cannot explain'),
+        ('twin_child', 'Several rollouts name spawned thread'),
+        # a driven child's file is not the one captured, or grew by no turn
+        ('shrunk', 'shorter than its captured length'),
+        ('torn_prefix', 'does not end on a line'),
+        ('emptied', 'cannot explain'),
+        ('grown_passive', 'does not end on a completed turn'),
+        # the child's segment is not one complete, fully counted stretch
+        ('open_turn', 'does not end on a completed turn'),
+        ('turn_aborted', 'interrupted turn'),
+        ('error', 'interrupted turn'),
+        ('no_events', 'does not end on a completed turn'),
+        ('no_rows', 'no per-response usage records'),
+        ('thread_counter', 'disagrees with the thread counter'),
+        # a record of a counted kind does not decode
+        ('malformed_record', 'Expecting value'),
+        # the child's served model has no rates
+        ('no_rates', 'has no pricing entry'),
+        # the fork's history start is read exactly: one line short lands on
+        # the copied interrupted turn, one past the child's own turn context
+        # loses its served model, and a negative one reads from the first line
+        ('fork_start_short', 'interrupted turn'),
+        ('fork_start_long', 'exactly one served model'),
+        ('negative_ordinal', 'interrupted turn'),
+        # the child's segment names one served model
+        ('no_context', 'exactly one served model'),
+        ('two_models', 'exactly one served model'),
+    ],
+    ids=[
+        'foreign-session',
+        'foreign-thread',
+        'foreign-turn',
+        'list-turn',
+        'foreign-root',
+        'child-of-child',
+        'sourceless-root',
+        'custom-root',
+        'root-without-session',
+        'pattern-root',
+        'unreadable-root',
+        'foreign-kind',
+        'plain-source-own-thread',
+        'own-thread-spawn',
+        'unexplained',
+        'torn-meta',
+        'blank-first-line',
+        'twin-child',
+        'shrunk',
+        'torn-prefix',
+        'emptied',
+        'grown-passive',
+        'open-turn',
+        'turn-aborted',
+        'error',
+        'no-events',
+        'no-rows',
+        'thread-counter',
+        'malformed-record',
+        'no-rates',
+        'fork-start-short',
+        'fork-start-long',
+        'negative-ordinal',
+        'no-context',
+        'two-models',
+    ],
+)
+def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fault: str,
+    diagnostic: str,
+) -> None:
+    """A child rollout the window cannot bind records NULL and names the log."""
+    monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
+    child: Any = copy.deepcopy(spawned_thread)
+    usage = child[_find(child, 'token_usage_record')]['payload']
+    records: list[Any] = spawning_thread
+    children: Optional[list[Any]] = None
+    resume = False
+    # each fault damages the child's evidence in one place
+    if fault == 'foreign_session':
+        usage['session_id'] = 'elsewhere'
+    elif fault == 'foreign_thread':
+        usage['thread_id'] = _SPAWN_SESSION
+    elif fault == 'foreign_turn':
+        usage['root_turn_id'] = 'elsewhere'
+    elif fault == 'list_turn':
+        usage['root_turn_id'] = []
+    elif fault == 'foreign_root':
+        child[0]['payload']['session_id'] = 'elsewhere'
+    # the child names another spawned thread, not a root, as its session
+    elif fault == 'child_of_child':
+        sibling = _as_thread(spawned_thread, str(uuid.uuid4()), root=_SPAWN_SESSION)
+        child[0]['payload']['session_id'] = sibling[0]['payload']['id']
+        children = [child, sibling]
+    # the child names a root the home holds without a plain source, or with
+    # an object one
+    elif fault in ('sourceless_root', 'custom_root'):
+        root = str(uuid.uuid4())
+        sibling = _as_thread(spawning_thread, root)
+        if fault == 'sourceless_root':
+            del sibling[0]['payload']['source']
+        else:
+            sibling[0]['payload']['source'] = {'custom': 'probe'}
+        wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
+        command = _command(backend, sibling, wire, thread=root)
+        _drive(backend, command, model=_SPAWN_MODEL)
+        child[0]['payload']['session_id'] = root
+    # the child names a root whose own metadata names no session
+    elif fault == 'root_without_session':
+        root = str(uuid.uuid4())
+        sibling = _as_thread(spawning_thread, root)
+        del sibling[0]['payload']['id']
+        path = (
+            backend.config_dir
+            / 'sessions/2026/09/15'
+            / f'rollout-2026-09-15T17-51-29-{root}.jsonl'
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(''.join(json.dumps(record) + '\n' for record in sibling))
+        child[0]['payload']['session_id'] = root
+    # the child names a session a root's name only matches as a glob pattern
+    elif fault == 'pattern_root':
+        child[0]['payload']['session_id'] = _SPAWN_SESSION[:-1] + '?'
+    # the child names a root whose path cannot be read
+    elif fault == 'unreadable_root':
+        root = str(uuid.uuid4())
+        directory = (
+            backend.config_dir
+            / 'sessions/2026/09/15'
+            / f'rollout-2026-09-15T17-51-29-{root}.jsonl'
+        )
+        directory.mkdir(parents=True)
+        child[0]['payload']['session_id'] = root
+    # a sub-agent of another kind on this thread is not a spawn the window prices
+    elif fault == 'foreign_kind':
+        child[0]['payload']['source'] = {'subagent': 'review'}
+    # a root naming this thread as its session is no sibling root
+    elif fault == 'plain_source_own_thread':
+        child[0]['payload']['source'] = 'exec'
+    # a copy of the step's own log behind a spawn first line is no spawned thread
+    elif fault == 'own_thread_spawn':
+        forged = copy.deepcopy(spawning_thread)
+        forged[0]['payload']['source'] = child[0]['payload']['source']
+        child = {'records': forged, 'name': _SPAWN_CHILD}
+    elif fault == 'twin_child':
+        child = {'records': child, 'twin': True}
+    # a spawning step opens the child (torn: its last line unterminated), and
+    # the resume that drives the thread finds the child shrunk below its
+    # captured length or emptied, grows it across that unterminated line, or
+    # grows it by one record of no counted kind and no turn
+    elif fault in ('shrunk', 'torn_prefix', 'emptied', 'grown_passive'):
+        setup = {'records': spawned_thread, 'torn': fault == 'torn_prefix'}
+        command = _command(
+            backend=backend,
+            records=spawning_thread,
+            wire=_SPAWN_WIRE,
+            thread=_SPAWN_SESSION,
+            children=[setup],
+        )
+        _drive(backend, command, model=_SPAWN_MODEL)
+        turn = str(uuid.uuid4())
+        records = _on_turn(_second_turn(spawning_thread), turn)
+        resume = True
+        if fault == 'shrunk':
+            child = {'records': [spawned_thread[0]], 'truncate': True}
+        elif fault == 'emptied':
+            child = {'records': [spawned_thread[0]], 'truncate': True, 'empty': True}
+        elif fault == 'grown_passive':
+            message = spawned_thread[_find(spawned_thread, 'response_item')]
+            child = {'records': [message], 'name': _SPAWN_CHILD}
+        else:
+            child = _on_turn(_second_turn(spawned_thread), str(uuid.uuid4()), root=turn)
+    elif fault == 'unexplained':
+        child[0]['type'] = 'response_item'
+    elif fault == 'torn_meta':
+        child[0] = '{"type": "session_meta", "payload": '
+    elif fault == 'blank_first_line':
+        child.insert(0, ' ')
+    elif fault == 'open_turn':
+        child.append(
+            copy.deepcopy(child[_find(child, 'event_msg', subtype='task_started')])
+        )
+    elif fault in ('turn_aborted', 'error'):
+        child.append({'type': 'event_msg', 'payload': {'type': fault}})
+    elif fault == 'no_events':
+        child = child[:1]
+    elif fault == 'no_rows':
+        child.pop(_find(child, 'token_usage_record'))
+    elif fault == 'thread_counter':
+        usage['thread_token_usage']['input_tokens'] += 1
+    elif fault == 'malformed_record':
+        child.append('{"type": "token_usage_record", "payload": ')
+    elif fault == 'no_rates':
+        child[_find(child, 'turn_context')]['payload']['model'] = 'other-model'
+    elif fault == 'fork_start_short':
+        child = _forked(spawned_thread, start=_FORK_START - 1)
+    elif fault == 'fork_start_long':
+        own = _FORK_START + 1 + _find(spawned_thread[1:], 'turn_context')
+        child = _forked(spawned_thread, start=own + 1)
+    elif fault == 'negative_ordinal':
+        child = _forked(spawned_thread, start=-1)
+    elif fault == 'no_context':
+        child.pop(_find(child, 'turn_context'))
+    elif fault == 'two_models':
+        context = copy.deepcopy(child[_find(child, 'turn_context')])
+        context['payload']['model'] = 'other-model'
+        child.insert(_find(child, 'turn_context') + 1, context)
+    children = children or [child]
+    # the spawning run's own turn is complete, and the faulted child leaves the
+    # step unpriced
+    step = _named_step(backend, 'UNPRICED')
+    command = _command(
+        backend=backend,
+        records=records,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        children=children,
+        resume=resume,
+    )
+    result, events = _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
     assert result.cost is None
-    assert backend.node.db.read('steps', where={'step_id': third})[0]['cost'] is None
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
+    assert not [event for event in events if event.kind == 'error']
     warnings = [
         record.message for record in caplog.records if record.levelno == logging.WARNING
     ]
-    assert warnings == [
-        'codex usage unpriced:'
-        ' Rollout spawned sub-agent threads (their usage is unpriced).'
+    assert len(warnings) == 1
+    assert warnings[0].startswith('codex usage unpriced: ')
+    assert diagnostic in warnings[0]
+    assert f'-{_SPAWN_CHILD}.jsonl' in warnings[0]
+
+
+@pytest.mark.parametrize(
+    argnames='case',
+    argvalues=[
+        'other-model',
+        'nested',
+        'two-children',
+        'forked',
+        'preempted',
+        'sibling-new',
+        'sibling-grown',
+        'sibling-empty',
+        'sibling-child',
+        'sibling-review',
+    ],
+)
+def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+) -> None:
+    """Every descendant sums at its own served model; a sibling root's rollout never joins."""
+    table = {_SPAWN_MODEL: _RATES, 'o3': _PRICING['o3']}
+    monkeypatch.setattr(pricing, '_load', lambda: table)
+    parent_cost = _price(_SPAWN_USAGE[-1]['thread_token_usage'])
+    child_cost = _price(_CHILD_USAGE)
+    children = [spawned_thread]
+    expected = parent_cost + child_cost
+    # a child on another model prices at that model's rates
+    if case == 'other-model':
+        child = copy.deepcopy(spawned_thread)
+        child[_find(child, 'turn_context')]['payload']['model'] = 'o3'
+        children = [child]
+        rates = _PRICING['o3']
+        uncached = _CHILD_USAGE['input_tokens'] - _CHILD_USAGE['cached_input_tokens']
+        expected = parent_cost + (
+            uncached * rates['input_cost_per_token']
+            + _CHILD_USAGE['cached_input_tokens'] * rates['cache_read_input_token_cost']
+            + _CHILD_USAGE['output_tokens'] * rates['output_cost_per_token']
+        )
+    # a child of the child names the root as its session, and sums like one
+    elif case == 'nested':
+        grandchild = _as_thread(
+            records=spawned_thread,
+            thread=str(uuid.uuid4()),
+            root=_SPAWN_SESSION,
+            parent=_SPAWN_CHILD,
+            depth=2,
+        )
+        children = [spawned_thread, grandchild]
+        expected += child_cost
+    elif case == 'two-children':
+        sibling = _as_thread(spawned_thread, str(uuid.uuid4()), root=_SPAWN_SESSION)
+        children = [spawned_thread, sibling]
+        expected += child_cost
+    # a forked child prices from the history start its metadata names; the
+    # fork shape is synthesized from the captured spawn, as the rollouts
+    # package holds no captured fork
+    elif case == 'forked':
+        children = [_forked(spawned_thread)]
+    # codex pre-empts a child's turn normally: a first start pre-empted by a
+    # second, on a turn of its own, which then completes is no fault
+    elif case == 'preempted':
+        child = copy.deepcopy(spawned_thread)
+        started = copy.deepcopy(
+            child[_find(child, 'event_msg', subtype='task_started')]
+        )
+        context = copy.deepcopy(child[_find(child, 'turn_context')])
+        root = context['payload']['root_turn_id']
+        child[1:] = _on_turn(child[1:], str(uuid.uuid4()), root=root)
+        child[1:1] = [started, context]
+        children = [child]
+    # another root's rollout, opened or grown beside the run, is not its spend
+    elif case == 'sibling-new':
+        children = [spawned_thread, _as_thread(spawning_thread, str(uuid.uuid4()))]
+    elif case == 'sibling-grown':
+        root = str(uuid.uuid4())
+        sibling = _as_thread(spawning_thread, root)
+        wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
+        command = _command(backend, sibling, wire, thread=root)
+        _drive(backend, command, model=_SPAWN_MODEL)
+        children = [spawned_thread, _second_turn(sibling)]
+    # a file codex opened beside the run but has not written is no record
+    elif case == 'sibling-empty':
+        opened = _as_thread(spawning_thread, str(uuid.uuid4()))[0]
+        children = [spawned_thread, {'records': [opened], 'empty': True}]
+    # a thread another root in the home spawned is that root's spend
+    elif case == 'sibling-child':
+        root = str(uuid.uuid4())
+        sibling = _as_thread(spawning_thread, root)
+        wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
+        command = _command(backend, sibling, wire, thread=root)
+        _drive(backend, command, model=_SPAWN_MODEL)
+        cousin = _as_thread(spawned_thread, str(uuid.uuid4()), root=root, parent=root)
+        children = [spawned_thread, cousin]
+    # a sibling root's sub-agent of another kind is that root's spend too
+    elif case == 'sibling-review':
+        root = str(uuid.uuid4())
+        sibling = _as_thread(spawning_thread, root)
+        wire = [{**_SPAWN_WIRE[0], 'thread_id': root}, *_SPAWN_WIRE[1:]]
+        command = _command(backend, sibling, wire, thread=root)
+        _drive(backend, command, model=_SPAWN_MODEL)
+        review = _as_thread(spawned_thread, str(uuid.uuid4()), root=root)
+        review[0]['payload']['source'] = {'subagent': 'review'}
+        children = [spawned_thread, review]
+    step = _named_step(backend, 'SPAWNING')
+    command = _command(
+        backend=backend,
+        records=spawning_thread,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        children=children,
+    )
+    result, events = _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
+    assert result.cost == pytest.approx(expected)
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] == (
+        pytest.approx(expected)
+    )
+    # the step row and the served-model record name the thread's model alone
+    assert result.model == _SPAWN_MODEL
+    assert result.models == (_SPAWN_MODEL,)
+    assert not [event for event in events if event.kind == 'error']
+    assert 'unpriced' not in caplog.text
+
+
+@pytest.mark.parametrize(
+    argnames='case',
+    argvalues=['spawned', 'predating'],
+)
+def test_a_driven_fork_is_read_from_its_captured_length(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+) -> None:
+    """A turn driving a forked child sums the rows it appends past the captured length.
+
+    The copied history and its ordinal lie in the fork's prefix; the driven
+    segment is read from the captured length, never from the ordinal -- for
+    a fork the thread's first turn opened, and for one the home held before
+    that turn, stamped with an ordinal past every line it will hold.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
+    parent_cost = _price(_SPAWN_USAGE[-1]['thread_token_usage'])
+    child_cost = _price(_CHILD_USAGE)
+    children = [_forked(spawned_thread)]
+    expected = parent_cost + child_cost
+    # the fork predates the first turn's capture, and that turn leaves it alone
+    if case == 'predating':
+        fork = _forked(spawned_thread, start=_FORK_START + 2 * len(spawned_thread))
+        path = (
+            backend.config_dir
+            / 'sessions/2026/09/15'
+            / f'rollout-2026-09-15T17-51-29-{_SPAWN_CHILD}.jsonl'
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(''.join(json.dumps(record) + '\n' for record in fork))
+        children = []
+        expected = parent_cost
+    # the first turn opens the fork, read from its history start, or runs beside it
+    first = _named_step(backend, 'SPAWNING')
+    command = _command(
+        backend=backend,
+        records=spawning_thread,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        children=children,
+    )
+    result, _ = _drive(backend, command, step_id=first, model=_SPAWN_MODEL)
+    assert result.cost == pytest.approx(expected)
+    # the next turn drives the fork: the rows it appends ride the driving turn
+    second = _named_step(backend, 'DRIVING')
+    turn = str(uuid.uuid4())
+    driving = _on_turn(_second_turn(spawning_thread), turn)
+    grown = _on_turn(_second_turn(spawned_thread), str(uuid.uuid4()), root=turn)
+    command = _command(
+        backend=backend,
+        records=driving,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        children=[grown],
+        resume=True,
+    )
+    result, _ = _drive(backend, command, step_id=second, model=_SPAWN_MODEL)
+    assert result.cost == pytest.approx(parent_cost + child_cost)
+    assert 'unpriced' not in caplog.text
+
+
+def test_an_unopenable_child_rollout_leaves_the_step_unpriced(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A mapped child rollout the window cannot open records NULL and names the log.
+
+    The window maps the spawned rollouts before it opens each one; a child
+    whose path becomes unreadable between the two refuses like any other.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
+    real = codex._spawned_rollouts
+
+    def unopenable(
+        home: pathlib.Path,
+        session: str,
+        *,
+        known: dict[pathlib.Path, int],
+        own: pathlib.Path,
+    ) -> dict[pathlib.Path, tuple[str, int, int]]:
+        """Map the spawned rollouts, then turn each child's file into a directory."""
+        spawned = real(home, session, known=known, own=own)
+        for child in spawned:
+            child.unlink()
+            child.mkdir()
+        return spawned
+
+    # the shim pins the window between mapping the spawned rollouts and
+    # opening each one: the child's file becomes a directory there
+    monkeypatch.setattr(codex, '_spawned_rollouts', unopenable)
+    step = _named_step(backend, 'UNPRICED')
+    command = _command(
+        backend=backend,
+        records=spawning_thread,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        children=[spawned_thread],
+    )
+    result, events = _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
+    assert result.cost is None
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
+    assert not [event for event in events if event.kind == 'error']
+    warnings = [
+        record.message for record in caplog.records if record.levelno == logging.WARNING
     ]
+    assert len(warnings) == 1
+    assert warnings[0].startswith('codex usage unpriced: Child rollout ')
+    assert f'-{_SPAWN_CHILD}.jsonl' in warnings[0]
 
 
 def test_nonzero_exit_closes_unpriced_and_silent(
@@ -1194,7 +1709,7 @@ def test_seed_config_disables_sub_agents_codex(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The packaged codex seed keeps both sub-agent features off (their spend is unpriced)."""
+    """The packaged codex seed keeps both sub-agent features off."""
     monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'global-home'))
     node_dir = tmp_path / 'node'
     (node_dir / 'skills').mkdir(parents=True)
@@ -1547,6 +2062,84 @@ def _second_turn(
     return turn
 
 
+def _on_turn(
+    records: list[dict],
+    turn: str,
+    *,
+    root: Optional[str] = None,
+) -> list[dict]:
+    """Copy ``records`` onto turn ``turn``, its usage rows riding root turn ``root``.
+
+    The root turn is ``turn`` itself by default -- a root thread's rows ride
+    their own turn, a spawned thread's the root's turn that drove it.
+    """
+    copied = copy.deepcopy(records)
+    for record in copied:
+        payload = record['payload']
+        if 'turn_id' in payload:
+            payload['turn_id'] = turn
+        if 'root_turn_id' in payload:
+            payload['root_turn_id'] = root or turn
+    return copied
+
+
+def _as_thread(
+    records: list[dict],
+    thread: str,
+    *,
+    root: Optional[str] = None,
+    parent: Optional[str] = None,
+    depth: int = 1,
+) -> list[dict]:
+    """Copy a captured rollout onto thread ``thread``.
+
+    Its metadata, rows and events are renamed; ``root`` is the session its
+    rows name (``thread`` itself for a root thread), and ``parent`` the
+    thread that spawned it at ``depth`` (the captured spawn by default).
+    """
+    copied = copy.deepcopy(records)
+    for record in copied:
+        payload = record['payload']
+        if record['type'] == 'session_meta':
+            payload['id'] = thread
+            if parent is not None:
+                payload['parent_thread_id'] = parent
+                spawn = payload['source']['subagent']['thread_spawn']
+                spawn.update(parent_thread_id=parent, depth=depth)
+        if 'thread_id' in payload:
+            payload['thread_id'] = thread
+        if 'session_id' in payload:
+            payload['session_id'] = root or thread
+    return copied
+
+
+def _forked(records: list[dict], *, start: Optional[int] = None) -> list[dict]:
+    """Copy a spawned thread's rollout as a fork of the run's thread.
+
+    Its source's history -- another model's turn context, four messages and
+    an interrupted turn -- is copied ahead of its own records, which begin
+    at the history start its metadata names; ``start`` overrides that
+    ordinal.
+    """
+    copied = copy.deepcopy(records)
+    messages = [
+        record for record in spawning_thread if record['type'] == 'response_item'
+    ]
+    history = [
+        copy.deepcopy(spawning_thread[_find(spawning_thread, 'turn_context')]),
+        *copy.deepcopy(messages[:4]),
+        {'type': 'event_msg', 'payload': {'type': 'turn_aborted'}},
+    ]
+    history[0]['payload']['model'] = 'o3'
+    ordinal = _FORK_START if start is None else start
+    copied[0]['payload'].update(
+        forked_from_id=_SPAWN_SESSION,
+        subagent_history_start_ordinal=ordinal,
+    )
+    settings = {'type': 'event_msg', 'payload': {'type': 'thread_settings_applied'}}
+    return copied[:1] + history + [settings] + copied[1:]
+
+
 def _price(usage: dict[str, int]) -> float:
     """Price one usage counter at the fixture rates."""
     return (
@@ -1559,7 +2152,7 @@ def _price(usage: dict[str, int]) -> float:
 def _find(records: list[dict], kind: str, *, subtype: Optional[str] = None) -> int:
     """Return the index of the first record of ``kind`` (and payload ``subtype``)."""
     for index, record in enumerate(records):
-        if record['type'] != kind:
+        if not isinstance(record, dict) or record['type'] != kind:
             continue
         if (subtype is None) or (record['payload'].get('type') == subtype):
             return index
@@ -1572,29 +2165,46 @@ def _command(
     wire: list[Any],
     *,
     thread: str = _SESSION,
-    spawned: Optional[list[dict]] = None,
+    children: Optional[list[Any]] = None,
     resume: bool = False,
     **options: Any,
 ) -> Invocation:
-    """Build the stand-in invocation appending ``records`` and printing ``wire``."""
+    """Build the stand-in invocation appending ``records`` and printing ``wire``.
+
+    Each of ``children`` is a rollout the run opens or grows beside its own:
+    a spawned thread's, or a sibling root's -- its records, or a dict of them
+    under ``records`` with the writer's per-child flags and, when the records
+    name no thread of their own, the thread whose file they land in under
+    ``name``.
+    """
     path = (
         backend.config_dir
         / 'sessions/2026/09/15'
         / f'rollout-2026-09-15T17-51-25-{thread}.jsonl'
     )
     data = {'path': str(path), 'records': records, 'wire': wire, **options}
-    # a spawned thread's rollout lands beside its parent's, named by its own id
-    # -- its opening metadata on the spawn, its counter rows on a later turn
-    if spawned is not None:
-        if spawned[0]['type'] == 'session_meta':
-            child = spawned[0]['payload']['id']
+    # a child rollout lands beside the run's, named by the thread its entry
+    # gives, else by its own id -- its opening metadata on the spawn, its
+    # counter rows on a later turn -- and one the home already holds grows
+    data['children'] = []
+    for child in children or []:
+        entry = dict(child) if isinstance(child, dict) else {'records': child}
+        rows = entry['records']
+        if 'name' in entry:
+            name = entry.pop('name')
+        elif isinstance(rows[0], dict) and rows[0]['type'] == 'session_meta':
+            name = rows[0]['payload']['id']
         else:
-            counter = spawned[_find(spawned, 'token_usage_record')]
-            child = counter['payload']['thread_id']
-        data['spawned'] = {
-            'path': str(path.with_name(f'rollout-2026-09-15T17-51-29-{child}.jsonl')),
-            'records': spawned,
-        }
+            counter = rows[_find(rows, 'token_usage_record')]
+            name = counter['payload']['thread_id']
+        present = list(
+            backend.config_dir.glob(f'sessions/*/*/*/rollout-*-{name}.jsonl')
+        )
+        if present:
+            (child_path,) = present
+        else:
+            child_path = path.with_name(f'rollout-2026-09-15T17-51-29-{name}.jsonl')
+        data['children'].append({**entry, 'path': str(child_path)})
     session = thread if resume else None
     command = backend.invocation('offline fixture', session=session)
     argv = (sys.executable, '-c', _WRITER, json.dumps(data))

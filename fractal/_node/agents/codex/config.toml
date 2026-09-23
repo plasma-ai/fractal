@@ -6,8 +6,10 @@ sandbox_mode = "danger-full-access"
 
 [features]
 fast_mode = false
-# sub-agent threads write rollout logs of their own; the step is priced from
-# the parent thread's log alone, so a node runs none
+# a node's step is one turn on one thread; these take the top-level spawn and
+# wait tools from the model. codex's code-mode runtime can still start a v1
+# sub-agent, which the rollout window binds and prices into the step or
+# refuses the step
 multi_agent = false
 multi_agent_v2 = false
 

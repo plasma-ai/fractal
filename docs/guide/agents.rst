@@ -184,15 +184,17 @@ Cost is token-priced from the pricing cache: spend is priced at the served
 model the session log names, and a cost cap requires a configured model with
 a pricing entry. Token counts come from the session log under the node's
 ``.codex`` home, read once the process exits, so a resumed thread's step
-records its own tokens; a log that cannot be bound to the step's process, a
-turn that spawned or drove sub-agent threads (their usage is unpriced), or a
-log from ``codex`` older than 0.153, which carries no per-response usage,
-records no cost and logs the reason. ``codex`` sessions (threads) cannot be
-forked — resume them in place instead. When an explicit model is
-configured, ``fractal node start`` runs a bounded probe invocation before
-the run, because some accounts reject models the pricing table can price — a
-rejection relays ``codex``'s own diagnostic. Supports the ``openrouter``
-route.
+records its own tokens, and a sub-agent thread the turn spawns or drives is
+summed from its own log at its own served model, so the step's cost includes
+its children's spend while the step's model stays the parent's; a log that
+cannot be bound to the step's process, a child log the window cannot bind to
+the turn, or a log from ``codex`` older than 0.153, which carries no
+per-response usage, records no cost and logs the reason. ``codex`` sessions
+(threads) cannot be forked — resume them in place instead. When an explicit
+model is configured, ``fractal node start`` runs a bounded probe invocation
+before the run, because some accounts reject models the pricing table can
+price — a rejection relays ``codex``'s own diagnostic. Supports the
+``openrouter`` route.
 
 grok
 ~~~~
