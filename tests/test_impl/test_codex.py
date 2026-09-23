@@ -84,6 +84,7 @@ __all__ = [
     'test_invocation_refuses_fork',
     'test_config_model_reads_the_toml_top_level',
     'test_seed_config_disables_fast_mode_codex',
+    'test_seed_config_disables_sub_agents_codex',
     'test_seed_links_auth_write_through_codex',
     'test_seed_carries_the_parent_instructions_file_codex',
     'test_seed_skips_uncarriable_instructions_codex',
@@ -1187,6 +1188,22 @@ def test_seed_config_disables_fast_mode_codex(
         (node_dir / '.codex' / 'config.toml').read_text(encoding='utf-8')
     )
     assert config['features']['fast_mode'] is False
+
+
+def test_seed_config_disables_sub_agents_codex(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The packaged codex seed keeps both sub-agent features off (their spend is unpriced)."""
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'global-home'))
+    node_dir = tmp_path / 'node'
+    (node_dir / 'skills').mkdir(parents=True)
+    CodexAgent.seed(node_dir)
+    config = tomllib.loads(
+        (node_dir / '.codex' / 'config.toml').read_text(encoding='utf-8')
+    )
+    assert config['features']['multi_agent'] is False
+    assert config['features']['multi_agent_v2'] is False
 
 
 def test_seed_links_auth_write_through_codex(

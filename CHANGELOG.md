@@ -9,6 +9,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
+- The packaged codex node seed turns both sub-agent features (`multi_agent` and
+  `multi_agent_v2`) off in its `config.toml`: a sub-agent thread writes a
+  rollout log of its own that the pricing window does not sum, so a node runs
+  none.
 - The `plasma-wiki` runtime requirement is `>=1.5,<2`: the seeded wiki skill
   relies on `wiki update` pruning stale index rows without a flag and the
   `_index.md` merge driver fractal installs unions both sides' link rows, both
