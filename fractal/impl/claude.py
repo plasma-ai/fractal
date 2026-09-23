@@ -233,7 +233,25 @@ class _RoutedClaudeParser(ClaudeParser):
         self: _RoutedClaudeParser,
         message: dict[str, Any],
     ) -> Optional[float]:
-        """Price the result frame's usage through the alias chain."""
+        """Price the result frame's usage through the alias chain.
+
+        The stream carries no frame from a sub-agent, so the frame's
+        ``modelUsage`` table, one entry per served model, is the only record
+        of their tokens: each entry is priced at its own model and the close
+        is their sum. A model the chain cannot price closes ``None``, since a
+        partial sum would read as a complete figure.
+        """
+        table = message.get('modelUsage')
+        if isinstance(table, dict) and table:
+            total = 0.0
+            for model, entry in table.items():
+                if not isinstance(entry, dict):
+                    return None
+                cost = _compute_cost(_model_usage_tokens(entry), model)
+                if cost is None:
+                    return None
+                total += cost
+            return total
         usage = message.get('usage')
         if not usage:
             return None
@@ -452,6 +470,22 @@ def _rates(model: str) -> Optional[dict[str, Any]]:
         if entry is not None:
             return entry
     return None
+
+
+def _model_usage_tokens(entry: dict[str, Any]) -> dict[str, Any]:
+    """Read one ``modelUsage`` entry in the shape ``_compute_cost`` prices.
+
+    The table names its buckets in camel case (``inputTokens``,
+    ``cacheReadInputTokens``, ``cacheCreationInputTokens``,
+    ``outputTokens``); the per-message ``usage`` shape names the same
+    buckets in snake case.
+    """
+    return {
+        'input_tokens': entry.get('inputTokens'),
+        'cache_read_input_tokens': entry.get('cacheReadInputTokens'),
+        'cache_creation_input_tokens': entry.get('cacheCreationInputTokens'),
+        'output_tokens': entry.get('outputTokens'),
+    }
 
 
 def _compute_cost(

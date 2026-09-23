@@ -21,6 +21,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- Behind an `ANTHROPIC_BASE_URL` gateway the Claude close prices every model in
+  the result frame's `modelUsage` table and sums them, so a sub-agent's spend on
+  another model reaches the step's cost; a model the pricing chain cannot
+  resolve closes unpriced instead of booking the parent alone.
 - A codex `error` frame inside the active turn — the frame codex writes when it
   retries a stream error and then completes the turn — no longer fails a step
   whose process exits 0; the recovered step is priced normally. A `turn.failed`

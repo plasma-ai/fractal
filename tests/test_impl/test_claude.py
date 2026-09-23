@@ -54,6 +54,7 @@ __all__ = [
     'test_routed_invocation_redirects_the_anthropic_seam',
     'test_native_invocation_scrubs_inherited_routing_keys',
     'test_routed_parser_prices_the_result_usage_through_the_chain',
+    'test_routed_parser_sums_the_result_model_usage_per_model',
     'test_routed_parser_tolerates_gateway_null_usage',
     'test_routed_tracking_and_preflight_gate_on_the_route',
     'test_rates_falls_back_through_the_openrouter_chain_claude',
@@ -914,6 +915,72 @@ def test_routed_parser_prices_the_result_usage_through_the_chain(
     # an unpriced slug closes with no figure rather than the gateway estimate
     monkeypatch.setattr(pricing, '_load', lambda: {})
     unpriced = _RoutedClaudeParser(model='mystery/model')
+    events = [event for line in _lines(frames) for event in unpriced.feed(line)]
+    (result,) = [event for event in events if event.kind == 'result']
+    assert result.cost is None
+    assert unpriced.cost is None
+
+
+def test_routed_parser_sums_the_result_model_usage_per_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Routed runs price every model in the result's table; an unpriced one closes None."""
+    monkeypatch.setattr(
+        pricing,
+        '_load',
+        lambda: {
+            'openrouter/anthropic/claude-haiku-4.5': _PRICING['claude-fable-5'],
+            'claude-fable-5-1': _PRICING['claude-fable-5'],
+        },
+    )
+    parent = {
+        'inputTokens': 4,
+        'outputTokens': 242,
+        'cacheReadInputTokens': 49882,
+        'cacheCreationInputTokens': 13283,
+    }
+    child = {
+        'inputTokens': 2,
+        'outputTokens': 4,
+        'cacheReadInputTokens': 7350,
+        'cacheCreationInputTokens': 5107,
+    }
+    frames = [
+        {
+            'type': 'result',
+            'subtype': 'success',
+            'total_cost_usd': 99.0,
+            # the frame's own usage covers the parent's tokens alone
+            'usage': _USAGE_FIRST,
+            'modelUsage': {
+                'anthropic/claude-haiku-4.5': parent,
+                'claude-fable-5-1': child,
+            },
+            'num_turns': 2,
+            'duration_ms': 10,
+        },
+    ]
+    parser = _RoutedClaudeParser(model='anthropic/claude-haiku-4.5')
+    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    (result,) = [event for event in events if event.kind == 'result']
+    rates = _PRICING['claude-fable-5']
+    expected = sum(
+        entry['inputTokens'] * rates['input_cost_per_token']
+        + entry['cacheReadInputTokens'] * rates['cache_read_input_token_cost']
+        + entry['cacheCreationInputTokens'] * rates['cache_creation_input_token_cost']
+        + entry['outputTokens'] * rates['output_cost_per_token']
+        for entry in (parent, child)
+    )
+    assert result.cost == pytest.approx(expected)
+    assert parser.cost == pytest.approx(expected)
+    assert parser.cost != 99.0
+    # a sub-agent model the chain cannot price closes with no figure
+    monkeypatch.setattr(
+        pricing,
+        '_load',
+        lambda: {'openrouter/anthropic/claude-haiku-4.5': _PRICING['claude-fable-5']},
+    )
+    unpriced = _RoutedClaudeParser(model='anthropic/claude-haiku-4.5')
     events = [event for line in _lines(frames) for event in unpriced.feed(line)]
     (result,) = [event for event in events if event.kind == 'result']
     assert result.cost is None
