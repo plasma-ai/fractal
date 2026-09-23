@@ -211,6 +211,7 @@ _SPAWN_USAGE = [
     if record['type'] == 'token_usage_record'
 ]
 _SPAWN_CHILD = spawned_thread[0]['payload']['id']
+_FORK_START = 7  # session_meta plus the six copied history lines
 _CHILD_USAGE = next(
     record['payload']['usage']
     for record in spawned_thread
@@ -910,6 +911,7 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         # a driven child's file is not the one captured
         ('shrunk', 'shorter than its captured length'),
         ('torn_prefix', 'does not end on a line'),
+        ('emptied', 'cannot explain'),
         # the child's segment is not one complete, fully counted stretch
         ('open_turn', 'does not end on a completed turn'),
         ('turn_aborted', 'interrupted turn'),
@@ -921,6 +923,14 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         ('malformed_record', 'Expecting value'),
         # the child's served model has no rates
         ('no_rates', 'has no pricing entry'),
+        # the fork's history start is read exactly: one line short lands on
+        # the copied interrupted turn, one past the child's own turn context
+        # loses its served model
+        ('fork_start_short', 'interrupted turn'),
+        ('fork_start_long', 'exactly one served model'),
+        # the child's segment names one served model
+        ('no_context', 'exactly one served model'),
+        ('two_models', 'exactly one served model'),
     ],
     ids=[
         'foreign-session',
@@ -936,6 +946,7 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         'twin-child',
         'shrunk',
         'torn-prefix',
+        'emptied',
         'open-turn',
         'turn-aborted',
         'error',
@@ -944,6 +955,10 @@ def test_sub_agent_spawn_prices_the_parent_and_child_rollouts(
         'thread-counter',
         'malformed-record',
         'no-rates',
+        'fork-start-short',
+        'fork-start-long',
+        'no-context',
+        'two-models',
     ],
 )
 def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
@@ -983,8 +998,8 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         child = {'records': child, 'twin': True}
     # a spawning step opens the child (torn: its last line unterminated), and
     # the resume that drives the thread finds the child shrunk below its
-    # captured length, or grows it across that unterminated line
-    elif fault in ('shrunk', 'torn_prefix'):
+    # captured length or emptied, or grows it across that unterminated line
+    elif fault in ('shrunk', 'torn_prefix', 'emptied'):
         setup = {'records': spawned_thread, 'torn': fault == 'torn_prefix'}
         command = _command(
             backend=backend,
@@ -999,6 +1014,8 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         resume = True
         if fault == 'shrunk':
             child = {'records': [spawned_thread[0]], 'truncate': True}
+        elif fault == 'emptied':
+            child = {'records': [spawned_thread[0]], 'truncate': True, 'empty': True}
         else:
             child = _on_turn(_second_turn(spawned_thread), str(uuid.uuid4()), root=turn)
     elif fault == 'unexplained':
@@ -1023,6 +1040,17 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
         child.append('{"type": "token_usage_record", "payload": ')
     elif fault == 'no_rates':
         child[_find(child, 'turn_context')]['payload']['model'] = 'other-model'
+    elif fault == 'fork_start_short':
+        child = _forked(spawned_thread, start=_FORK_START - 1)
+    elif fault == 'fork_start_long':
+        own = _FORK_START + 1 + _find(spawned_thread[1:], 'turn_context')
+        child = _forked(spawned_thread, start=own + 1)
+    elif fault == 'no_context':
+        child.pop(_find(child, 'turn_context'))
+    elif fault == 'two_models':
+        context = copy.deepcopy(child[_find(child, 'turn_context')])
+        context['payload']['model'] = 'other-model'
+        child.insert(_find(child, 'turn_context') + 1, context)
     # the spawning run's own turn is complete, and the faulted child leaves the
     # step unpriced
     step = _named_step(backend, 'UNPRICED')
@@ -1048,8 +1076,8 @@ def test_unbound_or_incomplete_child_evidence_leaves_the_step_unpriced(
 
 
 @pytest.mark.parametrize(
-    'case',
-    [
+    argnames='case',
+    argvalues=[
         'other-model',
         'nested',
         'two-children',
@@ -1105,20 +1133,11 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
         expected += child_cost
     # a forked child copies its source's history -- another model's turn
     # context and an interrupted turn -- ahead of its own records, which begin
-    # at the history start its metadata names
+    # at the history start its metadata names; the fork shape is synthesized
+    # from the captured spawn until a captured fork joins
+    # `tests/test_impl/rollouts/`
     elif case == 'forked':
-        child = copy.deepcopy(spawned_thread)
-        history = [
-            copy.deepcopy(spawning_thread[_find(spawning_thread, 'turn_context')]),
-            {'type': 'event_msg', 'payload': {'type': 'turn_aborted'}},
-        ]
-        history[0]['payload']['model'] = 'o3'
-        child[0]['payload'].update(
-            forked_from_id=_SPAWN_SESSION,
-            subagent_history_start_ordinal=1 + len(history),
-        )
-        settings = {'type': 'event_msg', 'payload': {'type': 'thread_settings_applied'}}
-        children = [child[:1] + history + [settings] + child[1:]]
+        children = [_forked(spawned_thread)]
     # codex pre-empts a child's turn normally: a second start before the turn
     # completes is no fault
     elif case == 'preempted':
@@ -1179,6 +1198,48 @@ def test_spawned_threads_price_at_their_own_model_beside_sibling_roots(
     assert result.model == _SPAWN_MODEL
     assert result.models == (_SPAWN_MODEL,)
     assert not [event for event in events if event.kind == 'error']
+    assert 'unpriced' not in caplog.text
+
+
+def test_a_driven_fork_is_read_from_its_captured_length(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A turn driving a forked child sums the rows it appends past the captured length.
+
+    The copied history and its ordinal lie in the fork's prefix; the driven
+    segment is read from the captured length, never from the ordinal.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
+    parent_cost = _price(_SPAWN_USAGE[-1]['thread_token_usage'])
+    child_cost = _price(_CHILD_USAGE)
+    # the spawning turn opens the fork, read from its history start
+    first = _named_step(backend, 'SPAWNING')
+    command = _command(
+        backend=backend,
+        records=spawning_thread,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        children=[_forked(spawned_thread)],
+    )
+    result, _ = _drive(backend, command, step_id=first, model=_SPAWN_MODEL)
+    assert result.cost == pytest.approx(parent_cost + child_cost)
+    # the next turn drives the fork: the rows it appends ride the driving turn
+    second = _named_step(backend, 'DRIVING')
+    turn = str(uuid.uuid4())
+    driving = _on_turn(_second_turn(spawning_thread), turn)
+    grown = _on_turn(_second_turn(spawned_thread), str(uuid.uuid4()), root=turn)
+    command = _command(
+        backend=backend,
+        records=driving,
+        wire=_SPAWN_WIRE,
+        thread=_SPAWN_SESSION,
+        children=[grown],
+        resume=True,
+    )
+    result, _ = _drive(backend, command, step_id=second, model=_SPAWN_MODEL)
+    assert result.cost == pytest.approx(parent_cost + child_cost)
     assert 'unpriced' not in caplog.text
 
 
@@ -1898,6 +1959,32 @@ def _as_thread(
         if 'session_id' in payload:
             payload['session_id'] = root or thread
     return copied
+
+
+def _forked(records: list[dict], *, start: Optional[int] = None) -> list[dict]:
+    """Copy a spawned thread's rollout as a fork of the run's thread.
+
+    Its source's history -- another model's turn context, four messages and
+    an interrupted turn -- is copied ahead of its own records, which begin
+    at the history start its metadata names; ``start`` overrides that
+    ordinal.
+    """
+    copied = copy.deepcopy(records)
+    messages = [
+        record for record in spawning_thread if record['type'] == 'response_item'
+    ]
+    history = [
+        copy.deepcopy(spawning_thread[_find(spawning_thread, 'turn_context')]),
+        *copy.deepcopy(messages[:4]),
+        {'type': 'event_msg', 'payload': {'type': 'turn_aborted'}},
+    ]
+    history[0]['payload']['model'] = 'o3'
+    copied[0]['payload'].update(
+        forked_from_id=_SPAWN_SESSION,
+        subagent_history_start_ordinal=_FORK_START if start is None else start,
+    )
+    settings = {'type': 'event_msg', 'payload': {'type': 'thread_settings_applied'}}
+    return copied[:1] + history + [settings] + copied[1:]
 
 
 def _price(usage: dict[str, int]) -> float:

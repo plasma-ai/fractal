@@ -19,11 +19,13 @@ may include breaking changes, each listed under a Breaking heading.
   row's model and the model-drop check stay the parent's. A child log the window
   cannot bind to the turn — another thread's or turn's rows, a segment not
   ending on a completed turn, an interrupted turn, a counter the sum disputes,
-  an unpriced child model — records `NULL` cost and logs the reason naming the
-  log; a new or grown log the window cannot explain (one not opening with
-  session metadata, a sub-agent of a root the node's codex home does not hold,
-  or a sub-agent of another kind — review, memory consolidation — on the step's
-  thread) refuses the step with
+  an unpriced child model, a driven child's log shorter than its captured length
+  or grown across an unterminated line, a second log naming one spawned thread —
+  records `NULL` cost and logs the reason naming the log; a new or grown log the
+  window cannot explain (one whose first line is not session metadata — a new,
+  still empty file is skipped — a sub-agent naming a session the node's codex
+  home does not hold as a root, or a sub-agent of another kind — review,
+  compact, memory consolidation — on the step's thread) refuses the step with
   `codex usage unpriced: Rollout window saw a rollout it cannot explain: <file>`.
   Another root's log beside the step's, or any sub-agent log naming that root,
   new or grown, is ignored.

@@ -280,7 +280,7 @@ class CodexAgent(Agent):
                 raise ValueError(f'Model {model!r} has no pricing entry.')
             # add each spawned thread's spend at its own served model's rates;
             # the step row's model stays the thread's, so the model-drop check
-            # judges the pin alone
+            # judges the parent's served model alone
             for child, (spent, served) in children.items():
                 priced = _compute_cost(spent, served)
                 if priced is None:
@@ -796,11 +796,12 @@ def _spawned_rollouts(
         size = known.get(path)
         if size is not None and path.stat().st_size == size:
             continue
-        # the spawn rides the opening session metadata alone -- a file codex
-        # has opened but not yet written is no record at all
+        # the spawn rides the opening session metadata alone -- a new file
+        # codex has opened but not yet written is no record at all, while a
+        # captured file found empty is not the file captured
         with path.open('rb') as handle:
             first = handle.readline()
-        if not first:
+        if not first and size is None:
             continue
         unexplained = f'Rollout window saw a rollout it cannot explain: {path.name}'
         try:
@@ -823,8 +824,8 @@ def _spawned_rollouts(
             if not _is_root(home, root):
                 raise ValueError(unexplained)
             continue
-        # a sub-agent of another kind (review, memory consolidation) on this
-        # thread is spend the window cannot place
+        # a sub-agent of another kind (review, compact, memory consolidation)
+        # on this thread is spend the window cannot place
         if not isinstance(spawn, dict) or not isinstance(thread, str):
             raise ValueError(unexplained)
         # one thread writes one rollout: a twin is not the captured file
