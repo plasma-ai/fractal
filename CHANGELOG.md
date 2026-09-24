@@ -10,10 +10,8 @@ may include breaking changes, each listed under a Breaking heading.
 ### Changed
 
 - The packaged codex node seed turns both sub-agent features (`multi_agent` and
-  `multi_agent_v2`) off in its `config.toml`, taking the top-level spawn and
-  wait tools from the model: a node's step is one turn on one thread. Codex's
-  code-mode runtime can still start a v1 sub-agent, which the rollout window
-  binds and prices into the step or refuses the step.
+  `multi_agent_v2`) on in its `config.toml`: the rollout window prices every
+  spawned thread into the step or refuses the step.
 - `codex` steps whose turn spawns or drives sub-agent threads are priced in
   full: each child's session log is summed past its captured length at the
   child's own served model's rates and added to the step's cost, while the step
