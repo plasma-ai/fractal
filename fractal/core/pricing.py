@@ -79,7 +79,7 @@ def update(max_age: Optional[str] = None) -> str:
         # raises socket.timeout (an OSError), but a malformed response --
         # truncated chunked body, garbage status line -- escapes urlretrieve
         # as a raw HTTPException, so the fallback must catch both classes
-        urllib.request.urlretrieve(_PRICING_URL, tmp)  # noqa: S310
+        urllib.request.urlretrieve(_PRICING_URL, tmp)
         os.replace(tmp, cache)
         # invalidate the process memo so rates() re-reads the fresh table --
         # without this the loop's per-iteration refresh is inert (a run that
