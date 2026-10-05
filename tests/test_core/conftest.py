@@ -248,8 +248,12 @@ def _spawn_chain(
     return p, c, g
 
 
-def _make_git_repo(path: pathlib.Path) -> pathlib.Path:
-    """Create a git repo with an initial commit at ``path``."""
+def _make_git_repo(path: pathlib.Path, *, wiki: str = 'wiki') -> pathlib.Path:
+    """Create a git repo with an initial commit at ``path``.
+
+    ``wiki`` is the shared project-wiki folder; any other folder than the
+    default is named by a committed ``.fractal/.settings.json``.
+    """
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ['git', 'init', '-b', 'main'],
@@ -274,15 +278,22 @@ def _make_git_repo(path: pathlib.Path) -> pathlib.Path:
     gitignore = path / '.gitignore'
     gitignore.write_text('.venv\n.worktrees/\n.db\n.db-*\n.status\n', encoding='utf-8')
     # project wiki -- required precondition for node init
-    wiki_dir = path / 'wiki'
-    wiki_dir.mkdir()
+    wiki_dir = path / wiki
+    wiki_dir.mkdir(parents=True)
     wiki_index = wiki_dir / '_index.md'
     wiki_index.write_text(
         '---\nname: wiki\n---\n# wiki\n\n***\n',
         encoding='utf-8',
     )
+    tracked = ['README.md', '.gitignore', wiki]
+    # a non-default folder is named by the project's settings file
+    if wiki != 'wiki':
+        settings = path / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}) + '\n', encoding='utf-8')
+        tracked.append('.fractal/.settings.json')
     subprocess.run(
-        ['git', 'add', 'README.md', '.gitignore', 'wiki'],
+        ['git', 'add', *tracked],
         cwd=path,
         capture_output=True,
         check=True,

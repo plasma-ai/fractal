@@ -57,8 +57,8 @@ class Files:
 
         The work-product surface: every git-tracked file in the worktree --
         the git-ignored runtime (``.db``/``.status``/logs) never appears in a
-        tracked listing, and ``wiki/``/``.fractal/`` entries list like any
-        other content (consumers filter or collapse them). With ``since`` the
+        tracked listing, and project-wiki and ``.fractal/`` entries list like
+        any other content (consumers filter or collapse them). With ``since`` the
         set is instead the node's own contribution: files its own commits
         touched (a first-parent walk from the ``since`` anchor -- a tree at
         ``HEAD`` contains everything ever merged in, so without the walk content
@@ -150,8 +150,8 @@ class Files:
             # skip only what _validate_relpath structurally refuses (so the
             # listing never names an entry read()/path() would reject): a
             # .git component, a leading .worktrees (sibling node worktrees on
-            # the user node), and leading pathspec magic -- wiki/ and
-            # .fractal/ list like any other tracked content
+            # the user node), and leading pathspec magic -- the project wiki
+            # and .fractal/ list like any other tracked content
             parts = rel.casefold().split('/')
             if '.git' in parts or parts[0] == WORKTREES_FOLDER:
                 continue
@@ -719,9 +719,9 @@ class Files:
         sibling nodes). Comparisons casefold -- APFS matches names
         case-insensitively, so ``.GIT`` names the same entry there; rejecting
         a literal ``.GIT`` file on a case-sensitive host is the accepted
-        cost. Fractal's own content (``wiki/``, ``.fractal/``) passes: it is
-        readable project state, filtered or collapsed by consumers, not a
-        boundary; the write tier (:meth:`_validate_writable`) is stricter.
+        cost. Fractal's own content (the project wiki, ``.fractal/``) passes:
+        it is readable project state, filtered or collapsed by consumers, not
+        a boundary; the write tier (:meth:`_validate_writable`) is stricter.
 
         Args:
             path: Worktree-relative file path.

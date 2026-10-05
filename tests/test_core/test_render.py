@@ -9,9 +9,11 @@ static variable map, prompt assembly, and the chat's runtime sentinels.
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import subprocess
 import tomllib
+from typing import Optional
 
 import pytest
 import tomli_w
@@ -34,6 +36,7 @@ __all__ = [
     'test_strip_frontmatter_edges',
     'test_build_prompt_assembles_charter_step_and_modes',
     'test_chat_seed_renders_paths_and_chat_sentinels',
+    'test_prompts_render_the_configured_wiki',
 ]
 
 _ENVSUBST = shutil.which('envsubst')
@@ -447,3 +450,34 @@ def test_chat_seed_renders_paths_and_chat_sentinels(node_with_db: Node) -> None:
     assert f'node={node.node_dir}' in seed
     assert 'step=N/A (chat)' in seed
     assert '$MAX_DESCENDANTS' not in seed
+
+
+@pytest.mark.parametrize(
+    argnames=('wiki', 'folder'),
+    argvalues=[
+        pytest.param(None, 'wiki', id='default'),
+        pytest.param('docs', 'docs', id='docs'),
+    ],
+)
+def test_prompts_render_the_configured_wiki(
+    node_with_db: Node,
+    wiki: Optional[str],
+    folder: str,
+) -> None:
+    """``$WIKI_DIR`` and the shipped prompts name the configured wiki folder.
+
+    The charter's scope rule and the commit step tell the agent which folder
+    is committable regardless of scope, so they speak through ``$WIKI_DIR``
+    and never hard-code ``wiki/``.
+    """
+    node = node_with_db
+    if wiki is not None:
+        node.config.set('wiki', wiki)
+    wiki_dir = node.worktree / folder
+    assert node.render_template('$WIKI_DIR') == f'{wiki_dir}'
+    package = pathlib.Path(fractal.__file__).parent / '_node'
+    for doc in ('NODE.md', 'steps/04-COMMIT.md'):
+        text = (package / doc).read_text(encoding='utf-8')
+        rendered = node.render_template(text)
+        assert f'`{wiki_dir}`' in rendered, doc
+        assert '`wiki/`' not in rendered, doc

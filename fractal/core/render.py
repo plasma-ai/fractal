@@ -237,10 +237,9 @@ def variables(node: Node, overrides: Optional[dict[str, str]] = None) -> dict[st
     # alias project/wiki dirs
     if node.project_path == '.':
         project_dir = repo_dir
-        wiki_dir = worktree_dir / 'wiki'
     else:
         project_dir = repo_dir / node.project_path
-        wiki_dir = worktree_dir / node.project_path / 'wiki'
+    wiki_dir = worktree_dir / node.wiki_prefix
     # alias scope dir (space-joined when several roots are scoped)
     if scope := node.config.get('scope'):
         scope_dir = ' '.join(f'{project_dir / root}' for root in scope)

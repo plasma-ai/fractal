@@ -299,6 +299,7 @@ __all__ = [
     'test_merge_into_a_node_target_resolves_a_conflict_on_its_own_seed',
     'test_merge_warnings_print_a_non_ascii_path_readably',
     'test_merge_refuses_a_squash_outside_the_nodes_scope',
+    'test_merge_footprint_exempts_the_configured_wiki',
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
     'test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal',
     'test_merge_continue_refuses_a_squash_outside_the_nodes_scope',
@@ -4141,6 +4142,68 @@ def test_merge_refuses_a_squash_outside_the_nodes_scope(
 
 
 @pytest.mark.parametrize(
+    argnames=('wiki', 'exempt', 'stray'),
+    argvalues=[
+        pytest.param('wiki', 'wiki/page.md', 'docs/page.md', id='default'),
+        pytest.param('docs', 'docs/page.md', 'wiki/page.md', id='docs'),
+    ],
+)
+def test_merge_footprint_exempts_the_configured_wiki(
+    tmp_path: pathlib.Path,
+    wiki: str,
+    exempt: str,
+    stray: str,
+) -> None:
+    """The squash's footprint check exempts the configured project wiki alone.
+
+    The merge judges a scoped node's offering by the law ``fractal commit``
+    enforces, so a project naming ``docs`` as its shared wiki lands a page
+    under ``docs/`` past the scope and refuses one under ``wiki/``, which is
+    then ordinary content outside it.
+    """
+    repo = _init_tree(tmp_path / 'wikiscoperepo', wiki=wiki)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    # in-scope work plus a page under each folder, committed raw (fractal
+    # commit would refuse the stray itself)
+    (worktree / 'src').mkdir()
+    (worktree / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    for path in (exempt, stray):
+        (worktree / path).parent.mkdir(parents=True, exist_ok=True)
+        (worktree / path).write_text(
+            '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+            encoding='utf-8',
+        )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and pages')
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    # refused, naming the stray page alone
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert 'outside its scope' in result.stderr, result.stderr
+    for path in ('src/a.py', exempt, stray):
+        assert (path in result.stderr) is (path == stray), (path, result.stderr)
+    # with the stray gone, the squash lands the exempt page
+    _git(worktree, 'rm', '-q', stray)
+    _git(worktree, 'commit', '-m', 'drop the stray page')
+    result = _script('merge.sh', repo, f'{worktree}')
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    tracked = _git(repo, 'ls-files', 'src/a.py', exempt).stdout.split()
+    assert tracked == sorted(['src/a.py', exempt])
+
+
+@pytest.mark.parametrize(
     argnames='attributes',
     argvalues=['* text=auto\n', '* text=auto', '\n* text=auto\n', '* text=auto  \n'],
     ids=[
@@ -5606,7 +5669,11 @@ def test_delete_warns_on_unmerged_non_ascii_work(tmp_path: pathlib.Path) -> None
     assert not worktree.exists()
 
 
-def test_delete_warns_on_unmerged_wiki_page_work(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_delete_warns_on_unmerged_wiki_page_work(
+    tmp_path: pathlib.Path,
+    wiki: str,
+) -> None:
     """Unmerged wiki *pages* still warn despite the generated-state excludes.
 
     The unmerged-work check excludes the wiki's generated indexes and
@@ -5615,16 +5682,16 @@ def test_delete_warns_on_unmerged_wiki_page_work(tmp_path: pathlib.Path) -> None
     a page -- refreshed index and cache riding along -- must still draw the
     warning: the excludes silence tool-owned bytes, never content.
     """
-    repo = _init_tree(tmp_path / 'wikiwarnrepo')
+    repo = _init_tree(tmp_path / 'wikiwarnrepo', wiki=wiki)
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
     # the child writes a wiki page and refreshes the generated index/cache
-    (worktree / 'wiki' / 'topic.md').write_text(
+    (worktree / wiki / 'topic.md').write_text(
         '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
         encoding='utf-8',
     )
-    wiki_dir = worktree / 'wiki'
+    wiki_dir = worktree / wiki
     _wiki_update(wiki_dir)
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child wiki page')
@@ -5638,8 +5705,10 @@ def test_delete_warns_on_unmerged_wiki_page_work(tmp_path: pathlib.Path) -> None
     assert not worktree.exists()
 
 
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
 def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
     tmp_path: pathlib.Path,
+    wiki: str,
 ) -> None:
     """Wiki state the tool regenerates never resurrects the warning.
 
@@ -5648,19 +5717,20 @@ def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
     including its committed ``_index.md`` and ``.wiki/`` cache. Once the
     target's wiki moves on, its regenerated bytes differ from the branch's
     copies, but those paths are tool-owned state, not the branch's work --
-    the unmerged check excludes them and stays silent.
+    the unmerged check excludes them, at the configured wiki folder, and
+    stays silent.
     """
-    repo = _init_tree(tmp_path / 'wikiregenrepo')
+    repo = _init_tree(tmp_path / 'wikiregenrepo', wiki=wiki)
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
     # the child writes a wiki page and commits the refreshed index/cache --
     # the branch's own copies of the generated state
-    (worktree / 'wiki' / 'topic.md').write_text(
+    (worktree / wiki / 'topic.md').write_text(
         '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
         encoding='utf-8',
     )
-    wiki_dir = worktree / 'wiki'
+    wiki_dir = worktree / wiki
     _wiki_update(wiki_dir)
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child wiki page')
@@ -5672,11 +5742,11 @@ def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
     # the target's wiki moves on (a sibling page lands and refreshes the
     # index), so its regenerated `_index.md`/`.wiki` bytes now differ from
     # the branch's committed copies
-    (repo / 'wiki' / 'other.md').write_text(
+    (repo / wiki / 'other.md').write_text(
         '---\nname: other\ndesc: A sibling page.\n---\n\n# other\n\n***\n',
         encoding='utf-8',
     )
-    wiki_dir = repo / 'wiki'
+    wiki_dir = repo / wiki
     _wiki_update(wiki_dir)
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-m', 'sibling wiki page')
@@ -5728,19 +5798,28 @@ def _wiki_update(wiki_dir: pathlib.Path) -> None:
     )
 
 
-def _init_tree(root: pathlib.Path) -> pathlib.Path:
-    """Build a git repo with a committed wiki and a ``fractal`` user node."""
+def _init_tree(root: pathlib.Path, *, wiki: str = 'wiki') -> pathlib.Path:
+    """Build a git repo with a committed wiki and a ``fractal`` user node.
+
+    ``wiki`` is the shared project-wiki folder; any other folder than the
+    default is named by a committed ``.fractal/.settings.json``.
+    """
     root.mkdir(parents=True, exist_ok=True)
     _git(root, 'init', '-b', 'main')
     _git(root, 'config', 'user.email', 'script@test.local')
     _git(root, 'config', 'user.name', 'script')
     (root / 'tracked.txt').write_text('original\n', encoding='utf-8')
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
+    wiki_dir = root / wiki
+    wiki_dir.mkdir()
+    (wiki_dir / '_index.md').write_text(
         '---\nname: wiki\n---\n# wiki\n\n***\n',
         encoding='utf-8',
     )
+    # a non-default folder is named by the project's settings file
+    if wiki != 'wiki':
+        settings = root / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}) + '\n', encoding='utf-8')
     _git(root, 'add', '-A')
     _git(root, 'commit', '-m', 'init')
     assert _run(root, 'init').returncode == 0

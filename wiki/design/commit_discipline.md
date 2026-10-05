@@ -58,6 +58,12 @@ findings would push knowledge into radio messages and private memory, where
 other nodes cannot find it. The wiki is the one surface where every node's write
 access is part of the design, with merge machinery (see below and
 [[features/wiki_system/merge_behavior]]) reconciling the concurrent edits.
+Because the exemption is that wide, its folder is fixed per tree: `wiki/` by
+default, or the folder the project's tracked `.fractal/.settings.json` names,
+read once at `fractal init` and inherited, immutable, by every node -- so a
+project whose `wiki/` holds ordinary content moves the exemption off it, and no
+node can widen its own boundary by renaming the wiki (see
+[[features/wiki_system/knowledge_stores]]).
 
 Runtime artifacts — the central database and its sidecars, status and pause
 markers, virtualenvs — are excluded from staging unconditionally. They are state

@@ -6,9 +6,13 @@ FRACTAL_FOLDER = '.fractal'
 WORKTREES_FOLDER = '.worktrees'
 #: immutable project-layout cache under the worktrees directory
 PROJECT_FOLDER = '.project'
+#: default shared project-wiki folder, relative to the project path
+WIKI_FOLDER = 'wiki'
 
 #: per-node configuration file in the node's data directory
 CONFIG_FILE = 'config.json'
+#: tracked project settings file in the project's fractal data directory
+SETTINGS_FILE = '.settings.json'
 #: central SQLite database file in the root node's data directory
 DB_FILE = '.db'
 #: lock filename, standalone or as a suffix, serializing concurrent access

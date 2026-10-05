@@ -37,6 +37,7 @@ from fractal.constants import (
     STATUS_FILE,
     STATUSES,
     STEP_PGID_FILE,
+    WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
 from fractal.typing import PathLike
@@ -47,6 +48,7 @@ from .config import (
     RESERVE_PRECISION,
     Config,
     parse_reserve_budget,
+    validate_wiki,
 )
 from .cost import Cost
 from .db import Database
@@ -292,6 +294,24 @@ class Node:
         absent for a repo-root project, which reads as ``'.'``.
         """
         return worktree.project_path(self.repo_dir, self.branch)
+
+    @property
+    def wiki_prefix(self: Node) -> str:
+        """Return the worktree-relative shared project-wiki folder.
+
+        The ``wiki`` config key (fixed at user init from the project's
+        tracked ``.fractal/.settings.json`` and inherited by every
+        descendant) names the folder relative to the project, ``wiki`` when
+        absent. Validated on every read, so a hand-edited value fails the
+        commit and merge scope checks loudly instead of moving the
+        boundary.
+        """
+        wiki = self.config.get('wiki')
+        if wiki is None:
+            wiki = WIKI_FOLDER
+        validate_wiki(wiki, source='wiki')
+        project = self.project_path
+        return wiki if project == '.' else f'{project}/{wiki}'
 
     @property
     def parent(self: Node) -> Optional[Node]:
@@ -1340,6 +1360,11 @@ class Node:
         # the child records the tree's root (inherited from the parent) so any
         # node can resolve the central database from its own config
         root = parent.config.get('root')
+        # the shared project-wiki folder is fixed for the whole tree at user
+        # init, so the child carries the parent's value (absent: the default)
+        wiki = parent.config.get('wiki')
+        if wiki is not None:
+            validate_wiki(wiki, source='wiki')
         # compose the child branch and probe its pre-existing ref now: the template
         # read below forks from the branch's own tip on a --reset, and the failure
         # rollback must never delete a reused branch's committed history
@@ -1680,6 +1705,8 @@ class Node:
             args.append(f'--title={title}')
             args.append(f'--parent={parent.branch}')
             args.append(f'--root={root}')
+            if wiki is not None:
+                args.append(f'--wiki={wiki}')
             # a non-root path selects the child's sub-project (default: inherit); a
             # .worktrees/ path is the cwd-in-a-worktree case above -- inherit too
             if path is not None and path != '.':
@@ -2019,6 +2046,10 @@ class Node:
         # ASCII identifier) up front so a bad dir name fails before any partial
         # init is written; it doubles as the wiki name
         wiki_name = worktree.derive_project_name(self.repo_dir)
+        # read the shared project-wiki folder from the project's tracked
+        # settings file up front, for the same reason; absent, the tree uses
+        # the default folder and its config records nothing
+        wiki_folder = worktree.read_wiki_setting(self._root / path)
         # resolve the default agent against the registry up front, for the
         # same reason -- a typo'd name would store fine, every spawn would
         # inherit it, and each start's loop would die on a vanishing tmux
@@ -2032,6 +2063,31 @@ class Node:
         # prior init (config.json written before db/radio/wiki) is repaired
         # on re-run -- db.init and radio.init are both idempotent
         if self.is_user:
+            # the folder is fixed at init (every node inherits it as its scope
+            # exemption), so a changed setting is adopted only while the tree
+            # has no node worktrees -- a live node would keep the old folder
+            recorded = self.config.get('wiki')
+            if wiki_folder != recorded:
+                nodes = [
+                    checkout
+                    for checkout in fractal.util.git.worktree_map(self.repo_dir)
+                    if checkout.startswith(f'{branch}.')
+                ]
+                if nodes:
+                    raise ValueError(
+                        f'The project wiki setting names'
+                        f' {wiki_folder or WIKI_FOLDER!r}, but the tree on'
+                        f' {branch!r} recorded {recorded or WIKI_FOLDER!r} and'
+                        f' still has nodes; run `fractal reset {branch}` and'
+                        ' re-run init to adopt it.'
+                    )
+                config = self.config.load()
+                if wiki_folder is None:
+                    config.pop('wiki', None)
+                else:
+                    config['wiki'] = wiki_folder
+                text = json.dumps(config, indent=2)
+                fractal.util.filesystem.write_atomic(self.config.path, text + '\n')
             if agent is not None:
                 self.config.set('agent', agent)
             if provider is not None:
@@ -2046,10 +2102,13 @@ class Node:
                 repo_dir=self.repo_dir,
                 path=path,
                 name=wiki_name,
+                wiki=wiki_folder or WIKI_FOLDER,
             )
             # re-check host hooks for the formatter lanes (informational)
             worktree.verify_hook_formatters(self.repo_dir)
             message = f'User node already initialized on branch {branch!r}.'
+            if wiki_folder != recorded:
+                message += f' Adopted the project wiki folder {self.wiki_prefix!r}.'
             if agent is not None:
                 message += f' Updated default agent to {agent}.'
             if provider is not None:
@@ -2101,14 +2160,14 @@ class Node:
             config['agent'] = agent
         if provider is not None:
             config['provider'] = provider
+        if wiki_folder is not None:
+            config['wiki'] = wiki_folder
         config_path = node_dir / CONFIG_FILE
         text = json.dumps(config, indent=2)
         fractal.util.filesystem.write_atomic(config_path, text + '\n')
         # resolve the seed and wiki paths (sub-project nodes nest under <project>/)
-        if path == '.':
-            seed, wiki = FRACTAL_FOLDER, 'wiki'
-        else:
-            seed, wiki = f'{path}/{FRACTAL_FOLDER}', f'{path}/wiki'
+        seed = FRACTAL_FOLDER if path == '.' else f'{path}/{FRACTAL_FOLDER}'
+        wiki = self.wiki_prefix
         # ensure git excludes -- the static block covers the runtime artifacts
         # init creates outside the node dir (.worktrees/ above all)
         worktree.exclude_update(self.repo_dir)
@@ -2121,6 +2180,7 @@ class Node:
             repo_dir=self.repo_dir,
             path=path,
             name=wiki_name,
+            wiki=wiki_folder or WIKI_FOLDER,
         )
         # check host hooks for the formatter lanes (informational)
         worktree.verify_hook_formatters(self.repo_dir)
@@ -4141,7 +4201,7 @@ class Node:
             return ''
         project = self.project_path
         seed = FRACTAL_FOLDER if project == '.' else f'{project}/{FRACTAL_FOLDER}'
-        wiki = 'wiki' if project == '.' else f'{project}/wiki'
+        wiki = self.wiki_prefix
         # a scope root that is, or lies under, a .fractal dir is work the merge
         # lands (a --meta node's scope is the target's own seed dir), so exclude
         # only the node's own seed and its descendants' instead of the whole
@@ -4563,6 +4623,7 @@ class Node:
             for _, descendant in tree._live_descendants(status='active'):
                 descendant._reconcile_status()
         args = [f'--branch={node.branch}']
+        args.append(f'--wiki={node.wiki_prefix}')
         if name is None:
             args.append('--all')
             # the sweep clears every tree's data dir, so name them here -- the

@@ -57,7 +57,8 @@ and the radio, but runs no loop of its own (see
 - the data directory ``<project>/.fractal/<branch>/`` with ``config.json``
   (marked ``user: true``), the central database, and the radio's default
   channels;
-- the project wiki at ``<project>/wiki/`` when absent;
+- the project wiki at ``<project>/wiki/`` when absent (or at the folder the
+  project's settings file names — see below);
 - fractal's block in the repo-local ``.git/info/exclude`` (worktrees,
   databases, status markers, agent logs), and a ``.gitignore`` of ``*``
   inside the seed directory itself, so ``.fractal/<branch>/`` is
@@ -70,14 +71,35 @@ before initializing nodes) and when ``.gitattributes`` lacks the
 ``**/_index.md merge=wiki`` line (append it and commit), since sibling nodes
 otherwise conflict on the index when they merge.
 
+The shared project wiki is the one folder every node may commit to
+regardless of its scope. It is ``wiki/`` unless the project's committed
+``<project>/.fractal/.settings.json`` names another folder, relative to the
+project:
+
+.. code-block:: json
+
+   {"wiki": "docs"}
+
+The file accepts only the ``wiki`` key. Init reads it once, before writing
+anything, records the folder in the user node's ``config.json``, and every
+node of the tree inherits it (see :doc:`/configuration`). A bad file —
+invalid JSON, an unknown key, or a folder that is absolute, ``.``, carries a
+``..``, ``.fractal``, ``.worktrees``, or ``.git`` component, or is not
+written canonically — refuses init, naming the file. With no file, the
+folder is ``wiki/`` and nothing new is recorded.
+
 The command ends by printing the required next step: the baseline commit
-(``fractal commit "<message>" --init``). Node worktrees can only branch
-from a committed tree.
+(``fractal commit "<message>" --init``), which also commits the settings
+file when there is one. Node worktrees can only branch from a committed
+tree.
 
 Re-running on an initialized tree is idempotent — it never clobbers
 existing data. A re-run repairs a partial prior init (a stranded database,
 radio, or missing wiki) and updates the stored agent and provider defaults
-when the flags are given.
+when the flags are given. A re-run adopts a changed project-wiki setting
+only while the tree has no nodes: run ``fractal reset <root>`` first, then
+re-run init and commit the baseline. Over live nodes it refuses, so one
+tree never mixes two wiki folders.
 
 ``PATH``
    Repository root or monorepo sub-project folder. Default: ``.``.
@@ -109,6 +131,7 @@ Refuses when:
   (run ``fractal init`` from the main checkout);
 - the branch is already mapped to a different project — one branch maps to
   a single project;
+- the project's ``.fractal/.settings.json`` is invalid (see above);
 - ``<project>/wiki/`` exists, is not empty, and is not a project wiki (it
   carries no ``.wiki/`` marker): adopting it would rewrite its files in place.
   Move the directory aside and re-run init, or convert it first with

@@ -38,6 +38,12 @@ via `--inherit`.
   parent cannot opt back into pushing, and the flag is latched once set.
 - **`project`** -- the child works in the parent's project unless its `--path`
   selects another sub-project.
+- **`wiki`** -- the shared project-wiki folder the user node read from the
+  project's `.fractal/.settings.json` at `fractal init`, copied from the parent
+  at init (absent stays absent, meaning `wiki`) and immutable after. A child in
+  another sub-project applies the same folder relative to that project. Nodes
+  never re-read the settings file, so one tree always uses one folder; a changed
+  setting reaches a tree only through `fractal reset` and a re-init.
 - **Agent config directories** -- each node data directory carries a config dir
   per supported agent backend (the agent CLI's settings file plus a skills
   link), recreated at every init and gitignored. A template's `agents/<agent>/`

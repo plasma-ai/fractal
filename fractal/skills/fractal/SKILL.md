@@ -238,8 +238,9 @@ Determine the node's state and proceed accordingly:
    without asking (every command here is idempotent, so re-runs are safe):
 
    1. `fractal init <path> --agent=<agent>` — writes the root node data
-      (`.fractal/`) and project wiki (`wiki/`); a no-op if the root already
-      exists (re-run to update the stored `--agent`). For a monorepo sub-project
+      (`.fractal/`) and project wiki (`wiki/`, or the folder the project's
+      settings file names — see below); a no-op if the root already exists
+      (re-run to update the stored `--agent`). For a monorepo sub-project
       `<path>` these nest under it (`<path>/.fractal/`, `<path>/wiki/`), not the
       repo root. `--agent` sets the default agent that spawned nodes inherit; if
       the user didn't specify one, default to `--agent=claude` if you are
@@ -264,17 +265,17 @@ Determine the node's state and proceed accordingly:
       if you intend to pass additional options, confirm with the user first. If
       it fails, stop and report the error.
 
-The project `wiki/` is **git-tracked** (as are node-branch seeds) — never add it
-to `.gitignore`. The root node's own `.fractal/` is **git-ignored on the
-top-level branch** by default, keeping it out of your main history; run
-`fractal track` to commit it there too and `fractal untrack` to revert — both
-toggle only the ignore and print the follow-up git command, never touching the
-index. Fractal manages this automatically: its runtime artifacts (worktrees, the
-central database, status, agent logs) ride the repo-local `.git/info/exclude`,
-and the top-level `.fractal/<branch>/` hides itself with its own ignore file —
-the committed `.gitignore` is never touched. Keep your own ignore patterns
-anchored (`/artifacts/`, not `artifacts/`), or they also match — and silently
-hide — same-named subtrees at any depth, such as a node's committable
+The project wiki is **git-tracked** (as are node-branch seeds) — never add it to
+`.gitignore`. The root node's own `.fractal/` is **git-ignored on the top-level
+branch** by default, keeping it out of your main history; run `fractal track` to
+commit it there too and `fractal untrack` to revert — both toggle only the
+ignore and print the follow-up git command, never touching the index. Fractal
+manages this automatically: its runtime artifacts (worktrees, the central
+database, status, agent logs) ride the repo-local `.git/info/exclude`, and the
+top-level `.fractal/<branch>/` hides itself with its own ignore file — the
+committed `.gitignore` is never touched. Keep your own ignore patterns anchored
+(`/artifacts/`, not `artifacts/`), or they also match — and silently hide —
+same-named subtrees at any depth, such as a node's committable
 `.fractal/<node>/artifacts/`.
 
 `fractal init` also wires the wiki merge driver: the committed `.gitattributes`
@@ -284,8 +285,9 @@ auto-resolve the generated index sections. Local config does not survive a clone
 — on a fresh clone the attribute is present but the driver is not, and
 `_index.md` merges fall back to git's default and may conflict on generated
 content; run `wiki config --path=wiki` (or `--path=<path>/wiki` for a
-sub-project) to register it (verify with `git config --get merge.wiki.driver`) —
-`fractal init` only wires it when it creates the wiki.
+sub-project, with the configured folder in place of `wiki`) to register it
+(verify with `git config --get merge.wiki.driver`) — `fractal init` only wires
+it when it creates the wiki.
 
 The output includes the project directory (worktree root) and the node data
 directory. Read these from the output to use in later steps (e.g.
@@ -293,8 +295,20 @@ directory. Read these from the output to use in later steps (e.g.
 
 If the output includes Obsidian plugin instructions, relay them to the user —
 installing the listed plugin(s) and running `wiki config --path=<path>` on the
-project wiki (`wiki/`) or memory wiki (`<node_dir>/memory`) lets them browse in
-Obsidian (optional).
+project wiki or memory wiki (`<node_dir>/memory`) lets them browse in Obsidian
+(optional).
+
+The shared project wiki — the one folder every node may commit to regardless of
+its scope — is `wiki/` by default. A project whose `wiki/` holds other content
+names a different folder in a committed `.fractal/.settings.json` (or
+`<path>/.fractal/.settings.json` for a sub-project), whose only key is `wiki`:
+`{"wiki": "docs"}`. The value is a folder relative to the project: never
+absolute, never `.`, with no `..`, no `.fractal`, `.worktrees`, or `.git`
+component, and written canonically (`docs`, not `./docs/`). `fractal init` reads
+the file once and fixes the folder for the whole tree; every node inherits it,
+and a bad value fails init. To change the folder of an existing tree, commit the
+new setting, run `fractal reset <root>` so the tree has no nodes, re-run
+`fractal init`, and commit the baseline with `--init`.
 
 ### Step 2: Define the node
 

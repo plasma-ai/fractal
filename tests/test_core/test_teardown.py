@@ -959,13 +959,26 @@ def test_teardown_locked_preflight_precedes_paused_settle(
     assert run['ended_at'] is None
 
 
-def test_destroy_lifecycle(git_repo: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    argnames=('wiki', 'kept'),
+    argvalues=[
+        pytest.param('wiki', [], id='default'),
+        pytest.param('docs', ['.fractal/.settings.json'], id='docs'),
+    ],
+)
+def test_destroy_lifecycle(
+    tmp_path: pathlib.Path,
+    wiki: str,
+    kept: list[str],
+) -> None:
     """Destroy removes worktrees, branches, node data, and the exclude block.
 
     A paused child rides into the teardown: destroy settles it (kill
     bookkeeping) rather than refusing -- the confirmation authorized
-    discarding its frozen work.
+    discarding its frozen work. The committed project wiki, at its
+    configured folder, and the settings file naming that folder survive.
     """
+    git_repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
     node = Node(git_repo)
     node.init(agent='claude', user=True)
     node.init(name='task')
@@ -975,9 +988,13 @@ def test_destroy_lifecycle(git_repo: pathlib.Path) -> None:
 
     output = Node.destroy(git_repo)
     assert 'Destroyed fractal' in output
+    assert f'Left in place: {wiki}/' in output
     # children, the registry, and the user node's data are all gone
     assert not (git_repo / '.worktrees').exists()
-    assert not (git_repo / '.fractal').exists()
+    remaining = sorted(
+        path.relative_to(git_repo).as_posix() for path in git_repo.glob('.fractal/**/*')
+    )
+    assert remaining == kept
     branches = subprocess.run(
         ['git', 'branch', '--list', 'main.task'],
         cwd=git_repo,
@@ -989,7 +1006,7 @@ def test_destroy_lifecycle(git_repo: pathlib.Path) -> None:
     # the exclude block is stripped; the committed wiki survives
     exclude = git_repo / '.git' / 'info' / 'exclude'
     assert '>>> fractal >>>' not in exclude.read_text(encoding='utf-8')
-    assert (git_repo / 'wiki').is_dir()
+    assert (git_repo / wiki).is_dir()
 
     # destroying again is a clean no-op
     second = Node.destroy(git_repo)

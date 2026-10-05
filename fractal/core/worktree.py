@@ -21,9 +21,13 @@ from fractal.constants import (
     MERGE_LOCK_FILE,
     PROJECT_FOLDER,
     SEED_IGNORE_FILE,
+    SETTINGS_FILE,
+    WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
 from fractal.typing import PathLike
+
+from .config import validate_wiki
 
 __all__ = []
 
@@ -274,6 +278,44 @@ def set_project_path(repo_dir: pathlib.Path, branch: str, project: str) -> None:
     (project_dir / branch).write_text(f'{project}\n', encoding='utf-8')
 
 
+def read_wiki_setting(project_dir: pathlib.Path) -> Optional[str]:
+    """Read the shared project-wiki folder from the project's settings file.
+
+    The tracked ``<project>/.fractal/.settings.json`` is the repository's
+    source of truth for the folder: user init reads it once and fixes the
+    value into the tree's config, which every descendant inherits. The
+    file holds one JSON object whose only key is ``wiki``, so a misspelled
+    key fails rather than silently reading as the default.
+
+    Args:
+        project_dir: The project's directory in the user node's worktree.
+
+    Returns:
+        The validated folder, relative to the project, or ``None`` when the
+        file or its ``wiki`` key is absent.
+
+    Raises:
+        ValueError: If the file is not a JSON object, carries an unknown
+            key, or names an invalid folder.
+
+    """
+    path = project_dir / FRACTAL_FOLDER / SETTINGS_FILE
+    if not path.is_file():
+        return None
+    try:
+        settings = json.loads(path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as e:
+        raise ValueError(f'{path} is not valid JSON: {e}') from e
+    if not isinstance(settings, dict):
+        raise ValueError(f'{path} must hold a JSON object.')
+    unknown = sorted(set(settings) - {'wiki'})
+    if unknown:
+        raise ValueError(f"{path} has unknown keys {unknown} (valid keys: ['wiki']).")
+    if 'wiki' not in settings:
+        return None
+    return validate_wiki(settings['wiki'], source=f'"wiki" in {path}')
+
+
 def exclude_update(repo_dir: pathlib.Path) -> None:
     """Write fractal's ignore patterns into the repo-local ``info/exclude``.
 
@@ -497,11 +539,13 @@ def ensure_project_wiki(
     repo_dir: pathlib.Path,
     path: str,
     name: str,
+    *,
+    wiki: str = WIKI_FOLDER,
 ) -> bool:
     """Create the project wiki if missing; report whether it was created.
 
-    The wiki lives at ``<worktree>/wiki`` (repo root) or
-    ``<worktree>/<project>/wiki`` (sub-project). ``name`` is the validated
+    The wiki lives at ``<worktree>/<wiki>`` (repo root) or
+    ``<worktree>/<project>/<wiki>`` (sub-project). ``name`` is the validated
     display name; the wiki is seeded with the strict ASCII-identifier
     naming policy. A failed ``wiki init`` is surfaced, not swallowed, and
     a pre-existing directory that is not a wiki is refused, never adopted.
@@ -512,6 +556,7 @@ def ensure_project_wiki(
             derived-name adjustment).
         path: Project path (``.`` for the repo root).
         name: Validated wiki display name.
+        wiki: Validated wiki folder, relative to the project.
 
     Returns:
         ``True`` if the wiki was created, ``False`` if it already existed.
@@ -519,9 +564,9 @@ def ensure_project_wiki(
     """
     # resolve the project wiki directory
     if path == '.':
-        wiki_dir = worktree / 'wiki'
+        wiki_dir = worktree / wiki
     else:
-        wiki_dir = worktree / path / 'wiki'
+        wiki_dir = worktree / path / wiki
     if (wiki_dir / '_index.md').exists():
         # an adopted index that lacks the tool's frontmatter stamps is flagged,
         # not rewritten (init leaves tracked files alone): siblings forking
@@ -551,7 +596,7 @@ def ensure_project_wiki(
         return False
     # refuse to adopt a pre-existing docs directory: `wiki init` rewrites
     # every page under its root (frontmatter, generated indexes), so a
-    # user's own wiki/ fails loud here instead of being silently rewritten;
+    # user's own folder fails loud here instead of being silently rewritten;
     # an empty dir or one carrying the .wiki marker is a partial prior
     # init, repaired in place
     foreign = wiki_dir.is_dir() and not (wiki_dir / '.wiki').exists()

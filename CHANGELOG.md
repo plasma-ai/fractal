@@ -7,6 +7,24 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Added
+
+- The shared project-wiki folder — the one folder every node commits to
+  regardless of its scope — is a setting. A project names it in a committed
+  `<project>/.fractal/.settings.json` (`{"wiki": "docs"}`, relative to the
+  project; `wiki` is the file's only key). `fractal init` reads the file once
+  and records the folder as the user node's immutable `wiki` config key, every
+  spawned node inherits it, and `fractal commit --init` commits the file beside
+  the wiki. The folder drives the commit scope exemption and the merge footprint
+  check, the commit-time and merge-time index refresh, the `node init` base-ref
+  precondition, `$WIKI_DIR` in node prompts, the seeded `lint.sh`, the
+  unmerged-work check of `node delete`, and the `destroy` report. A folder that
+  is absolute, `.`, carries a `..`, `.fractal`, `.worktrees`, or `.git`
+  component, or is not canonical refuses init, and a hand-edited bad value fails
+  every commit and merge scope check. A re-init adopts a changed setting only
+  once the tree has no nodes (`fractal reset` first). With no file the folder is
+  `wiki/` and no config records the key.
+
 ### Changed
 
 - The packaged codex node seed turns both sub-agent features (`multi_agent` and

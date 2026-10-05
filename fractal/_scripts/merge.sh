@@ -861,11 +861,12 @@ fi
 # a failed refresh restores the parent exactly like a conflict
 if command -v wiki &>/dev/null; then
     PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo ".")
+    PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null || true)
     if [[ "$PARENT_PROJECT" == "." ]]; then
-        WIKI_DIR="$PARENT_WORKTREE_DIR/wiki"
+        WIKI_DIR="$PARENT_WORKTREE_DIR/${PARENT_WIKI:-wiki}"
         MEMORY_DIR="$PARENT_WORKTREE_DIR/.fractal/$PARENT_BRANCH/memory"
     else
-        WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/wiki"
+        WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/${PARENT_WIKI:-wiki}"
         MEMORY_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/.fractal/$PARENT_BRANCH/memory"
     fi
     for INDEX_DIR in "$WIKI_DIR" "$MEMORY_DIR"; do

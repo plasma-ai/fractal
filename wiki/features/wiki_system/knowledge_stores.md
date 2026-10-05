@@ -20,7 +20,9 @@ Every node works with two wikis, distinguished by audience:
   root (or `<project>/wiki` when the node targets a sub-project of the repo) and
   is git-tracked, so it travels with the branch: other nodes see its content
   only through merges. It holds architecture, conventions, and durable
-  project-wide knowledge.
+  project-wide knowledge. A project whose `wiki/` holds other content names
+  another folder in its tracked `.fractal/.settings.json` (`{"wiki": "docs"}`);
+  see [[#The project wiki folder]].
 - **Memory** â€” the node's private knowledge base, a second wiki at `memory/`
   inside the node's data directory (`.fractal/<branch>/memory`). Only the owning
   node reads it; merge-up strips the node seed, so memory never reaches the
@@ -63,7 +65,27 @@ node's memory before linting and staging, and a failed update fails the commit â
 a broken wiki must never land. Backstop saves (`--force`) and the baseline
 commit (`--init`) skip the refresh, since a fail-safe save must never block. The
 project wiki is always committable regardless of the node's scope: scoped
-commits admit `wiki/` alongside the scope directories.
+commits admit the project wiki alongside the scope directories.
+
+## The project wiki folder
+
+The folder is one setting per tree. `fractal init` reads the project's tracked
+`<project>/.fractal/.settings.json` once, before writing anything
+(`worktree.read_wiki_setting`), and records its `wiki` value in the user node's
+config; every spawn copies the parent's value through `init.sh --wiki`, and
+`Node.wiki_prefix` resolves it against each node's project. The file is the
+repository's source of truth -- committed with the project, so no launch flag
+can be forgotten -- and nodes never read it again: a node editing its own copy
+changes nothing, and merge restores the target's `.fractal/` so the edit never
+lands. Everything that names the project wiki reads the recorded folder: the
+commit scope exemption and the merge footprint check (one law,
+`commit.scope_boundaries`), the commit-time and merge-time index refresh, the
+`node init` base-ref precondition, `WIKI_DIR`, the seeded `lint.sh`, the
+unmerged-work check of `node delete`, and the `destroy` report. The wiki CLI,
+the `merge=wiki` driver, the tool's `.wiki/` state directory, and the memory
+wiki keep their names. With no setting the folder is `wiki` and no config
+records the key, so a project that never names one behaves exactly as before the
+setting existed.
 
 ## Routing knowledge
 

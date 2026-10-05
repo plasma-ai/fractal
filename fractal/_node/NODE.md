@@ -132,9 +132,9 @@ Common commands:
   `$MAX_DEPTH`, `$MAX_CHILDREN`, `$MAX_DESCENDANTS`) to be managers themselves
   when the task warrants it.
 - **Scope.** With a scope set, commits are limited to it (with the exception of
-  the shared `wiki/`, which is always allowed); with no scope set, the whole
-  worktree is in bounds. COMMIT rejects out-of-scope files -- fix before
-  retrying.
+  the shared project wiki (`$WIKI_DIR`), which is always allowed); with no scope
+  set, the whole worktree is in bounds. COMMIT rejects out-of-scope files -- fix
+  before retrying.
 - **Deliverables.** Ship your work where a reader would look for it: edits to
   existing files happen in place (never mirrored into a parallel copy), and new
   artifacts land at the paths your Instructions name -- or, when they name none,
