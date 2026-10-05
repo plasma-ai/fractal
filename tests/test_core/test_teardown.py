@@ -7,6 +7,7 @@ pruning, and the full destroy/reset lifecycles.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
@@ -57,6 +58,7 @@ __all__ = [
     'test_destroy_rejects_from_inside_worktree',
     'test_teardown_locked_preflight_precedes_paused_settle',
     'test_destroy_lifecycle',
+    'test_destroy_survives_an_invalid_stored_wiki',
     'test_destroy_rejects_an_unknown_tree',
     'test_teardown_guards_travel_with_the_scope',
     'test_destroy_prunes_phantom_node_branches',
@@ -959,13 +961,26 @@ def test_teardown_locked_preflight_precedes_paused_settle(
     assert run['ended_at'] is None
 
 
-def test_destroy_lifecycle(git_repo: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    argnames=('wiki', 'kept'),
+    argvalues=[
+        pytest.param('wiki', [], id='default'),
+        pytest.param('docs', ['.fractal/.settings.json'], id='docs'),
+    ],
+)
+def test_destroy_lifecycle(
+    tmp_path: pathlib.Path,
+    wiki: str,
+    kept: list[str],
+) -> None:
     """Destroy removes worktrees, branches, node data, and the exclude block.
 
     A paused child rides into the teardown: destroy settles it (kill
     bookkeeping) rather than refusing -- the confirmation authorized
-    discarding its frozen work.
+    discarding its frozen work. The committed project wiki, at its
+    configured folder, and the settings file naming that folder survive.
     """
+    git_repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
     node = Node(git_repo)
     node.init(agent='claude', user=True)
     node.init(name='task')
@@ -975,9 +990,14 @@ def test_destroy_lifecycle(git_repo: pathlib.Path) -> None:
 
     output = Node.destroy(git_repo)
     assert 'Destroyed fractal' in output
+    assert f'Left in place: {wiki}/' in output
     # children, the registry, and the user node's data are all gone
     assert not (git_repo / '.worktrees').exists()
-    assert not (git_repo / '.fractal').exists()
+    remaining = sorted(
+        path.relative_to(git_repo).as_posix() for path in git_repo.glob('.fractal/**/*')
+    )
+    assert remaining == kept
+    assert (git_repo / '.fractal').exists() is bool(kept)
     branches = subprocess.run(
         ['git', 'branch', '--list', 'main.task'],
         cwd=git_repo,
@@ -989,11 +1009,32 @@ def test_destroy_lifecycle(git_repo: pathlib.Path) -> None:
     # the exclude block is stripped; the committed wiki survives
     exclude = git_repo / '.git' / 'info' / 'exclude'
     assert '>>> fractal >>>' not in exclude.read_text(encoding='utf-8')
-    assert (git_repo / 'wiki').is_dir()
+    assert (git_repo / wiki).is_dir()
 
     # destroying again is a clean no-op
     second = Node.destroy(git_repo)
     assert 'Nothing to destroy' in second
+
+
+def test_destroy_survives_an_invalid_stored_wiki(git_repo: pathlib.Path) -> None:
+    """A hand-edited invalid ``wiki`` key never blocks the teardown.
+
+    Every other read of the folder validates it and fails loudly, but
+    destroy needs it only for the report's "Left in place" line, so the
+    teardown runs to completion and the line falls back to the default.
+    """
+    node = Node(git_repo)
+    node.init(agent='claude', user=True)
+    node.init(name='task')
+    config = json.loads(node.config.path.read_text(encoding='utf-8'))
+    config['wiki'] = '../outside'
+    node.config.path.write_text(json.dumps(config, indent=2), encoding='utf-8')
+
+    output = Node.destroy(git_repo)
+    assert 'Destroyed fractal' in output
+    assert 'Left in place: wiki/' in output
+    assert not (git_repo / '.worktrees').exists()
+    assert not (git_repo / '.fractal').exists()
 
 
 def test_destroy_rejects_an_unknown_tree(git_repo: pathlib.Path) -> None:

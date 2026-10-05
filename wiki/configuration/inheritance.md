@@ -38,6 +38,13 @@ via `--inherit`.
   parent cannot opt back into pushing, and the flag is latched once set.
 - **`project`** -- the child works in the parent's project unless its `--path`
   selects another sub-project.
+- **`wiki`** -- the shared project-wiki folder, immutable after init. A child in
+  its parent's project copies the parent's value (absent stays absent, meaning
+  `wiki`); a child that selects another sub-project takes that project's own
+  setting. Either way the spawn reads the setting committed on the tree's root
+  branch, never a node's checkout, and refuses when it contradicts the copied
+  value, so one project's nodes always use one folder; a changed setting reaches
+  a tree only through `fractal reset` and a re-init.
 - **Agent config directories** -- each node data directory carries a config dir
   per supported agent backend (the agent CLI's settings file plus a skills
   link), recreated at every init and gitignored. A template's `agents/<agent>/`

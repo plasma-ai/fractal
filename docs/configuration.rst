@@ -23,8 +23,9 @@ Each node's config sits inside its data directory:
   (with the same monorepo project prefix), beside the tree's central
   database.
 
-``fractal node init`` writes every key in the schema except ``user`` and
-``clone_dirs``, storing unset keys as JSON ``null``. A freshly created node
+``fractal node init`` writes every key in the schema except ``user``,
+``clone_dirs``, and ``wiki`` (written only when the tree names a project-wiki
+folder), storing unset keys as JSON ``null``. A freshly created node
 titled "Build the parser" looks like:
 
 .. code-block:: json
@@ -65,7 +66,8 @@ titled "Build the parser" looks like:
 
 The user node's config is minimal — ``{"user": true, "project": ".",
 "root": "<branch>"}`` plus optional ``agent``/``provider`` defaults that
-children inherit. The user node has no loop, so the run-parameter keys never
+children inherit, and ``wiki`` when the project names its wiki folder (see
+`The project wiki folder`_). The user node has no loop, so the run-parameter keys never
 apply to it.
 
 Reads hit disk on every access (nothing is cached), so edits from other
@@ -200,7 +202,7 @@ silently no-ops. Per key:
      - Pinned at loop boot — the edit reaches the next ``start``/``resume``,
        never a run already in flight (a mid-run edit cannot flip a run's
        mode composition).
-   * - ``root``, ``user``, ``project``
+   * - ``root``, ``user``, ``project``, ``wiki``
      - Immutable.
 
 A malformed mid-run edit warns on the loop's stderr and keeps the prior
@@ -231,6 +233,13 @@ Plain values
      - inherited (``.`` at the repo root)
      - Project sub-path within the worktree, for monorepos. **Immutable**
        (see `Immutable keys`_).
+   * - ``wiki``
+     - absent (``wiki``); inherited
+     - The shared project-wiki folder, relative to the project: the one
+       folder a node commits to regardless of its ``scope``, refreshed at
+       each commit and merge. Read from the project's tracked settings file
+       at ``fractal init`` and inherited by every node in the same project;
+       no flag sets it. **Immutable** (see `The project wiki folder`_).
    * - ``root``
      - inherited from the parent
      - The tree's root branch. Every node carries it to resolve the central
@@ -442,19 +451,22 @@ Inheritance at spawn
 
 ``root`` is always inherited from the parent, and ``project`` is inherited by
 default (``node init --path <sub-project>`` selects a different sub-project
-for the child; either way the key is immutable after init); ``agent`` and
-``provider`` resolve through the nearest ancestor that sets them; a ``local``
-parent forces ``local`` children. A spawn with ``--template`` fills the
-budget, limit, duration, model, and mode keys its flags left unset from the
-template's ``config.json`` preset — a flag wins over the preset, and the
-preset beats an inherited value (see :doc:`/cli/node`). Everything else
-defaults fresh unless the spawn passes ``--inherit config``, which copies the
-parent's *preference* keys — ``model``, ``effort``, ``sync``, ``detached``,
-``iter_timeout``, ``step_timeout``, ``step_retries``, ``step_retry_backoff``,
-``wait``, and ``sleep``/``interval`` (only when the spawn sets neither) — as a
-spawn-time snapshot. Budget-class keys (the cost caps, ``max_iters``, the
-width/depth caps, and the run ``timeout``) never inherit; each node's budgets
-are set deliberately. See :doc:`/cli/node` for the ``--inherit`` surface.
+for the child; either way the key is immutable after init); ``wiki`` is
+inherited by a child in its parent's project and read from the selected
+project's own settings file otherwise (see `The project wiki folder`_);
+``agent`` and ``provider`` resolve through the nearest ancestor that sets
+them; a ``local`` parent forces ``local`` children. A spawn with
+``--template`` fills the budget, limit, duration, model, and mode keys its
+flags left unset from the template's ``config.json`` preset — a flag wins over
+the preset, and the preset beats an inherited value (see :doc:`/cli/node`).
+Everything else defaults fresh unless the spawn passes ``--inherit config``,
+which copies the parent's *preference* keys — ``model``, ``effort``, ``sync``,
+``detached``, ``iter_timeout``, ``step_timeout``, ``step_retries``,
+``step_retry_backoff``, ``wait``, and ``sleep``/``interval`` (only when the
+spawn sets neither) — as a spawn-time snapshot. Budget-class keys (the cost
+caps, ``max_iters``, the width/depth caps, and the run ``timeout``) never
+inherit; each node's budgets are set deliberately. See :doc:`/cli/node` for
+the ``--inherit`` surface.
 
 Immutable keys
 --------------
@@ -475,10 +487,74 @@ These keys are fixed at init and can never be changed:
     ``.worktrees/``; the track/untrack, lint, and merge machinery all read
     it, so a post-init change would desync them from the real paths.
 
+``wiki``
+    Fixes the folder every commit and merge admits regardless of scope. A
+    post-init change would let a node widen its own boundary, and would
+    split one project's nodes across two wiki folders.
+
 The public ``fractal node config set`` refuses these keys outright — even a
 first write (so ``config set user=true`` cannot turn a child into a root
 node). Only the internal bootstrap path used by ``node init`` seeds them, and
 even that path admits only the initial write, never a change.
+
+The project wiki folder
+-----------------------
+
+The shared project wiki lives at ``<project>/wiki/`` by default. A project
+whose ``wiki/`` holds other content names a different folder in a tracked
+settings file at ``<project>/.fractal/.settings.json``:
+
+.. code-block:: json
+
+   {
+     "wiki": "docs"
+   }
+
+The file is the repository's source of truth, committed with the project, so
+no operator flag can be forgotten. ``wiki`` is its only key — any other key
+refuses, so a typo cannot read as the default. The default folder is spelled
+by omitting the key (or the file), never by setting it to ``null``, which
+refuses. No node's ``config.json``, user or child, records ``wiki`` for the
+default: a child's config stores ``null`` for its other unset keys but omits
+``wiki``. ``fractal init`` reads the file before it writes anything and
+records the folder as the user node's ``wiki`` key; ``fractal commit --init``
+commits the file beside the wiki, and refuses a file naming another folder
+than the one recorded. Each spawn reads the setting committed on the tree's
+root branch, never a node's checkout, so a node editing its own copy changes
+nothing (``merge`` restores the target's ``.fractal/``, so such an edit never
+lands either):
+
+- a child in its parent's project copies the parent's value, and the spawn
+  refuses when the root branch's setting names another folder — a setting
+  committed after the tree recorded its folder — naming the remedy;
+- a child that selects another sub-project takes that project's own setting
+  (``wiki/`` when it has none), so each project's folder holds whichever tree
+  spawns into it.
+
+The merge footprint check applies the same two rules again before it judges
+a squash: a node whose ``config.json`` was edited by hand to name another
+valid folder would otherwise move its own scope exemption, so the merge
+refuses, naming both folders. A child in its parent's project is held to the
+parent's recorded folder, which never changes. A child in another
+sub-project (or one whose parent is checked out nowhere) is held to the
+setting committed on the root branch as it stands at the merge, so
+committing a new folder for that project after the spawn refuses the merge
+too; the refusal names the setting, and the remedy is to commit the
+recorded folder back on the root branch, or to delete the node and spawn it
+again to adopt the new one.
+
+The folder decides the scope exemption in ``fractal commit`` and the merge
+footprint check, the commit-time and merge-time index refresh, the base-ref
+precondition of ``fractal node init`` (``<folder>/_index.md`` must be
+committed), ``$WIKI_DIR`` in node prompts, the seeded ``lint.sh``, the
+unmerged-work check of ``node delete``, and the ``destroy`` report. With no
+file, every one of them uses ``wiki/`` and no config gains a ``wiki`` key.
+
+A tree records its folder when it is created. To switch a running tree to a
+new folder, commit the new setting, run ``fractal reset <root>`` (the tree's
+history survives), re-run ``fractal init``, and commit the baseline with
+``--init``. A re-init over live nodes refuses. An absent setting and one
+naming ``wiki`` are the same folder, so neither counts as a switch.
 
 The cleanup reserve
 -------------------
@@ -530,7 +606,12 @@ It rejects:
 - ``interval`` and ``sleep`` both set, or ``iter_timeout`` exceeding
   ``interval``;
 - absolute paths, ``..`` components, or non-canonical spellings (``./src``,
-  ``src/``) in ``scope`` or ``clone_dirs``, and ``.`` in ``clone_dirs``.
+  ``src/``) in ``scope`` or ``clone_dirs``, and ``.`` in ``clone_dirs``;
+- a ``wiki`` folder that is not a non-empty string, is absolute, carries a
+  ``..`` component, is ``.`` or ``null``, is not canonical, or has a
+  ``.fractal``, ``.worktrees``, or ``.git`` component (compared
+  case-insensitively). Every commit and merge scope check re-validates the
+  stored value too.
 
 Per-step overrides
 ------------------

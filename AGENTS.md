@@ -487,10 +487,10 @@ See `pyproject.toml` for formatter/linter config.
   frozen work), while `delete` — agent-reachable — refuses over them.
 - **Project-files surface:** `node.files` (the `Files` facade in
   `core/files.py`) exposes a node's work product to consumers: git-tracked files
-  including `wiki/` and `.fractal/` (consumers filter or collapse machinery;
-  only `.git`/`.worktrees` components are structurally unreachable, matched
-  casefolded). A `since` listing is the node's own contribution — files its own
-  first-parent, no-merge commits touched (merged-in content never lists;
+  including the project wiki and `.fractal/` (consumers filter or collapse
+  machinery; only `.git`/`.worktrees` components are structurally unreachable,
+  matched casefolded). A `since` listing is the node's own contribution — files
+  its own first-parent, no-merge commits touched (merged-in content never lists;
   per-worktree `user.name` identity backs future author attribution) with net
   diff counts — and `Files.history` is the same walk per file. Anchors
   (`base`/`commit`/`iteration`/`run`) resolve from the node's own record — init

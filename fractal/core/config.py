@@ -10,7 +10,12 @@ import typing
 from typing import Any, Optional
 
 import fractal.util
-from fractal.constants import CONFIG_FILE, LOCK_FILE
+from fractal.constants import (
+    CONFIG_FILE,
+    FRACTAL_FOLDER,
+    LOCK_FILE,
+    WORKTREES_FOLDER,
+)
 
 if typing.TYPE_CHECKING:
     from .node import Node
@@ -22,6 +27,7 @@ KEYS = (
     'title',
     'user',
     'project',
+    'wiki',
     'root',
     'scope',
     'clone_dirs',
@@ -104,8 +110,10 @@ DURATION_KEYS = (
 # tree, 'user' marks node identity (flipping it would let a root branch be
 # started as a loop), 'project' fixes the on-disk layout the immutable
 # .worktrees/.project cache mirrors (track/untrack, lint.sh, and merge.sh
-# all read it -- a post-init change desyncs them from the real paths)
-IMMUTABLE_KEYS = ('root', 'user', 'project')
+# all read it -- a post-init change desyncs them from the real paths), and
+# 'wiki' fixes the folder every commit admits regardless of scope (a
+# post-init change would let a node widen its own boundary)
+IMMUTABLE_KEYS = ('root', 'user', 'project', 'wiki')
 
 # default cleanup reserve as a fraction of max_cost
 DEFAULT_RESERVE_FRACTION = 0.10
@@ -183,6 +191,62 @@ def parse_reserve_budget(
     # (10% of $6) would otherwise persist binary noise into config.json
     # and every echo that quotes it
     return round(reserve, RESERVE_PRECISION)
+
+
+def validate_wiki(value: Any, source: str) -> str:
+    """Validate a shared project-wiki folder setting.
+
+    The folder is committable regardless of a node's scope, so it must
+    name a canonical subdirectory of the project -- the commit boundary
+    is a literal prefix match against git's canonical paths -- and stay
+    clear of fractal's own machinery: a ``.`` would exempt the whole
+    project, and a ``.fractal``, ``.worktrees``, or ``.git`` component
+    (casefolded, as the files surface matches them) would admit the
+    control plane. A folder named ``null`` is refused too: ``config _set``
+    reads that value as clearing the key, so a spawn would record the
+    default instead.
+
+    Args:
+        value: The configured folder, relative to the project path.
+        source: The setting's name in the error (the config key, or the
+            settings file it was read from).
+
+    Returns:
+        The validated folder.
+
+    Raises:
+        ValueError: If ``value`` is not a non-empty string, is absolute,
+            has a ``..`` component, is ``.``, is not canonical, has a
+            machinery component, or is ``null``.
+
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f'{source} must be a non-empty folder name, not {value!r}.')
+    rel = pathlib.PurePosixPath(value)
+    if rel.is_absolute() or '..' in rel.parts:
+        raise ValueError(
+            f'{source} must be a project-relative folder, not {value!r}'
+            ' (no absolute or ".." paths).'
+        )
+    if not rel.parts:
+        raise ValueError(f'{source} must name a subdirectory, not {value!r}.')
+    if value != rel.as_posix():
+        raise ValueError(
+            f'{source} must be canonical, not {value!r}'
+            f' (write it as {rel.as_posix()!r}).'
+        )
+    reserved = (FRACTAL_FOLDER, WORKTREES_FOLDER, '.git')
+    if any(part.casefold() in reserved for part in rel.parts):
+        raise ValueError(
+            f'{source} must stay outside fractal machinery, not {value!r}'
+            f' (no {", ".join(reserved)} component).'
+        )
+    if value == 'null':
+        raise ValueError(
+            f'{source} cannot be {value!r}, which a config value reads as'
+            ' clearing the key.'
+        )
+    return value
 
 
 class Config:
@@ -332,8 +396,10 @@ class Config:
         warms), a non-canonical list-key spelling (``./src``, ``src/`` --
         the setters store canonical form, so only a hand-edit lands one,
         and the literal prefix match would refuse every scoped commit),
-        and a ``.`` cache dir (which would clone the whole checkout
-        -- as a scope root it is legal, naming the project itself).
+        a ``.`` cache dir (which would clone the whole checkout
+        -- as a scope root it is legal, naming the project itself), and
+        a ``wiki`` folder :func:`validate_wiki` refuses (the folder every
+        commit admits regardless of scope).
 
         Args:
             config: The config mapping to validate; the stored
@@ -515,6 +581,12 @@ class Config:
                         )
             else:
                 raise ValueError(f'{key} must be a list of strings.')
+        # the shared project wiki is committable regardless of scope, so its
+        # folder must stay a canonical project subdirectory (any JSON type
+        # can land here via a hand-edit, as above)
+        wiki = config.get('wiki')
+        if wiki is not None:
+            validate_wiki(wiki, source='wiki')
 
     def reconcile(self: Config) -> dict[str, tuple[Any, Any]]:
         """Reconcile the registry cap row to this node's config file.

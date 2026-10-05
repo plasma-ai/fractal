@@ -50,6 +50,7 @@ _CONFIG_ORDER = (
     'title',
     'user',
     'project',
+    'wiki',
     'scope',
     'clone_dirs',
     'base',

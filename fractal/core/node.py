@@ -37,6 +37,7 @@ from fractal.constants import (
     STATUS_FILE,
     STATUSES,
     STEP_PGID_FILE,
+    WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
 from fractal.typing import PathLike
@@ -47,6 +48,7 @@ from .config import (
     RESERVE_PRECISION,
     Config,
     parse_reserve_budget,
+    validate_wiki,
 )
 from .cost import Cost
 from .db import Database
@@ -292,6 +294,24 @@ class Node:
         absent for a repo-root project, which reads as ``'.'``.
         """
         return worktree.project_path(self.repo_dir, self.branch)
+
+    @property
+    def wiki_prefix(self: Node) -> str:
+        """Return the worktree-relative shared project-wiki folder.
+
+        The ``wiki`` config key (fixed at user init from the project's
+        tracked ``.fractal/.settings.json`` and inherited by every
+        descendant) names the folder relative to the project, ``wiki`` when
+        absent. Validated on every read, so a hand-edited value fails the
+        commit and merge scope checks loudly instead of moving the
+        boundary.
+        """
+        wiki = self.config.get('wiki')
+        if wiki is None:
+            wiki = WIKI_FOLDER
+        validate_wiki(wiki, source='wiki')
+        project = self.project_path
+        return wiki if project == '.' else f'{project}/{wiki}'
 
     @property
     def parent(self: Node) -> Optional[Node]:
@@ -1305,19 +1325,19 @@ class Node:
         # file per branch, plus a .lock suffix) -- checkable only now
         # that the parent is resolved
         worktree.validate_name(name, parent_branch=parent.branch)
+        # a non-root path names the child's project (default: inherit); a
+        # .worktrees/ path is the cwd-in-a-worktree case -- inherit too
+        child_project = parent.project_path
+        if path is not None and path != '.':
+            parts = pathlib.Path(path).parts
+            if parts[0] != WORKTREES_FOLDER:
+                child_project = path
         # a meta node's scope is the target's seed dir, spelled relative to the
         # child's own project (scope roots resolve against a node's project):
         # bare when the two share a project, prefixed with the target's project
         # from the repo root, and unreachable from any other project
         if meta:
             target_project = worktree.project_path(self.repo_dir, meta)
-            # a non-root path names the child's project (default: inherit); a
-            # .worktrees/ path is the cwd-in-a-worktree case -- inherit too
-            child_project = parent.project_path
-            if path is not None and path != '.':
-                parts = pathlib.Path(path).parts
-                if parts[0] != WORKTREES_FOLDER:
-                    child_project = path
             if child_project == target_project:
                 scope = [f'{FRACTAL_FOLDER}/{meta}']
             elif child_project == '.':
@@ -1340,6 +1360,28 @@ class Node:
         # the child records the tree's root (inherited from the parent) so any
         # node can resolve the central database from its own config
         root = parent.config.get('root')
+        # the shared project-wiki folder follows the spawn rule the merge
+        # re-checks: the parent's value in its own project, else the child's
+        # project's setting as committed on the root branch (never a node's
+        # editable checkout); in the parent's project, a root branch naming
+        # another folder than the tree recorded refuses
+        wiki = _child_wiki(parent, child_project)
+        if child_project == parent.project_path:
+            if wiki is not None:
+                validate_wiki(wiki, source='wiki')
+            committed = worktree.committed_wiki_setting(
+                self.repo_dir,
+                ref=root,
+                project=child_project,
+            )
+            if (committed or WIKI_FOLDER) != (wiki or WIKI_FOLDER):
+                raise ValueError(
+                    f'The project wiki setting committed on {root!r} names'
+                    f' {committed or WIKI_FOLDER!r}, but the tree recorded'
+                    f' {wiki or WIKI_FOLDER!r}; commit the recorded'
+                    f' setting on {root!r}, or run `fractal reset {root}` and'
+                    ' re-run `fractal init` to adopt the committed one.'
+                )
         # compose the child branch and probe its pre-existing ref now: the template
         # read below forks from the branch's own tip on a --reset, and the failure
         # rollback must never delete a reused branch's committed history
@@ -1680,6 +1722,8 @@ class Node:
             args.append(f'--title={title}')
             args.append(f'--parent={parent.branch}')
             args.append(f'--root={root}')
+            if wiki is not None:
+                args.append(f'--wiki={wiki}')
             # a non-root path selects the child's sub-project (default: inherit); a
             # .worktrees/ path is the cwd-in-a-worktree case above -- inherit too
             if path is not None and path != '.':
@@ -2019,6 +2063,10 @@ class Node:
         # ASCII identifier) up front so a bad dir name fails before any partial
         # init is written; it doubles as the wiki name
         wiki_name = worktree.derive_project_name(self.repo_dir)
+        # read the shared project-wiki folder from the project's tracked
+        # settings file up front, for the same reason; absent, the tree uses
+        # the default folder and its config records nothing
+        wiki_folder = worktree.read_wiki_setting(self._root / path)
         # resolve the default agent against the registry up front, for the
         # same reason -- a typo'd name would store fine, every spawn would
         # inherit it, and each start's loop would die on a vanishing tmux
@@ -2032,6 +2080,33 @@ class Node:
         # prior init (config.json written before db/radio/wiki) is repaired
         # on re-run -- db.init and radio.init are both idempotent
         if self.is_user:
+            # the folder is fixed at init (every node inherits it as its scope
+            # exemption), so a changed setting is adopted only while the tree
+            # has no node worktrees -- a live node would keep the old folder;
+            # an absent setting and one naming the default are the same folder
+            recorded = self.config.get('wiki')
+            adopted = (wiki_folder or WIKI_FOLDER) != (recorded or WIKI_FOLDER)
+            if adopted:
+                nodes = [
+                    checkout
+                    for checkout in fractal.util.git.worktree_map(self.repo_dir)
+                    if checkout.startswith(f'{branch}.')
+                ]
+                if nodes:
+                    raise ValueError(
+                        f'The project wiki setting names'
+                        f' {wiki_folder or WIKI_FOLDER!r}, but the tree on'
+                        f' {branch!r} recorded {recorded or WIKI_FOLDER!r} and'
+                        f' still has nodes; run `fractal reset {branch}` and'
+                        ' re-run init to adopt it.'
+                    )
+                config = self.config.load()
+                if wiki_folder is None:
+                    config.pop('wiki', None)
+                else:
+                    config['wiki'] = wiki_folder
+                text = json.dumps(config, indent=2)
+                fractal.util.filesystem.write_atomic(self.config.path, text + '\n')
             if agent is not None:
                 self.config.set('agent', agent)
             if provider is not None:
@@ -2046,10 +2121,13 @@ class Node:
                 repo_dir=self.repo_dir,
                 path=path,
                 name=wiki_name,
+                wiki=wiki_folder or WIKI_FOLDER,
             )
             # re-check host hooks for the formatter lanes (informational)
             worktree.verify_hook_formatters(self.repo_dir)
             message = f'User node already initialized on branch {branch!r}.'
+            if adopted:
+                message += f' Adopted the project wiki folder {self.wiki_prefix!r}.'
             if agent is not None:
                 message += f' Updated default agent to {agent}.'
             if provider is not None:
@@ -2101,14 +2179,14 @@ class Node:
             config['agent'] = agent
         if provider is not None:
             config['provider'] = provider
+        if wiki_folder is not None:
+            config['wiki'] = wiki_folder
         config_path = node_dir / CONFIG_FILE
         text = json.dumps(config, indent=2)
         fractal.util.filesystem.write_atomic(config_path, text + '\n')
         # resolve the seed and wiki paths (sub-project nodes nest under <project>/)
-        if path == '.':
-            seed, wiki = FRACTAL_FOLDER, 'wiki'
-        else:
-            seed, wiki = f'{path}/{FRACTAL_FOLDER}', f'{path}/wiki'
+        seed = FRACTAL_FOLDER if path == '.' else f'{path}/{FRACTAL_FOLDER}'
+        wiki = self.wiki_prefix
         # ensure git excludes -- the static block covers the runtime artifacts
         # init creates outside the node dir (.worktrees/ above all)
         worktree.exclude_update(self.repo_dir)
@@ -2121,6 +2199,7 @@ class Node:
             repo_dir=self.repo_dir,
             path=path,
             name=wiki_name,
+            wiki=wiki_folder or WIKI_FOLDER,
         )
         # check host hooks for the formatter lanes (informational)
         worktree.verify_hook_formatters(self.repo_dir)
@@ -4013,6 +4092,65 @@ class Node:
         # the CompletedProcess -- return them beside the output
         return result.stdout.strip(), result.stderr.strip()
 
+    def check_wiki(self: Node) -> None:
+        """Refuse a recorded project-wiki folder other than the one spawn gave.
+
+        The ``wiki`` key is immutable through the config setters, but a raw
+        edit of ``config.json`` to another valid folder would move the
+        node's scope exemption, and its squash would then land pages under
+        that folder. The merge footprint check calls this first: it
+        recomputes the folder by the rule :meth:`init` applied (the
+        parent's folder in the parent's project, else the child's project's
+        setting committed on the root branch) and refuses a node that
+        records another. An edited parent is caught by its own merge.
+
+        A setting committed on the root branch is read as it stands now, so
+        a node checked against it is also refused when the setting changed
+        after its spawn; that refusal names the setting, since restoring
+        ``config.json`` to the new folder would itself move the exemption.
+
+        Raises:
+            ValueError: If the recorded folder differs, naming both.
+
+        """
+        root = self.config.get('root')
+        # the tree's user node resolves by the repo's record, not the
+        # checkout: a root checked out in a linked worktree carries no
+        # self-ignored seed there, so its folder would read as the default
+        if self.branch.rsplit('.', 1)[0] == root:
+            parent = Node.resolve_user(self.repo_dir, name=root)
+        else:
+            parent = self.parent
+        if parent is not None:
+            expected = _child_wiki(parent, self.project_path)
+        else:
+            # the parent is checked out nowhere (a --base merge into another
+            # tree's root can leave it so); spawn held the parent's folder to
+            # the setting committed on the root branch, so that one stands in
+            expected = worktree.committed_wiki_setting(
+                self.repo_dir,
+                ref=root,
+                project=self.project_path,
+            )
+        expected = expected or WIKI_FOLDER
+        recorded = self.config.get('wiki') or WIKI_FOLDER
+        if recorded == expected:
+            return
+        if parent is not None and parent.project_path == self.project_path:
+            raise ValueError(
+                f'{self.branch} records {recorded!r} as its project wiki folder,'
+                f' but its spawn gives {expected!r}; the folder is fixed at'
+                " init, so restore it in the node's config.json."
+            )
+        raise ValueError(
+            f'{self.branch} records {recorded!r} as its project wiki folder,'
+            f' but the setting committed on {root!r} for project'
+            f' {self.project_path!r} names {expected!r}; the folder is fixed'
+            f' at spawn, so commit {recorded!r} back on {root!r} if the'
+            ' setting changed since, or delete the node and spawn it again'
+            f' to adopt {expected!r}.'
+        )
+
     def guard_delete(self: Node) -> None:
         """Guard a subtree teardown: pre-flight its refusals, settle what it can.
 
@@ -4141,7 +4279,7 @@ class Node:
             return ''
         project = self.project_path
         seed = FRACTAL_FOLDER if project == '.' else f'{project}/{FRACTAL_FOLDER}'
-        wiki = 'wiki' if project == '.' else f'{project}/wiki'
+        wiki = self.wiki_prefix
         # a scope root that is, or lies under, a .fractal dir is work the merge
         # lands (a --meta node's scope is the target's own seed dir), so exclude
         # only the node's own seed and its descendants' instead of the whole
@@ -4563,6 +4701,13 @@ class Node:
             for _, descendant in tree._live_descendants(status='active'):
                 descendant._reconcile_status()
         args = [f'--branch={node.branch}']
+        # the project wiki feeds only the report's "Left in place" line, which
+        # falls back to the default folder: a hand-edited invalid value must
+        # not block the teardown
+        try:
+            args.append(f'--wiki={node.wiki_prefix}')
+        except ValueError:
+            pass
         if name is None:
             args.append('--all')
             # the sweep clears every tree's data dir, so name them here -- the
@@ -6685,6 +6830,33 @@ def _draining(node: Node) -> bool:
     if actor is not None and actor.drain_bound():
         return True
     return node.drain_lineage()
+
+
+def _child_wiki(parent: Node, project: str) -> Optional[str]:
+    """Return the ``wiki`` value a child of ``parent`` records in ``project``.
+
+    The spawn rule :meth:`Node.init` applies and :meth:`Node.check_wiki`
+    re-applies at merge: a child in its parent's project carries the
+    parent's recorded value, and a child selecting another sub-project
+    takes that project's setting as committed on the tree's root branch
+    (never a node's editable checkout).
+
+    Args:
+        parent: The child's parent node.
+        project: The child's project path (``.`` for the repo root).
+
+    Returns:
+        The folder to record, or ``None`` for the default.
+
+    Raises:
+        ValueError: If the other project's committed settings file is
+            invalid.
+
+    """
+    if project == parent.project_path:
+        return parent.config.get('wiki')
+    root = parent.config.get('root')
+    return worktree.committed_wiki_setting(parent.repo_dir, ref=root, project=project)
 
 
 def _claim_in_flight(pgid_file: pathlib.Path, recorded: str) -> bool:

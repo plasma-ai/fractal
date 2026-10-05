@@ -12,6 +12,7 @@ TITLE=""
 PARENT=""
 ROOT=""
 PROJECT=""
+WIKI=""
 SCOPE=""
 BASE=""
 META=""
@@ -57,6 +58,8 @@ Options:
     --root=<branch>                    Tree root branch (resolved by the caller)
     --project=<relpath>                Sub-project within the repo
                                        (default: inherit the parent's)
+    --wiki=<relpath>                   Shared project-wiki folder within the project
+                                       (resolved by the caller; default: wiki)
     --scope=<subdirs>                  Subdirectory scope within the worktree
                                        (comma-separated; repeatable)
     --base=<branch>                    Branch to start from
@@ -113,6 +116,7 @@ for arg in "$@"; do
         --parent=*) PARENT="${arg#*=}" ;;
         --root=*) ROOT="${arg#*=}" ;;
         --project=*) PROJECT="${arg#*=}" ;;
+        --wiki=*) WIKI="${arg#*=}" ;;
         --base=*) BASE="${arg#*=}" ;;
         --scope=*) SCOPE="${SCOPE:+$SCOPE,}${arg#*=}" ;;
         --agent=*) AGENT="${arg#*=}" ;;
@@ -438,9 +442,9 @@ if ! git -C "$REPO_DIR" rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/nu
     exit 1
 fi
 if [[ "$PROJECT_PATH" == "." ]]; then
-    WIKI_DIR="wiki"
+    WIKI_DIR="${WIKI:-wiki}"
 else
-    WIKI_DIR="$PROJECT_PATH/wiki"
+    WIKI_DIR="$PROJECT_PATH/${WIKI:-wiki}"
 fi
 if ! git -C "$REPO_DIR" cat-file -e "$BASE_REF:$WIKI_DIR/_index.md" 2>/dev/null; then
     echo "Error: base branch '$BASE_REF' has no project wiki at $WIKI_DIR/_index.md" >&2
@@ -695,6 +699,7 @@ if [[ "$RESET" == true ]] || [[ ! -f "$NODE_DIR/config.json" ]]; then
     fractal config _set \
         title="${TITLE:-null}" \
         project="$PROJECT_PATH" \
+        ${WIKI:+"wiki=$WIKI"} \
         root="$ROOT" \
         scope="${SCOPE:-null}" \
         base="${BASE:-null}" \

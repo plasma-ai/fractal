@@ -20,7 +20,9 @@ Every node works with two wikis, distinguished by audience:
   root (or `<project>/wiki` when the node targets a sub-project of the repo) and
   is git-tracked, so it travels with the branch: other nodes see its content
   only through merges. It holds architecture, conventions, and durable
-  project-wide knowledge.
+  project-wide knowledge. A project whose `wiki/` holds other content names
+  another folder in its tracked `.fractal/.settings.json` (`{"wiki": "docs"}`);
+  see [[#The project wiki folder]].
 - **Memory** â€” the node's private knowledge base, a second wiki at `memory/`
   inside the node's data directory (`.fractal/<branch>/memory`). Only the owning
   node reads it; merge-up strips the node seed, so memory never reaches the
@@ -63,7 +65,47 @@ node's memory before linting and staging, and a failed update fails the commit â
 a broken wiki must never land. Backstop saves (`--force`) and the baseline
 commit (`--init`) skip the refresh, since a fail-safe save must never block. The
 project wiki is always committable regardless of the node's scope: scoped
-commits admit `wiki/` alongside the scope directories.
+commits admit the project wiki alongside the scope directories.
+
+## The project wiki folder
+
+The folder is one setting per project, fixed into each node at init.
+`fractal init` reads the project's tracked `<project>/.fractal/.settings.json`
+before writing anything (`worktree.read_wiki_setting`) and records its `wiki`
+value in the user node's config, and the `--init` baseline refuses a file naming
+another folder than the one recorded. Each spawn reads the setting committed on
+the tree's root branch (`worktree.committed_wiki_setting`), never a node's
+checkout: a child in its parent's project copies the parent's value, refusing
+when the root branch names another folder, and a child that selects another
+sub-project takes that project's own setting. The value rides `init.sh --wiki`,
+and `Node.wiki_prefix` resolves it against each node's project. The file is the
+repository's source of truth -- committed with the project, so no launch flag
+can be forgotten -- and a node editing its own copy changes nothing, since merge
+restores the target's `.fractal/` and the edit never lands. A node's own
+recorded value is checked again at merge: the footprint check's
+`Node.check_wiki` recomputes the folder by the same spawn rule
+(`node._child_wiki`; with the parent checked out nowhere, the setting committed
+on the root branch, which spawn held the parent's folder to) and refuses a
+`config.json` hand-edited to another valid folder, naming both. A depth-1 node's
+parent is the user node resolved by config (`Node.resolve_user`), never by the
+root branch's checkout: a root checked out in a linked worktree carries no seed
+there, and its folder would read as the default. A node held to the committed
+setting (another sub-project than its parent's, or a parent checked out nowhere)
+reads it as it stands at the merge, so a setting changed after the spawn refuses
+too; that refusal names the setting and points at committing the recorded folder
+back or re-spawning the node, never at `config.json`, whose edit to the new
+folder would move the exemption. Everything that names the project wiki reads
+the recorded folder: the commit scope exemption and the merge footprint check
+(one law, `commit.scope_boundaries`), the commit-time and merge-time index
+refresh (a merge into a `--base` branch that is no node takes the merging node's
+folder), the `node init` base-ref precondition, `WIKI_DIR`, the seeded
+`lint.sh`, the unmerged-work check of `node delete`, and the `destroy` report
+(which falls back to `wiki/` when the stored value is invalid, so a bad
+hand-edit never blocks the teardown). The wiki CLI, the `merge=wiki` driver, the
+tool's `.wiki/` state directory, and the memory wiki keep their names. With no
+setting the folder is `wiki` and no config records the key, so a project that
+names none uses `wiki/` at every site. The default is spelled by omitting the
+key; the settings file refuses `"wiki": null`.
 
 ## Routing knowledge
 

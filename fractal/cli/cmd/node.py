@@ -1578,9 +1578,12 @@ def node_scope(app: typer.Typer) -> typer.Typer:
         the node's commit boundaries, the law ``fractal commit`` enforces;
         prints the out-of-scope ones one per line. Exit 1 when any is out
         of scope, 0 when all are in scope, 2 on a command error -- scripts
-        branch on the exit code rather than parse the output.
+        branch on the exit code rather than parse the output. A node whose
+        recorded project-wiki folder is not the one its spawn gave it is a
+        command error, so a hand-edited folder never moves the exemption.
         """
         node = resolve_node(path)
+        node.check_wiki()
         raw = sys.stdin.buffer.read()
         decoded = os.fsdecode(raw)
         paths = filter(None, decoded.split('\0'))

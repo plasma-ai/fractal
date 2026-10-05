@@ -35,11 +35,13 @@ qualifier. An optional body paragraph lands below the subject.
 
 With a scope configured, the pipeline checks the working tree, index, and
 untracked files for out-of-scope changes and refuses to commit them; the shared
-`wiki/` and the node's `.fractal/` prefix are always committable. The boundaries
-are one record (`Scope`: the project-prefixed roots, the node data-dir prefix,
-the project wiki prefix, and the estates prefix) resolved by `scope_boundaries`
-and judged by `out_of_scope` -- a sub-project node with no roots is bounded to
-its project dir, a repo-root node with no roots is unbounded. The worktree-root
+project wiki (`wiki/` unless the project's `.fractal/.settings.json` names
+another folder; see [[features/wiki_system/knowledge_stores]]) and the node's
+`.fractal/` prefix are always committable. The boundaries are one record
+(`Scope`: the project-prefixed roots, the node data-dir prefix, the project wiki
+prefix, and the estates prefix) resolved by `scope_boundaries` and judged by
+`out_of_scope` -- a sub-project node with no roots is bounded to its project
+dir, a repo-root node with no roots is unbounded. The worktree-root
 `.gitattributes` sits outside every root and is admitted only while the whole
 change is init's own edit -- HEAD's content followed by exactly the two lines
 the wiki tool appends (`# Wiki index merge driver`, `**/_index.md merge=wiki`);
@@ -48,7 +50,11 @@ The same record backs `merge.sh`'s footprint check through the private
 `fractal node _scope` command -- the staged paths outside `.fractal/`, with
 `--attributes-ok` passed under the same whole-change rule applied to the
 target's staged copy -- so a squash is judged by exactly the law the commit
-enforces (see [[user_flow/finishing/_index|user_flow/finishing]]).
+enforces (see [[user_flow/finishing/_index|user_flow/finishing]]). Before it
+judges, `_scope` runs `Node.check_wiki`, which recomputes the node's wiki folder
+by the spawn rule and refuses a `config.json` hand-edited to another folder,
+which would otherwise move the exemption (or, for a node held to its project's
+committed setting, a setting changed on the root branch since the spawn).
 `--ignore-scope` commits out-of-scope changes but still lints; `--force`
 bypasses scope, lint, and git hooks alike. Before staging, the pipeline
 refreshes both wiki indexes (the project wiki and the node's memory) with the

@@ -78,9 +78,10 @@ pipeline's ignore family rather than riding a commit.
 
 A node may be initialized with a `scope` — one or more subdirectories of the
 worktree that bound its commits. The commit pipeline rejects out-of-scope files,
-with two standing exceptions: the shared project `wiki/` and the node's own data
-directory are always committable. Scopes are directory-granular; finer ownership
-splits are contract text in a node's brief, not machinery.
+with two standing exceptions: the shared project wiki (`wiki/` unless the
+project's `.fractal/.settings.json` names another folder) and the node's own
+data directory are always committable. Scopes are directory-granular; finer
+ownership splits are contract text in a node's brief, not machinery.
 
 ## Merge topology
 

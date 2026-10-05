@@ -14,15 +14,16 @@ import pathlib
 import re
 import shutil
 import tomllib
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 import typer
 
 import fractal.core
+from fractal.cli.cmd.config import _config_set
 from fractal.cli.utils import init_node, resolve_init_target, resolve_node
 from fractal.core.node import Node
-from tests._helpers import _commit_template, _git
+from tests._helpers import _commit_template, _files, _git
 
 from .conftest import (
     _make_git_repo,
@@ -98,6 +99,12 @@ __all__ = [
     'test_init_rejects_incoherent_pacing',
     'test_init_rejects_absolute_or_traversal_scope',
     'test_init_normalizes_scope_before_validating',
+    'test_wiki_setting_is_fixed_at_init_and_inherited',
+    'test_init_rejects_an_invalid_wiki_setting',
+    'test_reinit_adopts_a_wiki_setting_only_on_an_empty_tree',
+    'test_reinit_over_live_nodes_keeps_the_folder_in_effect',
+    'test_baseline_refuses_a_wiki_setting_written_after_init',
+    'test_spawn_refuses_a_wiki_setting_committed_after_init',
     'test_child_inherits_subproject_from_parent',
     'test_init_ignores_cross_repo_ambient_node',
     'test_init_node_default_path_ignores_cross_repo_ambient',
@@ -2484,8 +2491,13 @@ def test_init_refuses_quoted_agent_command(git_repo: pathlib.Path) -> None:
 # ------ preconditions
 
 
-def test_init_requires_project_wiki(tmp_path: pathlib.Path) -> None:
-    """Init errors if the base branch has no project wiki."""
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_init_requires_project_wiki(tmp_path: pathlib.Path, wiki: str) -> None:
+    """Init errors if the base branch has no project wiki at its configured folder.
+
+    A project naming ``docs`` as its shared wiki needs ``docs/_index.md``
+    committed; a committed ``wiki/`` does not satisfy it.
+    """
     repo = tmp_path / 'repo'
     repo.mkdir()
     _git(repo, 'init', '-b', 'main')
@@ -2499,11 +2511,20 @@ def test_init_requires_project_wiki(tmp_path: pathlib.Path) -> None:
         '.venv\n.worktrees/\n.db\n.db-*\n.status\n',
         encoding='utf-8',
     )
+    # a non-default folder is named by the committed settings file, and the
+    # default folder is committed beside it
+    if wiki != 'wiki':
+        settings = repo / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}), encoding='utf-8')
+        index = repo / 'wiki' / '_index.md'
+        index.parent.mkdir()
+        index.write_text('---\nname: wiki\n---\n# wiki\n\n***\n', encoding='utf-8')
     _git(repo, 'add', '.')
     _git(repo, 'commit', '-m', 'init')
     node = Node(repo)
     node.init(agent='claude', user=True)
-    with pytest.raises(RuntimeError, match='project wiki'):
+    with pytest.raises(RuntimeError, match=f'no project wiki at {wiki}/_index.md'):
         node.init(name='bad')
 
 
@@ -2705,6 +2726,258 @@ def test_init_normalizes_scope_before_validating(git_repo: pathlib.Path) -> None
     # a traversal root hiding inside a space form cannot bypass validation
     with pytest.raises(ValueError, match='repo-relative subdirectory'):
         node.init(name='sneaky', scope=['roots/a ../escape'])
+
+
+# ------ project wiki folder
+
+
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_wiki_setting_is_fixed_at_init_and_inherited(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wiki: str,
+) -> None:
+    """User init fixes the project's wiki folder; every descendant inherits it.
+
+    The project names its shared wiki in ``.fractal/.settings.json``: user
+    init reads the file once, creates the wiki there, and the baseline
+    commits both. Children and grandchildren carry the folder in their
+    config, a node's own copy of the file is never re-read, and the key can
+    never be set afterwards. With no setting, no config records the key.
+    """
+    # the project names its folder in a settings file the baseline commits
+    if wiki != 'wiki':
+        settings = git_repo / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}), encoding='utf-8')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    assert (git_repo / wiki / '_index.md').is_file()
+    user.commit('configure', init=True)
+    result = _git(git_repo, 'ls-files', wiki, '.fractal')
+    tracked = result.stdout.split()
+    assert f'{wiki}/_index.md' in tracked
+    assert ('.fractal/.settings.json' in tracked) is (wiki != 'wiki')
+    # a child, whose own copy of the file then names another folder, spawns
+    # a grandchild
+    user.init(name='kid')
+    kid = Node(git_repo / '.worktrees' / 'main.kid')
+    settings = kid.worktree / '.fractal' / '.settings.json'
+    settings.write_text(json.dumps({'wiki': 'elsewhere'}), encoding='utf-8')
+    monkeypatch.setenv('_NODE', f'{kid.node_dir}')
+    Node(git_repo).init(name='grandkid')
+    monkeypatch.delenv('_NODE')
+    grandkid = Node(git_repo / '.worktrees' / 'main.kid.grandkid')
+    # every depth carries the user's folder; the default records nothing
+    for node in (user, kid, grandkid):
+        stored = node.config.load()
+        assert stored.get('wiki') == (None if wiki == 'wiki' else wiki)
+        assert node.wiki_prefix == wiki
+    # the operator surface refuses the key outright
+    with pytest.raises(typer.BadParameter, match='fixed at init'):
+        _config_set(['wiki=elsewhere'], f'{kid.worktree}')
+    assert kid.wiki_prefix == wiki
+
+
+@pytest.mark.parametrize(
+    argnames=('content', 'match'),
+    argvalues=[
+        pytest.param('{"wiki": ""}', 'non-empty', id='empty'),
+        pytest.param('{"wiki": 42}', 'non-empty', id='number'),
+        pytest.param('{"wiki": null}', 'non-empty', id='null'),
+        pytest.param('{"wiki": "/abs"}', 'project-relative', id='absolute'),
+        pytest.param('{"wiki": "../out"}', 'project-relative', id='parent'),
+        pytest.param('{"wiki": "a/../b"}', 'project-relative', id='inner-parent'),
+        pytest.param('{"wiki": "."}', 'must name a subdirectory', id='project'),
+        pytest.param('{"wiki": "./docs"}', 'canonical', id='dot-slash'),
+        pytest.param('{"wiki": "docs/"}', 'canonical', id='trailing-slash'),
+        pytest.param('{"wiki": "a//b"}', 'canonical', id='double-slash'),
+        pytest.param('{"wiki": ".fractal"}', 'machinery', id='fractal'),
+        pytest.param('{"wiki": "x/.worktrees"}', 'machinery', id='worktrees'),
+        pytest.param('{"wiki": ".GIT"}', 'machinery', id='git-casefolded'),
+        pytest.param('{"wiki": "null"}', 'clearing the key', id='named-null'),
+        pytest.param('{"wiki": "docs", "wikis": "x"}', 'unknown keys', id='typo'),
+        pytest.param('{"wiki": "docs"', 'not valid JSON', id='bad-json'),
+        pytest.param('["docs"]', 'JSON object', id='not-an-object'),
+    ],
+)
+def test_init_rejects_an_invalid_wiki_setting(
+    git_repo: pathlib.Path,
+    content: str,
+    match: str,
+) -> None:
+    """A bad settings file fails user init loudly, naming it, before any write.
+
+    The folder is committable regardless of scope, so it must be a
+    canonical project subdirectory clear of fractal's machinery; a
+    misspelled key or an unreadable file fails rather than reading as the
+    default.
+    """
+    settings = git_repo / '.fractal' / '.settings.json'
+    settings.parent.mkdir()
+    settings.write_text(content, encoding='utf-8')
+    with pytest.raises(ValueError, match=match) as excinfo:
+        Node(git_repo).init(agent='claude', user=True)
+    assert f'{settings}' in str(excinfo.value)
+    # nothing landed: no user node data, no project cache
+    assert not (git_repo / '.fractal' / 'main').exists()
+    assert not (git_repo / '.worktrees').exists()
+
+
+@pytest.mark.parametrize(
+    argnames=('before', 'after'),
+    argvalues=[
+        pytest.param(None, 'docs', id='to-docs'),
+        pytest.param('docs', None, id='to-default'),
+    ],
+)
+def test_reinit_adopts_a_wiki_setting_only_on_an_empty_tree(
+    git_repo: pathlib.Path,
+    before: Optional[str],
+    after: Optional[str],
+) -> None:
+    """A changed setting reaches a running tree only through reset and re-init.
+
+    The folder is fixed when the tree is created, so a project that renames
+    its shared wiki later cannot mix the two folders inside one tree: a
+    re-init over live nodes refuses, naming the reset, and once the tree has
+    no nodes the re-init records the new folder for every later spawn while
+    the tree's history survives. Whatever stays at the old folder -- the
+    ordinary content a rename leaves behind -- is never touched, and
+    dropping the setting returns the tree to ``wiki/`` with no key recorded.
+    """
+    settings = git_repo / '.fractal' / '.settings.json'
+    if before is not None:
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': before}), encoding='utf-8')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    user.commit('configure', init=True)
+    user.init(name='kid')
+    # the project moves its shared wiki: a rename leaves ordinary content at
+    # the old folder, and dropping the setting returns to the default
+    if after is not None:
+        _git(git_repo, 'mv', 'wiki', after)
+        (git_repo / 'wiki').mkdir()
+        (git_repo / 'wiki' / 'theorem.md').write_text('# theorem\n', encoding='utf-8')
+        settings.write_text(json.dumps({'wiki': after}), encoding='utf-8')
+        _git(git_repo, 'add', '-f', 'wiki', '.fractal/.settings.json')
+    else:
+        _git(git_repo, 'rm', '-q', '.fractal/.settings.json')
+    _git(git_repo, 'commit', '-m', 'move the project wiki')
+    old, new = before or 'wiki', after or 'wiki'
+    # live nodes keep the recorded folder; the refusal names the remedy
+    with pytest.raises(ValueError, match='fractal reset main'):
+        user.init(agent='claude', user=True)
+    assert user.wiki_prefix == old
+    # an empty tree adopts the new folder, keeping its history and the old
+    # folder's bytes
+    Node.reset(git_repo, name='main')
+    content = _files(git_repo / old)
+    output = user.init(agent='claude', user=True)
+    assert f'Adopted the project wiki folder {new!r}' in output
+    assert _files(git_repo / old) == content
+    assert user.config.load().get('wiki') == after
+    assert user.db.read('events', where={'node': 'main.kid'})
+    user.init(name='kid')
+    kid = Node(git_repo / '.worktrees' / 'main.kid')
+    assert kid.wiki_prefix == new
+
+
+@pytest.mark.parametrize(
+    argnames=('before', 'after'),
+    argvalues=[
+        pytest.param(None, 'wiki', id='named'),
+        pytest.param('wiki', None, id='dropped'),
+    ],
+)
+def test_reinit_over_live_nodes_keeps_the_folder_in_effect(
+    git_repo: pathlib.Path,
+    before: Optional[str],
+    after: Optional[str],
+) -> None:
+    """A setting naming the folder already in effect is no change.
+
+    An absent setting means ``wiki``, so naming it explicitly, or dropping
+    a file that named it, leaves the tree's folder where it is: a re-init
+    over live nodes proceeds -- updating the stored agent -- instead of
+    demanding a reset that would tear the tree down for nothing.
+    """
+    settings = git_repo / '.fractal' / '.settings.json'
+    settings.parent.mkdir()
+    if before is not None:
+        settings.write_text(json.dumps({'wiki': before}), encoding='utf-8')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    user.commit('configure', init=True)
+    user.init(name='kid')
+    if after is not None:
+        settings.write_text(json.dumps({'wiki': after}), encoding='utf-8')
+    else:
+        settings.unlink()
+    output = user.init(agent='codex', user=True)
+    assert 'Adopted' not in output
+    assert user.config.get('agent') == 'codex'
+    assert user.wiki_prefix == 'wiki'
+
+
+def test_baseline_refuses_a_wiki_setting_written_after_init(
+    git_repo: pathlib.Path,
+) -> None:
+    """The baseline never commits a setting that contradicts the recorded folder.
+
+    Every spawn reads the setting from the committed root branch, so a file
+    written after ``fractal init`` -- naming ``docs`` while the tree
+    recorded ``wiki`` -- refuses the baseline, which then commits nothing;
+    re-running init adopts the file and the baseline lands it.
+    """
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    settings = git_repo / '.fractal' / '.settings.json'
+    settings.write_text(json.dumps({'wiki': 'docs'}), encoding='utf-8')
+    with pytest.raises(ValueError, match='re-run `fractal init`'):
+        user.commit('configure', init=True)
+    result = _git(git_repo, 'ls-files', '.fractal', 'docs')
+    assert result.stdout == ''
+    # init adopts the file, and the baseline commits it beside the new wiki
+    output = user.init(agent='claude', user=True)
+    assert "Adopted the project wiki folder 'docs'" in output
+    user.commit('configure', init=True)
+    result = _git(git_repo, 'ls-files', '.fractal', 'docs/_index.md')
+    assert result.stdout.split() == ['.fractal/.settings.json', 'docs/_index.md']
+
+
+@pytest.mark.parametrize('recorded', [None, 'docs'], ids=['default', 'docs'])
+def test_spawn_refuses_a_wiki_setting_committed_after_init(
+    git_repo: pathlib.Path,
+    recorded: Optional[str],
+) -> None:
+    """A spawn refuses when the root branch's setting contradicts the tree's.
+
+    The tree enforces the folder init recorded. A settings file committed on
+    the root branch afterwards -- naming ``docs`` on a ``wiki`` tree, or
+    dropped from a ``docs`` tree -- would otherwise leave every new node
+    exempting a folder that is now ordinary content, so the spawn refuses,
+    naming the remedy, before anything is created.
+    """
+    settings = git_repo / '.fractal' / '.settings.json'
+    if recorded is not None:
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': recorded}), encoding='utf-8')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    user.commit('configure', init=True)
+    # the root branch changes the setting under the tree
+    if recorded is None:
+        settings.write_text(json.dumps({'wiki': 'docs'}), encoding='utf-8')
+        _git(git_repo, 'add', '-f', '.fractal/.settings.json')
+    else:
+        _git(git_repo, 'rm', '-q', '.fractal/.settings.json')
+    _git(git_repo, 'commit', '-m', 'change the project wiki setting')
+    with pytest.raises(ValueError, match='fractal reset main'):
+        user.init(name='task', scope=['src'])
+    assert not (git_repo / '.worktrees' / 'main.task').exists()
+    assert not user.db.exists('nodes', where={'node': 'main.task'})
 
 
 # ------ sub-projects and ambient resolution

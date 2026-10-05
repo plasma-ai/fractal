@@ -315,9 +315,10 @@ direct decomposition.
 
 The seed lives in the node data directory (`.fractal/`), which is **tracked by
 git** and captured by your `fractal commit --init`; the same goes for the
-project wiki (`wiki/`). Neither belongs in `.gitignore`. Fractal ignores its own
-runtime artifacts (worktrees, the central database, status, agent logs) via the
-repo-local `.git/info/exclude`, which it writes automatically.
+project wiki (`wiki/` unless `.fractal/.settings.json` names another folder).
+Neither belongs in `.gitignore`. Fractal ignores its own runtime artifacts
+(worktrees, the central database, status, agent logs) via the repo-local
+`.git/info/exclude`, which it writes automatically.
 
 ### Meta nodes
 

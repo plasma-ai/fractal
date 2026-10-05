@@ -119,12 +119,13 @@ if [[ -n "$MERGE_TARGET" ]] \
     # derive PROJECT_PATH the way merge.sh does (a subdir project nests its seed
     # under PROJECT_PATH) so SEED_EXCLUDE below points at the real seed location
     PROJECT_PATH=$(cat "$REPO_DIR/.worktrees/.project/$BRANCH" 2>/dev/null || echo ".")
+    WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null || true)
     if [[ "$PROJECT_PATH" == "." ]]; then
         SEED_PREFIX=".fractal"
-        WIKI_PREFIX="wiki"
+        WIKI_PREFIX="${WIKI:-wiki}"
     else
         SEED_PREFIX="$PROJECT_PATH/.fractal"
-        WIKI_PREFIX="$PROJECT_PATH/wiki"
+        WIKI_PREFIX="$PROJECT_PATH/${WIKI:-wiki}"
     fi
     # a scope root that is, or lies under, a .fractal dir is work the
     # merge lands (a --meta node's scope is the target's own seed dir), so

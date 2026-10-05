@@ -800,7 +800,9 @@ fi
 # --no-ff of children), so judge the staged paths by the node's commit
 # boundaries through the law fractal commit enforces; before the wiki refresh,
 # which stages the target's own regenerated state; a failed listing or check
-# fails closed, and a refusal restores the target like a conflict
+# fails closed, and a refusal restores the target like a conflict; the check
+# first recomputes the node's project-wiki folder from its parent and refuses
+# a config.json edited to another, which would move the exemption
 if [[ "$IGNORE_SCOPE" != true ]]; then
     # after the restore every staged .fractal/ path is the merge's own -- a
     # scope-root edit or the seed strip's deletion -- so the rest is judged
@@ -861,11 +863,16 @@ fi
 # a failed refresh restores the parent exactly like a conflict
 if command -v wiki &>/dev/null; then
     PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo ".")
+    # a --base target that is no node has no config: the merging node then
+    # names the folder (a guessed default would refresh, and stage past the
+    # footprint check, whatever ordinary content sits at wiki/)
+    PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null) \
+        || PARENT_WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null || true)
     if [[ "$PARENT_PROJECT" == "." ]]; then
-        WIKI_DIR="$PARENT_WORKTREE_DIR/wiki"
+        WIKI_DIR="$PARENT_WORKTREE_DIR/${PARENT_WIKI:-wiki}"
         MEMORY_DIR="$PARENT_WORKTREE_DIR/.fractal/$PARENT_BRANCH/memory"
     else
-        WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/wiki"
+        WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/${PARENT_WIKI:-wiki}"
         MEMORY_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/.fractal/$PARENT_BRANCH/memory"
     fi
     for INDEX_DIR in "$WIKI_DIR" "$MEMORY_DIR"; do

@@ -34,6 +34,17 @@ String keys:
 - `title` -- display name. Default: the de-slugged node name.
 - `project` -- project root relative to the repo (monorepo sub-project). Set by
   `--path`; **immutable**.
+- `wiki` -- the shared project-wiki folder relative to the project: the one
+  folder a node commits to regardless of its `scope`. Read at `fractal init`
+  from the project's tracked `.fractal/.settings.json` (`{"wiki": "docs"}`, its
+  only key) and copied from the parent at every spawn in the same project (a
+  child in another sub-project reads that project's setting); not settable by
+  flag; **immutable** -- a change would let a node widen its own boundary.
+  Absent means `wiki`, and no config records the key. The value must be a
+  canonical subdirectory: never absolute, `.`, `null`, or carrying a `..`,
+  `.fractal`, `.worktrees`, or `.git` component (casefolded). Validated at init,
+  by every config write and `start`, and again on every commit and merge scope
+  check. See [[configuration/inheritance]].
 - `root` -- the tree's root (user) node branch, inherited from the parent at
   init; every node carries it so any node can resolve the tree's central
   database. Not settable by flag; **immutable**. See
