@@ -64,12 +64,13 @@ and the radio, but runs no loop of its own (see
   inside the seed directory itself, so ``.fractal/<branch>/`` is
   git-ignored by default (``fractal track`` removes that file to opt in).
 
-An existing project wiki (a ``wiki/`` carrying ``_index.md``) is adopted as
-is — init rewrites nothing in it. It warns when ``wiki/_index.md`` carries no
-frontmatter stamps (run ``wiki update --path=wiki`` and commit the result
-before initializing nodes) and when ``.gitattributes`` lacks the
-``**/_index.md merge=wiki`` line (append it and commit), since sibling nodes
-otherwise conflict on the index when they merge.
+An existing project wiki (``wiki/``, or the folder the project's settings
+file names, carrying ``_index.md``) is adopted as is — init rewrites nothing
+in it. It warns when that ``_index.md`` carries no frontmatter stamps (run
+``wiki update --path=<folder>`` and commit the result before initializing
+nodes) and when ``.gitattributes`` lacks the ``**/_index.md merge=wiki`` line
+(append it and commit), since sibling nodes otherwise conflict on the index
+when they merge.
 
 The shared project wiki is the one folder every node may commit to
 regardless of its scope. It is ``wiki/`` unless the project's committed
@@ -83,15 +84,18 @@ project:
 The file accepts only the ``wiki`` key. Init reads it once, before writing
 anything, records the folder in the user node's ``config.json``, and every
 node of the tree inherits it (see :doc:`/configuration`). A bad file —
-invalid JSON, an unknown key, or a folder that is absolute, ``.``, carries a
-``..``, ``.fractal``, ``.worktrees``, or ``.git`` component, or is not
-written canonically — refuses init, naming the file. With no file, the
-folder is ``wiki/`` and nothing new is recorded.
+invalid JSON, an unknown key, or a folder that is absolute, ``.``,
+``null``, carries a ``..``, ``.fractal``, ``.worktrees``, or ``.git``
+component, or is not written canonically — refuses init, naming the file.
+With no file, the folder is ``wiki/`` and nothing new is recorded.
 
 The command ends by printing the required next step: the baseline commit
 (``fractal commit "<message>" --init``), which also commits the settings
 file when there is one. Node worktrees can only branch from a committed
-tree.
+tree. The baseline refuses a settings file that names another folder than
+the one init recorded (re-run init to adopt it), and every spawn checks the
+setting committed on the root branch the same way, so the committed file and
+the tree's folder always agree.
 
 Re-running on an initialized tree is idempotent — it never clobbers
 existing data. A re-run repairs a partial prior init (a stranded database,
@@ -132,10 +136,11 @@ Refuses when:
 - the branch is already mapped to a different project — one branch maps to
   a single project;
 - the project's ``.fractal/.settings.json`` is invalid (see above);
-- ``<project>/wiki/`` exists, is not empty, and is not a project wiki (it
-  carries no ``.wiki/`` marker): adopting it would rewrite its files in place.
-  Move the directory aside and re-run init, or convert it first with
-  ``wiki init --path=wiki``; the refusal lands after the data directory is
+- the project wiki folder (``<project>/wiki/``, or the folder the settings
+  file names) exists, is not empty, and is not a project wiki (it carries no
+  ``.wiki/`` marker): adopting it would rewrite its files in place. Move the
+  directory aside and re-run init, or convert it first with
+  ``wiki init --path=<folder>``; the refusal lands after the data directory is
   written, and the re-run completes the partial init;
 - the command runs from a draining seat (an agent invocation of a
   ``fractal node start --continue --drain`` run, or any process in its

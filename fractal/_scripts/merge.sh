@@ -861,7 +861,11 @@ fi
 # a failed refresh restores the parent exactly like a conflict
 if command -v wiki &>/dev/null; then
     PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo ".")
-    PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null || true)
+    # a --base target that is no node has no config: the merging node then
+    # names the folder (a guessed default would refresh, and stage past the
+    # footprint check, whatever ordinary content sits at wiki/)
+    PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null) \
+        || PARENT_WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null || true)
     if [[ "$PARENT_PROJECT" == "." ]]; then
         WIKI_DIR="$PARENT_WORKTREE_DIR/${PARENT_WIKI:-wiki}"
         MEMORY_DIR="$PARENT_WORKTREE_DIR/.fractal/$PARENT_BRANCH/memory"

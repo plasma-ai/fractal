@@ -8,6 +8,7 @@ static variable map, prompt assembly, and the chat's runtime sentinels.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
@@ -21,6 +22,9 @@ import tomli_w
 import fractal.core.render
 from fractal.core.node import Node
 from fractal.core.render import _VarTemplate
+from tests._helpers import _git
+
+from .conftest import _make_git_repo
 
 __all__ = [
     'test_var_template_matches_envsubst',
@@ -453,26 +457,42 @@ def test_chat_seed_renders_paths_and_chat_sentinels(node_with_db: Node) -> None:
 
 
 @pytest.mark.parametrize(
-    argnames=('wiki', 'folder'),
+    argnames=('wiki', 'project', 'folder'),
     argvalues=[
-        pytest.param(None, 'wiki', id='default'),
-        pytest.param('docs', 'docs', id='docs'),
+        pytest.param('wiki', None, 'wiki', id='default'),
+        pytest.param('docs', None, 'docs', id='docs'),
+        pytest.param('docs', 'app', 'app/docs', id='sub-project'),
     ],
 )
 def test_prompts_render_the_configured_wiki(
-    node_with_db: Node,
-    wiki: Optional[str],
+    tmp_path: pathlib.Path,
+    wiki: str,
+    project: Optional[str],
     folder: str,
 ) -> None:
     """``$WIKI_DIR`` and the shipped prompts name the configured wiki folder.
 
     The charter's scope rule and the commit step tell the agent which folder
     is committable regardless of scope, so they speak through ``$WIKI_DIR``
-    and never hard-code ``wiki/``.
+    and never hard-code ``wiki/``; a sub-project node's folder sits under
+    its project.
     """
-    node = node_with_db
-    if wiki is not None:
-        node.config.set('wiki', wiki)
+    if project is None:
+        repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
+    else:
+        # a sub-project naming its own folder, committed for the spawn
+        repo = _make_git_repo(tmp_path / 'repo')
+        index = repo / project / wiki / '_index.md'
+        index.parent.mkdir(parents=True)
+        index.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+        settings = repo / project / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}), encoding='utf-8')
+        _git(repo, 'add', project)
+        _git(repo, 'commit', '-m', 'add app wiki')
+    Node(repo).init(agent='claude', user=True)
+    Node(repo).init(name='task', path=project)
+    node = Node(repo / '.worktrees' / 'main.task')
     wiki_dir = node.worktree / folder
     assert node.render_template('$WIKI_DIR') == f'{wiki_dir}'
     package = pathlib.Path(fractal.__file__).parent / '_node'

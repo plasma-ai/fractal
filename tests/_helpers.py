@@ -12,6 +12,7 @@ from fractal.core.node import Node
 
 __all__ = [
     '_git',
+    '_files',
     '_commit_template',
     '_past_timestamp',
     '_age_iter',
@@ -30,6 +31,15 @@ def _git(cwd: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
         text=True,
         check=True,
     )
+
+
+def _files(root: pathlib.Path) -> dict[str, bytes]:
+    """Every file under ``root``, keyed by its relative path, with its bytes."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob('*')
+        if path.is_file()
+    }
 
 
 def _commit_template(

@@ -22,8 +22,8 @@ append-only log.
 Run `wiki --help` and `wiki <command> --help` for the CLI (init, update, lint,
 map, search, read). Always pass `--path` (`$WIKI_DIR` or `$MEMORY_DIR`) -- a
 bare command resolves the enclosing wiki by walking up, else `{cwd}/wiki`, which
-from the node's cwd is the project wiki at best and never memory, so an omitted
-`--path` silently targets the wrong wiki or errors. Run
+from the node's cwd need not be the project wiki (`$WIKI_DIR`) and is never
+memory, so an omitted `--path` silently targets the wrong wiki or errors. Run
 `wiki update --path=<dir>` after adding, moving, or deleting pages;
 `wiki lint --path=<dir>` validates structure.
 

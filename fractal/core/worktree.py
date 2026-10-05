@@ -302,18 +302,44 @@ def read_wiki_setting(project_dir: pathlib.Path) -> Optional[str]:
     path = project_dir / FRACTAL_FOLDER / SETTINGS_FILE
     if not path.is_file():
         return None
-    try:
-        settings = json.loads(path.read_text(encoding='utf-8'))
-    except json.JSONDecodeError as e:
-        raise ValueError(f'{path} is not valid JSON: {e}') from e
-    if not isinstance(settings, dict):
-        raise ValueError(f'{path} must hold a JSON object.')
-    unknown = sorted(set(settings) - {'wiki'})
-    if unknown:
-        raise ValueError(f"{path} has unknown keys {unknown} (valid keys: ['wiki']).")
-    if 'wiki' not in settings:
+    text = path.read_text(encoding='utf-8')
+    return _parse_wiki_setting(text, source=f'{path}')
+
+
+def committed_wiki_setting(
+    repo_dir: pathlib.Path,
+    ref: str,
+    project: str,
+) -> Optional[str]:
+    """Read a project's shared project-wiki folder as committed on ``ref``.
+
+    The spawn-time counterpart of :func:`read_wiki_setting`: it reads the
+    settings file from a branch's committed tree, never from a node's
+    checkout, so no node can steer the folder its children enforce.
+
+    Args:
+        repo_dir: Main repository root.
+        ref: The revision to read (the tree's root branch).
+        project: Project path (``.`` for the repo root).
+
+    Returns:
+        The validated folder, relative to the project, or ``None`` when the
+        file or its ``wiki`` key is absent at ``ref``.
+
+    Raises:
+        ValueError: If the committed file is not a JSON object, carries an
+            unknown key, or names an invalid folder.
+
+    """
+    if project == '.':
+        rel = f'{FRACTAL_FOLDER}/{SETTINGS_FILE}'
+    else:
+        rel = f'{project}/{FRACTAL_FOLDER}/{SETTINGS_FILE}'
+    cmd = ['show', f'{ref}:{rel}']
+    text = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
+    if text is None:
         return None
-    return validate_wiki(settings['wiki'], source=f'"wiki" in {path}')
+    return _parse_wiki_setting(text, source=f'{ref}:{rel}')
 
 
 def exclude_update(repo_dir: pathlib.Path) -> None:
@@ -807,3 +833,32 @@ def _strip_exclude_blocks(lines: list[str]) -> list[str]:
         kept.append(lines[index])
         index += 1
     return kept
+
+
+def _parse_wiki_setting(text: str, source: str) -> Optional[str]:
+    """Parse a settings file's text into its validated ``wiki`` folder.
+
+    Args:
+        text: The file's content.
+        source: The file's name in the error.
+
+    Returns:
+        The validated folder, or ``None`` when the ``wiki`` key is absent.
+
+    Raises:
+        ValueError: If ``text`` is not a JSON object, carries an unknown
+            key, or names an invalid folder.
+
+    """
+    try:
+        settings = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f'{source} is not valid JSON: {e}') from e
+    if not isinstance(settings, dict):
+        raise ValueError(f'{source} must hold a JSON object.')
+    unknown = sorted(set(settings) - {'wiki'})
+    if unknown:
+        raise ValueError(f"{source} has unknown keys {unknown} (valid keys: ['wiki']).")
+    if 'wiki' not in settings:
+        return None
+    return validate_wiki(settings['wiki'], source=f'"wiki" in {source}')

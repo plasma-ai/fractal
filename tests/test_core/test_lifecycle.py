@@ -23,7 +23,7 @@ import fractal.core.node
 import fractal.core.worktree
 from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, LOCK_FILE, PGID_FILE
 from fractal.core.node import Node
-from tests._helpers import _git, _stub_run_script
+from tests._helpers import _files, _git, _stub_run_script
 
 from .conftest import (
     _active_run,
@@ -108,6 +108,7 @@ __all__ = [
     'test_merge_excludes_merged_node_seed',
     'test_merge_excludes_subproject_node_seed',
     'test_merge_refreshes_parent_wiki_indexes',
+    'test_merge_into_a_plain_base_refreshes_the_configured_wiki',
     'test_merge_restores_parent_when_index_refresh_fails',
     'test_merge_refuses_when_parent_worktree_is_dirty',
     'test_merge_ignore_scope_lands_an_out_of_scope_squash',
@@ -2133,10 +2134,12 @@ def test_merge_refreshes_parent_wiki_indexes(tmp_path: pathlib.Path, wiki: str) 
     the merge commit carries current indexes and leaves the parent clean.
     The staging covers only what the refresh owns: an operator's untracked
     draft under the parent wiki never rides the merge commit. The project
-    wiki is the configured folder, whatever its name.
+    wiki is the configured folder, whatever its name: a corpus at ``wiki/``
+    beside a ``docs`` project wiki keeps its stale index.
     """
     git_repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
     project_dir, _ = _init_and_commit(git_repo, 'feature')
+    corpus = _files(git_repo / 'wiki')
     # an untracked operator draft in the parent wiki (outside the refresh)
     (git_repo / wiki / 'draft.txt').write_text('operator scratch\n', encoding='utf-8')
     # the child commits a wiki page, leaving the generated index stale
@@ -2159,6 +2162,46 @@ def test_merge_refreshes_parent_wiki_indexes(tmp_path: pathlib.Path, wiki: str) 
     # ...and the refresh left no residue beyond the draft
     status = _git(git_repo, 'status', '--porcelain').stdout
     assert status.strip() == f'?? {wiki}/draft.txt'
+    # a corpus beside the configured wiki kept its bytes
+    if wiki != 'wiki':
+        assert _files(git_repo / 'wiki') == corpus
+
+
+def test_merge_into_a_plain_base_refreshes_the_configured_wiki(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A merge into a ``--base`` branch that is no node refreshes the tree's folder.
+
+    Such a target has no config to name the project wiki, so the merging
+    node names it: the merge commit carries the refreshed ``docs/`` index,
+    and the corpus at ``wiki/`` -- whose stale index a refresh would
+    rewrite, and stage past the footprint check -- keeps its bytes.
+    """
+    git_repo = _make_git_repo(tmp_path / 'repo', wiki='docs')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    release = tmp_path / 'release'
+    _git(git_repo, 'worktree', 'add', '-q', '-b', 'release', f'{release}')
+    output = user.init(name='rel', base='release')
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    corpus = _files(release / 'wiki')
+    # the node commits a project-wiki page, leaving the generated index stale
+    (project_dir / 'docs' / 'topic.md').write_text(
+        '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(project_dir, 'add', 'docs/topic.md')
+    _git(project_dir, 'commit', '-m', 'add topic page')
+
+    Node(project_dir).merge()
+
+    index = _git(release, 'show', 'release:docs/_index.md').stdout
+    assert '[[topic' in index
+    assert _files(release / 'wiki') == corpus
+    status = _git(release, 'status', '--porcelain').stdout
+    assert status.strip() == ''
 
 
 def test_merge_restores_parent_when_index_refresh_fails(

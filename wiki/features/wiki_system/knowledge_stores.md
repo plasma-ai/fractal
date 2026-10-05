@@ -69,23 +69,28 @@ commits admit the project wiki alongside the scope directories.
 
 ## The project wiki folder
 
-The folder is one setting per tree. `fractal init` reads the project's tracked
-`<project>/.fractal/.settings.json` once, before writing anything
-(`worktree.read_wiki_setting`), and records its `wiki` value in the user node's
-config; every spawn copies the parent's value through `init.sh --wiki`, and
-`Node.wiki_prefix` resolves it against each node's project. The file is the
+The folder is one setting per project, fixed into each node at init.
+`fractal init` reads the project's tracked `<project>/.fractal/.settings.json`
+before writing anything (`worktree.read_wiki_setting`) and records its `wiki`
+value in the user node's config, and the `--init` baseline refuses a file naming
+another folder than the one recorded. Each spawn reads the setting committed on
+the tree's root branch (`worktree.committed_wiki_setting`), never a node's
+checkout: a child in its parent's project copies the parent's value, refusing
+when the root branch names another folder, and a child that selects another
+sub-project takes that project's own setting. The value rides `init.sh --wiki`,
+and `Node.wiki_prefix` resolves it against each node's project. The file is the
 repository's source of truth -- committed with the project, so no launch flag
-can be forgotten -- and nodes never read it again: a node editing its own copy
-changes nothing, and merge restores the target's `.fractal/` so the edit never
-lands. Everything that names the project wiki reads the recorded folder: the
-commit scope exemption and the merge footprint check (one law,
-`commit.scope_boundaries`), the commit-time and merge-time index refresh, the
-`node init` base-ref precondition, `WIKI_DIR`, the seeded `lint.sh`, the
-unmerged-work check of `node delete`, and the `destroy` report. The wiki CLI,
-the `merge=wiki` driver, the tool's `.wiki/` state directory, and the memory
-wiki keep their names. With no setting the folder is `wiki` and no config
-records the key, so a project that never names one behaves exactly as before the
-setting existed.
+can be forgotten -- and a node editing its own copy changes nothing, since merge
+restores the target's `.fractal/` and the edit never lands. Everything that
+names the project wiki reads the recorded folder: the commit scope exemption and
+the merge footprint check (one law, `commit.scope_boundaries`), the commit-time
+and merge-time index refresh (a merge into a `--base` branch that is no node
+takes the merging node's folder), the `node init` base-ref precondition,
+`WIKI_DIR`, the seeded `lint.sh`, the unmerged-work check of `node delete`, and
+the `destroy` report. The wiki CLI, the `merge=wiki` driver, the tool's `.wiki/`
+state directory, and the memory wiki keep their names. With no setting the
+folder is `wiki` and no config records the key, so a project that names none
+uses `wiki/` at every site.
 
 ## Routing knowledge
 

@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from typing import Optional
 
 import fractal.util
-from fractal.constants import FRACTAL_FOLDER, SETTINGS_FILE
+from fractal.constants import FRACTAL_FOLDER, SETTINGS_FILE, WIKI_FOLDER
 from fractal.exceptions import DirtyWorktreeError
 
 from . import worktree
@@ -447,6 +447,10 @@ def commit_user_init(node: Node, message: str) -> str:
     Returns:
         Confirmation message.
 
+    Raises:
+        ValueError: If the project's settings file is invalid or names
+            another project-wiki folder than the tree recorded at init.
+
     """
     # resolve the project prefix (sub-project nodes nest under <project>/)
     project = node.config.get('project', '.')
@@ -455,6 +459,18 @@ def commit_user_init(node: Node, message: str) -> str:
     else:
         seed = f'{project}/{FRACTAL_FOLDER}'
     wiki = node.wiki_prefix
+    # the baseline is what every spawn reads the setting from, so it never
+    # commits a settings file naming another folder than the one init fixed
+    # (an absent setting names the default)
+    setting = worktree.read_wiki_setting(node.worktree / project)
+    recorded = node.config.get('wiki')
+    if (setting or WIKI_FOLDER) != (recorded or WIKI_FOLDER):
+        raise ValueError(
+            f'{seed}/{SETTINGS_FILE} names {setting or WIKI_FOLDER!r} as the'
+            f' project wiki, but the tree on {node.branch!r} recorded'
+            f' {recorded or WIKI_FOLDER!r}; re-run `fractal init` to adopt it'
+            f' (after `fractal reset {node.branch}` if the tree has nodes).'
+        )
     # stage fractal's node data only when tracked (it is self-ignored on the
     # top-level branch by default); the shared project wiki always rides along
     # so the base ref has a committed wiki, and with it the settings file

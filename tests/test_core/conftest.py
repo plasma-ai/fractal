@@ -252,7 +252,9 @@ def _make_git_repo(path: pathlib.Path, *, wiki: str = 'wiki') -> pathlib.Path:
     """Create a git repo with an initial commit at ``path``.
 
     ``wiki`` is the shared project-wiki folder; any other folder than the
-    default is named by a committed ``.fractal/.settings.json``.
+    default is named by a committed ``.fractal/.settings.json``, and
+    ``wiki/`` then holds a corpus that is itself a wiki with a stale index,
+    so a refresh that reached it would rewrite it.
     """
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -286,12 +288,18 @@ def _make_git_repo(path: pathlib.Path, *, wiki: str = 'wiki') -> pathlib.Path:
         encoding='utf-8',
     )
     tracked = ['README.md', '.gitignore', wiki]
-    # a non-default folder is named by the project's settings file
+    # a non-default folder is named by the project's settings file, beside a
+    # corpus wiki/ whose index omits its page
     if wiki != 'wiki':
         settings = path / '.fractal' / '.settings.json'
         settings.parent.mkdir()
         settings.write_text(json.dumps({'wiki': wiki}) + '\n', encoding='utf-8')
-        tracked.append('.fractal/.settings.json')
+        corpus = path / 'wiki'
+        corpus.mkdir()
+        index = wiki_index.read_text(encoding='utf-8')
+        (corpus / '_index.md').write_text(index, encoding='utf-8')
+        (corpus / 'theorem.md').write_text('# theorem\n', encoding='utf-8')
+        tracked += ['.fractal/.settings.json', 'wiki']
     subprocess.run(
         ['git', 'add', *tracked],
         cwd=path,

@@ -303,12 +303,15 @@ its scope — is `wiki/` by default. A project whose `wiki/` holds other content
 names a different folder in a committed `.fractal/.settings.json` (or
 `<path>/.fractal/.settings.json` for a sub-project), whose only key is `wiki`:
 `{"wiki": "docs"}`. The value is a folder relative to the project: never
-absolute, never `.`, with no `..`, no `.fractal`, `.worktrees`, or `.git`
-component, and written canonically (`docs`, not `./docs/`). `fractal init` reads
-the file once and fixes the folder for the whole tree; every node inherits it,
-and a bad value fails init. To change the folder of an existing tree, commit the
-new setting, run `fractal reset <root>` so the tree has no nodes, re-run
-`fractal init`, and commit the baseline with `--init`.
+absolute, never `.` or `null`, with no `..`, no `.fractal`, `.worktrees`, or
+`.git` component, and written canonically (`docs`, not `./docs/`). Write the
+file before `fractal init`, which reads it and fixes the folder for the tree;
+every node in the project inherits it, and a bad value fails init. The baseline
+commit refuses a file naming another folder than the one init recorded, and a
+node spawn refuses when the root branch's committed file does. To change the
+folder of an existing tree, commit the new setting, run `fractal reset <root>`
+so the tree has no nodes, re-run `fractal init`, and commit the baseline with
+`--init`.
 
 ### Step 2: Define the node
 

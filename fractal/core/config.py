@@ -202,7 +202,9 @@ def validate_wiki(value: Any, source: str) -> str:
     clear of fractal's own machinery: a ``.`` would exempt the whole
     project, and a ``.fractal``, ``.worktrees``, or ``.git`` component
     (casefolded, as the files surface matches them) would admit the
-    control plane.
+    control plane. A folder named ``null`` is refused too: ``config _set``
+    reads that value as clearing the key, so a spawn would record the
+    default instead.
 
     Args:
         value: The configured folder, relative to the project path.
@@ -214,8 +216,8 @@ def validate_wiki(value: Any, source: str) -> str:
 
     Raises:
         ValueError: If ``value`` is not a non-empty string, is absolute,
-            has a ``..`` component, is ``.``, is not canonical, or has a
-            machinery component.
+            has a ``..`` component, is ``.``, is not canonical, has a
+            machinery component, or is ``null``.
 
     """
     if not isinstance(value, str) or not value:
@@ -238,6 +240,11 @@ def validate_wiki(value: Any, source: str) -> str:
         raise ValueError(
             f'{source} must stay outside fractal machinery, not {value!r}'
             f' (no {", ".join(reserved)} component).'
+        )
+    if value == 'null':
+        raise ValueError(
+            f'{source} cannot be {value!r}, which a config value reads as'
+            ' clearing the key.'
         )
     return value
 

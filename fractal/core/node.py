@@ -1325,19 +1325,19 @@ class Node:
         # file per branch, plus a .lock suffix) -- checkable only now
         # that the parent is resolved
         worktree.validate_name(name, parent_branch=parent.branch)
+        # a non-root path names the child's project (default: inherit); a
+        # .worktrees/ path is the cwd-in-a-worktree case -- inherit too
+        child_project = parent.project_path
+        if path is not None and path != '.':
+            parts = pathlib.Path(path).parts
+            if parts[0] != WORKTREES_FOLDER:
+                child_project = path
         # a meta node's scope is the target's seed dir, spelled relative to the
         # child's own project (scope roots resolve against a node's project):
         # bare when the two share a project, prefixed with the target's project
         # from the repo root, and unreachable from any other project
         if meta:
             target_project = worktree.project_path(self.repo_dir, meta)
-            # a non-root path names the child's project (default: inherit); a
-            # .worktrees/ path is the cwd-in-a-worktree case -- inherit too
-            child_project = parent.project_path
-            if path is not None and path != '.':
-                parts = pathlib.Path(path).parts
-                if parts[0] != WORKTREES_FOLDER:
-                    child_project = path
             if child_project == target_project:
                 scope = [f'{FRACTAL_FOLDER}/{meta}']
             elif child_project == '.':
@@ -1360,11 +1360,28 @@ class Node:
         # the child records the tree's root (inherited from the parent) so any
         # node can resolve the central database from its own config
         root = parent.config.get('root')
-        # the shared project-wiki folder is fixed for the whole tree at user
-        # init, so the child carries the parent's value (absent: the default)
-        wiki = parent.config.get('wiki')
-        if wiki is not None:
-            validate_wiki(wiki, source='wiki')
+        # the shared project-wiki folder is the child's project's setting as
+        # committed on the root branch (never a node's editable checkout); a
+        # child in its parent's project carries the parent's value, and a
+        # root branch naming another folder refuses
+        wiki = worktree.committed_wiki_setting(
+            self.repo_dir,
+            ref=root,
+            project=child_project,
+        )
+        if child_project == parent.project_path:
+            inherited = parent.config.get('wiki')
+            if inherited is not None:
+                validate_wiki(inherited, source='wiki')
+            if (wiki or WIKI_FOLDER) != (inherited or WIKI_FOLDER):
+                raise ValueError(
+                    f'The project wiki setting committed on {root!r} names'
+                    f' {wiki or WIKI_FOLDER!r}, but the tree recorded'
+                    f' {inherited or WIKI_FOLDER!r}; commit the recorded'
+                    f' setting on {root!r}, or run `fractal reset {root}` and'
+                    ' re-run `fractal init` to adopt the committed one.'
+                )
+            wiki = inherited
         # compose the child branch and probe its pre-existing ref now: the template
         # read below forks from the branch's own tip on a --reset, and the failure
         # rollback must never delete a reused branch's committed history
@@ -2065,9 +2082,11 @@ class Node:
         if self.is_user:
             # the folder is fixed at init (every node inherits it as its scope
             # exemption), so a changed setting is adopted only while the tree
-            # has no node worktrees -- a live node would keep the old folder
+            # has no node worktrees -- a live node would keep the old folder;
+            # an absent setting and one naming the default are the same folder
             recorded = self.config.get('wiki')
-            if wiki_folder != recorded:
+            adopted = (wiki_folder or WIKI_FOLDER) != (recorded or WIKI_FOLDER)
+            if adopted:
                 nodes = [
                     checkout
                     for checkout in fractal.util.git.worktree_map(self.repo_dir)
@@ -2107,7 +2126,7 @@ class Node:
             # re-check host hooks for the formatter lanes (informational)
             worktree.verify_hook_formatters(self.repo_dir)
             message = f'User node already initialized on branch {branch!r}.'
-            if wiki_folder != recorded:
+            if adopted:
                 message += f' Adopted the project wiki folder {self.wiki_prefix!r}.'
             if agent is not None:
                 message += f' Updated default agent to {agent}.'

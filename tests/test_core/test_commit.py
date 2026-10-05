@@ -14,7 +14,7 @@ import pytest
 import fractal.util
 from fractal.core import commit
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _files, _git
 
 from .conftest import (
     _make_git_repo,
@@ -881,7 +881,9 @@ def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path, wiki: str) -> Non
     the pipeline runs ``wiki update`` on the project and memory wikis before
     the lint gate, so the refreshed indexes land in the same commit as the
     work -- no dedicated refresh commits, no agent turns spent on it. The
-    project wiki is the configured folder, whatever its name.
+    project wiki is the configured folder, whatever its name: a corpus at
+    ``wiki/`` beside a ``docs`` project wiki is ordinary content the
+    refresh never touches, stale index and all.
     """
     repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
     Node(repo).init(agent='claude', user=True)
@@ -893,6 +895,7 @@ def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path, wiki: str) -> Non
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     node.commit('baseline', init=True)
+    corpus = _files(project_dir / 'wiki')
     # new pages in both wikis, with the generated indexes left stale
     (project_dir / wiki / 'topic.md').write_text(
         '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
@@ -915,6 +918,9 @@ def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path, wiki: str) -> Non
     result = _git(project_dir, 'status', '--porcelain')
     status = result.stdout
     assert status == ''
+    # a corpus beside the configured wiki kept its bytes
+    if wiki != 'wiki':
+        assert _files(project_dir / 'wiki') == corpus
 
 
 def test_commit_untracks_a_pretracked_wiki_cache(tmp_path: pathlib.Path) -> None:
@@ -1268,21 +1274,33 @@ def test_sub_project_commit_boundary(
 
 
 @pytest.mark.parametrize(
-    argnames=('wiki', 'project', 'exempt', 'stray'),
+    argnames=('root_wiki', 'wiki', 'project', 'exempt', 'stray'),
     argvalues=[
-        pytest.param('wiki', None, 'wiki/note.md', 'docs/note.md', id='default'),
-        pytest.param('docs', None, 'docs/note.md', 'wiki/note.md', id='docs'),
         pytest.param(
+            'wiki', 'wiki', None, 'wiki/note.md', 'docs/note.md', id='default'
+        ),
+        pytest.param('docs', 'docs', None, 'docs/note.md', 'wiki/note.md', id='docs'),
+        pytest.param(
+            'wiki',
             'docs',
             'app',
             'app/docs/note.md',
             'app/wiki/note.md',
             id='sub-project',
         ),
+        pytest.param(
+            'docs',
+            'wiki',
+            'app',
+            'app/wiki/note.md',
+            'app/docs/note.md',
+            id='sub-project-default',
+        ),
     ],
 )
 def test_wiki_setting_moves_the_scope_exemption(
     tmp_path: pathlib.Path,
+    root_wiki: str,
     wiki: str,
     project: Optional[str],
     exempt: str,
@@ -1294,14 +1312,20 @@ def test_wiki_setting_moves_the_scope_exemption(
     ``.fractal/.settings.json`` moves the always-committable exemption
     there: a scoped node commits pages under it, while ``wiki/`` becomes
     ordinary content outside the scope. A child that selects a sub-project
-    applies the same folder relative to that project.
+    follows that project's own setting, whatever the tree's root project
+    names.
     """
-    repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
-    # a committed sub-project wiki -- the base-ref precondition for the init
+    repo = _make_git_repo(tmp_path / 'repo', wiki=root_wiki)
+    # a committed sub-project wiki (the base-ref precondition for the init),
+    # with a settings file when the sub-project names another folder
     if project is not None:
         index = repo / project / wiki / '_index.md'
         index.parent.mkdir(parents=True)
         index.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+        if wiki != 'wiki':
+            settings = repo / project / '.fractal' / '.settings.json'
+            settings.parent.mkdir()
+            settings.write_text(json.dumps({'wiki': wiki}), encoding='utf-8')
         _git(repo, 'add', project)
         _git(repo, 'commit', '-m', 'add app wiki')
     Node(repo).init(agent='claude', user=True)
@@ -1778,6 +1802,9 @@ def test_lint_lints_the_configured_wiki(
     )
     lines = calls.read_text(encoding='utf-8').splitlines()
     assert f'lint --path={project_dir / wiki}' in lines
+    # a corpus at wiki/ beside the configured folder is never linted
+    linted = f'lint --path={project_dir / "wiki"}' in lines
+    assert linted is (wiki == 'wiki')
 
 
 # ------ helpers

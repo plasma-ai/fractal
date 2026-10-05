@@ -237,9 +237,9 @@ Plain values
      - absent (``wiki``); inherited
      - The shared project-wiki folder, relative to the project: the one
        folder a node commits to regardless of its ``scope``, refreshed at
-       each commit and merge. Read once from the project's tracked settings
-       file at ``fractal init`` and inherited by every node; no flag sets it.
-       **Immutable** (see `The project wiki folder`_).
+       each commit and merge. Read from the project's tracked settings file
+       at ``fractal init`` and inherited by every node in the same project;
+       no flag sets it. **Immutable** (see `The project wiki folder`_).
    * - ``root``
      - inherited from the parent
      - The tree's root branch. Every node carries it to resolve the central
@@ -449,9 +449,11 @@ loop-side default is noted.
 Inheritance at spawn
 ~~~~~~~~~~~~~~~~~~~~
 
-``root`` and ``wiki`` are always inherited from the parent, and ``project`` is
-inherited by default (``node init --path <sub-project>`` selects a different
-sub-project for the child; either way the key is immutable after init);
+``root`` is always inherited from the parent, and ``project`` is inherited by
+default (``node init --path <sub-project>`` selects a different sub-project
+for the child; either way the key is immutable after init); ``wiki`` is
+inherited by a child in its parent's project and read from the selected
+project's own settings file otherwise (see `The project wiki folder`_);
 ``agent`` and ``provider`` resolve through the nearest ancestor that sets
 them; a ``local`` parent forces ``local`` children. A spawn with
 ``--template`` fills the budget, limit, duration, model, and mode keys its
@@ -488,7 +490,7 @@ These keys are fixed at init and can never be changed:
 ``wiki``
     Fixes the folder every commit and merge admits regardless of scope. A
     post-init change would let a node widen its own boundary, and would
-    split one tree across two wiki folders.
+    split one project's nodes across two wiki folders.
 
 The public ``fractal node config set`` refuses these keys outright — even a
 first write (so ``config set user=true`` cannot turn a child into a root
@@ -511,12 +513,19 @@ settings file at ``<project>/.fractal/.settings.json``:
 The file is the repository's source of truth, committed with the project, so
 no operator flag can be forgotten. ``wiki`` is its only key — any other key
 refuses, so a typo cannot read as the default. ``fractal init`` reads the
-file once, before it writes anything, and records the folder as the user
-node's ``wiki`` key; ``fractal commit --init`` commits the file beside the
-wiki. Every spawned node copies its parent's value, and a sub-project child
-applies it relative to its own project. Nodes never read the file again, so a
-node editing its own copy changes nothing (``merge`` restores the target's
-``.fractal/``, so such an edit never lands either).
+file before it writes anything and records the folder as the user node's
+``wiki`` key; ``fractal commit --init`` commits the file beside the wiki, and
+refuses a file naming another folder than the one recorded. Each spawn reads
+the setting committed on the tree's root branch, never a node's checkout, so
+a node editing its own copy changes nothing (``merge`` restores the target's
+``.fractal/``, so such an edit never lands either):
+
+- a child in its parent's project copies the parent's value, and the spawn
+  refuses when the root branch's setting names another folder — a setting
+  committed after the tree recorded its folder — naming the remedy;
+- a child that selects another sub-project takes that project's own setting
+  (``wiki/`` when it has none), so each project's folder holds whichever tree
+  spawns into it.
 
 The folder decides the scope exemption in ``fractal commit`` and the merge
 footprint check, the commit-time and merge-time index refresh, the base-ref
@@ -528,7 +537,8 @@ file, every one of them uses ``wiki/`` and no config gains a ``wiki`` key.
 A tree records its folder when it is created. To switch a running tree to a
 new folder, commit the new setting, run ``fractal reset <root>`` (the tree's
 history survives), re-run ``fractal init``, and commit the baseline with
-``--init``. A re-init over live nodes refuses.
+``--init``. A re-init over live nodes refuses. An absent setting and one
+naming ``wiki`` are the same folder, so neither counts as a switch.
 
 The cleanup reserve
 -------------------
@@ -582,9 +592,10 @@ It rejects:
 - absolute paths, ``..`` components, or non-canonical spellings (``./src``,
   ``src/``) in ``scope`` or ``clone_dirs``, and ``.`` in ``clone_dirs``;
 - a ``wiki`` folder that is not a non-empty string, is absolute, carries a
-  ``..`` component, is ``.``, is not canonical, or has a ``.fractal``,
-  ``.worktrees``, or ``.git`` component (compared case-insensitively). Every
-  commit and merge scope check re-validates the stored value too.
+  ``..`` component, is ``.`` or ``null``, is not canonical, or has a
+  ``.fractal``, ``.worktrees``, or ``.git`` component (compared
+  case-insensitively). Every commit and merge scope check re-validates the
+  stored value too.
 
 Per-step overrides
 ------------------

@@ -995,6 +995,7 @@ def test_destroy_lifecycle(
         path.relative_to(git_repo).as_posix() for path in git_repo.glob('.fractal/**/*')
     )
     assert remaining == kept
+    assert (git_repo / '.fractal').exists() is bool(kept)
     branches = subprocess.run(
         ['git', 'branch', '--list', 'main.task'],
         cwd=git_repo,
