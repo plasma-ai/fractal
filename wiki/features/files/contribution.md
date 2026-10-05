@@ -22,13 +22,14 @@ Its listing has two modes.
 Without a diff scope, the listing is every git-tracked file in the worktree,
 sorted by path, each entry carrying its worktree-relative path and on-disk size.
 Git-ignored runtime state (the node database, status file, logs) never appears,
-because it is never tracked. Fractal's own content — `wiki/` and `.fractal/` —
-lists like any other tracked content: it is readable project state, and
-consumers filter or collapse machinery rather than the surface hiding it. Only
-structurally unreachable entries are dropped: any `.git` component, a leading
-`.worktrees` (which on the user node would reach into sibling nodes' worktrees),
-and names carrying leading pathspec magic — matched casefolded, because APFS
-resolves names case-insensitively (see
+because it is never tracked. Fractal's own content — the project wiki (`wiki/`
+unless the project's `.fractal/.settings.json` names another folder) and
+`.fractal/` — lists like any other tracked content: it is readable project
+state, and consumers filter or collapse machinery rather than the surface hiding
+it. Only structurally unreachable entries are dropped: any `.git` component, a
+leading `.worktrees` (which on the user node would reach into sibling nodes'
+worktrees), and names carrying leading pathspec magic — matched casefolded,
+because APFS resolves names case-insensitively (see
 [[features/files/path_validation|path_validation]]).
 
 A `path` filter restricts either mode to one worktree-relative subtree.

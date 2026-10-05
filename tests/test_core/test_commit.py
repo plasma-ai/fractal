@@ -71,10 +71,18 @@ _FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
 # ------ baselines and pushes
 
 
-@pytest.mark.parametrize('track', [False, True], ids=['untracked', 'tracked'])
+@pytest.mark.parametrize(
+    argnames=('track', 'wiki'),
+    argvalues=[
+        pytest.param(False, 'wiki', id='untracked'),
+        pytest.param(True, 'wiki', id='tracked'),
+        pytest.param(False, 'docs', id='docs'),
+    ],
+)
 def test_user_node_commit_init_commits_baseline(
     git_repo: pathlib.Path,
     track: bool,
+    wiki: str,
 ) -> None:
     """``commit(init=True)`` baselines the project wiki -- plus node data when tracked.
 
@@ -83,8 +91,13 @@ def test_user_node_commit_init_commits_baseline(
     other staged work is untouched) and commits them, while a non-init commit from
     a user node is rejected. The node's own ``.fractal/`` is git-ignored on the
     top-level branch by default, so it is committed only after ``fractal track``
-    opts the tree in.
+    opts the tree in. A project naming another folder in its settings file
+    baselines the wiki init created there, and the settings file itself.
     """
+    if wiki != 'wiki':
+        settings = git_repo / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}) + '\n', encoding='utf-8')
     node = Node(git_repo)
     node.init(agent='claude', user=True)
     if track:
@@ -109,7 +122,7 @@ def test_user_node_commit_init_commits_baseline(
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
     # the wiki tool's self-ignored derived cache sits inside the staged wiki
-    cache = git_repo / 'wiki' / '.wiki' / 'cache'
+    cache = git_repo / wiki / '.wiki' / 'cache'
     cache.mkdir(parents=True, exist_ok=True)
     (cache / '.gitignore').write_text('*\n', encoding='utf-8')
     (cache / 'word_counts.json').write_text('{}\n', encoding='utf-8')
@@ -118,13 +131,16 @@ def test_user_node_commit_init_commits_baseline(
     # seed must stay out of the commit on their own
     (git_repo / '.git' / 'info' / 'exclude').unlink()
     node.commit('configure', init=True)
-    # a tracked tree makes a real commit (the seed is new); untracked, the wiki
-    # is already committed by the fixture, so the baseline is legitimately a no-op
-    if track:
+    # a tracked tree makes a real commit (the seed is new), and so does a
+    # configured folder (init created its wiki); untracked, the default wiki
+    # is already committed by the fixture, so the baseline is legitimately a
+    # no-op
+    if track or wiki != 'wiki':
         assert _head(git_repo) != before
-    result = _git(git_repo, 'ls-files', '.fractal', 'wiki')
+    result = _git(git_repo, 'ls-files', '.fractal', wiki)
     tracked = result.stdout
-    assert 'wiki/_index.md' in tracked
+    assert f'{wiki}/_index.md' in tracked
+    assert ('.fractal/.settings.json' in tracked) == (wiki != 'wiki')
     assert ('.fractal/main/config.json' in tracked) == track
     # runtime artifacts never ride the baseline, tracked or not
     assert '.db' not in tracked

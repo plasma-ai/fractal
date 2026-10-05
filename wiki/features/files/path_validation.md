@@ -35,8 +35,9 @@ history. It rejects:
 - a path whose resolution escapes the worktree (a symlinked intermediate
   directory must not lead outside).
 
-Fractal's own content passes this tier: `wiki/` and `.fractal/` are readable
-project state, filtered or collapsed by consumers, not a boundary.
+Fractal's own content passes this tier: the project wiki (`wiki/` unless the
+project's `.fractal/.settings.json` names another folder) and `.fractal/` are
+readable project state, filtered or collapsed by consumers, not a boundary.
 
 Beyond structure, a read or download serves only what the surface exposes: the
 path must be git-tracked — a read under a `since` scope also accepts a member of

@@ -7,6 +7,7 @@ pruning, and the full destroy/reset lifecycles.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
@@ -57,6 +58,7 @@ __all__ = [
     'test_destroy_rejects_from_inside_worktree',
     'test_teardown_locked_preflight_precedes_paused_settle',
     'test_destroy_lifecycle',
+    'test_destroy_survives_an_invalid_stored_wiki',
     'test_destroy_rejects_an_unknown_tree',
     'test_teardown_guards_travel_with_the_scope',
     'test_destroy_prunes_phantom_node_branches',
@@ -1012,6 +1014,27 @@ def test_destroy_lifecycle(
     # destroying again is a clean no-op
     second = Node.destroy(git_repo)
     assert 'Nothing to destroy' in second
+
+
+def test_destroy_survives_an_invalid_stored_wiki(git_repo: pathlib.Path) -> None:
+    """A hand-edited invalid ``wiki`` key never blocks the teardown.
+
+    Every other read of the folder validates it and fails loudly, but
+    destroy needs it only for the report's "Left in place" line, so the
+    teardown runs to completion and the line falls back to the default.
+    """
+    node = Node(git_repo)
+    node.init(agent='claude', user=True)
+    node.init(name='task')
+    config = json.loads(node.config.path.read_text(encoding='utf-8'))
+    config['wiki'] = '../outside'
+    node.config.path.write_text(json.dumps(config, indent=2), encoding='utf-8')
+
+    output = Node.destroy(git_repo)
+    assert 'Destroyed fractal' in output
+    assert 'Left in place: wiki/' in output
+    assert not (git_repo / '.worktrees').exists()
+    assert not (git_repo / '.fractal').exists()
 
 
 def test_destroy_rejects_an_unknown_tree(git_repo: pathlib.Path) -> None:

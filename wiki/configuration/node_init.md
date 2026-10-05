@@ -47,8 +47,9 @@ exists.
   worktree. Each root must be a repo-relative subdirectory: absolute paths and
   `..` segments are refused, since they would never match the commit pipeline's
   prefix check and would brick every scoped commit. With a scope set, the node's
-  commits are limited to the scope roots (the shared `wiki/` tree and the node's
-  own `.fractal/` directory always remain in bounds).
+  commits are limited to the scope roots (the shared project wiki -- `wiki/`
+  unless the project's `.fractal/.settings.json` names another folder -- and the
+  node's own `.fractal/` directory always remain in bounds).
 - `--base` -- branch to start from instead of the parent's branch. The base is
   also the squash-merge target when the node finishes, so it must have a
   checked-out worktree in the repository -- init refuses a worktree-less base

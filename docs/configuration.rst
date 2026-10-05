@@ -512,13 +512,17 @@ settings file at ``<project>/.fractal/.settings.json``:
 
 The file is the repository's source of truth, committed with the project, so
 no operator flag can be forgotten. ``wiki`` is its only key — any other key
-refuses, so a typo cannot read as the default. ``fractal init`` reads the
-file before it writes anything and records the folder as the user node's
-``wiki`` key; ``fractal commit --init`` commits the file beside the wiki, and
-refuses a file naming another folder than the one recorded. Each spawn reads
-the setting committed on the tree's root branch, never a node's checkout, so
-a node editing its own copy changes nothing (``merge`` restores the target's
-``.fractal/``, so such an edit never lands either):
+refuses, so a typo cannot read as the default. The default folder is spelled
+by omitting the key (or the file), never by setting it to ``null``, which
+refuses; a user node's ``config.json`` likewise omits ``wiki`` for the
+default rather than storing ``null`` as it does for other unset keys.
+``fractal init`` reads the file before it writes anything and records the
+folder as the user node's ``wiki`` key; ``fractal commit --init`` commits the
+file beside the wiki, and refuses a file naming another folder than the one
+recorded. Each spawn reads the setting committed on the tree's root branch,
+never a node's checkout, so a node editing its own copy changes nothing
+(``merge`` restores the target's ``.fractal/``, so such an edit never lands
+either):
 
 - a child in its parent's project copies the parent's value, and the spawn
   refuses when the root branch's setting names another folder — a setting
@@ -526,6 +530,11 @@ a node editing its own copy changes nothing (``merge`` restores the target's
 - a child that selects another sub-project takes that project's own setting
   (``wiki/`` when it has none), so each project's folder holds whichever tree
   spawns into it.
+
+The merge footprint check applies the same two rules again before it judges
+a squash: a node whose ``config.json`` was edited by hand to name another
+valid folder would otherwise move its own scope exemption, so the merge
+refuses, naming both folders.
 
 The folder decides the scope exemption in ``fractal commit`` and the merge
 footprint check, the commit-time and merge-time index refresh, the base-ref

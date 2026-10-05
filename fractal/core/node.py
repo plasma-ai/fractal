@@ -1360,28 +1360,28 @@ class Node:
         # the child records the tree's root (inherited from the parent) so any
         # node can resolve the central database from its own config
         root = parent.config.get('root')
-        # the shared project-wiki folder is the child's project's setting as
-        # committed on the root branch (never a node's editable checkout); a
-        # child in its parent's project carries the parent's value, and a
-        # root branch naming another folder refuses
-        wiki = worktree.committed_wiki_setting(
-            self.repo_dir,
-            ref=root,
-            project=child_project,
-        )
+        # the shared project-wiki folder follows the spawn rule the merge
+        # re-checks: the parent's value in its own project, else the child's
+        # project's setting as committed on the root branch (never a node's
+        # editable checkout); in the parent's project, a root branch naming
+        # another folder than the tree recorded refuses
+        wiki = _child_wiki(parent, child_project)
         if child_project == parent.project_path:
-            inherited = parent.config.get('wiki')
-            if inherited is not None:
-                validate_wiki(inherited, source='wiki')
-            if (wiki or WIKI_FOLDER) != (inherited or WIKI_FOLDER):
+            if wiki is not None:
+                validate_wiki(wiki, source='wiki')
+            committed = worktree.committed_wiki_setting(
+                self.repo_dir,
+                ref=root,
+                project=child_project,
+            )
+            if (committed or WIKI_FOLDER) != (wiki or WIKI_FOLDER):
                 raise ValueError(
                     f'The project wiki setting committed on {root!r} names'
-                    f' {wiki or WIKI_FOLDER!r}, but the tree recorded'
-                    f' {inherited or WIKI_FOLDER!r}; commit the recorded'
+                    f' {committed or WIKI_FOLDER!r}, but the tree recorded'
+                    f' {wiki or WIKI_FOLDER!r}; commit the recorded'
                     f' setting on {root!r}, or run `fractal reset {root}` and'
                     ' re-run `fractal init` to adopt the committed one.'
                 )
-            wiki = inherited
         # compose the child branch and probe its pre-existing ref now: the template
         # read below forks from the branch's own tip on a --reset, and the failure
         # rollback must never delete a reused branch's committed history
@@ -4092,6 +4092,43 @@ class Node:
         # the CompletedProcess -- return them beside the output
         return result.stdout.strip(), result.stderr.strip()
 
+    def check_wiki(self: Node) -> None:
+        """Refuse a recorded project-wiki folder other than the one spawn gave.
+
+        The ``wiki`` key is immutable through the config setters, but a raw
+        edit of ``config.json`` to another valid folder would move the
+        node's scope exemption, and its squash would then land pages under
+        that folder. The merge footprint check calls this first: it
+        recomputes the folder by the rule :meth:`init` applied (the
+        parent's folder in the parent's project, else the child's project's
+        setting committed on the root branch) and refuses a node that
+        records another. An edited parent is caught by its own merge.
+
+        Raises:
+            ValueError: If the recorded folder differs, naming both.
+
+        """
+        parent = self.parent
+        if parent is not None:
+            expected = _child_wiki(parent, self.project_path)
+        else:
+            # the parent is checked out nowhere (a --base merge into another
+            # tree's root can leave it so); spawn held the parent's folder to
+            # the setting committed on the root branch, so that one stands in
+            expected = worktree.committed_wiki_setting(
+                self.repo_dir,
+                ref=self.config.get('root'),
+                project=self.project_path,
+            )
+        expected = expected or WIKI_FOLDER
+        recorded = self.config.get('wiki') or WIKI_FOLDER
+        if recorded != expected:
+            raise ValueError(
+                f'{self.branch} records {recorded!r} as its project wiki folder,'
+                f' but its spawn gives {expected!r}; the folder is fixed at'
+                " init, so restore it in the node's config.json."
+            )
+
     def guard_delete(self: Node) -> None:
         """Guard a subtree teardown: pre-flight its refusals, settle what it can.
 
@@ -4642,7 +4679,13 @@ class Node:
             for _, descendant in tree._live_descendants(status='active'):
                 descendant._reconcile_status()
         args = [f'--branch={node.branch}']
-        args.append(f'--wiki={node.wiki_prefix}')
+        # the project wiki feeds only the report's "Left in place" line, which
+        # falls back to the default folder: a hand-edited invalid value must
+        # not block the teardown
+        try:
+            args.append(f'--wiki={node.wiki_prefix}')
+        except ValueError:
+            pass
         if name is None:
             args.append('--all')
             # the sweep clears every tree's data dir, so name them here -- the
@@ -6765,6 +6808,33 @@ def _draining(node: Node) -> bool:
     if actor is not None and actor.drain_bound():
         return True
     return node.drain_lineage()
+
+
+def _child_wiki(parent: Node, project: str) -> Optional[str]:
+    """Return the ``wiki`` value a child of ``parent`` records in ``project``.
+
+    The spawn rule :meth:`Node.init` applies and :meth:`Node.check_wiki`
+    re-applies at merge: a child in its parent's project carries the
+    parent's recorded value, and a child selecting another sub-project
+    takes that project's setting as committed on the tree's root branch
+    (never a node's editable checkout).
+
+    Args:
+        parent: The child's parent node.
+        project: The child's project path (``.`` for the repo root).
+
+    Returns:
+        The folder to record, or ``None`` for the default.
+
+    Raises:
+        ValueError: If the other project's committed settings file is
+            invalid.
+
+    """
+    if project == parent.project_path:
+        return parent.config.get('wiki')
+    root = parent.config.get('root')
+    return worktree.committed_wiki_setting(parent.repo_dir, ref=root, project=project)
 
 
 def _claim_in_flight(pgid_file: pathlib.Path, recorded: str) -> bool:

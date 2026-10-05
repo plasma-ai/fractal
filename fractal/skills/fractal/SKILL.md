@@ -241,13 +241,13 @@ Determine the node's state and proceed accordingly:
       (`.fractal/`) and project wiki (`wiki/`, or the folder the project's
       settings file names — see below); a no-op if the root already exists
       (re-run to update the stored `--agent`). For a monorepo sub-project
-      `<path>` these nest under it (`<path>/.fractal/`, `<path>/wiki/`), not the
-      repo root. `--agent` sets the default agent that spawned nodes inherit; if
-      the user didn't specify one, default to `--agent=claude` if you are
-      Claude, `--agent=codex` if you are Codex, `--agent=grok` if you are Grok,
-      `--agent=opencode` if you are opencode, or `--agent=omp` if you are Oh My
-      Pi. `--provider` sets the default provider route the same way (e.g.
-      `openrouter` routes claude or codex through OpenRouter on
+      `<path>` these nest under it (`<path>/.fractal/`, its wiki folder), not
+      the repo root. `--agent` sets the default agent that spawned nodes
+      inherit; if the user didn't specify one, default to `--agent=claude` if
+      you are Claude, `--agent=codex` if you are Codex, `--agent=grok` if you
+      are Grok, `--agent=opencode` if you are opencode, or `--agent=omp` if you
+      are Oh My Pi. `--provider` sets the default provider route the same way
+      (e.g. `openrouter` routes claude or codex through OpenRouter on
       `OPENROUTER_API_KEY`; agents without routes ignore it, and omitting it
       means each agent's own endpoint). Route mechanics to know: an inherited
       route is cleared per node with `fractal node config set provider=null`;

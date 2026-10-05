@@ -301,6 +301,7 @@ __all__ = [
     'test_merge_warnings_print_a_non_ascii_path_readably',
     'test_merge_refuses_a_squash_outside_the_nodes_scope',
     'test_merge_footprint_exempts_the_configured_wiki',
+    'test_merge_refuses_a_hand_edited_wiki_folder',
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
     'test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal',
     'test_merge_continue_refuses_a_squash_outside_the_nodes_scope',
@@ -4206,6 +4207,89 @@ def test_merge_footprint_exempts_the_configured_wiki(
     assert tracked == sorted(['src/a.py', exempt])
     if wiki != 'wiki':
         assert _files(repo / 'wiki') == corpus
+
+
+@pytest.mark.parametrize(
+    argnames=('wiki', 'project', 'spawned', 'edited'),
+    argvalues=[
+        pytest.param('wiki', None, 'wiki', 'docs', id='default'),
+        pytest.param('docs', None, 'docs', 'wiki', id='docs'),
+        # a sub-project naming no folder keeps the default, whatever the
+        # tree's root project names
+        pytest.param('docs', 'app', 'wiki', 'docs', id='sub-project'),
+    ],
+)
+def test_merge_refuses_a_hand_edited_wiki_folder(
+    tmp_path: pathlib.Path,
+    wiki: str,
+    project: Optional[str],
+    spawned: str,
+    edited: str,
+) -> None:
+    """A node whose ``config.json`` names another wiki folder cannot merge.
+
+    The ``wiki`` key is immutable through the config setters, but a raw
+    edit to another valid folder would move the node's scope exemption and
+    let the squash land pages under it. The footprint check recomputes the
+    folder by the rule spawn applied -- the parent's folder in the parent's
+    project, else the project's committed setting -- and refuses the merge
+    naming both folders, restoring the target. With the edit undone, the
+    page is an ordinary path outside the scope.
+    """
+    repo = _init_tree(tmp_path / 'editedrepo', wiki=wiki)
+    flags = []
+    prefix = ''
+    if project is not None:
+        # a committed sub-project wiki -- the base-ref precondition for the init
+        app_wiki = repo / project / 'wiki' / '_index.md'
+        app_wiki.parent.mkdir(parents=True)
+        app_wiki.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+        _git(repo, 'add', project)
+        _git(repo, 'commit', '-m', 'add app wiki')
+        flags = ['--path', project]
+        prefix = f'{project}/'
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        *flags,
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    # hand-edit the recorded folder, then commit a page under it raw
+    config_path = worktree / f'{prefix}.fractal' / 'main.task' / 'config.json'
+    original = config_path.read_text(encoding='utf-8')
+    config = json.loads(original)
+    config['wiki'] = edited
+    config_path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+    page = f'{prefix}{edited}/page.md'
+    (worktree / page).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / page).write_text(
+        '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'edit the wiki folder and add a page')
+    main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    # refused, naming both folders; the target restored
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert f'records {edited!r}' in result.stderr, result.stderr
+    assert f'gives {spawned!r}' in result.stderr, result.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == main_head
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    # with the edit undone, the page is a stray outside the scope
+    config_path.write_text(original, encoding='utf-8')
+    result = _script('merge.sh', repo, f'{worktree}')
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert f'outside its scope: {page};' in result.stderr, result.stderr
 
 
 @pytest.mark.parametrize(

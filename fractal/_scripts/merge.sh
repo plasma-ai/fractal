@@ -800,7 +800,9 @@ fi
 # --no-ff of children), so judge the staged paths by the node's commit
 # boundaries through the law fractal commit enforces; before the wiki refresh,
 # which stages the target's own regenerated state; a failed listing or check
-# fails closed, and a refusal restores the target like a conflict
+# fails closed, and a refusal restores the target like a conflict; the check
+# first recomputes the node's project-wiki folder from its parent and refuses
+# a config.json edited to another, which would move the exemption
 if [[ "$IGNORE_SCOPE" != true ]]; then
     # after the restore every staged .fractal/ path is the merge's own -- a
     # scope-root edit or the seed strip's deletion -- so the rest is judged

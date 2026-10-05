@@ -527,7 +527,10 @@ place, and its remedies differ: re-run with ``--continue --ignore-scope``, or
 widen the scope (config set, then commit) and redo the squash (``git -C
 <target worktree> reset --hard HEAD && git -C <target worktree> merge
 --squash <branch>``), because the widening commit is a node commit made after
-the hand squash, which makes ``--continue`` refuse.
+the hand squash, which makes ``--continue`` refuse. Before it judges any path,
+the check refuses a node whose recorded project-wiki folder is not the one its
+spawn gave it (a hand edit of its ``config.json``), naming both folders (see
+:doc:`/configuration`).
 
 Nothing under any ``.fractal/`` directory on the target changes except a
 scope root of the merging node that is, or lies under, a ``.fractal/``

@@ -81,16 +81,23 @@ sub-project takes that project's own setting. The value rides `init.sh --wiki`,
 and `Node.wiki_prefix` resolves it against each node's project. The file is the
 repository's source of truth -- committed with the project, so no launch flag
 can be forgotten -- and a node editing its own copy changes nothing, since merge
-restores the target's `.fractal/` and the edit never lands. Everything that
+restores the target's `.fractal/` and the edit never lands. A node's own
+recorded value is checked again at merge: the footprint check's
+`Node.check_wiki` recomputes the folder by the same spawn rule
+(`node._child_wiki`; with the parent checked out nowhere, the setting committed
+on the root branch, which spawn held the parent's folder to) and refuses a
+`config.json` hand-edited to another valid folder, naming both. Everything that
 names the project wiki reads the recorded folder: the commit scope exemption and
 the merge footprint check (one law, `commit.scope_boundaries`), the commit-time
 and merge-time index refresh (a merge into a `--base` branch that is no node
 takes the merging node's folder), the `node init` base-ref precondition,
 `WIKI_DIR`, the seeded `lint.sh`, the unmerged-work check of `node delete`, and
-the `destroy` report. The wiki CLI, the `merge=wiki` driver, the tool's `.wiki/`
-state directory, and the memory wiki keep their names. With no setting the
-folder is `wiki` and no config records the key, so a project that names none
-uses `wiki/` at every site.
+the `destroy` report (which falls back to `wiki/` when the stored value is
+invalid, so a bad hand-edit never blocks the teardown). The wiki CLI, the
+`merge=wiki` driver, the tool's `.wiki/` state directory, and the memory wiki
+keep their names. With no setting the folder is `wiki` and no config records the
+key, so a project that names none uses `wiki/` at every site. The default is
+spelled by omitting the key; the settings file refuses `"wiki": null`.
 
 ## Routing knowledge
 
