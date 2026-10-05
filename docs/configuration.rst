@@ -514,15 +514,15 @@ The file is the repository's source of truth, committed with the project, so
 no operator flag can be forgotten. ``wiki`` is its only key — any other key
 refuses, so a typo cannot read as the default. The default folder is spelled
 by omitting the key (or the file), never by setting it to ``null``, which
-refuses; a user node's ``config.json`` likewise omits ``wiki`` for the
-default rather than storing ``null`` as it does for other unset keys.
-``fractal init`` reads the file before it writes anything and records the
-folder as the user node's ``wiki`` key; ``fractal commit --init`` commits the
-file beside the wiki, and refuses a file naming another folder than the one
-recorded. Each spawn reads the setting committed on the tree's root branch,
-never a node's checkout, so a node editing its own copy changes nothing
-(``merge`` restores the target's ``.fractal/``, so such an edit never lands
-either):
+refuses. No node's ``config.json``, user or child, records ``wiki`` for the
+default: a child's config stores ``null`` for its other unset keys but omits
+``wiki``. ``fractal init`` reads the file before it writes anything and
+records the folder as the user node's ``wiki`` key; ``fractal commit --init``
+commits the file beside the wiki, and refuses a file naming another folder
+than the one recorded. Each spawn reads the setting committed on the tree's
+root branch, never a node's checkout, so a node editing its own copy changes
+nothing (``merge`` restores the target's ``.fractal/``, so such an edit never
+lands either):
 
 - a child in its parent's project copies the parent's value, and the spawn
   refuses when the root branch's setting names another folder — a setting
@@ -534,7 +534,14 @@ either):
 The merge footprint check applies the same two rules again before it judges
 a squash: a node whose ``config.json`` was edited by hand to name another
 valid folder would otherwise move its own scope exemption, so the merge
-refuses, naming both folders.
+refuses, naming both folders. A child in its parent's project is held to the
+parent's recorded folder, which never changes. A child in another
+sub-project (or one whose parent is checked out nowhere) is held to the
+setting committed on the root branch as it stands at the merge, so
+committing a new folder for that project after the spawn refuses the merge
+too; the refusal names the setting, and the remedy is to commit the
+recorded folder back on the root branch, or to delete the node and spawn it
+again to adopt the new one.
 
 The folder decides the scope exemption in ``fractal commit`` and the merge
 footprint check, the commit-time and merge-time index refresh, the base-ref

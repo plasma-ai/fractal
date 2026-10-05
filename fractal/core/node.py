@@ -4104,11 +4104,23 @@ class Node:
         setting committed on the root branch) and refuses a node that
         records another. An edited parent is caught by its own merge.
 
+        A setting committed on the root branch is read as it stands now, so
+        a node checked against it is also refused when the setting changed
+        after its spawn; that refusal names the setting, since restoring
+        ``config.json`` to the new folder would itself move the exemption.
+
         Raises:
             ValueError: If the recorded folder differs, naming both.
 
         """
-        parent = self.parent
+        root = self.config.get('root')
+        # the tree's user node resolves by the repo's record, not the
+        # checkout: a root checked out in a linked worktree carries no
+        # self-ignored seed there, so its folder would read as the default
+        if self.branch.rsplit('.', 1)[0] == root:
+            parent = Node.resolve_user(self.repo_dir, name=root)
+        else:
+            parent = self.parent
         if parent is not None:
             expected = _child_wiki(parent, self.project_path)
         else:
@@ -4117,17 +4129,27 @@ class Node:
             # the setting committed on the root branch, so that one stands in
             expected = worktree.committed_wiki_setting(
                 self.repo_dir,
-                ref=self.config.get('root'),
+                ref=root,
                 project=self.project_path,
             )
         expected = expected or WIKI_FOLDER
         recorded = self.config.get('wiki') or WIKI_FOLDER
-        if recorded != expected:
+        if recorded == expected:
+            return
+        if parent is not None and parent.project_path == self.project_path:
             raise ValueError(
                 f'{self.branch} records {recorded!r} as its project wiki folder,'
                 f' but its spawn gives {expected!r}; the folder is fixed at'
                 " init, so restore it in the node's config.json."
             )
+        raise ValueError(
+            f'{self.branch} records {recorded!r} as its project wiki folder,'
+            f' but the setting committed on {root!r} for project'
+            f' {self.project_path!r} names {expected!r}; the folder is fixed'
+            f' at spawn, so commit {recorded!r} back on {root!r} if the'
+            ' setting changed since, or delete the node and spawn it again'
+            f' to adopt {expected!r}.'
+        )
 
     def guard_delete(self: Node) -> None:
         """Guard a subtree teardown: pre-flight its refusals, settle what it can.

@@ -529,8 +529,10 @@ widen the scope (config set, then commit) and redo the squash (``git -C
 --squash <branch>``), because the widening commit is a node commit made after
 the hand squash, which makes ``--continue`` refuse. Before it judges any path,
 the check refuses a node whose recorded project-wiki folder is not the one its
-spawn gave it (a hand edit of its ``config.json``), naming both folders (see
-:doc:`/configuration`).
+spawn gave it (a hand edit of its ``config.json``), naming both folders; a node
+in another sub-project than its parent is held to its project's setting as
+committed on the root branch now, so a setting changed since its spawn refuses
+too, naming the setting (see :doc:`/configuration`).
 
 Nothing under any ``.fractal/`` directory on the target changes except a
 scope root of the merging node that is, or lies under, a ``.fractal/``

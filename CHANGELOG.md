@@ -26,11 +26,12 @@ may include breaking changes, each listed under a Breaking heading.
   is absolute, `.`, `null`, carries a `..`, `.fractal`, `.worktrees`, or `.git`
   component, or is not canonical refuses init, and a hand-edited bad value fails
   every commit and merge scope check; a merge also refuses a node whose
-  `config.json` was edited to another valid folder than its spawn gave it. A
-  re-init adopts a changed setting only once the tree has no nodes
-  (`fractal reset` first); a setting naming `wiki` counts as no change. With no
-  file, or no `wiki` key in it, the folder is `wiki/` and no config records the
-  key.
+  `config.json` was edited to another valid folder than its spawn gave it, and a
+  node in another sub-project than its parent whose project's setting changed on
+  the root branch since its spawn. A re-init adopts a changed setting only once
+  the tree has no nodes (`fractal reset` first); a setting naming `wiki` counts
+  as no change. With no file, or no `wiki` key in it, the folder is `wiki/` and
+  no config records the key.
 
 ### Changed
 

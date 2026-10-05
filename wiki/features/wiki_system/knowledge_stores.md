@@ -86,18 +86,26 @@ recorded value is checked again at merge: the footprint check's
 `Node.check_wiki` recomputes the folder by the same spawn rule
 (`node._child_wiki`; with the parent checked out nowhere, the setting committed
 on the root branch, which spawn held the parent's folder to) and refuses a
-`config.json` hand-edited to another valid folder, naming both. Everything that
-names the project wiki reads the recorded folder: the commit scope exemption and
-the merge footprint check (one law, `commit.scope_boundaries`), the commit-time
-and merge-time index refresh (a merge into a `--base` branch that is no node
-takes the merging node's folder), the `node init` base-ref precondition,
-`WIKI_DIR`, the seeded `lint.sh`, the unmerged-work check of `node delete`, and
-the `destroy` report (which falls back to `wiki/` when the stored value is
-invalid, so a bad hand-edit never blocks the teardown). The wiki CLI, the
-`merge=wiki` driver, the tool's `.wiki/` state directory, and the memory wiki
-keep their names. With no setting the folder is `wiki` and no config records the
-key, so a project that names none uses `wiki/` at every site. The default is
-spelled by omitting the key; the settings file refuses `"wiki": null`.
+`config.json` hand-edited to another valid folder, naming both. A depth-1 node's
+parent is the user node resolved by config (`Node.resolve_user`), never by the
+root branch's checkout: a root checked out in a linked worktree carries no seed
+there, and its folder would read as the default. A node held to the committed
+setting (another sub-project than its parent's, or a parent checked out nowhere)
+reads it as it stands at the merge, so a setting changed after the spawn refuses
+too; that refusal names the setting and points at committing the recorded folder
+back or re-spawning the node, never at `config.json`, whose edit to the new
+folder would move the exemption. Everything that names the project wiki reads
+the recorded folder: the commit scope exemption and the merge footprint check
+(one law, `commit.scope_boundaries`), the commit-time and merge-time index
+refresh (a merge into a `--base` branch that is no node takes the merging node's
+folder), the `node init` base-ref precondition, `WIKI_DIR`, the seeded
+`lint.sh`, the unmerged-work check of `node delete`, and the `destroy` report
+(which falls back to `wiki/` when the stored value is invalid, so a bad
+hand-edit never blocks the teardown). The wiki CLI, the `merge=wiki` driver, the
+tool's `.wiki/` state directory, and the memory wiki keep their names. With no
+setting the folder is `wiki` and no config records the key, so a project that
+names none uses `wiki/` at every site. The default is spelled by omitting the
+key; the settings file refuses `"wiki": null`.
 
 ## Routing knowledge
 

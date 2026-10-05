@@ -150,6 +150,13 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   with no scope is unrestricted, a sub-project node with none is bounded to
   its project dir (its own wiki in, the repo-root wiki out), and one with
   roots to ``<project>/<root>``.
+- **``merge.sh`` wiki-folder check** recomputes the node's project-wiki folder
+  by the spawn rule before the footprint judges it: a ``config.json``
+  hand-edited to another folder refuses, a depth-1 node's parent resolves as
+  the user node by the repo's record (a root checked out in a linked worktree
+  carries no seed to read), and a node held to its sub-project's committed
+  setting is refused when that setting changed since its spawn, naming the
+  setting rather than a ``config.json`` edit.
 - **Templates under the scope law**: a template folder is ordinary project
   content, so the scope rule is the only rule -- a node whose scope covers
   the folder commits a template edit through ``fractal commit`` and lands it
@@ -302,6 +309,8 @@ __all__ = [
     'test_merge_refuses_a_squash_outside_the_nodes_scope',
     'test_merge_footprint_exempts_the_configured_wiki',
     'test_merge_refuses_a_hand_edited_wiki_folder',
+    'test_merge_into_a_linked_root_holds_the_trees_wiki_folder',
+    'test_merge_refuses_a_node_whose_project_setting_changed_since_spawn',
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
     'test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal',
     'test_merge_continue_refuses_a_squash_outside_the_nodes_scope',
@@ -4279,10 +4288,15 @@ def test_merge_refuses_a_hand_edited_wiki_folder(
     main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
     result = _script('merge.sh', repo, f'{worktree}')
 
-    # refused, naming both folders; the target restored
+    # refused, naming both folders -- a sub-project node's by its project's
+    # committed setting; the target restored
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert f'records {edited!r}' in result.stderr, result.stderr
-    assert f'gives {spawned!r}' in result.stderr, result.stderr
+    if project is None:
+        assert f'gives {spawned!r}' in result.stderr, result.stderr
+    else:
+        named = f'for project {project!r} names {spawned!r}'
+        assert named in result.stderr, result.stderr
     assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == main_head
     assert _git(repo, 'status', '--porcelain').stdout == ''
     # with the edit undone, the page is a stray outside the scope
@@ -4290,6 +4304,133 @@ def test_merge_refuses_a_hand_edited_wiki_folder(
     result = _script('merge.sh', repo, f'{worktree}')
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert f'outside its scope: {page};' in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    argnames='direct',
+    argvalues=[False, True],
+    ids=['cli', 'script'],
+)
+@pytest.mark.parametrize(argnames='wiki', argvalues=['wiki', 'docs'])
+def test_merge_into_a_linked_root_holds_the_trees_wiki_folder(
+    tmp_path: pathlib.Path,
+    wiki: str,
+    direct: bool,
+) -> None:
+    """An unedited depth-1 node merges into a linked root under the tree's folder.
+
+    The wiki-folder check recomputes a depth-1 node's folder from the user
+    node, which resolves by the repo's record: a root checked out in a
+    linked worktree carries no self-ignored seed to read, so a checkout
+    lookup would see the default folder and refuse every node of a ``docs``
+    tree. The node's page lands past its scope, and the merge's index
+    refresh leaves a corpus beside the configured wiki alone.
+    """
+    repo = _init_tree(tmp_path / 'linkedwikirepo', wiki=wiki)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    page = f'{wiki}/page.md'
+    (worktree / 'src').mkdir()
+    (worktree / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    (worktree / page).write_text(
+        '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    # the repo root parks on a side branch; main is checked out linked
+    _git(repo, 'checkout', '-b', 'side', 'main')
+    linked = tmp_path / 'main-wt'
+    _git(repo, 'worktree', 'add', f'{linked}', 'main')
+    corpus = _files(linked / 'wiki')
+    if direct:
+        result = _script('merge.sh', repo, f'{worktree}')
+    else:
+        result = _run(repo, 'node', 'merge', f'--path={worktree}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
+    tracked = _git(linked, 'ls-files', 'src/a.py', page).stdout.split()
+    assert tracked == sorted(['src/a.py', page])
+    if wiki != 'wiki':
+        assert _files(linked / 'wiki') == corpus
+
+
+def test_merge_refuses_a_node_whose_project_setting_changed_since_spawn(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A changed sub-project setting refuses the merge, naming the setting.
+
+    A node that selects another sub-project than its parent's records that
+    project's setting as committed on the root branch, and the merge holds
+    it to the setting as it stands then. A folder committed after the spawn
+    refuses an unedited node, and the refusal names the setting rather than
+    a ``config.json`` edit, which would move the exemption to the new
+    folder; committing the recorded folder back lets the merge land.
+    """
+    repo = _init_tree(tmp_path / 'settingrepo', wiki='docs')
+    # a sub-project naming its own folder, with the committed wiki there that
+    # the base-ref precondition requires
+    notes = repo / 'app' / 'notes' / '_index.md'
+    notes.parent.mkdir(parents=True)
+    notes.write_text('---\nname: notes\n---\n# notes\n\n***\n', encoding='utf-8')
+    settings = repo / 'app' / '.fractal' / '.settings.json'
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({'wiki': 'notes'}) + '\n', encoding='utf-8')
+    _git(repo, 'add', 'app')
+    _git(repo, 'commit', '-m', 'add the app project')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--path',
+        'app',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'app' / 'src').mkdir()
+    (worktree / 'app' / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work')
+    # the operator names another folder for the project after the spawn
+    settings.write_text(json.dumps({'wiki': 'other'}) + '\n', encoding='utf-8')
+    _git(repo, 'commit', '-am', 'move the app wiki')
+    main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    # refused, naming the setting and the remedy, never a config.json edit
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert (
+        "main.task records 'notes' as its project wiki folder, but the setting"
+        " committed on 'main' for project 'app' names 'other'"
+    ) in result.stderr, result.stderr
+    assert "commit 'notes' back on 'main'" in result.stderr, result.stderr
+    assert 'config.json' not in result.stderr, result.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == main_head
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    # with the recorded folder committed back, the merge lands
+    settings.write_text(json.dumps({'wiki': 'notes'}) + '\n', encoding='utf-8')
+    _git(repo, 'commit', '-am', 'restore the app wiki')
+    result = _script('merge.sh', repo, f'{worktree}')
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize(

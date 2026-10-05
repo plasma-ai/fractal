@@ -53,14 +53,15 @@ target's staged copy -- so a squash is judged by exactly the law the commit
 enforces (see [[user_flow/finishing/_index|user_flow/finishing]]). Before it
 judges, `_scope` runs `Node.check_wiki`, which recomputes the node's wiki folder
 by the spawn rule and refuses a `config.json` hand-edited to another folder,
-which would otherwise move the exemption. `--ignore-scope` commits out-of-scope
-changes but still lints; `--force` bypasses scope, lint, and git hooks alike.
-Before staging, the pipeline refreshes both wiki indexes (the project wiki and
-the node's memory) with the `wiki` CLI and fails the commit if a refresh fails
--- a broken wiki must never land -- then runs the node's `lint.sh` and surfaces
-its notices instead of dropping them. Helper CLIs are resolved from the invoking
-installation, not ambient PATH, so a foreign install cannot answer the hook's
-reads.
+which would otherwise move the exemption (or, for a node held to its project's
+committed setting, a setting changed on the root branch since the spawn).
+`--ignore-scope` commits out-of-scope changes but still lints; `--force`
+bypasses scope, lint, and git hooks alike. Before staging, the pipeline
+refreshes both wiki indexes (the project wiki and the node's memory) with the
+`wiki` CLI and fails the commit if a refresh fails -- a broken wiki must never
+land -- then runs the node's `lint.sh` and surfaces its notices instead of
+dropping them. Helper CLIs are resolved from the invoking installation, not
+ambient PATH, so a foreign install cannot answer the hook's reads.
 
 ## Staging and warnings
 
