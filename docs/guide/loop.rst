@@ -524,10 +524,15 @@ Token-priced backends and provider routes price usage from a cached copy of
 the LiteLLM price table (``~/.fractal/pricing.json``), refreshed at run start
 and daily during long runs. If the fetch fails and no cache exists, the run
 aborts at preflight; a stale cache warns and is used. A cost cap combined
-with an agent whose spend cannot be priced fails the step at launch: no model
-set means ``a cost cap requires a model``, and a model missing from the price
-table is refused by name. When caps are armed but a run's spend goes entirely
-untracked, the loop warns once that the budget guards cannot trip.
+with an agent whose spend cannot be priced aborts the run at preflight, before
+the run row commits and before any paid probe: every token-priced step's
+effective model (its own ``model:`` or the node's) is judged against the
+refreshed table, and the first gap names its step — no model set means
+``a cost cap requires a model``, and a model missing from the price table is
+refused by name. A step that reaches launch unpriced all the same (a step
+file edited mid-run) fails at launch with the same words. When caps are armed
+but a run's spend goes entirely untracked, the loop warns once that the
+budget guards cannot trip.
 
 The commit pipeline
 -------------------

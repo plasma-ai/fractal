@@ -1479,6 +1479,67 @@ def test_preflight_logs_what_a_passed_probe_spent(
     ) in capsys.readouterr().out
 
 
+def test_preflight_refuses_a_cap_over_an_unpriced_model(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Armed caps abort the boot when a step's model cannot be priced.
+
+    Refused at launch instead, each step's instant zero-cost failure
+    would read as a billing outage; judging every token-priced step's
+    effective model at preflight aborts once, before the run row
+    commits and before the paid probe, naming the step and the gap: no
+    model anywhere names the requirement, an unpriced model names the
+    entry gap, and a priced model boots.
+    """
+    _configure(loop_node, agent='codex', max_cost=5.0)
+    monkeypatch.setattr(pricing, 'update', lambda max_age=None: 'fresh')
+    rates = {'input_cost_per_token': 1e-5, 'output_cost_per_token': 5e-5}
+    monkeypatch.setattr(pricing, '_load', lambda: {'gpt-5-codex': rates})
+    probes: list[str] = []
+
+    def boot() -> Loop:
+        loop = Loop(loop_node)
+        # `sh` stands in for the codex binary; a probe that runs answers
+        # with a clean exit and is counted
+        monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+
+        def fake_spawn(invocation: Any, **kwargs: Any) -> subprocess.Popen:
+            probes.append(invocation.argv[invocation.argv.index('-m') + 1])
+            return subprocess.Popen(
+                ['sh', '-c', 'exit 0'],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                text=True,
+                errors='replace',
+                **kwargs,
+            )
+
+        monkeypatch.setattr(loop._agent, '_spawn', fake_spawn)
+        return loop
+
+    # no model anywhere: the cap requires one before any launch
+    with pytest.raises(_Abort):
+        boot()._preflight()
+    reason = 'a cost cap requires a model for codex in 01-PLAN.md'
+    assert loop_node.record.runs(limit=1)[0]['metadata'] == reason
+    assert loop_node.status() == 'exited'
+    assert f'Error: {reason}' in capsys.readouterr().err
+    # an unpriced model refuses naming the entry gap, still without a probe
+    _configure(loop_node, model='mystery-model')
+    with pytest.raises(_Abort):
+        boot()._preflight()
+    reason = "cost cap set but model 'mystery-model' (01-PLAN.md) has no pricing entry"
+    assert loop_node.record.runs(limit=1)[0]['metadata'] == reason
+    assert reason in capsys.readouterr().err
+    assert probes == []
+    # a priced model boots, through the probe
+    _configure(loop_node, model='gpt-5-codex')
+    boot()._preflight()
+    assert probes == ['gpt-5-codex']
+
+
 # ------ boot latch
 
 

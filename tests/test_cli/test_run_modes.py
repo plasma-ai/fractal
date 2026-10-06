@@ -2449,20 +2449,20 @@ def test_cascaded_budget_finish_records_exited(
 
 
 def test_codex_preflight_probe_aborts_on_model_rejection(repo: dict) -> None:
-    """A cost-capped codex node aborts at launch if codex rejects its model.
+    """A codex node with an explicit model aborts at launch if codex rejects it.
 
-    Codex spend is priced from token counts, so a cost cap needs an explicit
-    ``--model`` -- but some codex accounts reject some explicit models (e.g. a
-    ChatGPT-plan account lacking the entitlement) and would fail every step.
-    The run-start probe catches this and aborts with the probe's own error
-    before any step (or run) starts.
+    Some codex accounts reject some explicit models (e.g. a ChatGPT-plan
+    account lacking the entitlement) and would fail every step. The
+    run-start probe catches this and aborts with the probe's own error
+    before any step (or run) starts. The probe runs for any explicit
+    model; under a cost cap the pricing check precedes it, so a capped
+    node's model is already priced by the time the probe asks codex.
     """
     node = _make_node(
         repo=repo,
         name='codexprobe',
         detached=False,
         sync=False,
-        max_cost=1.0,
         agent='codex',
     )
     # point the node model at the stub's rejection sentinel
@@ -3347,13 +3347,14 @@ def test_stream_borne_failure_reason_carries_the_cause(repo: dict) -> None:
 
 
 def test_cost_cap_guard_failure_reason_is_durable(repo: dict) -> None:
-    """A pre-launch guard failure's step row names the guard, not the agent.
+    """A cost cap over an unpriceable model aborts the boot naming the guard.
 
-    A cost cap with no priceable model fails every step before any agent
-    launches -- a config error, not an agent one. The step row's reason
-    carries the guard's own message (the same line the pane prints), so
-    ``node activity`` names the real cause instead of a bare ``agent error``
-    that would misattribute a launch that never happened.
+    A cost cap with no priceable model is a config error, not an agent
+    one, so the boot aborts at preflight before any step row or agent
+    launch: the run row's reason carries the guard's own message (the
+    same line the pane prints), so ``node activity`` names the real
+    cause, and no step row exists to misattribute a launch that never
+    happened.
     """
     steps = {'01-alpha.md': '# Alpha\n\nFirst step.\n'}
     node = _make_node(
@@ -3366,26 +3367,38 @@ def test_cost_cap_guard_failure_reason_is_durable(repo: dict) -> None:
         max_cost=5.0,
     )
     worktree = node['worktree']
-    # single-attempt shape: the deterministic failure must not buy a retry
-    assert _run(worktree, 'config', '_set', 'step_retries=0').returncode == 0
     _, result = _run_loop(repo, node, capture_name='cap_no_model')
+    assert result.returncode != 0, result.stdout
+    reason = 'a cost cap requires a model for codex in 01-alpha.md'
+    assert f'Error: {reason}; set --model' in result.stderr, result.stderr
 
-    # the step row names the guard's cause, never the bare agent-error label
-    step_row = (
+    # the run row names the guard's cause, and no step row was booked
+    run_row = (
         _run(
             worktree,
             'db',
             '_query',
-            "SELECT COALESCE(metadata, '') FROM steps"
-            " WHERE node = 'main.capnomodel' AND status = 'failed'"
+            "SELECT status, COALESCE(metadata, '') FROM runs"
+            " WHERE node = 'main.capnomodel'"
             ' ORDER BY rowid DESC LIMIT 1',
             '--csv',
         )
         .stdout.strip()
         .splitlines()[-1]
     )
-    assert 'cost cap requires a model' in step_row, (step_row, result.stdout)
-    assert not step_row.startswith('agent error'), step_row
+    assert run_row == f'exited,{reason}', (run_row, result.stdout)
+    booked = (
+        _run(
+            worktree,
+            'db',
+            '_query',
+            "SELECT COUNT(*) FROM steps WHERE node = 'main.capnomodel'",
+            '--csv',
+        )
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+    assert booked == '0', booked
 
 
 def test_drain_wait_sync_failure_keeps_completed_with_note(repo: dict) -> None:
