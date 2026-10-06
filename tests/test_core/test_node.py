@@ -63,8 +63,7 @@ def test_status_display_decorates_exited_with_run_reason(node_with_db: Node) -> 
 
     A run that ended for a recorded reason (here a budget landing) reads
     ``exited (<reason>)`` -- display-only, the stored status stays bare --
-    while a run that closed reason-less (the reconcile-healed crash shape)
-    keeps the bare ``exited``.
+    while a run that closed with no reason keeps the bare ``exited``.
     """
     node = node_with_db
     reason = 'cost budget reserve reached (spent $0.14 >= $0.15 max - $0.015 reserve)'

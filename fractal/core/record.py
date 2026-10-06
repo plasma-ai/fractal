@@ -8,7 +8,7 @@ import typing
 from typing import Any, Optional
 
 import fractal.util
-from fractal.constants import EVENTS, STATUSES
+from fractal.constants import CRASH_REASON, EVENTS, STATUSES
 from fractal.typing import Row
 
 if typing.TYPE_CHECKING:
@@ -291,11 +291,12 @@ class Record:
 
         """
         # reconcile a crashed loop's stranded rows: stamp every still-open
-        # row exited (first-writer-wins, so a clean end's rows are untouched);
-        # the close and the insert share one transaction
+        # row exited, the run naming the crash like the reconcile heal does
+        # (first-writer-wins, so a clean end's rows are untouched); the close
+        # and the insert share one transaction
         branch = self._node.branch
         with self.db.transaction() as connection:
-            self.close_open('exited', connection=connection)
+            self.close_open('exited', metadata=CRASH_REASON, connection=connection)
             # create the new active run with the node's default agent and
             # armed cost cap, linked to the parent's active run (NULL at root
             # / when the parent is idle); the start instant is captured after

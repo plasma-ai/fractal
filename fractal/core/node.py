@@ -25,6 +25,7 @@ from typing import Any, Optional
 import fractal.util
 from fractal.constants import (
     CONFIG_FILE,
+    CRASH_REASON,
     DB_FILE,
     FRACTAL_FOLDER,
     HEADLESS_FILE,
@@ -562,7 +563,7 @@ class Node:
             for judged, found in zip(snapshot, self._records_snapshot()):
                 if found is not None and found != judged:
                     return
-            self.record.close_open('exited')
+            self.record.close_open('exited', metadata=CRASH_REASON)
             self.status_set('exited')
             self.config.reconcile()
             # the heal is the record's catch -- the settled node keeps no
@@ -5018,7 +5019,8 @@ class Node:
         ``pausing`` / ``stopping`` / ``finishing`` when a pause/stop/finish
         signal is pending on an active node; the recorded end reason when
         the latest run row says why an ``exited`` run ended (the run row is
-        the single source -- a reconcile-healed crash records no reason);
+        the single source -- a crash healed by reconcile names itself
+        there);
         else empty. An unresolved model drop on the newest iteration
         composes a ``model drop`` marker onto whichever qualifier stands
         (any status -- served-model honesty outlives the run). The
@@ -5043,8 +5045,7 @@ class Node:
                 detail = 'finishing'
         if status == 'exited':
             # the latest run row records why the loop ended (budget landing,
-            # timeout, setup abort); a crash healed by reconcile closes its
-            # rows reason-less and keeps the bare status
+            # timeout, setup abort, a crash healed by reconcile)
             rows = self.record.runs(limit=1)
             if rows and rows[0]['status'] == 'exited' and rows[0]['metadata']:
                 detail = rows[0]['metadata']
@@ -5087,15 +5088,16 @@ class Node:
         ``final_iteration_failed`` (a drained finish whose last
         iteration died). ``exited`` rows read ``cost_budget`` --
         exited/0 is the DB-level budget-landing discriminator, every
-        other exited path keeps 1 -- ``timeout``, ``setup_abort``, or
-        ``final_iteration_failed`` (the iteration cap landing on a dead
-        final iteration); any other recorded reason (an unexpected exit,
-        a kill/retire that beat the boot, a failed resume preflight)
-        maps ``other``, so ``None`` keeps meaning nothing recorded (a
-        reconcile-healed crash closes its rows reason-less). Every other
+        other exited path keeps 1 -- ``timeout``, ``setup_abort``,
+        ``crashed`` (a dead loop's rows closed by the heal, at a later
+        read or at the next boot), or ``final_iteration_failed`` (the
+        iteration cap landing on a dead final iteration); any other
+        recorded reason (an unexpected exit, a kill/retire that beat the
+        boot, a failed resume preflight) maps ``other``, so ``None`` keeps
+        meaning nothing recorded (a run that never landed). Every other
         status reads ``None``. Reads the stored status without
         reconciling: a crashed-but-active node's open run carries no
-        reason before the heal and none after it.
+        reason until the heal stamps it.
 
         Returns:
             The token, or ``None`` when no run reason is recorded.
@@ -5117,6 +5119,8 @@ class Node:
                 return 'timeout'
             if reason.startswith('setup failed x'):
                 return 'setup_abort'
+            if reason.startswith('crashed:'):
+                return 'crashed'
             exhausted = reason.startswith('Reached max iterations')
             if exhausted and reason.endswith('final iteration failed'):
                 return 'final_iteration_failed'

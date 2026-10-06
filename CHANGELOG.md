@@ -39,6 +39,12 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
+- A crash healed by reconciliation — a later read over a dead loop, or the boot
+  that finds the previous loop's rows still open — stamps the run row
+  `crashed: loop runtime gone, healed by reconcile`, so `node list` renders
+  `exited (crashed: loop runtime gone, healed by reconcile)` and `end_reason`
+  reads the new token `crashed`. A null `end_reason` is left to a run that never
+  landed.
 - The packaged codex node seed turns both sub-agent features (`multi_agent` and
   `multi_agent_v2`) on in its `config.toml`: the rollout window prices every
   spawned thread into the step or refuses the step.

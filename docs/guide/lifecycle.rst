@@ -84,15 +84,18 @@ parentheses — ``active (pausing)``, ``exited (<reason>)`` — while
 ``fractal node list`` keeps its ``status`` column bare and carries the same
 qualifier in a separate ``detail`` column, with a typed ``end_reason`` column
 (``goal_met``, ``run_exhausted``, ``final_iteration_failed``, ``cost_budget``,
-``timeout``, ``setup_abort``, ``other``, or empty — ``null`` in ``--json``
+``timeout``, ``setup_abort``, ``crashed``, ``other``, or empty — ``null`` in
+``--json``
 — when nothing is recorded) beside it. Both are display-only — the stored
 status stays bare, and ``list --status`` filters match the bare ``status``
 column. Several qualifiers can stand at once, ``;``-joined:
 
 - ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)`` — a
   pause, stop, or finish signal is pending on an active node.
-- ``exited (<reason>)`` — the latest run row recorded why it ended (a
-  reconciliation-healed crash records no reason and stays bare).
+- ``exited (<reason>)`` — the latest run row recorded why it ended; a crash
+  healed by reconciliation reads ``exited (crashed: loop runtime gone, healed
+  by reconcile)`` with ``end_reason`` ``crashed``, whether a later read healed
+  it or the next boot closed its stranded rows.
 - ``completed (run exhausted: Reached max iterations (N))`` — the run landed
   ``completed`` by running out its iteration cap with a clean final
   iteration, not by a goal-met finish.

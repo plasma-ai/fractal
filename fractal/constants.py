@@ -44,6 +44,9 @@ STATUS_FILE = '.status'
 #: process group id of the running step
 STEP_PGID_FILE = '.step_pgid'
 
+#: run-row reason the crash heal stamps on a dead loop's rows
+CRASH_REASON = 'crashed: loop runtime gone, healed by reconcile'
+
 #: lifecycle status set shared by the node status file and the record rows
 STATUSES = (
     'active',

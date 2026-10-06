@@ -1533,6 +1533,7 @@ def test_list_json_mirrors_csv_shape(repo: dict) -> None:
             'cost_budget',
             'timeout',
             'setup_abort',
+            'crashed',
             'other',
         }
     # the two machine formats cannot be combined ...
