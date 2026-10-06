@@ -22,16 +22,20 @@ may include breaking changes, each listed under a Breaking heading.
   folder drives the commit scope exemption and the merge footprint check, the
   commit-time and merge-time index refresh, the `node init` base-ref
   precondition, `$WIKI_DIR` in node prompts, the seeded `lint.sh`, the
-  unmerged-work check of `node delete`, and the `destroy` report. A folder that
-  is absolute, `.`, `null`, carries a `..`, `.fractal`, `.worktrees`, or `.git`
-  component, or is not canonical refuses init, and a hand-edited bad value fails
-  every commit and merge scope check; a merge also refuses a node whose
-  `config.json` was edited to another valid folder than its spawn gave it, and a
-  node in another sub-project than its parent whose project's setting changed on
-  the root branch since its spawn. A re-init adopts a changed setting only once
-  the tree has no nodes (`fractal reset` first); a setting naming `wiki` counts
-  as no change. With no file, or no `wiki` key in it, the folder is `wiki/` and
-  no config records the key.
+  unmerged-work check of `node delete`, and the `destroy` report. A merge into a
+  `--base` branch that is no node refreshes the merging node's folder, read at
+  the base checkout's root rather than under the node's sub-project, since a
+  plain branch records no project. A folder that is absolute, `.`, `null`,
+  carries a `..`, `.fractal`, `.worktrees`, or `.git` component, or is not
+  canonical refuses init, and a hand-edited bad value fails every commit and
+  merge scope check, while `destroy` falls back to `wiki/` in its report so the
+  teardown never blocks on it; a merge also refuses a node whose `config.json`
+  was edited to another valid folder than its spawn gave it, and a node in
+  another sub-project than its parent whose project's setting changed on the
+  root branch since its spawn. A re-init adopts a changed setting only once the
+  tree has no nodes (`fractal reset` first); a setting naming `wiki` counts as
+  no change. With no file, or no `wiki` key in it, the folder is `wiki/` and no
+  config records the key.
 
 ### Changed
 
@@ -84,6 +88,13 @@ may include breaking changes, each listed under a Breaking heading.
   reports the real exit status: the step banner and the row's reason read
   `agent error (exit N)` with the stream detail and the stderr tail behind it,
   instead of the bare `agent error` label that reads as a clean-exit failure.
+- The loop guide and the budgets and steps wiki pages describe the two budget
+  stops as the loop books them: a step that reaches its launch with no budget
+  left is recorded `stopped` with reason `over budget`, while the steps the
+  between-steps subtree-ceiling check cuts off are never launched and book no
+  row. The agents guide and the cost wiki pages state that the `codex`
+  model-acceptance probe at run start is a paid invocation whose usage is
+  unpriced — it lands in no step row and counts toward no cap.
 
 ## [1.3.0] - 2026-09-17
 

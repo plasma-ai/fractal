@@ -110,4 +110,7 @@ The codex probe leads its own process group and rides the node's `.step_pgid`
 marker for its lifetime, so `kill` reaps it like a step (pause is refused until
 the loop stamps the node active, which happens after preflight); a probe that
 does not answer within the preflight timeout (`_PREFLIGHT_TIMEOUT`) is cancelled
-— TERM, a short grace (`_PREFLIGHT_GRACE`), then KILL on the whole group.
+— TERM, a short grace (`_PREFLIGHT_GRACE`), then KILL on the whole group. The
+probe is a paid invocation — one short turn at the configured model — and its
+usage is unpriced: it lands in no step row, so the run's recorded spend and
+every cost cap leave it out (see [[features/cost/measurement|measurement]]).

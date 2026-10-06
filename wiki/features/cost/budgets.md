@@ -77,7 +77,9 @@ whichever order the two signals landed.
 
 Spawn-heavy iterations get a harder backstop: between steps the loop also checks
 the subtree ceiling directly, so a long iteration stops queuing steps as soon as
-descendants blow the budget rather than waiting for the boundary.
+descendants blow the budget rather than waiting for the boundary. The steps it
+cuts off are never launched and book no row; the `stopped` / `over budget` step
+row belongs only to a step that reaches its launch with no budget left.
 
 Enforcement is only as good as the ledger: armed caps over fully-untracked spend
 ([[features/cost/measurement|measurement]]) can never trip, and a run that mixes
