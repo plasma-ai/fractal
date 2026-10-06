@@ -1911,6 +1911,49 @@ def test_preflight_probes_model_acceptance(
     assert 'expired/invalid auth' in detail
 
 
+def test_preflight_names_what_a_passed_probe_spent(
+    node_with_db: Node,
+    router: _Router,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A passed probe reports its usage priced at the model's rates.
+
+    The probe is a paid turn that lands on no step row, so its summary
+    is the one place the spend is named: the turn's usage as the stream
+    reports it, the figure the rates put on it, and that the ledger
+    leaves it out. A model the rates cannot price reads unpriced and a
+    stream that does not describe one complete turn reads unreported,
+    never a guessed figure; with no model nothing is probed or named.
+    """
+    backend = CodexAgent(node_with_db, 'sh')
+    monkeypatch.setattr(pricing, '_load', lambda: {_MODEL: _RATES})
+    probe = _script(lines=[json.dumps(frame) for frame in _FRESH_WIRE])
+    # the priced summary: the fresh thread's turn total, at the rates
+    router(backend, probe)
+    tokens = _FRESH_USAGE['input_tokens'] + _FRESH_USAGE['output_tokens']
+    cost = (
+        _FRESH_USAGE['input_tokens'] * _INPUT_RATE
+        + _FRESH_USAGE['output_tokens'] * _OUTPUT_RATE
+    )
+    assert backend.preflight(_MODEL) == (
+        f'codex probe passed for model {_MODEL!r}:'
+        f' {tokens} tokens, ${cost:.4f}, outside the ledger'
+    )
+    # a model outside the price table is named unpriced
+    router(backend, probe)
+    assert backend.preflight('gpt-5-codex') == (
+        f"codex probe passed for model 'gpt-5-codex': {tokens} tokens,"
+        ' unpriced, outside the ledger'
+    )
+    # a stream without one complete turn reports no usage
+    router(backend, _script())
+    assert backend.preflight(_MODEL) == (
+        f'codex probe passed for model {_MODEL!r} (usage unreported)'
+    )
+    # no model: nothing probed, nothing to name
+    assert backend.preflight() is None
+
+
 def test_preflight_timeout_reaps_a_term_ignoring_probe(
     node_with_db: Node,
     router: _Router,

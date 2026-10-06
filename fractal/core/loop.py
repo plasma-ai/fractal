@@ -702,9 +702,10 @@ class Loop:
         # diagnosis on stderr; the probe's group rides the step marker while
         # it runs so kill.sh can reap it (pause is refused until the active
         # stamp, which lands after this returns)
+        summary = None
         try:
             model = self._node_model or None
-            self._agent.preflight(model, register=self._register_probe)
+            summary = self._agent.preflight(model, register=self._register_probe)
         except RuntimeError as error:
             print(f'Error: {error}', file=sys.stderr)
             reason, *_ = f'{error}'.split('\n')
@@ -713,6 +714,10 @@ class Loop:
             # the probe is over -- drop the group handle so a later kill can
             # never signal a recycled pgid
             (node.node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
+        # a passed probe is paid inference that lands on no step row and
+        # counts toward no cap, so this banner is the one record of it
+        if summary is not None:
+            print(f'=== Preflight: {summary} ===')
 
     def _register_probe(self: Loop, process: subprocess.Popen) -> None:
         """Record the preflight probe as the leader of its own process group.

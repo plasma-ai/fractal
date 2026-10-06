@@ -393,7 +393,7 @@ class CodexAgent(Agent):
         model: Optional[str],
         *,
         register: Optional[Callable[[subprocess.Popen], None]] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Probe codex's acceptance of an explicit model for this account.
 
         Some codex accounts reject some explicit models (e.g. a
@@ -407,6 +407,13 @@ class CodexAgent(Agent):
         process group, handed to ``register`` before the first wait, so
         a timeout reaps codex's whole subtree and the loop can record
         the group for ``kill.sh``.
+
+        Returns:
+            A one-line summary of the passed probe: its token usage and
+            the figure the model's rates put on it, paid inference that
+            lands on no step row and counts toward no cap. ``None`` when
+            no model is set and nothing is probed.
+
         """
         # the openrouter route runs on the key alone -- fail fast when the
         # environment cannot possibly authenticate
@@ -500,6 +507,25 @@ class CodexAgent(Agent):
                 ' account (some ChatGPT-plan accounts lack access to some'
                 ' models; API-key auth is an alternative)'
             )
+        # the probe passed: name what it spent from the usage codex reports
+        # on its stream (a fresh thread's turn total is the probe's own),
+        # since the paid turn lands on no step row and counts toward no cap;
+        # a stream that does not describe one complete turn, or a model the
+        # rates cannot price, says so rather than guessing a figure
+        parser = CodexParser(model=model)
+        for line in output.splitlines():
+            parser.feed(line)
+        try:
+            usage = _validate_usage(parser.turn_usage())
+        except ValueError:
+            return f'codex probe passed for model {model!r} (usage unreported)'
+        tokens = usage['input_tokens'] + usage['output_tokens']
+        cost = _compute_cost(usage, model)
+        priced = 'unpriced' if cost is None else f'${cost:.4f}'
+        return (
+            f'codex probe passed for model {model!r}:'
+            f' {tokens} tokens, {priced}, outside the ledger'
+        )
 
     @classmethod
     def _seed(

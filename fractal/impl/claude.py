@@ -446,7 +446,7 @@ class ClaudeAgent(Agent):
         model: Optional[str],
         *,
         register: Optional[Callable[[subprocess.Popen], None]] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Probe the openrouter route's key presence before a run."""
         # the openrouter route runs on the key alone -- fail fast when the
         # environment cannot possibly authenticate
