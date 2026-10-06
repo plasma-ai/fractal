@@ -75,6 +75,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- `node cost remaining`, `spent`, and `breakdown` refuse a `--run <id>` that is
+  not the target's own: another node's run is refused naming its owner, and an
+  id no run carries is refused as unrecorded, instead of answering in the
+  target's name from the other run's lineage.
 - Behind an `ANTHROPIC_BASE_URL` gateway the Claude close prices every model in
   the result frame's `modelUsage` table and sums them, so a sub-agent's spend on
   another model reaches the step's cost; a model the pricing chain cannot

@@ -32,6 +32,7 @@ __all__ = [
     'command',
     'require_non_negative',
     'require_timestamp',
+    'require_run_owner',
     'StreamRenderer',
     'print_rows',
     'print_json',
@@ -158,6 +159,34 @@ def require_timestamp(**instants: Optional[str]) -> None:
                 f'--{flag} expects an ISO 8601 date or timestamp'
                 f' (e.g. 2026-01-31 or 2026-01-31T14:00:00Z); got {value!r}.'
             ) from None
+
+
+def require_run_owner(node: Node, *, run_id: Optional[int], branch: str) -> None:
+    """Reject a ``--run`` id that is not one of the target's own runs.
+
+    A run id scopes the ledger readers by lineage alone, so another
+    node's run would answer in the target's name. ``None`` is skipped.
+    ``branch`` is the target's branch -- for a deleted target the
+    recorded branch, not the caller's that answers for it.
+
+    Args:
+        node: A node on the tree's central database.
+        run_id: The ``--run`` value, or ``None``.
+        branch: The branch the run must belong to.
+
+    Raises:
+        typer.BadParameter: If no run carries the id, or the run belongs
+            to another branch.
+
+    """
+    if run_id is None:
+        return
+    rows = node.db.read('runs', where={'run_id': run_id})
+    if not rows:
+        raise typer.BadParameter(f'No run {run_id} is recorded.')
+    owner = rows[0]['node']
+    if owner != branch:
+        raise typer.BadParameter(f'Run {run_id} belongs to {owner!r}, not {branch!r}.')
 
 
 class StreamRenderer:

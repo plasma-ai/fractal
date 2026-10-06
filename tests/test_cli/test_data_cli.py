@@ -43,6 +43,7 @@ __all__ = [
     'test_cost_spent_and_breakdown_disclose_unpriced_count',
     'test_cost_spent_scope_flags',
     'test_cost_scope_flags_reject_two_scopes',
+    'test_cost_refuses_another_nodes_run',
     'test_cost_rejects_lifetime_selector',
     'test_cost_breakdown_emits_header_for_no_children',
     'test_cost_breakdown_lists_a_registered_child',
@@ -415,6 +416,36 @@ def test_cost_scope_flags_reject_two_scopes(repo: dict) -> None:
     assert spent.returncode == 2, spent.stderr
     remaining = _run(task, 'node', 'cost', 'remaining', '--run', '1', '--step', '1')
     assert remaining.returncode == 2, remaining.stderr
+
+
+@pytest.mark.parametrize(
+    argnames='verb',
+    argvalues=['remaining', 'spent', 'breakdown'],
+)
+def test_cost_refuses_another_nodes_run(repo: dict, verb: str) -> None:
+    """``--run`` must name one of the target's own runs.
+
+    A run id scopes the readers by lineage alone, so another node's run
+    would answer in the target's name: it is refused naming the owner,
+    an id no run carries is refused as unrecorded, and the target's own
+    run still answers.
+    """
+    root, task = repo['root'], repo['task']
+    # a sibling worker with a settled run of its own (named per verb: the
+    # module fixture is shared, so each case inits its own worker)
+    name = f'other_{verb}'
+    assert _run(root, 'node', 'init', name, '--agent', 'claude').returncode == 0
+    other = Node(root / '.worktrees' / f'main.{name}').record
+    foreign = other.run_start()
+    other.run_end(run_id=foreign, status='completed', exit_code=0)
+    refused = _run(task, 'node', 'cost', verb, '--run', str(foreign))
+    assert refused.returncode == 2, refused.stderr
+    assert f"Run {foreign} belongs to 'main.{name}', not 'main.task'" in refused.stderr
+    unknown = _run(task, 'node', 'cost', verb, '--run', '999999')
+    assert unknown.returncode == 2, unknown.stderr
+    assert 'No run 999999 is recorded' in unknown.stderr
+    own = _run(task, 'node', 'cost', verb, '--run', str(repo['run_id']))
+    assert own.returncode == 0, own.stderr
 
 
 def test_cost_rejects_lifetime_selector(repo: dict) -> None:
