@@ -1180,7 +1180,9 @@ class Record:
         point-in-time events, each carrying its run/iter/step lineage. The
         LEFT JOINs add the display numbers the surrogate ids stand for --
         the iteration-relative ``step`` number, ``step_name``, and the
-        run-relative ``iter``.
+        run-relative ``iter`` -- and the step's own ``agent`` and served
+        ``model``, read from the step row rather than the view so an
+        existing database needs no rebuild.
 
         Args:
             limit: Maximum rows to return.
@@ -1191,7 +1193,7 @@ class Record:
         """
         query = (
             'SELECT a.*, s.step AS step, s.step_name AS step_name,'
-            ' i.iter AS iter'
+            ' s.agent AS agent, s.model AS model, i.iter AS iter'
             ' FROM activity a'
             ' LEFT JOIN steps s ON a.step_id = s.step_id'
             ' LEFT JOIN iters i ON a.iter_id = i.iter_id'

@@ -888,11 +888,14 @@ statuses render bracketed (``[active]``); machine output stays unbracketed.
 Show the node's lifecycle activity, most recent first. Columns (bind by
 header name, not position): ``timestamp``, ``node``, ``event_id``,
 ``step_id``, ``iter_id``, ``run_id``, ``event``, ``actor``, ``step_name``,
-``step``, ``iter``, ``status``, ``exit_code``, ``metadata``, ``duration``,
-``cost``. The ``cost`` column is the row's own-node step cost only — subtree
-spend, children included, is ``fractal node cost spent``. ``--limit <n>``
-bounds the rows returned; ``--json`` emits a JSON array of row objects
-(mutually exclusive with ``--csv``).
+``step``, ``iter``, ``agent``, ``model``, ``status``, ``exit_code``,
+``metadata``, ``duration``, ``cost``. ``agent`` and ``model`` are a step's
+own — the agent that ran it and the model that served it, as its stream named
+them — and are blank on every other row. The ``cost`` column is the row's
+own-node step cost only — subtree spend, children included, is
+``fractal node cost spent``. ``--limit <n>`` bounds the rows returned;
+``--json`` emits a JSON array of row objects (mutually exclusive with
+``--csv``).
 
 .. code-block:: console
 
