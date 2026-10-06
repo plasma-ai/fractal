@@ -481,7 +481,9 @@ run's remaining budget minus the reserve, the iteration's remaining headroom,
 and ``max_step_cost``. Inside the reserve window the budget floors at the
 full run remaining, so wind-down steps may spend the reserve but never past
 the ceiling. A non-positive budget skips the launch entirely — the step is
-recorded ``stopped`` with reason ``over budget``.
+recorded ``stopped`` with reason ``over budget``. That row belongs only to a
+step that reaches its launch with no budget left; the steps the between-steps
+subtree ceiling check cuts off (below) are never launched and book no row.
 
 For an enforcing agent the budget is passed as a hard flag; an agent that
 stops itself at that budget records a *clean completed* step — a budget stop
@@ -500,7 +502,8 @@ budget abort has cascaded a finish down to this node. It sets
 ``RESERVE_MODE=true`` so the packaged wind-down instructions join every
 prompt, and it skips approval gates. At the iteration boundary the loop then
 ends the run; a mid-iteration check also stops queuing steps once the subtree
-ceiling itself is crossed.
+ceiling itself is crossed, and the steps it cuts off are never launched and
+leave no row.
 
 A budget end always lands the run as ``exited`` with **exit code 0** — the
 ``exited``/0 pair is how a budget landing is distinguished from both a
@@ -657,7 +660,7 @@ Step rows land with these statuses:
    * - timed out
      - ``exited``
      - ``timed out``
-   * - budget skip (never launched)
+   * - budget skip (launch reached with no budget left)
      - ``stopped``
      - ``over budget``
    * - paused mid-step

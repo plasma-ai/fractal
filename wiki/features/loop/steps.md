@@ -89,7 +89,9 @@ The loop brackets every step with lifecycle and budget checks:
   worktree is the frozen mid-iteration state that resume continues from.
 - **Stop** and the **subtree cost ceiling** are checked between steps, so a long
   iteration stops queuing steps soon after the signal or the ceiling trip rather
-  than at the iteration boundary.
+  than at the iteration boundary. A step cut off this way is never launched and
+  books no row; only a step that reaches its launch with no budget left records
+  the `stopped` / `over budget` row.
 - **Reserve mode** latches per-iteration when the iteration's own cost cap is
   reached, when total run spend drains into the reserve window below the run
   cap, or when an ancestor's budget abort left a cascaded finish pending; the

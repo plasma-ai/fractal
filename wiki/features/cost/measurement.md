@@ -175,8 +175,10 @@ Zero and unknowable are never conflated:
   commands disclose the count on stderr
   (`N unpriced steps (NULL cost) excluded`) while stdout stays parseable.
 
-Codex's model-acceptance preflight runs before step rows exist. Its usage is
-outside the step ledger and is not included in the recorded run spend.
+Codex's model-acceptance preflight is a paid invocation -- one short turn at the
+configured model -- that runs before step rows exist. Its usage is unpriced:
+outside the step ledger, absent from the recorded run spend, and counted toward
+no cap.
 
 ## Finality
 
