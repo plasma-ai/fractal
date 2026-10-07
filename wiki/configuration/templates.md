@@ -162,8 +162,11 @@ missing-input declarations.
 Values come from three sources, later ones winning:
 
 - The template's `_template.toml` `[values]` defaults, at the template commit.
-- `--values=<file.toml>` -- a TOML document whose top-level keys are inputs,
-  without a wrapping `[values]` table.
+- `--values=<file.toml>` -- a TOML document whose top-level keys are inputs, or
+  whose `[values]` table holds them in the shape a node's `_template.toml`
+  records (the record's `path`, `commit`, `include` and `exclude` keys beside
+  the table are ignored, so one node's record seeds another); a `[values]` table
+  beside any other top-level key refuses, naming the keys.
 - `--set KEY=VALUE` (repeatable) -- one input whose value is a TOML literal:
   `--set 'role="reviewer"'`, `--set review=false`, or
   `--set 'checks=["tests"]'`.

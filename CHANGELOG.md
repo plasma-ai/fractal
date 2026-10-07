@@ -94,6 +94,14 @@ may include breaking changes, each listed under a Breaking heading.
   whose process exits 0; the recovered step is priced normally. A `turn.failed`
   frame, an error frame outside the active turn, an error frame in a turn that
   never completes, or a non-zero exit still fails the step unpriced.
+- A `--values` file in the provenance shape — a `[values]` table holding the
+  inputs, as `_template.toml` records them and a commission file is written — is
+  read as the input table, instead of as one input named `values` holding a
+  table, which the record showed as `[values.values]` while every real input
+  silently kept its default. The record's other keys (`path`, `commit`,
+  `include`, `exclude`) beside the table are ignored, so one node's record can
+  seed another, and a `[values]` table beside any other top-level key refuses,
+  naming the keys.
 - A step whose agent names an error on its stream and then exits non-zero
   reports the real exit status: the step banner and the row's reason read
   `agent error (exit N)` with the stream detail and the stderr tail behind it,

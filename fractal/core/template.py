@@ -34,6 +34,9 @@ _VALUE_NAME = re.compile(r'[a-z_][a-z0-9_]*')
 #: Jinja names that cannot refer to a supplied context input
 _RESERVED_NAMES = ('true', 'false', 'none', 'not', 'self')
 
+#: the keys a provenance record carries beside its [values] table
+_PROVENANCE_KEYS = frozenset({'path', 'commit', 'include', 'exclude'})
+
 # a recorded commit is the full sha the folder deploys at -- the verbs
 # that act on a record resolve it verbatim, so anything shorter refuses
 _COMMIT_SHA = re.compile(r'[0-9a-f]{40}')
@@ -229,10 +232,12 @@ def collect_values(
 ) -> dict[str, Any]:
     """Merge the inputs a spawn supplies, with later sources winning.
 
-    The ``--values`` TOML file supplies inputs and repeatable
-    ``--set KEY=VALUE`` pairs override whole top-level values. Each
-    override is a TOML literal; text requires quotes. ``--pin`` must
-    agree with a pin supplied through either source.
+    The ``--values`` TOML file supplies inputs -- flat at its top level,
+    or under a ``[values]`` table in the shape :func:`write_provenance`
+    records, so a node's own ``_template.toml`` can seed another node --
+    and repeatable ``--set KEY=VALUE`` pairs override whole top-level
+    values. Each override is a TOML literal; text requires quotes.
+    ``--pin`` must agree with a pin supplied through either source.
 
     Args:
         values: The ``--values`` path, or ``None``.
@@ -244,7 +249,8 @@ def collect_values(
 
     Raises:
         ValueError: If a file or override is malformed, an input name
-            is invalid, or two explicit commission pins disagree.
+            is invalid, a ``[values]`` table stands beside other
+            top-level inputs, or two explicit commission pins disagree.
 
     """
     collected: dict[str, Any] = {}
@@ -257,6 +263,19 @@ def collect_values(
             data = tomllib.loads(sheet.read_text(encoding='utf-8'))
         except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
             raise ValueError(f'--values file is not valid TOML: {sheet}: {e}') from e
+        # a top-level [values] table is the input table in the provenance
+        # shape: the record's own keys beside it are ignored, and any other
+        # key beside it reads two ways, so it refuses rather than guessing
+        if isinstance(data.get('values'), dict):
+            foreign = sorted(set(data) - {'values'} - _PROVENANCE_KEYS)
+            if foreign:
+                names = ', '.join(foreign)
+                raise ValueError(
+                    f'--values file is ambiguous: {sheet} holds a [values] table'
+                    f' beside top-level keys {names}; name every input in one'
+                    ' place, flat or under [values].'
+                )
+            data = data['values']
         collected.update(validate_values(data, source='--values'))
     # --set replaces a whole top-level value, never a nested merge
     for pair in sets or []:
