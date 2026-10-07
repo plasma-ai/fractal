@@ -1435,6 +1435,50 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
     assert 'will not be tracked' not in capsys.readouterr().err
 
 
+def test_preflight_logs_what_a_passed_probe_spent(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A passed probe's spend is named on the loop's own log.
+
+    The probe runs before any step row exists and counts toward no cap,
+    so the banner is the one record of what it cost: the usage the
+    probe's stream reports, priced at the model's rates.
+    """
+    _configure(loop_node, agent='codex', model='gpt-5-codex')
+    loop = Loop(loop_node)
+    # `sh` stands in for the codex binary, routed to a probe that answers
+    # with one complete turn
+    monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+    monkeypatch.setattr(pricing, 'update', lambda max_age=None: 'fresh')
+    rates = {'input_cost_per_token': 1e-5, 'output_cost_per_token': 5e-5}
+    monkeypatch.setattr(pricing, '_load', lambda: {'gpt-5-codex': rates})
+    frames = [
+        {'type': 'thread.started', 'thread_id': 'probe'},
+        {'type': 'turn.started'},
+        {'type': 'turn.completed', 'usage': {'input_tokens': 100, 'output_tokens': 10}},
+    ]
+    script = '; '.join(f"printf '%s\\n' '{json.dumps(frame)}'" for frame in frames)
+
+    def fake_spawn(invocation: Any, **kwargs: Any) -> subprocess.Popen:
+        return subprocess.Popen(
+            ['sh', '-c', script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            **kwargs,
+        )
+
+    monkeypatch.setattr(loop._agent, '_spawn', fake_spawn)
+    loop._preflight()
+    assert (
+        "=== Preflight: codex probe passed for model 'gpt-5-codex':"
+        ' 110 tokens, $0.0015, outside the ledger ==='
+    ) in capsys.readouterr().out
+
+
 # ------ boot latch
 
 

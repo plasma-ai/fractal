@@ -1082,7 +1082,7 @@ class Agent:
         model: Optional[str] = None,
         *,
         register: Optional[Callable[[subprocess.Popen], None]] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Fail fast before a run.
 
         Checks the agent binary is on ``PATH``, fires ``on_preflight``,
@@ -1095,6 +1095,12 @@ class Agent:
                 waits on it, so the supervising loop can record the
                 probe's process group under its own marker; ``None``
                 records nothing.
+
+        Returns:
+            A one-line summary of a provider probe that ran and passed,
+            naming what it spent -- the probe lands on no step row, so
+            the caller's log is where the spend is named -- or ``None``
+            when no probe ran.
 
         Raises:
             RuntimeError: For an unsupported provider route, a missing
@@ -1121,13 +1127,14 @@ class Agent:
         model: Optional[str],
         *,
         register: Optional[Callable[[subprocess.Popen], None]] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Hook for provider-specific probes. Default is a no-op.
 
         A backend that spawns a probe routes it through ``spawn`` (so a
-        host's ``_spawn`` override covers it) and calls ``register`` with
-        the process before waiting on it. Override in a backend to relay
-        provider diagnostics::
+        host's ``_spawn`` override covers it), calls ``register`` with
+        the process before waiting on it, and returns a one-line summary
+        of the passed probe naming what it spent. Override in a backend
+        to relay provider diagnostics::
 
             def _preflight(self, model, *, register=None):
                 probe = subprocess.run([*self.parts, 'auth'], check=False)
