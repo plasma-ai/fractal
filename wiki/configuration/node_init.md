@@ -92,8 +92,10 @@ exists.
   `_partials/` and excluded outputs.
 - `--values` -- TOML inputs for seed-time Jinja rendering, overriding the
   template's optional `_template.toml` `[values]` defaults. The external file
-  names inputs at its top level; the node's generated `_template.toml` records
-  the complete resolved map. Values remain literal data, never template source.
+  names inputs at its top level or under a `[values]` table, the shape the
+  node's generated `_template.toml` records (so one node's record can seed
+  another); the record stores the complete resolved map. Values remain literal
+  data, never template source.
 - `--set KEY=VALUE` (repeatable) -- one input as a TOML literal, winning over
   `--values`: `--set 'role="reviewer"'` supplies text and `--set enabled=false`
   supplies a boolean. Lists and nested tables replace whole top-level values

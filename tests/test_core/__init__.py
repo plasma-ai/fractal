@@ -26,6 +26,7 @@ from .test_record import *
 from .test_render import *
 from .test_session import *
 from .test_teardown import *
+from .test_template import *
 from .test_time import *
 from .test_time_iteration_scope import *
 from .test_worktree import *

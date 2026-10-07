@@ -181,8 +181,12 @@ node at ``--path``.
      - none
      - TOML inputs for seed-time Jinja rendering, overriding the template's
        optional ``_template.toml`` ``[values]`` defaults. The external file
-       names inputs at its top level, without a ``[values]`` wrapper;
-       strings, booleans, numbers, lists, tables, and date/time values keep
+       names inputs at its top level, or under a ``[values]`` table — the
+       shape a node's generated ``_template.toml`` records, so one node's
+       record can seed another (its ``path``, ``commit``, ``include``, and
+       ``exclude`` keys beside the table are ignored); a ``[values]`` table
+       beside any other top-level key refuses, naming the keys. Strings,
+       booleans, numbers, lists, tables, and date/time values keep
        their types. Requires ``--template``; the node's generated
        ``_template.toml`` records the complete resolved map. Missing inputs
        used by selected outputs refuse before creation. Values remain literal
