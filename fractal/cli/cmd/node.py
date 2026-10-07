@@ -85,6 +85,8 @@ _ACTIVITY_COLUMNS = [
     'step_name',
     'step',
     'iter',
+    'agent',
+    'model',
     'status',
     'exit_code',
     'metadata',

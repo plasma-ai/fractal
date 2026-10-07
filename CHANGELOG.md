@@ -36,6 +36,10 @@ may include breaking changes, each listed under a Breaking heading.
   tree has no nodes (`fractal reset` first); a setting naming `wiki` counts as
   no change. With no file, or no `wiki` key in it, the folder is `wiki/` and no
   config records the key.
+- `node activity` rows carry `agent` and `model`: on a step's rows, the agent
+  that ran it and the model that served it, as the step's own stream named them;
+  blank on run, iteration, and event rows. Both are read through the listing's
+  join on the step row, so an existing database needs no rebuild.
 
 ### Changed
 

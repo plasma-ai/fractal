@@ -3699,8 +3699,9 @@ def test_activity_names_attribution_and_lineage_columns(repo: dict) -> None:
 
     Consumers bind by header name, so the header names every projected
     column; an event row carries its writer and a step row its name, the
-    iteration-relative step number, and the run-relative iteration number
-    the surrogate lineage ids stand for.
+    iteration-relative step number, the run-relative iteration number the
+    surrogate lineage ids stand for, and the agent and served model its
+    stream named.
     """
     root = repo['root']
     # seed one settled lineage on the root node so a step row exists to
@@ -3713,6 +3714,9 @@ def test_activity_names_attribution_and_lineage_columns(repo: dict) -> None:
         run_id=run_id,
         step=2,
         step_name='PLAN',
+    )
+    node.record.step_session(
+        'codex', step_id=step_id, model='gpt-5.3-codex', session='thread-1'
     )
     node.record.step_end(step_id=step_id, status='completed', exit_code=0)
     node.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
@@ -3733,6 +3737,8 @@ def test_activity_names_attribution_and_lineage_columns(repo: dict) -> None:
         'step_name',
         'step',
         'iter',
+        'agent',
+        'model',
         'status',
         'exit_code',
         'metadata',
@@ -3746,6 +3752,10 @@ def test_activity_names_attribution_and_lineage_columns(repo: dict) -> None:
     # a step row renders its name and the run-relative numbers
     step = next(row for row in rows if row['step_id'])
     assert (step['step_name'], step['step'], step['iter']) == ('PLAN', '2', '3')
+    # a step row names the agent that ran it and the model that served it;
+    # an event row carries neither
+    assert (step['agent'], step['model']) == ('codex', 'gpt-5.3-codex')
+    assert (spawn['agent'], spawn['model']) == ('', '')
 
 
 # ------ chat
