@@ -110,6 +110,14 @@ may include breaking changes, each listed under a Breaking heading.
   row. The agents guide and the cost wiki pages state that the `codex`
   model-acceptance probe at run start is a paid invocation whose usage is
   unpriced — it lands in no step row and counts toward no cap.
+- Under a cost cap, a token-priced step whose effective model the price table
+  cannot price aborts the run at preflight, before the run row commits and
+  before the paid `codex` probe, naming the step and the gap
+  (`a cost cap requires a model for <agent> in <step>`, or
+  `cost cap set but model '<name>' (<step>) has no pricing entry`); the same gap
+  met at launch stays a step failure with the same words. Three such launch
+  refusals in a row read as the `PAUSED: billing` backoff, which the preflight
+  check forestalls.
 
 ## [1.3.0] - 2026-09-17
 

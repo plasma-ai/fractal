@@ -661,6 +661,7 @@ class Loop:
         # not, and a routed backend chain-prices its result usage; an agent
         # that reports its own cost natively gives pricing nothing to do
         self._needs_pricing = False
+        priced: list[tuple[pathlib.Path, Agent, str]] = []
         for path in sorted((node.node_dir / 'steps').glob('*.md')):
             # step files are hand-edited: a bad byte must abort through the
             # machinery below -- a bare UnicodeDecodeError names a byte
@@ -680,7 +681,7 @@ class Loop:
             if not backend.tracks_cost():
                 if backend.needs_pricing or backend.provider is not None:
                     self._needs_pricing = True
-                    break
+                    priced.append((path, backend, step.model or self._node_model))
         # refresh model pricing before the run; a fetch failure with no cache
         # is fatal -- the cost/cap pipeline cannot price token usage without it
         if self._needs_pricing:
@@ -694,6 +695,31 @@ class Loop:
                     'Warning: could not refresh pricing; using cached pricing.json.',
                     file=sys.stderr,
                 )
+        # a cost cap requires spend the loop can track: judge every
+        # token-priced step's effective model against the refreshed table
+        # here, before the run row commits and before the paid probe, so a
+        # gap aborts the boot once by name -- refused at launch instead, the
+        # instant zero-cost failures would read as a billing outage
+        caps = (self._max_cost, self._max_iter_cost, self._max_step_cost)
+        if any(cap is not None for cap in caps):
+            for path, backend, model in priced:
+                if backend.tracks_cost(model or None):
+                    continue
+                # the gap alone is the short reason the run row persists;
+                # the remedy rides stderr with it
+                if not model:
+                    gap = (
+                        f'a cost cap requires a model for {backend.name} in {path.name}'
+                    )
+                    remedy = 'set --model or model: to a priced model'
+                else:
+                    gap = (
+                        f'cost cap set but model {model!r} ({path.name})'
+                        f' has no pricing entry'
+                    )
+                    remedy = 'set a priced model or remove the cost cap'
+                print(f'Error: {gap}; {remedy}', file=sys.stderr)
+                self._abort_preflight(gap)
         # provider preflight via the seam: the binary must be on PATH, and a
         # token-priced agent with an explicit model is probed once (some codex
         # accounts reject some explicit models; the pricing check only proves

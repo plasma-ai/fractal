@@ -98,6 +98,10 @@ prove the spend untracked, never firing for a contention window.
 A token-priced agent cannot run without pricing: the loop refreshes the LiteLLM
 cache at run start and aborts preflight when no table can be fetched and none is
 cached (a stale cache degrades to a warning -- see
-[[features/cost/pricing|pricing]]). The refresh runs whether or not a model is
-configured: a token-priced agent with no model set is priced at the served model
-its session record names.
+[[features/cost/pricing|pricing]]). Under a cost cap the refreshed table then
+judges every token-priced step's effective model before the run row commits and
+before the paid probe: the first gap (no model, or a model the table cannot
+price) aborts the boot naming its step, so a cap never meets the launch-time
+refusal three times over and reads as a billing outage. The refresh runs whether
+or not a model is configured: a token-priced agent with no model set is priced
+at the served model its session record names.

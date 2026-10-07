@@ -260,6 +260,8 @@ Preflight
 Before its first iteration, a run fails fast when the node cannot
 possibly work:
 
+- under a cost cap, every token-priced step's effective model must be in
+  the price table (the first gap names its step);
 - the agent binary must be on ``PATH``;
 - an ``openrouter``-routed node must have ``OPENROUTER_API_KEY`` set;
 - ``codex`` with an explicit model runs its acceptance probe, and a probe
