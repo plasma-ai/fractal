@@ -679,6 +679,26 @@ class Record:
         data = {'agent': agent, 'model': model, 'session': session}
         self.db.update(data, 'steps', where={'step_id': step_id})
 
+    def step_effort(
+        self: Record,
+        *,
+        step_id: int,
+        effort: str,
+    ) -> None:
+        """Record the effort a step's launch was handed.
+
+        Stamped by the loop at launch, so the row names it even when the
+        stream never opens; the agent and served model arrive from the
+        stream through :meth:`step_session`.
+
+        Args:
+            step_id: Step to update.
+            effort: The effort setting the invocation was given (the
+                step's own ``effort:`` or the node's).
+
+        """
+        self.db.update({'effort': effort}, 'steps', where={'step_id': step_id})
+
     def step_end(
         self: Record,
         *,
@@ -1181,9 +1201,9 @@ class Record:
         point-in-time events, each carrying its run/iter/step lineage. The
         LEFT JOINs add the display numbers the surrogate ids stand for --
         the iteration-relative ``step`` number, ``step_name``, and the
-        run-relative ``iter`` -- and the step's own ``agent`` and served
-        ``model``, read from the step row rather than the view so an
-        existing database needs no rebuild.
+        run-relative ``iter`` -- and the step's own ``agent``, served
+        ``model``, and launch ``effort``, read from the step row rather
+        than the view so an existing database needs no rebuild.
 
         Args:
             limit: Maximum rows to return.
@@ -1194,7 +1214,8 @@ class Record:
         """
         query = (
             'SELECT a.*, s.step AS step, s.step_name AS step_name,'
-            ' s.agent AS agent, s.model AS model, i.iter AS iter'
+            ' s.agent AS agent, s.model AS model, s.effort AS effort,'
+            ' i.iter AS iter'
             ' FROM activity a'
             ' LEFT JOIN steps s ON a.step_id = s.step_id'
             ' LEFT JOIN iters i ON a.iter_id = i.iter_id'

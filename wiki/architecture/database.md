@@ -33,9 +33,14 @@ domain logic, opening a one-shot handle per operation unless a caller passes an
 explicit transaction connection to make a multi-statement block atomic. Every
 handle enables foreign keys and carries a generous busy timeout, so contending
 writers under wide node fan-out wait for the lock instead of failing fast. The
-schema is applied idempotently from `core/schema.sql` — purely additive
-`IF NOT EXISTS` DDL with a stamped schema version, so a database created under
-an older schema is rebuilt, never migrated in place.
+schema is applied idempotently from `core/schema.sql` — additive `IF NOT EXISTS`
+DDL with a stamped schema version (`PRAGMA user_version`). A column added to a
+table reaches an existing database through a version step: every handle reads
+the stamp on open and a database stamped behind the current version is lifted
+one step at a time, each step inside its own immediate transaction so two
+writers racing it serialize and the second finds it done, each checking what it
+adds before adding it, and each left at its old version by SQLite's
+transactional DDL if it fails. A changed view still needs a rebuild.
 
 Row accounting on top of the wrapper goes through the record surface in
 `fractal/core/record.py`: lifecycle transitions funnel through first-writer-wins
@@ -78,8 +83,8 @@ on `node`, and attribution never depends on which mailbox a row sits in.
 - **Execution accounting** — `runs`, `iters`, and `steps`: one row per run, per
   iteration within a run, and per step within an iteration. Rows carry start and
   end instants (duration is derived, never stored), status, exit code, and — on
-  step rows — the recorded cost and approval state, so cost aggregates roll up
-  from steps.
+  step rows — the agent, served model, and launch effort, the recorded cost, and
+  the approval state, so cost aggregates roll up from steps.
 - **Events** — point-in-time lifecycle entries (init, spawn, commit, merge,
   pause, resume, and the rest), each optionally pinned to the run, iteration,
   and step context it happened in.

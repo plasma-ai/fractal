@@ -87,6 +87,7 @@ _ACTIVITY_COLUMNS = [
     'iter',
     'agent',
     'model',
+    'effort',
     'status',
     'exit_code',
     'metadata',

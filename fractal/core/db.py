@@ -12,6 +12,10 @@ from fractal.typing import Row
 
 __all__ = ['Database']
 
+#: the schema version a current database is stamped with; each step past
+#: a stamped older version is applied by connect (see Database._upgrade)
+_SCHEMA_VERSION = 2
+
 
 class Database:
     """Thin SQLite wrapper for the tree's central database.
@@ -49,10 +53,12 @@ class Database:
     def init(self: Database) -> None:
         """Create the database and tables from the schema.
 
-        Idempotent -- safe to call on an existing database -- but purely
+        Idempotent -- safe to call on an existing database -- and
         additive: the schema's ``IF NOT EXISTS`` DDL never alters an
-        existing table or refreshes a changed view, so a database created
-        under an older schema is not upgraded and must be rebuilt.
+        existing table or refreshes a changed view, so a column added to
+        a table reaches an existing database through the version step
+        :meth:`connect` applies, while a changed view still needs a
+        rebuild.
         """
         sql = self._schema.read_text(encoding='utf-8')
         connection = self.connect()
@@ -62,13 +68,15 @@ class Database:
             # lock, so it must never run per-connect under a live fleet
             connection.execute('PRAGMA journal_mode = WAL')
             connection.executescript(sql)
-            # stamp the schema version on an unstamped database only, so a
-            # future migration mechanism can key on the stored version
+            # an unstamped database is at the first version: a fresh one
+            # already holds the current tables, an older one the first
+            # version's, and the step below tells them apart by what it finds
             version, *_ = connection.execute('PRAGMA user_version').fetchone()
             if version == 0:
                 connection.execute('PRAGMA user_version = 1')
         finally:
             connection.close()
+        self._upgrade()
         # backfill the schema into the main file: a fresh tree's .db
         # must be self-contained at rest, not a bare header page whose
         # tables live only in the -wal
@@ -147,7 +155,63 @@ class Database:
             connection.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
         connection.execute('PRAGMA foreign_keys = ON')
         connection.row_factory = sqlite3.Row
+        # lift a database stamped behind the current schema before the
+        # handle is used -- one header read per handle is the price of an
+        # existing tree taking a new column without a rebuild; a read-only
+        # handle tries the same lift and otherwise reads the schema it finds
+        # (a write-denied reader has no way to lift it)
+        version, *_ = connection.execute('PRAGMA user_version').fetchone()
+        if 0 < version < _SCHEMA_VERSION:
+            try:
+                self._upgrade()
+            except sqlite3.OperationalError:
+                if not read_only:
+                    connection.close()
+                    raise
         return connection
+
+    def _upgrade(self: Database) -> None:
+        """Lift a stamped database behind ``_SCHEMA_VERSION`` to it.
+
+        One step per version, each inside its own ``BEGIN IMMEDIATE``:
+        two writers racing the same step serialize on the write lock,
+        and the second re-reads the version under it and finds the step
+        done. A step checks what it adds before adding it, so a column
+        that already exists (a database altered out of band) is stamped
+        past rather than refused, and SQLite's transactional DDL leaves
+        a step that fails at the version it started from, never
+        half-stamped. An unstamped database (version 0) is left to
+        :meth:`init`, which stamps it first.
+        """
+        connection = sqlite3.connect(f'{self._path}', timeout=self._timeout)
+        connection.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+        connection.isolation_level = None
+        try:
+            while True:
+                connection.execute('BEGIN IMMEDIATE')
+                try:
+                    version, *_ = connection.execute('PRAGMA user_version').fetchone()
+                    if not 0 < version < _SCHEMA_VERSION:
+                        connection.execute('COMMIT')
+                        return
+                    # version 1 -> 2: the step row's effort column
+                    if version == 1:
+                        columns = {
+                            row[1]
+                            for row in connection.execute('PRAGMA table_info(steps)')
+                        }
+                        if 'effort' not in columns:
+                            connection.execute(
+                                'ALTER TABLE steps ADD COLUMN effort TEXT'
+                            )
+                    connection.execute(f'PRAGMA user_version = {version + 1}')
+                    connection.execute('COMMIT')
+                except BaseException:
+                    if connection.in_transaction:
+                        connection.execute('ROLLBACK')
+                    raise
+        finally:
+            connection.close()
 
     @contextlib.contextmanager
     def transaction(self: Database) -> Iterator[sqlite3.Connection]:

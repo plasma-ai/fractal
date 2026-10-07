@@ -43,10 +43,17 @@ may include breaking changes, each listed under a Breaking heading.
   nodes (`fractal reset` first); a setting naming `wiki` counts as no change.
   With no file, or no `wiki` key in it, the folder is `wiki/` and no config
   records the key.
-- `node activity` rows carry `agent` and `model`: on a step's rows, the agent
-  that ran it and the model that served it, as the step's own stream named them;
-  blank on run, iteration, and event rows. Both are read through the listing's
-  join on the step row, so an existing database needs no rebuild.
+- `node activity` rows carry `agent`, `model`, and `effort`: on a step's rows,
+  the agent that ran it and the model that served it, as the step's own stream
+  named them, and the effort its launch was handed (the step's `effort:` or the
+  node's); blank on run, iteration, and event rows. All three are read through
+  the listing's join on the step row. `effort` is a new `steps` column, and the
+  central database takes it without a rebuild: the schema version
+  (`PRAGMA user_version`) is now 2, every handle reads the stamp on open, and a
+  database at version 1 is lifted in one immediate transaction (two writers
+  racing it serialize, the second finds it done; a step that fails leaves the
+  database at version 1, readable as before). Steps recorded before the lift
+  read a blank effort.
 
 ### Changed
 
