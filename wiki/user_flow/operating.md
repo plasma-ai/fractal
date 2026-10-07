@@ -48,12 +48,13 @@ whose worktree is gone.
 
 **History and spend.** `fractal node activity` shows a node's lifecycle activity
 most recent first, each row with its own-node step cost and, on a step's rows,
-the agent that ran it and the model that served it. `fractal node cost spent`
-totals a subtree's spend (children included), `cost remaining` shows what's left
-of the run's cap, and `cost breakdown` splits it per node. Budgets and their
-semantics are [[configuration/_index|configuration]]-branch territory;
-operationally, watch for a child burning far faster than its siblings — that is
-the node to rein in before it trips a subtree cap.
+the agent that ran it, the model that served it, and the effort its launch was
+handed. `fractal node cost spent` totals a subtree's spend (children included),
+`cost remaining` shows what's left of the run's cap, and `cost breakdown` splits
+it per node. Budgets and their semantics are
+[[configuration/_index|configuration]]-branch territory; operationally, watch
+for a child burning far faster than its siblings — that is the node to rein in
+before it trips a subtree cap.
 
 **The cockpit.** `fractal open` launches the TUI — a live tree view with
 per-node panes for output, radio, and lifecycle actions (see the

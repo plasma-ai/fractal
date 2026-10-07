@@ -2654,6 +2654,13 @@ class Loop:
                 )
             except Exception:
                 pass
+        # the effort the invocation was handed lands on the row the same way,
+        # so the row names it even when the stream never opens
+        if effort is not None and self._step_id is not None:
+            try:
+                node.record.step_effort(step_id=self._step_id, effort=effort)
+            except Exception:
+                pass
 
         # run in the worktree (the project) so a bare relative write lands in
         # the deliverable tree, never inside .fractal/; capture stderr

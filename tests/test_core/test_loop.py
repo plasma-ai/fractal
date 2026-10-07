@@ -25,7 +25,7 @@ import pytest
 
 from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
 from fractal.core import pricing, worktree
-from fractal.core.agent import StreamEvent
+from fractal.core.agent import StreamEvent, StreamResult
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
@@ -52,6 +52,7 @@ __all__ = [
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
     'test_agent_borne_stream_error_keeps_the_exit_code',
+    'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
     'test_agent_launch_failure_books_a_failed_step',
@@ -970,6 +971,64 @@ def test_agent_borne_stream_error_keeps_the_exit_code(
     assert (step['metadata'] or '').startswith(
         'agent error (exit 3): sample reported an error: quota exhausted; stub crashed'
     )
+
+
+def test_launch_stamps_the_effort_on_the_step_row(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch records the effort it hands the invocation on its step row.
+
+    The stream names the agent and model later; the effort is the loop's
+    own fact, stamped beside the session before the spawn, so a launch
+    whose stream never opens still leaves the row attributable. A node
+    with no effort set leaves the column blank.
+    """
+    monkeypatch.setenv('_NODE', '')
+
+    class QuietAgent(SampleAgent):
+        """A backend whose launch exits clean with an empty stream."""
+
+        def spawn(
+            self: QuietAgent,
+            invocation: Any,
+            *,
+            start_new_session: bool = True,
+            stderr: Any = None,
+        ) -> subprocess.Popen:
+            """Exit 0 at once."""
+            return subprocess.Popen(
+                ['sh', '-c', 'exit 0'],
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                start_new_session=start_new_session,
+            )
+
+        def stream(self: QuietAgent, stdout: Any, **kwargs: Any) -> Any:
+            """Drain to EOF and report an empty, costless stream."""
+            for _ in stdout:
+                pass
+            kwargs['process'].wait()
+            return StreamResult(session=None, model=None, cost=None)
+
+    class QuietLoop(MockLoop):
+        """Mock loop that runs the REAL launch with the quiet agent."""
+
+        def _launch(
+            self: QuietLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Run the base launch so the stamp executes."""
+            kwargs['agent'] = QuietAgent(self.node)
+            return Loop._launch(self, step, prompt, **kwargs)
+
+    _configure(loop_node, effort='high')
+    assert QuietLoop(loop_node).run() == 0
+    efforts = [row['effort'] for row in loop_node.db.read('steps')]
+    assert efforts == ['high', 'high']
+    # no effort anywhere: the column stays blank
+    _configure(loop_node, effort='')
+    assert QuietLoop(loop_node).run() == 0
+    assert loop_node.db.read('steps', limit=1)[0]['effort'] is None
 
 
 def test_agent_stderr_tolerates_non_utf8_output(
