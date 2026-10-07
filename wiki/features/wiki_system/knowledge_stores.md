@@ -97,15 +97,17 @@ back or re-spawning the node, never at `config.json`, whose edit to the new
 folder would move the exemption. Everything that names the project wiki reads
 the recorded folder: the commit scope exemption and the merge footprint check
 (one law, `commit.scope_boundaries`), the commit-time and merge-time index
-refresh (a merge into a `--base` branch that is no node takes the merging node's
-folder), the `node init` base-ref precondition, `WIKI_DIR`, the seeded
-`lint.sh`, the unmerged-work check of `node delete`, and the `destroy` report
-(which falls back to `wiki/` when the stored value is invalid, so a bad
-hand-edit never blocks the teardown). The wiki CLI, the `merge=wiki` driver, the
-tool's `.wiki/` state directory, and the memory wiki keep their names. With no
-setting the folder is `wiki` and no config records the key, so a project that
-names none uses `wiki/` at every site. The default is spelled by omitting the
-key; the settings file refuses `"wiki": null`.
+refresh (the merge regenerates the node's own project wiki under the target
+checkout, the folder its spawn gave it -- never a hand-edited `config.json`'s,
+and never the target's own wiki when the node lives in another sub-project), the
+`node init` base-ref precondition, `WIKI_DIR`, the seeded `lint.sh`, the
+unmerged-work check of `node delete`, and the `destroy` report (which falls back
+to `wiki/` when the stored value is invalid, so a bad hand-edit never blocks the
+teardown). The wiki CLI, the `merge=wiki` driver, the tool's `.wiki/` state
+directory, and the memory wiki keep their names. With no setting the folder is
+`wiki` and no config records the key, so a project that names none uses `wiki/`
+at every site. The default is spelled by omitting the key; the settings file
+refuses `"wiki": null`.
 
 ## Routing knowledge
 

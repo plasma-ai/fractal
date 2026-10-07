@@ -310,6 +310,8 @@ __all__ = [
     'test_merge_footprint_exempts_the_configured_wiki',
     'test_merge_refuses_a_hand_edited_wiki_folder',
     'test_merge_into_a_linked_root_holds_the_trees_wiki_folder',
+    'test_merge_refreshes_a_sub_project_nodes_own_wiki',
+    'test_merge_ignoring_scope_refreshes_the_folder_the_spawn_gave',
     'test_merge_refuses_a_node_whose_project_setting_changed_since_spawn',
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
     'test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal',
@@ -4365,6 +4367,126 @@ def test_merge_into_a_linked_root_holds_the_trees_wiki_folder(
     assert tracked == sorted(['src/a.py', page])
     if wiki != 'wiki':
         assert _files(linked / 'wiki') == corpus
+
+
+@pytest.mark.parametrize(
+    argnames='linked',
+    argvalues=[False, True],
+    ids=['checked_out', 'linked'],
+)
+def test_merge_refreshes_a_sub_project_nodes_own_wiki(
+    tmp_path: pathlib.Path,
+    linked: bool,
+) -> None:
+    """A sub-project node's merge refreshes its own project's wiki in the target.
+
+    The squash lands the node's pages under its project's wiki folder, so
+    that folder's indexes are what the merge regenerates in the target
+    checkout -- never the target's own wiki, which the squash left alone
+    -- whether the root is checked out in place or in a linked worktree,
+    where no config of the target's can be read at all.
+    """
+    repo = _init_tree(tmp_path / 'subwikirepo')
+    # a sub-project naming its own folder, with the committed wiki there that
+    # the base-ref precondition requires
+    notes = repo / 'app' / 'notes' / '_index.md'
+    notes.parent.mkdir(parents=True)
+    notes.write_text('---\nname: notes\n---\n# notes\n\n***\n', encoding='utf-8')
+    settings = repo / 'app' / '.fractal' / '.settings.json'
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({'wiki': 'notes'}) + '\n', encoding='utf-8')
+    _git(repo, 'add', 'app')
+    _git(repo, 'commit', '-m', 'add the app project')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--path',
+        'app',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'app' / 'src').mkdir()
+    (worktree / 'app' / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    (worktree / 'app' / 'notes' / 'page.md').write_text(
+        '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    target = repo
+    if linked:
+        # the repo root parks on a side branch; main is checked out linked
+        _git(repo, 'checkout', '-b', 'side', 'main')
+        target = tmp_path / 'main-wt'
+        _git(repo, 'worktree', 'add', f'{target}', 'main')
+    root_index = (target / 'wiki' / '_index.md').read_text(encoding='utf-8')
+    result = _run(repo, 'node', 'merge', f'--path={worktree}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    # the app wiki's index lists the landed page; the root wiki is untouched
+    index = _git(target, 'show', 'HEAD:app/notes/_index.md').stdout
+    assert '[[page|page]]' in index, index
+    assert (target / 'wiki' / '_index.md').read_text(encoding='utf-8') == root_index
+
+
+def test_merge_ignoring_scope_refreshes_the_folder_the_spawn_gave(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``--ignore-scope`` never lets a hand-edited folder steer the refresh.
+
+    The footprint check that refuses a ``config.json`` edited to another
+    folder is skipped under ``--ignore-scope``, and a root checked out in
+    a linked worktree carries no config to read the folder from, so the
+    refresh takes the folder the node's spawn gave it from the merge's
+    own resolution: the configured ``docs/`` is refreshed, and a corpus
+    ``wiki/`` beside it, the edit's target, keeps its bytes.
+    """
+    repo = _init_tree(tmp_path / 'editedrepo', wiki='docs')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'src').mkdir()
+    (worktree / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    (worktree / 'docs' / 'page.md').write_text(
+        '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    # the node's config.json is edited to the corpus folder
+    config_path = worktree / '.fractal' / 'main.task' / 'config.json'
+    config = json.loads(config_path.read_text(encoding='utf-8'))
+    config['wiki'] = 'wiki'
+    config_path.write_text(json.dumps(config, indent=2), encoding='utf-8')
+    # the repo root parks on a side branch; main is checked out linked
+    _git(repo, 'checkout', '-b', 'side', 'main')
+    linked = tmp_path / 'main-wt'
+    _git(repo, 'worktree', 'add', f'{linked}', 'main')
+    corpus = _files(linked / 'wiki')
+    result = _run(repo, 'node', 'merge', '--ignore-scope', f'--path={worktree}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    # the configured folder's index lists the landed page; the corpus is intact
+    index = _git(linked, 'show', 'HEAD:docs/_index.md').stdout
+    assert '[[page|page]]' in index, index
+    assert _files(linked / 'wiki') == corpus
 
 
 def test_merge_refuses_a_node_whose_project_setting_changed_since_spawn(

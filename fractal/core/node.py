@@ -4084,6 +4084,16 @@ class Node:
         # a linked worktree carries no self-ignored seed there to probe
         if any(user.branch == target_branch for user in Node.user_nodes(self.repo_dir)):
             args.append('--user-target')
+        # the folder the index refresh regenerates: the node's own project
+        # wiki under the target checkout, as the node's spawn gave it, so a
+        # hand-edited config.json steers neither the exemption nor the
+        # refresh and a sub-project node's pages are indexed where they
+        # landed (a root checked out in a linked worktree carries no config
+        # for the script to read the folder from)
+        _, wiki = self._spawn_wiki()
+        project = self.project_path
+        prefix = wiki if project == '.' else f'{project}/{wiki}'
+        args.append(f'--target-wiki={prefix}')
         # one squash at a time per repo: two sibling merges racing into the
         # same target interleave their index writes and leave it half-merged
         with worktree.merge_lock(self.repo_dir):
@@ -4115,6 +4125,43 @@ class Node:
 
         """
         root = self.config.get('root')
+        parent, expected = self._spawn_wiki()
+        recorded = self.config.get('wiki') or WIKI_FOLDER
+        if recorded == expected:
+            return
+        if parent is not None and parent.project_path == self.project_path:
+            raise ValueError(
+                f'{self.branch} records {recorded!r} as its project wiki folder,'
+                f' but its spawn gives {expected!r}; the folder is fixed at'
+                " init, so restore it in the node's config.json."
+            )
+        raise ValueError(
+            f'{self.branch} records {recorded!r} as its project wiki folder,'
+            f' but the setting committed on {root!r} for project'
+            f' {self.project_path!r} names {expected!r}; the folder is fixed'
+            f' at spawn, so commit {recorded!r} back on {root!r} if the'
+            ' setting changed since, or delete the node and spawn it again'
+            f' to adopt {expected!r}.'
+        )
+
+    def _spawn_wiki(self: Node) -> tuple[Optional[Node], str]:
+        """Return the parent spawn saw and the project-wiki folder it gave.
+
+        The rule :meth:`init` applied, recomputed from the repo's record
+        rather than the node's editable ``config.json``: the parent's
+        folder in the parent's project, else the node's project's setting
+        committed on the root branch. Shared by :meth:`check_wiki` and
+        :meth:`merge`, so the guard and the index refresh read one folder.
+
+        Returns:
+            The parent as spawn resolved it (``None`` when checked out
+            nowhere) and the folder, relative to the node's project.
+
+        Raises:
+            ValueError: If the committed settings file is invalid.
+
+        """
+        root = self.config.get('root')
         # the tree's user node resolves by the repo's record, not the
         # checkout: a root checked out in a linked worktree carries no
         # self-ignored seed there, so its folder would read as the default
@@ -4133,24 +4180,7 @@ class Node:
                 ref=root,
                 project=self.project_path,
             )
-        expected = expected or WIKI_FOLDER
-        recorded = self.config.get('wiki') or WIKI_FOLDER
-        if recorded == expected:
-            return
-        if parent is not None and parent.project_path == self.project_path:
-            raise ValueError(
-                f'{self.branch} records {recorded!r} as its project wiki folder,'
-                f' but its spawn gives {expected!r}; the folder is fixed at'
-                " init, so restore it in the node's config.json."
-            )
-        raise ValueError(
-            f'{self.branch} records {recorded!r} as its project wiki folder,'
-            f' but the setting committed on {root!r} for project'
-            f' {self.project_path!r} names {expected!r}; the folder is fixed'
-            f' at spawn, so commit {recorded!r} back on {root!r} if the'
-            ' setting changed since, or delete the node and spawn it again'
-            f' to adopt {expected!r}.'
-        )
+        return parent, expected or WIKI_FOLDER
 
     def guard_delete(self: Node) -> None:
         """Guard a subtree teardown: pre-flight its refusals, settle what it can.

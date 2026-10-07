@@ -29,6 +29,12 @@ Options:
     --user-target     Judge the target as its tree's user node (Node.merge
                       passes it from the repo's record; the checkout probe is
                       the fallback for a direct call).
+    --target-wiki=PATH
+                      Worktree-relative project-wiki folder the index refresh
+                      regenerates after the squash (Node.merge passes the
+                      folder the node's spawn gave it under the node's own
+                      project; a direct call reads the target's config, then
+                      the node's).
     --help|-h         Show this help message
 USAGE
     exit 0
@@ -38,6 +44,7 @@ WORKTREE_DIR=""
 CONTINUE=false
 IGNORE_SCOPE=false
 USER_TARGET=false
+TARGET_WIKI=""
 VALIDATE=false
 VALIDATION_SCRIPT=""
 
@@ -51,6 +58,7 @@ for arg in "$@"; do
             VALIDATION_SCRIPT="${arg#*=}"
             ;;
         --user-target) USER_TARGET=true ;;
+        --target-wiki=*) TARGET_WIKI="${arg#*=}" ;;
         *)
             if [[ -z "$WORKTREE_DIR" ]]; then
                 WORKTREE_DIR="$arg"
@@ -863,17 +871,29 @@ fi
 # a failed refresh restores the parent exactly like a conflict
 if command -v wiki &>/dev/null; then
     PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo ".")
-    # a --base target that is no node has no config: the merging node then
-    # names the folder (a guessed default would refresh, and stage past the
-    # footprint check, whatever ordinary content sits at wiki/)
-    PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null) \
-        || PARENT_WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null || true)
     if [[ "$PARENT_PROJECT" == "." ]]; then
-        WIKI_DIR="$PARENT_WORKTREE_DIR/${PARENT_WIKI:-wiki}"
         MEMORY_DIR="$PARENT_WORKTREE_DIR/.fractal/$PARENT_BRANCH/memory"
     else
-        WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/${PARENT_WIKI:-wiki}"
         MEMORY_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/.fractal/$PARENT_BRANCH/memory"
+    fi
+    # the project wiki the squash landed pages in: Node.merge names the
+    # folder the node's spawn gave it under the node's own project, so a
+    # hand-edited config.json never steers the refresh and a sub-project
+    # node's pages are indexed where they landed; a direct call reads the
+    # target's config, and a --base target that is no node has none, so the
+    # merging node then names the folder (a guessed default would refresh,
+    # and stage past the footprint check, whatever ordinary content sits at
+    # wiki/)
+    if [[ -n "$TARGET_WIKI" ]]; then
+        WIKI_DIR="$PARENT_WORKTREE_DIR/$TARGET_WIKI"
+    else
+        PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null) \
+            || PARENT_WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null || true)
+        if [[ "$PARENT_PROJECT" == "." ]]; then
+            WIKI_DIR="$PARENT_WORKTREE_DIR/${PARENT_WIKI:-wiki}"
+        else
+            WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/${PARENT_WIKI:-wiki}"
+        fi
     fi
     for INDEX_DIR in "$WIKI_DIR" "$MEMORY_DIR"; do
         # guarded: a set -e exit from a failed ls-files would strand the

@@ -28,20 +28,21 @@ may include breaking changes, each listed under a Breaking heading.
   folder drives the commit scope exemption and the merge footprint check, the
   commit-time and merge-time index refresh, the `node init` base-ref
   precondition, `$WIKI_DIR` in node prompts, the seeded `lint.sh`, the
-  unmerged-work check of `node delete`, and the `destroy` report. A merge into a
-  `--base` branch that is no node refreshes the merging node's folder, read at
-  the base checkout's root rather than under the node's sub-project, since a
-  plain branch records no project. A folder that is absolute, `.`, `null`,
-  carries a `..`, `.fractal`, `.worktrees`, or `.git` component, or is not
-  canonical refuses init, and a hand-edited bad value fails every commit and
-  merge scope check, while `destroy` falls back to `wiki/` in its report so the
-  teardown never blocks on it; a merge also refuses a node whose `config.json`
-  was edited to another valid folder than its spawn gave it, and a node in
-  another sub-project than its parent whose project's setting changed on the
-  root branch since its spawn. A re-init adopts a changed setting only once the
-  tree has no nodes (`fractal reset` first); a setting naming `wiki` counts as
-  no change. With no file, or no `wiki` key in it, the folder is `wiki/` and no
-  config records the key.
+  unmerged-work check of `node delete`, and the `destroy` report. The merge's
+  index refresh regenerates the node's own project wiki under the target
+  checkout, the folder its spawn gave it, whatever the target is (a node in
+  another sub-project, a root checked out in a linked worktree, or a `--base`
+  branch that is no node). A folder that is absolute, `.`, `null`, carries a
+  `..`, `.fractal`, `.worktrees`, or `.git` component, or is not canonical
+  refuses init, and a hand-edited bad value fails every commit and merge scope
+  check, while `destroy` falls back to `wiki/` in its report so the teardown
+  never blocks on it; a merge also refuses a node whose `config.json` was edited
+  to another valid folder than its spawn gave it, and a node in another
+  sub-project than its parent whose project's setting changed on the root branch
+  since its spawn. A re-init adopts a changed setting only once the tree has no
+  nodes (`fractal reset` first); a setting naming `wiki` counts as no change.
+  With no file, or no `wiki` key in it, the folder is `wiki/` and no config
+  records the key.
 - `node activity` rows carry `agent` and `model`: on a step's rows, the agent
   that ran it and the model that served it, as the step's own stream named them;
   blank on run, iteration, and event rows. Both are read through the listing's
@@ -100,6 +101,14 @@ may include breaking changes, each listed under a Breaking heading.
   the result frame's `modelUsage` table and sums them, so a sub-agent's spend on
   another model reaches the step's cost; a model the pricing chain cannot
   resolve closes unpriced instead of booking the parent alone.
+- The merge's post-squash index refresh takes its folder from `Node.merge`
+  (`merge.sh --target-wiki=<folder>`), the node's own project wiki as its spawn
+  gave it, instead of the target checkout's config with the node's `wiki` key as
+  the fallback: a root checked out in a linked worktree has no config there, so
+  a `config.json` hand-edited to another folder steered the refresh under
+  `--ignore-scope`, and a sub-project node merging into the root refreshed the
+  root's wiki rather than its own project's, leaving the landed pages out of
+  their index.
 - A codex `error` frame inside the active turn — the frame codex writes when it
   retries a stream error and then completes the turn — no longer fails a step
   whose process exits 0; the recovered step is priced normally. A `turn.failed`
