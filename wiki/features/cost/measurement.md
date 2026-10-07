@@ -132,7 +132,8 @@ step prices its own rows alone.
 `fractal node cost spent` sums step rows for the **current run** by default (the
 active run, else the most recent) -- budgets and spend are per-run, so a drained
 prior run never bleeds into the bare reading (`--run` scopes to a specific run;
-`--iter`/`--step` scope to one iteration's or step's rows, without children).
+`--iter`/`--step` scope to one iteration's or step's rows, without children;
+each must name the target's own row, and another node's is refused).
 
 The run scope includes descendants: every run a child spawned under this run's
 lineage is chained to it, hop by hop, and the whole chain -- the **per-run

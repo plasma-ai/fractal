@@ -32,6 +32,7 @@ __all__ = [
     'command',
     'require_non_negative',
     'require_timestamp',
+    'require_scope_owner',
     'StreamRenderer',
     'print_rows',
     'print_json',
@@ -48,6 +49,12 @@ __all__ = [
 # tool-result preview budget: two to three 80-column terminal lines, so one
 # verbose tool call cannot flood the streamed transcript
 _TOOL_RESULT_MAX = 200
+# the row table and the label a scope option's id is judged by
+_SCOPE_TABLES = {
+    'run_id': ('runs', 'run'),
+    'iter_id': ('iters', 'iteration'),
+    'step_id': ('steps', 'step'),
+}
 _DIM = '\033[2m'
 _RESET = '\033[0m'
 _BLUE = '\033[34m'
@@ -158,6 +165,41 @@ def require_timestamp(**instants: Optional[str]) -> None:
                 f'--{flag} expects an ISO 8601 date or timestamp'
                 f' (e.g. 2026-01-31 or 2026-01-31T14:00:00Z); got {value!r}.'
             ) from None
+
+
+def require_scope_owner(node: Node, branch: str, **scopes: Optional[int]) -> None:
+    """Reject a ``--run``/``--iter``/``--step`` id that is not the target's own.
+
+    A scope id selects the ledger readers' rows by lineage alone, so
+    another node's run, iteration, or step would answer in the target's
+    name. Each keyword maps a scope option's name (``run_id``,
+    ``iter_id``, ``step_id``) to its value; ``None`` is skipped.
+    ``branch`` is the target's branch -- for a deleted target the
+    recorded branch, not the caller's that answers for it.
+
+    Args:
+        node: A node on the tree's central database.
+        branch: The branch the scoped row must belong to.
+        **scopes: Scope option name mapped to its value
+            (e.g. ``run_id=run_id``).
+
+    Raises:
+        typer.BadParameter: If no row carries an id, or the row belongs
+            to another branch.
+
+    """
+    for name, value in scopes.items():
+        if value is None:
+            continue
+        table, label = _SCOPE_TABLES[name]
+        rows = node.db.read(table, where={name: value})
+        if not rows:
+            raise typer.BadParameter(f'No {label} {value} is recorded.')
+        owner = rows[0]['node']
+        if owner != branch:
+            raise typer.BadParameter(
+                f'{label.capitalize()} {value} belongs to {owner!r}, not {branch!r}.'
+            )
 
 
 class StreamRenderer:

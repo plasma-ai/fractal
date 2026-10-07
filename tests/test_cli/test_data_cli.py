@@ -43,6 +43,7 @@ __all__ = [
     'test_cost_spent_and_breakdown_disclose_unpriced_count',
     'test_cost_spent_scope_flags',
     'test_cost_scope_flags_reject_two_scopes',
+    'test_cost_refuses_another_nodes_scope',
     'test_cost_rejects_lifetime_selector',
     'test_cost_breakdown_emits_header_for_no_children',
     'test_cost_breakdown_lists_a_registered_child',
@@ -415,6 +416,66 @@ def test_cost_scope_flags_reject_two_scopes(repo: dict) -> None:
     assert spent.returncode == 2, spent.stderr
     remaining = _run(task, 'node', 'cost', 'remaining', '--run', '1', '--step', '1')
     assert remaining.returncode == 2, remaining.stderr
+
+
+@pytest.mark.parametrize(
+    argnames=('verb', 'flag', 'label'),
+    argvalues=[
+        # verb, scope flag, the label the refusal names the row by
+        ('remaining', '--run', 'run'),
+        ('remaining', '--iter', 'iteration'),
+        ('remaining', '--step', 'step'),
+        ('spent', '--run', 'run'),
+        ('spent', '--iter', 'iteration'),
+        ('spent', '--step', 'step'),
+        ('breakdown', '--run', 'run'),
+    ],
+)
+def test_cost_refuses_another_nodes_scope(
+    repo: dict,
+    verb: str,
+    flag: str,
+    label: str,
+) -> None:
+    """A scope flag must name one of the target's own rows.
+
+    A run, iteration, or step id selects the readers' rows by lineage
+    alone, so another node's would answer in the target's name: it is
+    refused naming the owner, an id no row carries is refused as
+    unrecorded, and the target's own row still answers.
+    """
+    root, task = repo['root'], repo['task']
+    # a sibling worker with a settled lineage of its own (named per case:
+    # the module fixture is shared, so each case inits its own worker)
+    name = f'other_{verb}_{label}'
+    assert _run(root, 'node', 'init', name, '--agent', 'claude').returncode == 0
+    other = Node(root / '.worktrees' / f'main.{name}').record
+    run_id = other.run_start()
+    iter_id = other.iter_start(run_id=run_id, iter=1)
+    step_id = other.step_start(iter_id=iter_id, run_id=run_id, step=1, step_name='PLAN')
+    other.step_end(step_id=step_id, status='completed', exit_code=0)
+    other.iter_end(iter_id=iter_id, status='completed', exit_code=0)
+    other.run_end(run_id=run_id, status='completed', exit_code=0)
+    foreign = {'run': run_id, 'iteration': iter_id, 'step': step_id}[label]
+    refused = _run(task, 'node', 'cost', verb, flag, str(foreign))
+    assert refused.returncode == 2, refused.stderr
+    # the error panel wraps a long message across bordered lines
+    flat = ' '.join(refused.stderr.replace('│', ' ').split())
+    assert (
+        f"{label.capitalize()} {foreign} belongs to 'main.{name}', not 'main.task'"
+    ) in flat, refused.stderr
+    unknown = _run(task, 'node', 'cost', verb, flag, '999999')
+    assert unknown.returncode == 2, unknown.stderr
+    assert f'No {label} 999999 is recorded' in unknown.stderr
+    # the target's own row answers
+    mine = Node(task).record
+    own = {
+        'run': repo['run_id'],
+        'iteration': repo['iter_id'],
+        'step': mine.steps(run_id=repo['run_id'])[0]['step_id'],
+    }[label]
+    answered = _run(task, 'node', 'cost', verb, flag, str(own))
+    assert answered.returncode == 0, answered.stderr
 
 
 def test_cost_rejects_lifetime_selector(repo: dict) -> None:

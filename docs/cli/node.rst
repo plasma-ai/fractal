@@ -1098,7 +1098,10 @@ Cost budgets: ``fractal node cost``
 
 Budgets and spend are **per-run**: each launch arms ``max_cost`` anew, and all
 three commands default to the current run (scope to a prior run with
-``--run <id>``). Amounts print as ``$X.XXXX``. A deleted node still resolves
+``--run <id>``). ``--run``, ``--iter``, and ``--step`` must name the target's
+own run, iteration, or step: another node's is refused naming its owner, and
+an id no row carries is refused as unrecorded. Amounts print as ``$X.XXXX``.
+A deleted node still resolves
 through the tree's shared history: ``spent`` and ``breakdown`` answer from its
 latest recorded run, while ``remaining`` always prints ``no budget`` (caps die
 with the node).
