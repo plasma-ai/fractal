@@ -655,7 +655,10 @@ overwrites it.
    Merge out-of-scope changes instead of refusing — paths outside the node's
    scope roots and its project wiki (``.fractal/`` paths are never judged; the
    worktree-root ``.gitattributes`` is admitted only as init's own
-   ``merge=wiki`` edit).
+   ``merge=wiki`` edit). The index refresh that follows the squash still
+   regenerates the project wiki the node's spawn gave it, under the node's
+   own project in the target checkout, so a hand-edited ``config.json``
+   steers neither the exemption nor the refresh.
 
 ``--validate <script>``
    Run a repository gate on the destination before the squash commit. Bash
