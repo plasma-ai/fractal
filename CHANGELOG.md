@@ -13,8 +13,9 @@ may include breaking changes, each listed under a Breaking heading.
   `=== Preflight: codex probe passed for model '<name>': <N> tokens, $<cost>, outside the ledger ===`
   from the usage the probe's own stream reports, priced at the model's rates
   (`unpriced` when the rates cannot price the model, `usage unreported` when the
-  stream does not describe one complete turn). The probe's spend still lands on
-  no step row and counts toward no cap.
+  stream does not describe one complete turn), and books a `preflight` event
+  carrying the same line, so `node activity` keeps it. The probe's spend still
+  lands on no step row and, events carrying no cost, counts toward no cap.
 - The shared project-wiki folder — the one folder every node commits to
   regardless of its scope — is a setting. A project names it in a committed
   `<project>/.fractal/.settings.json` (`{"wiki": "docs"}`, relative to the

@@ -1440,11 +1440,13 @@ def test_preflight_logs_what_a_passed_probe_spent(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """A passed probe's spend is named on the loop's own log.
+    """A passed probe's spend is named on the loop's log and in its events.
 
     The probe runs before any step row exists and counts toward no cap,
-    so the banner is the one record of what it cost: the usage the
-    probe's stream reports, priced at the model's rates.
+    so the banner and a ``preflight`` event carrying the same line are
+    the record of what it cost: the usage the probe's stream reports,
+    priced at the model's rates. The event rides no run, since none is
+    open yet, and no cost, so the caps still leave the probe out.
     """
     _configure(loop_node, agent='codex', model='gpt-5-codex')
     loop = Loop(loop_node)
@@ -1473,10 +1475,14 @@ def test_preflight_logs_what_a_passed_probe_spent(
 
     monkeypatch.setattr(loop._agent, '_spawn', fake_spawn)
     loop._preflight()
-    assert (
-        "=== Preflight: codex probe passed for model 'gpt-5-codex':"
-        ' 110 tokens, $0.0015, outside the ledger ==='
-    ) in capsys.readouterr().out
+    summary = (
+        "codex probe passed for model 'gpt-5-codex': 110 tokens, $0.0015,"
+        ' outside the ledger'
+    )
+    assert f'=== Preflight: {summary} ===' in capsys.readouterr().out
+    (event,) = loop_node.record.events(event='preflight')
+    assert (event['status'], event['metadata']) == ('completed', summary)
+    assert event['run_id'] is None
 
 
 def test_preflight_refuses_a_cap_over_an_unpriced_model(

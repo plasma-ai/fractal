@@ -741,9 +741,17 @@ class Loop:
             # never signal a recycled pgid
             (node.node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
         # a passed probe is paid inference that lands on no step row and
-        # counts toward no cap, so this banner is the one record of it
+        # counts toward no cap: the banner names it on the log, and an event
+        # carrying the same line keeps it in node activity -- an event, not
+        # a step row, since events carry no cost and the caps leave it out
         if summary is not None:
             print(f'=== Preflight: {summary} ===')
+            try:
+                event_id = node.record.event_start('preflight', metadata=summary)
+                if event_id is not None:
+                    node.record.event_end(event_id=event_id, status='completed')
+            except Exception:
+                pass
 
     def _register_probe(self: Loop, process: subprocess.Popen) -> None:
         """Record the preflight probe as the leader of its own process group.

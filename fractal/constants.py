@@ -70,6 +70,7 @@ EVENTS = (
     'delete',
     'orphan',
     'model_drop',
+    'preflight',
     'start',
     'finish',
     'finish_cancel',

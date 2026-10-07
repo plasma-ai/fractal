@@ -39,15 +39,17 @@ any open iteration stay open for resume to adopt.
 ## Events beside statuses
 
 Every transition writes a point-in-time event row: `init`, `spawn`, `commit`,
-`approve`, `merge`, `delete`, `orphan`, `model_drop`, `start`, `finish`,
-`finish_cancel`, `stop`, `kill`, `pause`, `resume`, `retire`, and `unretire`.
-Not every event is a transition — `model_drop` records a step served off its
-pinned model against that attempt's own row, leaving the node's status untouched
-(see [[features/loop/steps|steps]]). Rows carry start and end instants
-(durations are derived, never stored), and the `pause` / `resume` event instants
-credit paused spans back to run and iteration deadlines. Refused signals also
-leave evidence: a refusal writes a `failed` event row whose metadata states the
-reason before the operation raises.
+`approve`, `merge`, `delete`, `orphan`, `model_drop`, `preflight`, `start`,
+`finish`, `finish_cancel`, `stop`, `kill`, `pause`, `resume`, `retire`, and
+`unretire`. Not every event is a transition — `model_drop` records a step served
+off its pinned model against that attempt's own row, leaving the node's status
+untouched (see [[features/loop/steps|steps]]), and `preflight` records a passed
+codex probe's priced summary before any run is open (see
+[[features/agents/models_and_effort|models_and_effort]]). Rows carry start and
+end instants (durations are derived, never stored), and the `pause` / `resume`
+event instants credit paused spans back to run and iteration deadlines. Refused
+signals also leave evidence: a refusal writes a `failed` event row whose
+metadata states the reason before the operation raises.
 
 ## Legal signals per status
 

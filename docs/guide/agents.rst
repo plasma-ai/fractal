@@ -266,8 +266,10 @@ possibly work:
 - an ``openrouter``-routed node must have ``OPENROUTER_API_KEY`` set;
 - ``codex`` with an explicit model runs its acceptance probe, and a probe
   that passes is logged with its token usage and the figure the model's
-  rates put on it (``=== Preflight: codex probe passed ... ===``) — paid
-  inference that lands on no step row;
+  rates put on it (``=== Preflight: codex probe passed ... ===``) and booked
+  as a ``preflight`` event carrying the same line, so ``node activity``
+  keeps it — paid inference that lands on no step row and, events carrying
+  no cost, counts toward no cap;
 - a run whose agent prices from tokens needs the pricing cache — a stale
   cache warns and is used, a missing cache that cannot be fetched aborts.
 
