@@ -3381,12 +3381,17 @@ class Loop:
     def _billing_failure(self: Loop, result: StepResult, duration: int) -> bool:
         """Return whether a failed launch carries the billing signature.
 
-        Instant and zero-cost: the launch died before buying any paid
-        inference -- an API billing/credit refusal, not work that failed.
-        A cannot-exec launch (127) is a different class and never arms
-        the breaker; an unknowable (``None``) cost on an instant failure
+        Instant and zero-cost, from a launch that was bought: the launch
+        died before buying any paid inference -- an API billing/credit
+        refusal, not work that failed. A step refused before its launch
+        (a cost cap over an unpriced model, a per-step agent that cannot
+        run) bought nothing and proves nothing about credits; a
+        cannot-exec launch (127) is a different class and never arms the
+        breaker; an unknowable (``None``) cost on an instant failure
         reads as zero, since a launch that paid reports its frames.
         """
+        if not self._step_launched:
+            return False
         if result.exit_code == 127 or duration >= _BILLING_INSTANT_SECONDS:
             return False
         spent = None

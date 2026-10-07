@@ -122,6 +122,11 @@ may include breaking changes, each listed under a Breaking heading.
   `include`, `exclude`) beside the table are ignored, so one node's record can
   seed another, and a `[values]` table beside any other top-level key refuses,
   naming the keys.
+- The billing breaker no longer counts a step refused before its launch — a cost
+  cap over a model the price table cannot price, or a per-step agent or provider
+  that cannot run — as an instant zero-cost failure: such a refusal bought no
+  inference and proves nothing about credits, so three of them no longer park
+  the node as `PAUSED: billing`.
 - A step whose agent names an error on its stream and then exits non-zero
   reports the real exit status: the step banner and the row's reason read
   `agent error (exit N)` with the stream detail and the stderr tail behind it,

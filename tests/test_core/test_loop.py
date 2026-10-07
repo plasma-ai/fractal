@@ -102,6 +102,7 @@ __all__ = [
     'test_finalize_terminal_cascade_matrix',
     'test_iteration_gap_alarm_fires_and_stays_quiet',
     'test_billing_breaker_does_not_arm_on_non_billing_failures',
+    'test_unpriced_model_refusals_never_read_as_billing',
     'test_sealed_seat_gets_no_inbox_digest',
     'test_iter_timeout_live_re_read_bounds_the_next_iteration',
     'test_killed_before_boot_stands_the_loop_down',
@@ -3286,7 +3287,11 @@ def test_billing_breaker_does_not_arm_on_non_billing_failures(
     loop = MockLoop(loop_node)
     loop._run_id = loop_node.record.run_start()
     instant = StepResult(status='failed', exit_code=1)
-    # known-bad (the outage shape): instant, zero-cost, ordinary failure
+    # known-good: a step refused before its launch bought no inference
+    assert loop._billing_failure(instant, 0) is False
+    # known-bad (the outage shape): instant, zero-cost, ordinary failure of
+    # a launch that was bought
+    loop._step_launched = True
     assert loop._billing_failure(instant, 0) is True
     # known-good: a cannot-exec launch is a broken binary, not dead credits
     assert loop._billing_failure(StepResult(status='failed', exit_code=127), 0) is False
@@ -3303,6 +3308,42 @@ def test_billing_breaker_does_not_arm_on_non_billing_failures(
     loop_node.record.step_cost(step_id=step_id, cost=0.42)
     loop._step_id = step_id
     assert loop._billing_failure(instant, 0) is False
+
+
+def test_unpriced_model_refusals_never_read_as_billing(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Three cap refusals over an unpriced model leave the breaker disarmed.
+
+    A capped step whose model the price table cannot price is refused
+    before any launch: instant and zero-cost like a credit refusal, but
+    nothing was bought, so a streak of them must not read as the billing
+    outage and park the node behind the breaker's clock.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    monkeypatch.setattr(pricing, '_load', lambda: {})
+    node = loop_node
+    # a token-priced agent under a cap: each iteration's first step is refused
+    # and ends it, so four iterations are four refusals, past the breaker's
+    # three
+    _configure(
+        node,
+        agent='codex',
+        max_cost=5.0,
+        model='mystery/model',
+        max_iters=4,
+        step_retries=0,
+    )
+    loop = MockLoop(node)
+    loop.run()
+    assert loop.launched == []
+    captured = capsys.readouterr()
+    assert captured.err.count('has no pricing entry') >= 3
+    assert 'PAUSED: billing' not in captured.out
+    assert 'billing breaker' not in captured.out
 
 
 def test_sealed_seat_gets_no_inbox_digest(
