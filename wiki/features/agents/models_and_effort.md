@@ -107,8 +107,9 @@ missing, and probe failures name the route-specific causes. The base preflight
 also validates that the bound route is one the backend supports. A probe that
 passes hands the loop a one-line summary of what it spent — the usage the
 probe's own stream reports, priced at the model's rates — which the loop prints
-as `=== Preflight: codex probe passed ... ===`, the one record of a turn that
-lands on no step row.
+as `=== Preflight: codex probe passed ... ===` and books as a `preflight` event
+carrying the same line, the record of a turn that lands on no step row and,
+events carrying no cost, counts toward no cap.
 
 The codex probe leads its own process group and rides the node's `.step_pgid`
 marker for its lifetime, so `kill` reaps it like a step (pause is refused until
