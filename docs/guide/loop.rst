@@ -357,8 +357,11 @@ Three such failures in a row trip the loop's billing breaker. Every agent
 launch counts toward the streak, the before-step SYNC included; a
 cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, or
 one that spent real money is not billing-shaped and resets the streak to
-zero (which also disarms an armed breaker). Paused and budget-skipped steps
-bought no launch and leave the streak untouched.
+zero (which also disarms an armed breaker), and so is a step refused before
+its launch — a cost cap over a model the price table cannot price, or a
+per-step agent or provider that cannot run — since it bought no inference.
+Paused and budget-skipped steps bought no launch and leave the streak
+untouched.
 
 While the breaker is armed, every launch — the SYNC and the work step alike
 — is held behind a backoff that starts at 60 seconds and doubles per further
