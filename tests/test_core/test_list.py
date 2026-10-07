@@ -17,7 +17,7 @@ from typing import Optional
 
 import pytest
 
-from fractal.constants import PGID_FILE, SOCKET_FILE
+from fractal.constants import CRASH_REASON, PGID_FILE, SOCKET_FILE
 from fractal.core.node import Node
 from tests._helpers import _past_timestamp
 
@@ -347,7 +347,9 @@ def test_list_decorates_exited_with_run_reason(
             'Could not fetch pricing and no cached pricing.json exists.',
             'other',
         ),
-        # a reason-less exited row (the reconcile-healed crash's shape)
+        # the crash heal's own stamp, at a later read or the next boot
+        ('exited', 1, CRASH_REASON, 'crashed'),
+        # a reason-less exited row is nothing recorded
         ('exited', 1, '', None),
         ('completed', 0, '', 'goal_met'),
         # a cap-overshoot note is still done-conditions-met
@@ -396,10 +398,9 @@ def test_end_reason_types_each_recorded_landing(
 def test_end_reason_null_when_nothing_recorded(node_with_db: Node) -> None:
     """``end_reason`` is null wherever no run landing stands recorded.
 
-    A node that never ran, a live run, and a reconcile-healed crash
-    (rows closed reason-less) all read ``None`` -- and a requested stop
-    does too: the vocabulary types the completed/exited landings, not
-    every lifecycle terminal.
+    A node that never ran and a live run read ``None`` -- and a
+    requested stop does too: the vocabulary types the completed/exited
+    landings, not every lifecycle terminal.
     """
     node = node_with_db
     # never ran: no run row to read
@@ -408,7 +409,7 @@ def test_end_reason_null_when_nothing_recorded(node_with_db: Node) -> None:
     node.status_set('active')
     node.record.run_start()
     assert node.end_reason() is None
-    # a reconcile-healed crash closes its rows reason-less
+    # a run closed with no reason stands unrecorded
     node.record.close_open('exited')
     node.status_set('exited')
     assert node.end_reason() is None

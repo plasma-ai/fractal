@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from fractal.constants import CRASH_REASON
 from fractal.core.node import Node
 from fractal.typing import Row
 
@@ -243,7 +244,8 @@ def test_run_start_reconciles_stranded_lifecycle(node_with_db: Node) -> None:
 
     The single-tmux-session invariant guarantees a leftover ``active`` run is
     dead, so ``run_start`` reconciles it (and its open iteration/step) to a
-    truthful terminal rather than force-closing to ``stopped`` or leaving it open.
+    truthful terminal rather than force-closing to ``stopped`` or leaving it
+    open, the run row naming the crash the way a reconcile heal does.
     """
     node = node_with_db
     # a crashed loop: run/iteration/step left open (no *_end calls)
@@ -267,6 +269,7 @@ def test_run_start_reconciles_stranded_lifecycle(node_with_db: Node) -> None:
         assert row['status'] == 'exited'
         assert row['exit_code'] == 1
         assert row['ended_at'] is not None
+        assert row['metadata'] == (CRASH_REASON if table == 'runs' else '')
     # the fresh run is the sole active one
     active = node.db.read('runs', where={'status': 'active'})
     assert [r['run_id'] for r in active] == [new_run]

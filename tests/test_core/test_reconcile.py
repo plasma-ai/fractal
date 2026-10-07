@@ -21,7 +21,7 @@ from typing import NoReturn, Optional
 
 import pytest
 
-from fractal.constants import HEADLESS_FILE, PGID_FILE, SOCKET_FILE
+from fractal.constants import CRASH_REASON, HEADLESS_FILE, PGID_FILE, SOCKET_FILE
 from fractal.core.node import Node, _recorded_group
 from tests._helpers import _stub_run_script
 
@@ -581,8 +581,11 @@ def test_headless_liveness_reconciles_a_dead_process_group(
     monkeypatch.setattr('fractal.core.node.os.killpg', dead_group)
     node._reconcile_status()
     assert node.status() == 'exited'
+    # the heal names the crash on the run row, typed for the census
     run = node.db.read('runs', where={'run_id': run_id})[0]
-    assert run['status'] == 'exited'
+    assert (run['status'], run['metadata']) == ('exited', CRASH_REASON)
+    assert node.end_reason() == 'crashed'
+    assert node.status_display() == f'exited ({CRASH_REASON})'
     assert not (node.node_dir / PGID_FILE).exists()
     # the backend record names the launch, not the run -- the heal keeps it
     assert node.headless

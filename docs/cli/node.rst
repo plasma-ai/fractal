@@ -827,9 +827,11 @@ with no recorded row, and ``PAUSED: billing`` while the newest launches carry
 the dead-credits signature. ``end_reason`` is ``detail``'s typed counterpart,
 a closed vocabulary naming a settled row's landing: ``goal_met``,
 ``run_exhausted``, or ``final_iteration_failed`` on a ``completed`` row;
-``cost_budget``, ``timeout``, ``setup_abort``, ``final_iteration_failed``, or
-``other`` (recorded but unmapped) on an ``exited`` row; null when no reason is
-recorded (e.g. a reconcile-healed crash) and on every other status. ``spend``
+``cost_budget``, ``timeout``, ``setup_abort``, ``crashed`` (a dead loop's rows
+closed by the crash heal, whose ``detail`` reads ``crashed: loop runtime gone,
+healed by reconcile``), ``final_iteration_failed``, or ``other`` (recorded but
+unmapped) on an ``exited`` row; null when no reason is recorded (a run that
+never landed) and on every other status. ``spend``
 is the current run's subtree cost at the scope ``max_cost`` is enforced at,
 blank for a node that has never run. Blank limit columns mean unlimited.
 ``last`` is the age of each node's newest activity, with a ``!`` suffix

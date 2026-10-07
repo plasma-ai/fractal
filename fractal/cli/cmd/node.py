@@ -1048,7 +1048,8 @@ def node_list(app: typer.Typer) -> typer.Typer:
         ``model drop``, an ``iteration gap``); ``end_reason`` types a
         settled row's landing (``goal_met``, ``run_exhausted``,
         ``final_iteration_failed``, ``cost_budget``, ``timeout``,
-        ``setup_abort``, ``other``), null when nothing is recorded.
+        ``setup_abort``, ``crashed``, ``other``), null when nothing is
+        recorded.
         ``spend`` is the current run's subtree cost, the
         scope ``max_cost`` beside it is enforced at, and is blank for a node
         that has never run. ``last`` is the age of each node's newest activity;
