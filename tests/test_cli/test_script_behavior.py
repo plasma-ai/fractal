@@ -5063,9 +5063,12 @@ def test_merge_interrupt_during_the_commit_hook_finishes_the_merge(
     (the reset --hard HEAD would restore nothing) nor a "staged squash left
     in place" that the commit already consumed.
 
-    The signal goes to the process group: bash acts on a SIGINT it receives
-    while waiting on a child only when that child dies of it, so the hook
-    and its sleep must take the signal too.
+    The signal goes to the process group, so the hook takes it too. The
+    hook traps INT and exits at whichever point the signal lands: inside
+    a sleep, or between two polls, where a bash without a trap ignores a
+    SIGINT its foreground child did not die of (a sleep forked after the
+    signal exits clean) and runs on to its marker. So the marker after
+    the gate proves the signal reached the hook, never racing its poll.
     """
     repo = _init_tree(tmp_path / 'hookrepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -5086,6 +5089,7 @@ def test_merge_interrupt_during_the_commit_hook_finishes_the_merge(
     hook.parent.mkdir(exist_ok=True)
     hook.write_text(
         '#!/usr/bin/env bash\n'
+        "trap 'exit 130' INT\n"
         f'touch "{ready}"\n'
         f'while [[ ! -e "{release}" ]]; do sleep 0.05; done\n'
         f'touch "{slept}"\n',
