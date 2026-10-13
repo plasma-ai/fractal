@@ -206,6 +206,26 @@ easiest to try.
   adding a workaround. If a stopgap is necessary, state the problem it covers,
   its limits, and when it can be removed.
 
+## Documentation Hygiene
+
+Comments and docs describe the current state; git records how it got there.
+Change-log notes pile up as junk: each is true only of a moment, and readers
+must sort through them to find what is current.
+
+- **Correct in place.** When text is wrong or out of date, rewrite it to state
+  the current fact. Do not record what it used to say, when it changed, or who
+  changed it ("updated on DATE", "previously did X", "corrected from Y", "no
+  longer does Z"). Clean up change-log notes in and around text you are editing,
+  and mention any you see elsewhere.
+- **Explain changes in git.** The reason for a change belongs in its commit
+  message or PR description, not in a comment beside the changed text. Files
+  whose job is to record changes, such as release notes, are the exception.
+- **Dates only when git cannot supply them.** A date belongs in a tracked file
+  only when it is genuinely needed and git cannot supply it (e.g. when the text
+  reports a changing source and the reading date is needed to interpret it, or
+  when an outside event happened). The date a file was edited is git's to
+  record.
+
 ## Communication
 
 - **Questions are not edit requests.** Before acting on any message, find the
