@@ -196,7 +196,7 @@ prompts they are re-derived per step from live config — only
      - The node's branch.
    * - ``MAX_DEPTH``, ``MAX_CHILDREN``, ``MAX_DESCENDANTS``
      - The node's spawn limits: ``-1`` for an unset (unlimited) cap, ``0``
-       for none.
+       for a leaf (no spawns).
    * - ``DETACHED_MODE``, ``META_MODE``, ``META_TARGET``
      - The boot-pinned mode flags (``true``/``false``) and the meta
        target branch.
