@@ -117,6 +117,11 @@ Members still alive after that are named on stderr, which `Node` relays as
 warnings — the survivors on the pause or kill output, and a `Warning:` line in
 the loop's log for the in-process paths.
 
+`pause.sh` hands the reap its `.pause_abort` marker, which the reap touches just
+before its first signal to the step group: the loop still finds the marker
+before the agent dies, and a step the reap spares (a self-pause) is never
+marked, so a later unrelated failure is never read as a park.
+
 `kill.sh` passes the loop's recorded group beside the step group, so the loop
 dies in the same round as its agent and cannot launch the next step while the
 agent's tree drains. Pause passes only the step group: the loop sits above the

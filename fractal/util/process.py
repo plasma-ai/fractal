@@ -104,6 +104,7 @@ def reap(
     grace: float = GRACE_SECONDS,
     worktree: Optional[pathlib.Path] = None,
     spare: Collection[pathlib.Path] = (),
+    mark: Optional[pathlib.Path] = None,
 ) -> Reaped:
     """TERM, then KILL, every process group an invocation's tree holds.
 
@@ -137,6 +138,8 @@ def reap(
             directory lies inside this directory.
         spare: Files each recording a process group id to spare (a missing
             or unreadable file spares nothing).
+        mark: File to touch just before the first signal to a root group;
+            left alone when every root group is protected or spared.
 
     Returns:
         The tree's survivors, the spared groups it reached, and, with
@@ -145,9 +148,9 @@ def reap(
     """
     roots = frozenset(root for root in roots if root > 1)
     try:
-        return _reap(roots, grace=grace, worktree=worktree, spare=spare)
+        return _reap(roots, grace=grace, worktree=worktree, spare=spare, mark=mark)
     except (OSError, subprocess.SubprocessError):
-        _reap_groups(roots, grace=grace)
+        _reap_groups(roots, grace=grace, mark=mark)
         return Reaped()
 
 
@@ -160,9 +163,10 @@ def _reap(
     grace: float,
     worktree: Optional[pathlib.Path],
     spare: Collection[pathlib.Path],
+    mark: Optional[pathlib.Path],
 ) -> Reaped:
     """Run :func:`reap` over a readable process table."""
-    tree = _Tree(roots, spare)
+    tree = _Tree(roots, spare, mark)
     # TERM pass, then the KILL pass over every group still alive
     if grace > 0:
         tree.signal_pass(signal.SIGTERM, wait=grace)
@@ -191,10 +195,12 @@ class _Tree:
         self: _Tree,
         roots: frozenset[int],
         spare: Collection[pathlib.Path],
+        mark: Optional[pathlib.Path],
     ) -> None:
         """Initialize ``_Tree`` with its first walk (before any signal)."""
         self.roots = roots
         self.spare = spare
+        self.mark = mark
         self.spared = _read_groups(spare)
         self.stopped: set[int] = set()
         self.table = snapshot()
@@ -247,6 +253,14 @@ class _Tree:
         }
         return groups - self.protected - self.spared
 
+    def signal(self: _Tree, groups: set[int], sig: signal.Signals) -> None:
+        """Signal ``groups``, touching the mark before a root group's first."""
+        if self.mark is not None and groups & self.roots:
+            _touch(self.mark)
+            self.mark = None
+        for group in groups:
+            _killpg(group, sig)
+
     def signal_pass(self: _Tree, sig: signal.Signals, *, wait: float) -> None:
         """Signal every live group in rounds, then wait for the groups to empty.
 
@@ -260,8 +274,7 @@ class _Tree:
             groups = self.live() - signaled
             if not groups:
                 break
-            for group in groups:
-                _killpg(group, sig)
+            self.signal(groups, sig)
             signaled |= groups
             self.refresh()
         # wait out the allowance, signaling late groups
@@ -269,9 +282,9 @@ class _Tree:
         while self.live() and time.monotonic() < deadline:
             time.sleep(POLL_SECONDS)
             self.refresh()
-            for group in self.live() - signaled:
-                _killpg(group, sig)
-                signaled.add(group)
+            groups = self.live() - signaled
+            self.signal(groups, sig)
+            signaled |= groups
 
 
 def _walk(
@@ -349,6 +362,14 @@ def _read_groups(paths: Collection[pathlib.Path]) -> frozenset[int]:
     return frozenset(groups)
 
 
+def _touch(path: pathlib.Path) -> None:
+    """Touch a marker file, ignoring a failed write (the abort still lands)."""
+    try:
+        path.touch()
+    except OSError:
+        pass
+
+
 def _killpg(pgid: int, sig: signal.Signals) -> None:
     """Signal a process group, ignoring one that is gone or not ours."""
     try:
@@ -357,9 +378,16 @@ def _killpg(pgid: int, sig: signal.Signals) -> None:
         pass
 
 
-def _reap_groups(roots: frozenset[int], *, grace: float) -> None:
+def _reap_groups(
+    roots: frozenset[int],
+    *,
+    grace: float,
+    mark: Optional[pathlib.Path],
+) -> None:
     """Signal the root groups alone: TERM, the grace, then KILL survivors."""
     groups = roots - {os.getpgrp()}
+    if groups and mark is not None:
+        _touch(mark)
     if grace > 0:
         for group in groups:
             _killpg(group, signal.SIGTERM)

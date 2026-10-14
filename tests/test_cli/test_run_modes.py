@@ -103,6 +103,8 @@ __all__ = [
     'test_abort_reaps_the_agents_tool_groups',
     'test_pause_names_a_worktree_stray_and_leaves_it_running',
     'test_pause_spares_another_nodes_loop_group',
+    'test_self_pause_finishes_the_step_unmarked',
+    'test_pause_abort_marker_alone_parks_the_step',
     'test_tree_latch_parks_a_booting_loop',
     'test_finish_drain_blocks_on_paused_child',
     'test_per_step_agent_override_runs_in_detached',
@@ -282,6 +284,12 @@ time.sleep(600)
     for ROLE in "${ROLES[@]}"; do
         while [[ ! -s "$CAPTURE_DIR/tool_$ROLE.pid" ]]; do sleep 0.05; done
     done
+    # a prompt carrying SELF-PAUSE pauses the stub's own node from inside the
+    # step's process tree, the way an agent's tool would, recording the exit
+    if [[ "$PROMPT" == *SELF-PAUSE* ]]; then
+        fractal node pause --reason self >"$CAPTURE_DIR/self_pause.out" 2>&1
+        echo "$?" >"$CAPTURE_DIR/self_pause.rc"
+    fi
     # a prompt carrying USAGE-THEN-HANG emits one usage-bearing frame and hangs
     # with NO result, so the timeout kill yields the killed-mid-stream shape;
     # the usage_flushed marker tells load starvation from a recording gap
@@ -420,6 +428,7 @@ _INIT_HANG_STEPS = {
 # the daemon marker a double-forked daemon working in the worktree (see the
 # stub)
 _TOOLS_MARKER = 'SPAWN-TOOLS'
+_SELF_PAUSE_MARKER = 'SELF-PAUSE'
 _LOOP_MARKER = 'SPAWN-LOOP'
 _DAEMON_MARKER = 'SPAWN-DAEMON'
 
@@ -1221,6 +1230,92 @@ def test_pause_spares_another_nodes_loop_group(repo: dict) -> None:
 
     assert alive == [loop], (alive, group, loop, session)
     assert f'spared process group {loop}' in pause.stderr, pause.stderr
+
+
+def test_self_pause_finishes_the_step_unmarked(repo: dict) -> None:
+    """A pause run from inside the step's own tree spares the step, unmarked.
+
+    The reap never signals its caller's lineage, so the agent that pauses
+    its own node is not aborted: no abort marker may land (it would
+    classify a later, unrelated failure as paused), the step finishes, and
+    the loop parks at the next checkpoint.
+    """
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_SELF_PAUSE_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'selfpause', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+    node_dir = node['node_dir']
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='self_pause')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        output = (capture / 'self_pause.out').read_text(encoding='utf-8')
+        assert (capture / 'self_pause.rc').read_text().strip() == '0', output
+        marked = (node_dir / '.pause_abort').exists()
+        (capture / 'gate_release').touch()
+        proc.wait(timeout=60)
+    finally:
+        _, result = _finish_wait_result(proc, capture, log)
+
+    assert not marked, output
+    assert result.returncode == 0, result.stdout
+    assert _run(worktree, 'node', 'status').stdout.strip() == 'paused', result.stdout
+    steps_rows = (
+        _run(
+            worktree,
+            'db',
+            '_query',
+            "SELECT step, status FROM steps WHERE node = 'main.selfpause'"
+            ' ORDER BY step_id',
+            '--csv',
+        )
+        .stdout.strip()
+        .splitlines()[1:]
+    )
+    assert steps_rows == ['1,completed'], steps_rows
+
+
+def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
+    """The abort marker lands before the reap's signal and alone parks the step.
+
+    With no pause signal at all -- the shape a resume withdrawing the signal
+    mid-abort leaves -- the real ``pause.sh`` still marks the abort before
+    the agent dies, so the loop records the step paused, never failed.
+    """
+    node = _make_node(repo, 'markpause', detached=False, sync=False, steps=_GATE_STEPS)
+    worktree = node['worktree']
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='mark_pause')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
+        abort = subprocess.run(
+            ['bash', f'{pause_sh}', f'{worktree}'],
+            capture_output=True,
+            text=True,
+        )
+        assert abort.returncode == 0, abort.stderr
+    finally:
+        # an unmarked abort fails the step and re-enters the gate, so the
+        # launch never exits -- the step rows below name the failure
+        _, result = _finish_wait_result(proc, capture, log)
+
+    steps_rows = (
+        _run(
+            worktree,
+            'db',
+            '_query',
+            "SELECT step, status FROM steps WHERE node = 'main.markpause'"
+            ' ORDER BY step_id',
+            '--csv',
+        )
+        .stdout.strip()
+        .splitlines()[1:]
+    )
+    assert steps_rows == ['1,paused'], (steps_rows, result.stdout)
+    assert result.returncode == 0, result.stdout
 
 
 def test_tree_latch_parks_a_booting_loop(repo: dict) -> None:

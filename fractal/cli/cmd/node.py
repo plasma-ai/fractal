@@ -1627,6 +1627,11 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         ' report processes outside the tree working in this directory.'
     )
     worktree = typer.Option(None, '--worktree', help=worktree_help)
+    # abort marker option
+    abort_marker_help = (
+        'File to touch just before the first signal to a recorded group.'
+    )
+    abort_marker = typer.Option(None, '--abort-marker', help=abort_marker_help)
     # grace option
     grace_help = 'Seconds between the TERM and KILL passes.'
     grace = typer.Option(fractal.util.process.GRACE_SECONDS, '--grace', help=grace_help)
@@ -1635,6 +1640,7 @@ def node_reap(app: typer.Typer) -> typer.Typer:
     def _reap(
         pgid: list[int] = pgid,
         worktree: Optional[str] = worktree,
+        abort_marker: Optional[str] = abort_marker,
         grace: float = grace,
     ) -> None:
         """Reap process groups with their trees (invoked by pause.sh and kill.sh).
@@ -1646,11 +1652,13 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         """
         worktree_dir = pathlib.Path(worktree) if worktree else None
         spare = resolve_node(worktree).loop_records() if worktree else []
+        mark = pathlib.Path(abort_marker) if abort_marker else None
         reaped = fractal.util.process.reap(
             pgid,
             grace=grace,
             worktree=worktree_dir,
             spare=spare,
+            mark=mark,
         )
         for group in reaped.spared:
             typer.echo(

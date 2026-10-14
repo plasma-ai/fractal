@@ -74,17 +74,20 @@ if [[ -z "$STEP_PGID" ]] || ! kill -0 -- "-$STEP_PGID" 2>/dev/null; then
     exit 0
 fi
 
-# mark the abort durably before delivering it -- the loop classifies the
-# killed step as paused by marker OR signal, so a resume that withdraws the
-# signal mid-abort can never demote the park to a failure
-touch "${STEP_PGID_FILE%.step_pgid}.pause_abort"
+# the abort is marked durably before it is delivered -- the loop classifies
+# the killed step as paused by marker OR signal, so a resume that withdraws
+# the signal mid-abort can never demote the park to a failure; a step the
+# reap spares (a self-pause runs inside it) is never marked
+ABORT_MARKER="${STEP_PGID_FILE%.step_pgid}.pause_abort"
 
 # reap the agent's whole tree -- its tool commands run in groups (or sessions)
 # of their own; the loop lives above the tree and survives to record the park;
 # survivors and worktree strays are named on stderr
-if ! fractal node _reap --pgid="$STEP_PGID" --worktree="$WORKTREE_DIR"; then
+if ! fractal node _reap --pgid="$STEP_PGID" --worktree="$WORKTREE_DIR" \
+    --abort-marker="$ABORT_MARKER"; then
     # the helper could not run: TERM the agent group alone; when timeout(1)
     # leads the group it forwards the TERM to the agent
+    touch "$ABORT_MARKER"
     kill -TERM -- "-$STEP_PGID" 2>/dev/null || true
 
     WAITED=0
