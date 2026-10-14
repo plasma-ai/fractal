@@ -195,10 +195,8 @@ prompts they are re-derived per step from live config — only
    * - ``CURRENT_BRANCH``
      - The node's branch.
    * - ``MAX_DEPTH``, ``MAX_CHILDREN``, ``MAX_DESCENDANTS``
-     - The node's spawn limits. An unset cap renders as ``None`` on a node
-       seeded by ``fractal node init`` (the seed stores unset keys as
-       ``null``); ``-1`` appears only when the key is absent from
-       ``config.json``.
+     - The node's spawn limits: ``-1`` for an unset (unlimited) cap, ``0``
+       for none.
    * - ``DETACHED_MODE``, ``META_MODE``, ``META_TARGET``
      - The boot-pinned mode flags (``true``/``false``) and the meta
        target branch.

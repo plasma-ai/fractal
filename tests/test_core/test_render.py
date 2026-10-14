@@ -37,6 +37,7 @@ __all__ = [
     'test_seed_refuses_mutation_and_ambient_state',
     'test_seed_preserves_text_with_jinja_whitespace_rules',
     'test_render_template_substitutes_static_and_passes_runtime',
+    'test_render_template_renders_unset_limits_as_unlimited',
     'test_strip_frontmatter_edges',
     'test_build_prompt_assembles_charter_step_and_modes',
     'test_chat_seed_renders_paths_and_chat_sentinels',
@@ -378,6 +379,31 @@ def test_render_template_substitutes_static_and_passes_runtime(
     # an override wins over the (absent) derived value
     overridden = node.render_template(template, overrides={'STEP_LABEL': 'step 1 of 3'})
     assert 'step=step 1 of 3' in overridden
+
+
+@pytest.mark.parametrize(
+    argnames=('limits', 'expected'),
+    argvalues=[
+        pytest.param({}, '-1 -1 -1', id='unset'),
+        pytest.param({'max_depth': 0, 'max_children': 3}, '0 3 -1', id='partial'),
+    ],
+)
+def test_render_template_renders_unset_limits_as_unlimited(
+    tmp_path: pathlib.Path,
+    limits: dict[str, int],
+    expected: str,
+) -> None:
+    """An unset spawn limit renders ``-1``, the node skill's unlimited.
+
+    ``fractal node init`` stores an unset limit as ``null``, which the spawn
+    gate treats as no cap; a set limit, ``0`` included, renders as given.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    Node(repo).init(name='task', **limits)
+    node = Node(repo / '.worktrees' / 'main.task')
+    template = '$MAX_DEPTH $MAX_CHILDREN $MAX_DESCENDANTS'
+    assert node.render_template(template) == expected
 
 
 @pytest.mark.parametrize(
