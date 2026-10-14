@@ -102,6 +102,7 @@ __all__ = [
     'test_pause_with_pending_finish_still_finishes_the_iteration',
     'test_abort_reaps_the_agents_tool_groups',
     'test_pause_names_a_worktree_stray_and_leaves_it_running',
+    'test_pause_spares_another_nodes_loop_group',
     'test_tree_latch_parks_a_booting_loop',
     'test_finish_drain_blocks_on_paused_child',
     'test_per_step_agent_override_runs_in_detached',
@@ -249,15 +250,17 @@ if [[ "$SELF" == "claude" ]]; then
     printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
     # a prompt carrying SPAWN-TOOLS starts two long sleepers the way agent
     # CLIs run tool commands -- one in a process group of its own, one in a
-    # session of its own; SPAWN-DAEMON starts a double-forked daemon that
-    # leaves the session and outlives its parent; each records its pid before
-    # the stub moves on, and none holds the stream pipe
+    # session of its own; SPAWN-LOOP starts another in a session of its own,
+    # standing in for a node loop the agent launched; SPAWN-DAEMON starts a
+    # double-forked daemon that leaves the session and outlives its parent;
+    # each records its pid before the stub moves on, and none holds the
+    # stream pipe
     TOOL='
 import os, sys, time
 role, capture = sys.argv[1:3]
 if role == "group":
     os.setpgid(0, 0)
-elif role == "session":
+elif role in ("session", "loop"):
     os.setsid()
 elif os.fork():
     os._exit(0)
@@ -271,6 +274,7 @@ time.sleep(600)
 '
     ROLES=()
     [[ "$PROMPT" == *SPAWN-TOOLS* ]] && ROLES+=(group session)
+    [[ "$PROMPT" == *SPAWN-LOOP* ]] && ROLES+=(loop)
     [[ "$PROMPT" == *SPAWN-DAEMON* ]] && ROLES+=(daemon)
     for ROLE in "${ROLES[@]}"; do
         python3 -c "$TOOL" "$ROLE" "$CAPTURE_DIR" >/dev/null 2>&1 &
@@ -411,9 +415,12 @@ _INIT_HANG_STEPS = {
 }
 
 # the tool modes: a body carrying the tools marker makes the stub start one
-# sleeper in its own process group and one in its own session, the daemon
-# marker a double-forked daemon working in the worktree (see the stub)
+# sleeper in its own process group and one in its own session, the loop
+# marker another in its own session standing in for a launched node loop,
+# the daemon marker a double-forked daemon working in the worktree (see the
+# stub)
 _TOOLS_MARKER = 'SPAWN-TOOLS'
+_LOOP_MARKER = 'SPAWN-LOOP'
 _DAEMON_MARKER = 'SPAWN-DAEMON'
 
 # the stub's fail modes: a body carrying the fail marker fails that step, and
@@ -1175,6 +1182,45 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
     assert f'pid {daemon} works in the worktree' in pause.stderr, pause.stderr
     assert 'left running' in pause.stderr, pause.stderr
     assert alive == [daemon]
+
+
+def test_pause_spares_another_nodes_loop_group(repo: dict) -> None:
+    """A pause never reaps a group another node records as its loop.
+
+    A node the agent launches stays a child of the agent's tool until its
+    launcher returns, so a walk from the agent reaches its loop. The stub
+    starts a ``setsid``'d sleeper standing in for that loop, recorded in a
+    sibling node's ``.pgid``, beside the plain tool sleepers: the pause
+    reaps the tools, spares the loop, and names the spared group.
+    """
+    steps = {
+        '01-gate.md': (
+            f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER} {_LOOP_MARKER}\n'
+        ),
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'reapspare', detached=False, sync=False, steps=steps)
+    sibling = _make_node(repo, 'reapsparekid', detached=False, sync=False)
+    worktree = node['worktree']
+    record = sibling['node_dir'] / '.pgid'
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='reap_spare')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        # role order: group, loop, session
+        group, loop, session = _tool_pids(capture)
+        record.write_text(f'{loop}\n', encoding='utf-8')
+        pause = _run(worktree, 'node', 'pause', '--reason', 'spare')
+        assert pause.returncode == 0, pause.stderr
+        proc.wait(timeout=60)
+        alive = _alive_pids([group, loop, session])
+    finally:
+        record.unlink(missing_ok=True)
+        _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    assert alive == [loop], (alive, group, loop, session)
+    assert f'spared process group {loop}' in pause.stderr, pause.stderr
 
 
 def test_tree_latch_parks_a_booting_loop(repo: dict) -> None:

@@ -131,13 +131,21 @@ sweep is how the operator learns of it. The sweep reads `lsof` on macOS and
 operator may run `fractal pause` from a shell in the worktree) and the processes
 the tree hangs from (the loop and its parents).
 
-Three rails bound the reap. It never signals pid 0 or 1, the caller's own group,
+Four rails bound the reap. It never signals pid 0 or 1, the caller's own group,
 or the group of any of the caller's ancestors — so an agent that pauses its own
-node keeps the groups it runs in. It signals only groups found through the
-recorded group's session or tree. And when the process table cannot be read, it
-falls back to signaling the recorded groups alone; when `fractal node _reap`
-itself cannot run, `pause.sh` and `kill.sh` fall back to their own group-only
-teardown, so a helper failure never fails the pause or kill.
+node keeps the groups it runs in, its step finishes, and the loop parks at the
+next checkpoint. It never signals another node's loop group, nor walks through
+one: a node the agent launches (`fractal node start` runs the child's loop in a
+new session) stays a child of the agent's tool until its launcher returns, so
+the reap spares every group recorded in another registered node's `.pgid`,
+everything in a session one of its processes leads, and everything below it, and
+names each spared group it reached. The records are re-read before every signal
+round, so a launch that lands mid-reap is honored. It signals only groups found
+through the recorded group's session or tree. And when the process table cannot
+be read, it falls back to signaling the recorded groups alone; when
+`fractal node _reap` itself cannot run, `pause.sh` and `kill.sh` fall back to
+their own group-only teardown, so a helper failure never fails the pause or
+kill.
 
 ## Launch environment
 

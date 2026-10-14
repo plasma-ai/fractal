@@ -1622,7 +1622,10 @@ def node_reap(app: typer.Typer) -> typer.Typer:
     pgid_help = 'Recorded process group to reap with its whole tree (repeatable).'
     pgid = typer.Option(..., '--pgid', help=pgid_help)
     # worktree option
-    worktree_help = 'Also report processes outside the tree working in this directory.'
+    worktree_help = (
+        "The reaped node's worktree: spare every other node's loop group and"
+        ' report processes outside the tree working in this directory.'
+    )
     worktree = typer.Option(None, '--worktree', help=worktree_help)
     # grace option
     grace_help = 'Seconds between the TERM and KILL passes.'
@@ -1637,11 +1640,23 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         """Reap process groups with their trees (invoked by pause.sh and kill.sh).
 
         Names on stderr each tree member still alive after the KILL and,
-        with ``--worktree``, each process outside the tree whose working
-        directory lies in that directory -- reported, never signaled.
+        with ``--worktree``, each spared loop group the walk reached and
+        each process outside the tree whose working directory lies in that
+        directory -- reported, never signaled.
         """
         worktree_dir = pathlib.Path(worktree) if worktree else None
-        reaped = fractal.util.process.reap(pgid, grace=grace, worktree=worktree_dir)
+        spare = resolve_node(worktree).loop_records() if worktree else []
+        reaped = fractal.util.process.reap(
+            pgid,
+            grace=grace,
+            worktree=worktree_dir,
+            spare=spare,
+        )
+        for group in reaped.spared:
+            typer.echo(
+                f"Note: spared process group {group} (another node's loop)",
+                err=True,
+            )
         for process in reaped.survivors:
             typer.echo(
                 f'Warning: pid {process.pid} survived the reap: {process.command}',

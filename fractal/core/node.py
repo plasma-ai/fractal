@@ -809,6 +809,34 @@ class Node:
                 return True
         return False
 
+    def loop_records(self: Node) -> list[pathlib.Path]:
+        """Return the loop group record of every other node in this tree.
+
+        A process-tree reap spares the groups these record: a node launched
+        from this node's agent stays a child of that agent until its
+        launcher returns, so a walk from the agent would otherwise take a
+        healthy loop at boot. Paths, not ids -- the reap re-reads them
+        before every signal round, catching a record written mid-reap.
+        Best-effort: an unreadable registry answers none.
+
+        Returns:
+            The ``.pgid`` record path of each registered node with a live
+            worktree, this node's own excluded.
+
+        """
+        try:
+            rows = self.db.read(query='SELECT node FROM nodes')
+        except Exception:
+            return []
+        worktrees = fractal.util.git.worktree_map(self.repo_dir)
+        result = []
+        for row in rows:
+            worktree_dir = worktrees.get(row['node'])
+            if row['node'] == self.branch or worktree_dir is None:
+                continue
+            result.append(self.__class__(worktree_dir).node_dir / PGID_FILE)
+        return result
+
     @classmethod
     def user_nodes(cls: type[Node], path: PathLike) -> list[Node]:
         """Return every tree's user (root) node in the repo, branch-sorted.

@@ -2723,10 +2723,17 @@ class Loop:
             except PermissionError:
                 pass
             timed_out.set()
-            # reap the invocation's whole tree -- tool commands run in groups
-            # of their own, and a TERM-trapping survivor holding the stdout
-            # pipe must still draw the KILL or the reader blocks on it
-            reaped = fractal.util.process.reap([process.pid], grace=_KILL_GRACE_SECONDS)
+            # reap the invocation's whole tree, sparing other nodes' loops --
+            # tool commands run in groups of their own, and a TERM-trapping
+            # survivor holding the stdout pipe must still draw the KILL or
+            # the reader blocks on it
+            reaped = fractal.util.process.reap(
+                [process.pid],
+                grace=_KILL_GRACE_SECONDS,
+                spare=node.loop_records(),
+            )
+            for group in reaped.spared:
+                print(f"Note: spared process group {group} (another node's loop)")
             for survivor in reaped.survivors:
                 print(
                     f'Warning: pid {survivor.pid} survived the reap: {survivor.command}',
@@ -2759,9 +2766,16 @@ class Loop:
         except Exception as error:
             stream_error = error
             # the reader died with the agent possibly still writing -- drop
-            # the whole tree so a blocked writer cannot outlive its step
+            # the whole tree (other nodes' loops spared) so a blocked writer
+            # cannot outlive its step
             if process.poll() is None:
-                reaped = fractal.util.process.reap([process.pid], grace=0)
+                reaped = fractal.util.process.reap(
+                    [process.pid],
+                    grace=0,
+                    spare=node.loop_records(),
+                )
+                for group in reaped.spared:
+                    print(f"Note: spared process group {group} (another node's loop)")
                 for survivor in reaped.survivors:
                     print(
                         f'Warning: pid {survivor.pid} survived the reap:'

@@ -46,11 +46,13 @@ class Reaped:
 
     ``survivors`` are the tree's members still alive after the KILL;
     ``strays`` are processes outside the tree whose working directory lies
-    in the swept worktree -- reported, never signaled.
+    in the swept worktree -- reported, never signaled; ``spared`` are the
+    spared groups the walk reached and stopped at.
     """
 
     survivors: tuple[Process, ...] = ()
     strays: tuple[Process, ...] = ()
+    spared: tuple[int, ...] = ()
 
 
 def snapshot() -> dict[int, Process]:
@@ -101,6 +103,7 @@ def reap(
     *,
     grace: float = GRACE_SECONDS,
     worktree: Optional[pathlib.Path] = None,
+    spare: Collection[pathlib.Path] = (),
 ) -> Reaped:
     """TERM, then KILL, every process group an invocation's tree holds.
 
@@ -119,22 +122,30 @@ def reap(
 
     Never signals pid 0 or 1, the caller's group, or the group of any of
     the caller's ancestors -- an agent pausing its own node keeps the
-    groups it runs in. When the process table cannot be read, signals the
-    root groups alone with the same grace and names nothing.
+    groups it runs in. Never signals a group recorded in a ``spare`` file,
+    nor walks through one: everything in it, in a session one of its
+    processes leads, or below one of its processes is left alone. The
+    files are re-read before every signal round, so a record written
+    mid-reap (a node launch the tree spawned) is honored. When the process
+    table cannot be read, signals the root groups alone with the same
+    grace and names nothing.
 
     Args:
         roots: Recorded process group ids (each its leader's pid).
         grace: Seconds between the TERM and KILL passes.
         worktree: Also report processes outside the tree whose working
             directory lies inside this directory.
+        spare: Files each recording a process group id to spare (a missing
+            or unreadable file spares nothing).
 
     Returns:
-        The tree's survivors and, with ``worktree``, the strays.
+        The tree's survivors, the spared groups it reached, and, with
+        ``worktree``, the strays.
 
     """
     roots = frozenset(root for root in roots if root > 1)
     try:
-        return _reap(roots, grace=grace, worktree=worktree)
+        return _reap(roots, grace=grace, worktree=worktree, spare=spare)
     except (OSError, subprocess.SubprocessError):
         _reap_groups(roots, grace=grace)
         return Reaped()
@@ -148,9 +159,10 @@ def _reap(
     *,
     grace: float,
     worktree: Optional[pathlib.Path],
+    spare: Collection[pathlib.Path],
 ) -> Reaped:
     """Run :func:`reap` over a readable process table."""
-    tree = _Tree(roots)
+    tree = _Tree(roots, spare)
     # TERM pass, then the KILL pass over every group still alive
     if grace > 0:
         tree.signal_pass(signal.SIGTERM, wait=grace)
@@ -168,17 +180,26 @@ def _reap(
             for pid in sorted(_cwd_inside(worktree, tree.table))
             if pid not in excluded and not tree.table[pid].zombie
         )
-    return Reaped(survivors=survivors, strays=strays)
+    spared = tuple(sorted(tree.stopped))
+    return Reaped(survivors=survivors, strays=strays, spared=spared)
 
 
 class _Tree:
     """An invocation's process tree, re-walked from each fresh snapshot."""
 
-    def __init__(self: _Tree, roots: frozenset[int]) -> None:
+    def __init__(
+        self: _Tree,
+        roots: frozenset[int],
+        spare: Collection[pathlib.Path],
+    ) -> None:
         """Initialize ``_Tree`` with its first walk (before any signal)."""
         self.roots = roots
+        self.spare = spare
+        self.spared = _read_groups(spare)
+        self.stopped: set[int] = set()
         self.table = snapshot()
-        self.members = _walk(roots, self.table, {})
+        self.members: dict[int, int] = {}
+        self.walk()
         self.seen = set(self.members)
         # never signal the caller's own lineage
         self.lineage = _lineage(os.getpid(), self.table)
@@ -195,18 +216,36 @@ class _Tree:
             if pgid in roots:
                 self.owners.update(_lineage(self.table[pid].ppid, self.table))
 
+    def walk(self: _Tree) -> None:
+        """Re-walk the current snapshot from the known members."""
+        self.members, stopped = _walk(
+            self.roots,
+            self.table,
+            self.members,
+            self.spared,
+        )
+        self.stopped |= stopped
+
     def refresh(self: _Tree) -> None:
         """Take a fresh snapshot and re-walk the tree from the known members."""
+        self.spared = _read_groups(self.spare)
         self.table = snapshot()
-        self.members = _walk(self.roots, self.table, self.members)
+        self.walk()
         self.seen.update(self.members)
+
+    def respare(self: _Tree) -> None:
+        """Re-read the spared groups, re-walking when the set changed."""
+        spared = _read_groups(self.spare)
+        if spared != self.spared:
+            self.spared = spared
+            self.walk()
 
     def live(self: _Tree) -> set[int]:
         """Return the signalable groups that still hold a live member."""
         groups = {
             pgid for pid, pgid in self.members.items() if not self.table[pid].zombie
         }
-        return groups - self.protected
+        return groups - self.protected - self.spared
 
     def signal_pass(self: _Tree, sig: signal.Signals, *, wait: float) -> None:
         """Signal every live group in rounds, then wait for the groups to empty.
@@ -217,6 +256,7 @@ class _Tree:
         signaled: set[int] = set()
         # signal in rounds until a walk finds no new group
         for _ in range(ROUNDS):
+            self.respare()
             groups = self.live() - signaled
             if not groups:
                 break
@@ -238,31 +278,53 @@ def _walk(
     roots: frozenset[int],
     table: Mapping[int, Process],
     known: Mapping[int, int],
-) -> dict[int, int]:
-    """Return the tree's members in ``table`` as ``{pid: pgid}``.
+    spared: frozenset[int],
+) -> tuple[dict[int, int], set[int]]:
+    """Return the tree's members in ``table`` and the spared groups it reached.
 
-    Seeds from the root groups and from ``known`` (an earlier walk's
-    members, kept only where the pid still names the same group, so a
-    recycled pid never joins), then closes over session membership and
-    parentage. Pid 1 never joins: every orphan's parent would follow it.
+    Members come back as ``{pid: pgid}``. Seeds from the root groups and
+    from ``known`` (an earlier walk's members, kept only where the pid
+    still names the same group, so a recycled pid never joins), then closes
+    over session membership and parentage. Pid 1 never joins: every
+    orphan's parent would follow it. Nothing at or below a spared group
+    joins either -- its processes, the sessions they lead, and their
+    descendants.
     """
-    members = {
+    # block every spared process and everything below it
+    blocked = {pid for pid, process in table.items() if process.pgid in spared}
+    while True:
+        leaders = {pid for pid in blocked if table[pid].sid == pid}
+        below = {
+            pid
+            for pid, process in table.items()
+            if process.sid in leaders or process.ppid in blocked
+        }
+        if below <= blocked:
+            break
+        blocked |= below
+    # seed, then close over sessions and parentage, stopping at blocked ones
+    candidates = {
         pid
         for pid, process in table.items()
         if pid > 1 and (process.pgid in roots or known.get(pid) == process.pgid)
     }
+    members: set[int] = set()
+    stopped: set[int] = set()
     sessions = set(roots)
     while True:
+        stopped.update(table[pid].pgid for pid in candidates & blocked)
+        candidates -= blocked
+        if candidates <= members:
+            stopped &= spared
+            return {pid: table[pid].pgid for pid in members}, stopped
+        members |= candidates
         # a member that leads a session brings the whole session in
         sessions.update(pid for pid in members if table[pid].sid == pid)
-        found = {
+        candidates = {
             pid
             for pid, process in table.items()
             if pid > 1 and (process.sid in sessions or process.ppid in members)
         }
-        if found <= members:
-            return {pid: table[pid].pgid for pid in members}
-        members |= found
 
 
 def _lineage(pid: int, table: Mapping[int, Process]) -> list[int]:
@@ -272,6 +334,19 @@ def _lineage(pid: int, table: Mapping[int, Process]) -> list[int]:
         result.append(pid)
         pid = table[pid].ppid
     return result
+
+
+def _read_groups(paths: Collection[pathlib.Path]) -> frozenset[int]:
+    """Return the process group ids the files at ``paths`` record."""
+    groups = set()
+    for path in paths:
+        try:
+            content = path.read_text(encoding='utf-8').strip()
+        except OSError:
+            continue
+        if content.isdigit() and int(content) > 1:
+            groups.add(int(content))
+    return frozenset(groups)
 
 
 def _killpg(pgid: int, sig: signal.Signals) -> None:

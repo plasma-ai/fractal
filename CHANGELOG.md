@@ -130,9 +130,10 @@ may include breaking changes, each listed under a Breaking heading.
   running after the agent died — an evidence replay or a validation script
   holding a build lock had to be found and killed by hand. The reap finds every
   process in the agent's session or below it before the first signal, re-walks
-  after each round of TERMs, and KILLs what remains after the grace; pause and
-  kill name any survivor, and any other process working in the node's worktree,
-  which they report but leave running.
+  after each round of TERMs, and KILLs what remains after the grace; it spares
+  any other node's loop the agent launched. Pause and kill name any survivor,
+  and any other process working in the node's worktree, which they report but
+  leave running.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives `$MAX_CHILDREN` and the other config-derived variables from
