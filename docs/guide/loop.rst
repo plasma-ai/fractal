@@ -174,9 +174,12 @@ the digest.
 Template variables
 ~~~~~~~~~~~~~~~~~~
 
-Static variables are pinned once at boot in the exported environment. In
-prompts they are re-derived per step from live config — only
-``DETACHED_MODE`` and ``META_MODE`` stay boot-pinned in prompts as well:
+Static variables are re-derived from live config for every step, in prompts
+and in the exported environment alike, so a mid-run edit (the spawn limits
+included) reaches the next step. Only the mode flags (``DETACHED_MODE``,
+``META_MODE``, ``META_TARGET``) and ``FRACTAL_HEADLESS`` stay pinned to their
+boot values, so a mid-run config edit cannot flip a run's mode composition or
+launch backend:
 
 .. list-table::
    :header-rows: 1
