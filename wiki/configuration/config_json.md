@@ -175,7 +175,9 @@ Config is a live steering surface with per-key boundaries: `max_iters` at the
 next iteration's stop gate; `iter_timeout`/`step_timeout`/`wait` at the next
 iteration; `interval`/`sleep` at the next between-iterations sleep call; the
 cost caps at the next iteration's pricing (and live at every budget probe);
-`scope`/`local` per commit; `sealed` at the next radio read. The boot-pinned set
-— `timeout`, `agent`, `provider`, `model`, `effort`, `detached`, `sync`, `meta`,
-`step_retries`, `step_retry_backoff` — reaches the next start/resume, never a
-run in flight. Malformed mid-run edits warn and keep the prior value.
+`scope`/`local` per commit; `sealed` at the next radio read; the spawn limits
+(`max_depth`, `max_children`, `max_descendants`) at the next step's prompt and
+environment. The boot-pinned set — `timeout`, `agent`, `provider`, `model`,
+`effort`, `detached`, `sync`, `meta`, `step_retries`, `step_retry_backoff` —
+reaches the next start/resume, never a run in flight. Malformed mid-run edits
+warn and keep the prior value.

@@ -69,11 +69,19 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
+- A node's record directories admit `.py` files — plain text like the seeded
+  `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
+  instead of being withheld as not a node record. Keys, archives, and binaries
+  stay refused.
 - A node's `fractal commit --init` baseline carries only the node's own seed
   (its data dir under `.fractal/`) and init's `.gitattributes` edit, and refuses
   any other change by name before staging. The baseline skips the wiki refresh
   and the lint, so project content — material copied into a child's tree
   included — goes in an ordinary `fractal commit`, which the lint gates.
+- A node's instructions say it names its own files through `$MEMORY_DIR`,
+  `$PLANS_DIR`, and `$NODE_DIR`, with scratch in `$NODE_DIR/tmp/` — a path at
+  the worktree root is the project, not the node, since file tools resolve
+  relative paths against the worktree root.
 - A crash healed by reconciliation — a later read over a dead loop, or the boot
   that finds the previous loop's rows still open — stamps the run row
   `crashed: loop runtime gone, healed by reconcile`, so `node list` renders
@@ -116,6 +124,13 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
+  `--max-depth`, `--max-descendants`) reaches the next step's environment — each
+  step re-derives `$MAX_CHILDREN` and the other config-derived variables from
+  live config, matching the prompt, instead of exporting their boot values for
+  the whole run. Only the mode flags (`$DETACHED_MODE`, `$META_MODE`,
+  `$META_TARGET`) and `$FRACTAL_HEADLESS` stay pinned to their boot values, and
+  the prompt now takes `$META_TARGET` from the same pinned set.
 - `node merge`'s refresh of the other wiki roots judges an index merged when its
   staged bytes match neither side's, so a criss-cross merge base no longer hides
   one; matches every folder literally, so a glob character in a folder name

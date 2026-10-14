@@ -174,9 +174,12 @@ the digest.
 Template variables
 ~~~~~~~~~~~~~~~~~~
 
-Static variables are pinned once at boot in the exported environment. In
-prompts they are re-derived per step from live config — only
-``DETACHED_MODE`` and ``META_MODE`` stay boot-pinned in prompts as well:
+Static variables are re-derived from live config for every step, in prompts
+and in the exported environment alike, so a mid-run edit (the spawn limits
+included) reaches the next step. Only the mode flags (``DETACHED_MODE``,
+``META_MODE``, ``META_TARGET``) and ``FRACTAL_HEADLESS`` stay pinned to their
+boot values, so a mid-run config edit cannot flip a run's mode composition or
+launch backend:
 
 .. list-table::
    :header-rows: 1
@@ -567,7 +570,7 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    temp files). New content under the node directory is admitted only by a
    content allowlist: ``NODE.md`` and ``config.json`` at the node-directory
    root, and under ``memory/``, ``plans/``, ``scripts/``, ``skills/``, and
-   ``steps/`` files with a text suffix (``.md``, ``.json``, ``.sh``,
+   ``steps/`` files with a text suffix (``.md``, ``.json``, ``.py``, ``.sh``,
    ``.toml``, ``.yaml``/``.yml``, ``.csv``/``.tsv``, ``.txt``) plus, inside
    those directories, the tool state ``.wiki/`` and ``.gitkeep``. Anything
    else a node parks there — a key, a ``.env`` file, an archive, a

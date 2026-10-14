@@ -46,6 +46,7 @@ __all__ = [
     'test_provider_frontmatter_rebinds_the_boot_agent',
     'test_agent_env_publishes_node_branch',
     'test_agent_env_inherits_headless_launches',
+    'test_midrun_limit_edits_reach_the_next_step_env',
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
     'test_boot_gate_vets_the_recorded_group',
     'test_continue_restore_lands_config_all_or_nothing',
@@ -530,6 +531,74 @@ def test_agent_env_inherits_headless_launches(
     loop = MockLoop(loop_node)
     expected = 'true' if headless else 'false'
     assert loop._agent_env('work')['FRACTAL_HEADLESS'] == expected
+
+
+@pytest.mark.parametrize(
+    argnames='detached',
+    argvalues=[True, False],
+    ids=['fresh-session', 'resumed-session'],
+)
+def test_midrun_limit_edits_reach_the_next_step_env(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    detached: bool,
+) -> None:
+    """A mid-run limit edit reaches the next step's env; mode flags stay pinned.
+
+    One env builder serves every launch, whether the step mints a fresh
+    session (detached) or resumes the iteration's continuous one, so both
+    see the edited limits -- matching the freshly rendered prompt -- while
+    ``DETACHED_MODE``/``META_MODE``/``META_TARGET`` keep their boot values.
+    """
+    monkeypatch.setenv('_NODE', '')
+    (loop_node.node_dir / 'NODE.md').write_text(
+        '# Charter\n\nSpawn at most $MAX_CHILDREN; meta [$META_TARGET].\n',
+        encoding='utf-8',
+    )
+    _configure(loop_node, max_children=4, max_descendants=4, detached=detached)
+
+    class EditingLoop(MockLoop):
+        """Mock loop editing the config after the first launch."""
+
+        def __init__(self: EditingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``EditingLoop``."""
+            super().__init__(node, **kwargs)
+            self.seen: list[tuple[dict[str, str], str, Optional[str]]] = []
+
+        def _launch(
+            self: EditingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the launch env, prompt, and resumed session; then edit."""
+            name = kwargs['agent'].name
+            session = None if self._step_detached else self.node.sessions.get(name)
+            self.seen.append((self._agent_env(self._step_label), prompt, session))
+            if len(self.seen) == 1:
+                # the first launch minted a session; the operator retunes
+                self.node.sessions.set(name, 'session-1')
+                _configure(
+                    self.node,
+                    max_children=8,
+                    max_descendants=8,
+                    detached=not detached,
+                    meta='edited-target',
+                )
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = EditingLoop(loop_node)
+    assert loop.run() == 0
+    (first, _, _), (env, prompt, session) = loop.seen
+    # the boot step carried the boot limits
+    assert first['MAX_CHILDREN'] == '4'
+    # the later step resumed the session only in continuous mode
+    assert session == (None if detached else 'session-1')
+    # the edited limits reached the env and the prompt alike
+    assert env['MAX_CHILDREN'] == '8'
+    assert env['MAX_DESCENDANTS'] == '8'
+    assert 'Spawn at most 8; meta [].' in prompt
+    # the mode flags kept their boot values
+    assert env['DETACHED_MODE'] == ('true' if detached else 'false')
+    assert env['META_MODE'] == 'false'
+    assert env['META_TARGET'] == ''
 
 
 @pytest.mark.parametrize(
