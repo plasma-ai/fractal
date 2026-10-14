@@ -245,11 +245,10 @@ def variables(node: Node, overrides: Optional[dict[str, str]] = None) -> dict[st
         scope_dir = ' '.join(f'{project_dir / root}' for root in scope)
     else:
         scope_dir = ''
-    # alias config limits (an unset cap is unlimited, rendered -1) and modes
-    max_depth, max_children, max_descendants = (
-        -1 if (limit := node.config.get(key)) is None else limit
-        for key in ('max_depth', 'max_children', 'max_descendants')
-    )
+    # alias config limits (None when unset, rendered -1: unlimited) and modes
+    max_depth = node.config.get('max_depth')
+    max_children = node.config.get('max_children')
+    max_descendants = node.config.get('max_descendants')
     detached = node.config.get('detached', False)
     meta = node.config.get('meta') or ''
     # merge the static map under the caller's overrides
@@ -263,9 +262,9 @@ def variables(node: Node, overrides: Optional[dict[str, str]] = None) -> dict[st
         'MEMORY_DIR': f'{memory_dir}',
         'WIKI_DIR': f'{wiki_dir}',
         'CURRENT_BRANCH': branch,
-        'MAX_DEPTH': f'{max_depth}',
-        'MAX_CHILDREN': f'{max_children}',
-        'MAX_DESCENDANTS': f'{max_descendants}',
+        'MAX_DEPTH': '-1' if max_depth is None else f'{max_depth}',
+        'MAX_CHILDREN': '-1' if max_children is None else f'{max_children}',
+        'MAX_DESCENDANTS': '-1' if max_descendants is None else f'{max_descendants}',
         'DETACHED_MODE': 'true' if detached else 'false',
         'META_MODE': 'true' if meta else 'false',
         'META_TARGET': meta,
