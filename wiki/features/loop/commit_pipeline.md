@@ -63,6 +63,14 @@ land -- then runs the node's `lint.sh` and surfaces its notices instead of
 dropping them. Helper CLIs are resolved from the invoking installation, not
 ambient PATH, so a foreign install cannot answer the hook's reads.
 
+A node's `--init` baseline (`fractal commit "configure <name>" --init`, the
+child's configured seed before its start) skips the refresh and the lint, so it
+carries fractal's setup alone: the node's own data dir under `.fractal/` and
+init's `.gitattributes` edit. Any other change -- project content, material
+copied into the node's tree -- refuses the baseline by name before anything is
+staged, and goes in an ordinary commit, which the lint gates. The user node's
+baseline is a separate path (`commit_user_init`) that stages its own fixed set.
+
 ## Staging and warnings
 
 Staging appends a fixed exclude set to every sweep: virtualenvs, the central

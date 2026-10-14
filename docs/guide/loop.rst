@@ -603,7 +603,9 @@ message that starts with the branch name or ``iteration``. The pipeline then:
 
 Options: ``--init`` labels the commit ``init`` instead of an iteration (the
 baseline commit) and skips the message-shape check, the wiki refresh, lint,
-and the ``commit`` event; ``--check`` exits 1 if uncommitted changes exist
+and the ``commit`` event -- so a node's baseline carries only its own seed and
+init's ``.gitattributes`` edit, refusing any other change, which an ordinary
+commit carries through the lint; ``--check`` exits 1 if uncommitted changes exist
 instead of committing; ``--ignore-scope`` commits out-of-scope changes but
 still lints; ``--force`` bypasses scope, lint, and git hooks; and ``--path``
 names the worktree (default ``.``). A dirty tree under ``--check`` is the

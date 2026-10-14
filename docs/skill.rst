@@ -406,7 +406,8 @@ the ``fractal init`` output (``.fractal/`` and the wiki scaffold it creates),
 the node seed, and the baseline and child configuration commits the workflow
 prescribes (the ``fractal commit ... --init`` calls above). These commits are
 what make a node launchable — the node must branch from a committed tree —
-and they touch only fractal's own files.
+and they touch only fractal's own files: a child's ``--init`` baseline refuses
+any change outside its own seed.
 
 The exception is deliberately narrow. Ordinary project work — code in your
 main worktree, anything outside fractal's setup, seed, and configuration
