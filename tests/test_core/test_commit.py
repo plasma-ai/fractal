@@ -38,6 +38,7 @@ __all__ = [
     'test_estate_add_refuses_non_record_files_with_no_ignore_layer',
     'test_estate_commits_its_own_tool_state',
     'test_estate_commits_the_template_provenance',
+    'test_child_baseline_carries_only_its_seed',
     'test_refused_estate_content_leaves_the_clean_check_quiet',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
@@ -170,10 +171,8 @@ def test_commit_pushes_unless_local(tmp_path: pathlib.Path) -> None:
         # configure git user in the worktree
         _git(project_dir, 'config', 'user.email', 'test@test.com')
         _git(project_dir, 'config', 'user.name', 'Test')
-        # baseline commit through the real path (--init skips the empty-memory
-        # lint stub but still pushes unless local)
-        (project_dir / f'{name}.txt').write_text('work\n', encoding='utf-8')
-        Node(project_dir).commit(f'add {name}', init=True)
+        # the seed's baseline commit through the real path pushes unless local
+        Node(project_dir).commit(f'configure {name}', init=True)
         return branch
 
     pushed = _commit_node('pushed', local=False)
@@ -246,8 +245,11 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    # freshen both generated wikis up front -- the pipeline's index refresh
-    # is byte-stable once run, so the no-op invocation below stays a no-op
+    # an --init baseline of the seed lands but emits no commit event
+    node.commit('baseline', init=True)
+    assert node.db.read('events', where={'event': 'commit'}) == []
+    # freshen both generated wikis -- the pipeline's index refresh is
+    # byte-stable once run, so the no-op invocation below stays a no-op
     for wiki_dir in (
         project_dir / 'wiki',
         project_dir / '.fractal' / branch / 'memory',
@@ -257,10 +259,6 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
             capture_output=True,
             check=True,
         )
-    # an --init baseline commit lands but emits no commit event
-    (project_dir / 'seed.txt').write_text('seed\n', encoding='utf-8')
-    node.commit('baseline', init=True)
-    assert node.db.read('events', where={'event': 'commit'}) == []
     # stub the lint gate (not under test) so the hook path alone decides
     lint = project_dir / '.fractal' / branch / 'scripts' / 'lint.sh'
     lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
@@ -744,6 +742,49 @@ def test_estate_commits_the_template_provenance(tmp_path: pathlib.Path) -> None:
     node.commit(check=True)
 
 
+def test_child_baseline_carries_only_its_seed(tmp_path: pathlib.Path) -> None:
+    """A child's ``--init`` baseline commits its seed alone.
+
+    The baseline skips the wiki refresh and the lint, so it carries only
+    fractal's setup: material copied into the child's tree refuses it by
+    name, with nothing staged or committed. With the material set aside the
+    seed commits as the baseline, and the material then lands through an
+    ordinary commit, which the lint gates.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    material = project_dir / 'reference.txt'
+    material.write_text('copied material\n', encoding='utf-8')
+    head = _git(project_dir, 'rev-parse', 'HEAD').stdout
+
+    with pytest.raises(RuntimeError, match='commits only the node seed') as refused:
+        node.commit('configure', init=True)
+
+    # the refusal names the copied file, and nothing was staged or committed
+    assert 'reference.txt' in str(refused.value)
+    assert _git(project_dir, 'rev-parse', 'HEAD').stdout == head
+    assert _git(project_dir, 'diff', '--cached', '--name-only').stdout == ''
+    # set aside, the material no longer blocks the seed's baseline...
+    aside = tmp_path / 'reference.txt'
+    material.rename(aside)
+    node.commit('configure', init=True)
+    subject = _git(project_dir, 'log', '-1', '--format=%s').stdout.strip()
+    assert subject == 'main.task: init (configure)'
+    tracked = _git(project_dir, 'ls-files').stdout
+    assert '.fractal/main.task/NODE.md' in tracked
+    assert 'reference.txt' not in tracked
+    # ...and returned, it lands through an ordinary commit
+    aside.rename(material)
+    node.commit('add reference material')
+    assert 'reference.txt' in _git(project_dir, 'ls-files').stdout
+    node.commit(check=True)
+
+
 def test_refused_estate_content_leaves_the_clean_check_quiet(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1002,13 +1043,17 @@ def test_commit_update_failure_blocks_commit_but_not_backstops(
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    # a conflict-marked wiki page -- `wiki update` refuses to write over it
+    # a conflict-marked wiki page in history -- `wiki update` refuses to write
+    # over it (committed with raw git, past the pipeline's refresh)
     (project_dir / 'wiki' / 'broken.md').write_text(
         '---\nname: broken\ndesc: A broken page.\n---\n\n# broken\n\n***\n'
         '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other\n',
         encoding='utf-8',
     )
-    # the --init baseline skips the refresh -- it lands despite the markers
+    _git(project_dir, 'add', 'wiki/broken.md')
+    _git(project_dir, 'commit', '-m', 'broken page')
+    # the --init baseline of the seed skips the refresh -- it lands despite
+    # the markers
     node.commit('baseline', init=True)
     head_before = _head(project_dir)
     # a plain commit fails with the refusal named in the error, before landing
@@ -1617,6 +1662,9 @@ def test_commit_surfaces_hook_aborted_commit(tmp_path: pathlib.Path) -> None:
     head_before = _head(project_dir)
     # a clean tree is a genuine no-op -- commit must not raise
     node.commit('noop', init=True)
+    # stub the lint gate (not under test) so the hook path alone decides
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
     # install a pre-commit hook that aborts the commit (a check-only hook
     # failing, or black reformatting staged files and exiting non-zero);
     # it prints its findings the way linters do -- to stdout
@@ -1635,7 +1683,7 @@ def test_commit_surfaces_hook_aborted_commit(tmp_path: pathlib.Path) -> None:
     # (script exits non-zero -> RuntimeError), carrying the hook's findings
     # so the agent's remediation loop has something to act on
     with pytest.raises(RuntimeError, match='lint finding: bad format'):
-        node.commit('work', init=True)
+        node.commit('work')
     # HEAD did not advance -- the work is genuinely uncommitted, so a masked
     # "success" would have been a lie that a later --continue could discard
     assert _head(project_dir) == head_before
@@ -1662,6 +1710,9 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
     node.commit('baseline', init=True)
     head_before = _head(project_dir)
 
+    # stub the lint gate (not under test) so the hook path alone decides
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
     # a pre-commit config makes the recovery path eligible
     (project_dir / '.pre-commit-config.yaml').write_text(
         'repos: []\n',
@@ -1686,7 +1737,7 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
 
     work.write_text('original work\n', encoding='utf-8')
     # first hook run reformats + aborts; the pipeline re-stages and retries
-    node.commit('work', init=True)
+    node.commit('work')
 
     # HEAD advanced and the committed work is the hook's reformatted version
     assert _head(project_dir) != head_before

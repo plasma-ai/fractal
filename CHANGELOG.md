@@ -62,6 +62,11 @@ may include breaking changes, each listed under a Breaking heading.
   `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
   instead of being withheld as not a node record. Keys, archives, and binaries
   stay refused.
+- A node's `fractal commit --init` baseline carries only the node's own seed
+  (its data dir under `.fractal/`) and init's `.gitattributes` edit, and refuses
+  any other change by name before staging. The baseline skips the wiki refresh
+  and the lint, so project content — material copied into a child's tree
+  included — goes in an ordinary `fractal commit`, which the lint gates.
 - A crash healed by reconciliation — a later read over a dead loop, or the boot
   that finds the previous loop's rows still open — stamps the run row
   `crashed: loop runtime gone, healed by reconcile`, so `node list` renders
