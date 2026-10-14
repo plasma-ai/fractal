@@ -393,6 +393,13 @@ open. The node's status is ``paused`` and its tmux session is gone — **no
 session while parked is normal**, and crash reconciliation deliberately
 never touches a paused node.
 
+The abort takes the agent's whole process tree, not just its process group:
+agent CLIs run tool commands in groups (or sessions) of their own, and those
+die with the agent. ``kill`` and a step deadline reap the same way. Anything
+still alive after the forced kill is named in the command's output, and so is
+any other process working in the node's worktree, which is reported but left
+running.
+
 While parked, a node:
 
 - accepts only ``resume``, ``kill``, ``node chat``, and ``node merge`` —

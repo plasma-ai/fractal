@@ -61,8 +61,9 @@ queue instead of interleaving their index writes.
   pid-less claim refuses, and an unverifiable group refuses naming the `ps`
   check — so a bare `fractal node _loop`, which runs none of the launch gates
   above, still cannot boot over a live loop.
-- `pause.sh` reaps the recorded step process group, aborting the in-flight agent
-  so the loop can park.
+- `pause.sh` reaps the in-flight agent's whole process tree from the recorded
+  step process group (see [[#Reaping an agent's process tree]]), aborting the
+  agent so the loop can park.
 - `resume.sh` relaunches the loop through the backend the node's `.headless`
   marker records — the same record an unflagged `start --continue` reuses; the
   relaunched loop withdraws the run's recorded pause signals itself as it adopts
@@ -73,12 +74,13 @@ queue instead of interleaving their index writes.
   still-parking loop is refused by the relaunch's group vet instead.
 - `kill.sh` reaps the node's live process groups — the in-flight agent's
   recorded step group and the tmux pane's or, with no pane, the recorded `.pgid`
-  group — escalating a polite termination to a forced one, then destroys the
-  tmux session. The teardown is per-backend like `resume.sh`'s guard: under the
-  `.headless` marker the pane lookup, session check, and session destroy are all
-  skipped and only the recorded groups are reaped, so a same-named session from
-  another repo sharing the basename is never cross-fired. When nothing is alive
-  (a paused park), it exits cleanly and the kill is pure bookkeeping.
+  group — together with every process their trees hold, escalating a polite
+  termination to a forced one, then destroys the tmux session. The teardown is
+  per-backend like `resume.sh`'s guard: under the `.headless` marker the pane
+  lookup, session check, and session destroy are all skipped and only the
+  recorded groups are reaped, so a same-named session from another repo sharing
+  the basename is never cross-fired. When nothing is alive (a paused park), it
+  exits cleanly and the kill is pure bookkeeping.
 - `merge.sh` squash-merges the node's branch into its target from inside the
   target's worktree: it restores the target's `.fractal/` outside the node's
   scope roots, strips the node's own seed from a user-node target, judges the
@@ -89,6 +91,53 @@ queue instead of interleaving their index writes.
   view of the merge is [[user_flow/finishing/_index|user_flow/finishing]].
 - `delete.sh` removes one node's worktree, local branch, and remote branch; the
   recursive delete calls it once per node, deepest first.
+
+## Reaping an agent's process tree
+
+Agent CLIs run each tool command in a process group of its own — some in a
+session of their own — so they can time it out. Signaling the recorded step
+group alone misses those groups, and once the agent dies they live on,
+reparented to init. Every path that ends an agent invocation therefore reaps its
+whole tree through one helper, `fractal.util.process.reap`: `pause.sh` and
+`kill.sh` call it through the private
+`fractal node _reap --pgid=<pgid> [--worktree=<dir>]`, and the loop calls it
+in-process when a step's deadline fires and when its stream reader dies with the
+agent still running.
+
+The helper finds the tree before sending any signal. The agent leader starts its
+own session, so every process whose session id is the recorded group id belongs
+to the invocation; a session id survives reparenting, so this finds orphans too.
+A walk down parent links from the leader and every member then catches tools
+that left the session while their parent is alive, and any session a member
+leads joins the match. The helper TERMs every member group, re-walks, and TERMs
+any group the walk newly finds, for up to five rounds; it waits out the grace
+(five seconds from the scripts, the loop's own grace for a deadline) while still
+signaling late groups, then KILLs every group with a live member the same way.
+Members still alive after that are named on stderr, which `Node` relays as
+warnings — the survivors on the pause or kill output, and a `Warning:` line in
+the loop's log for the in-process paths.
+
+`kill.sh` passes the loop's recorded group beside the step group, so the loop
+dies in the same round as its agent and cannot launch the next step while the
+agent's tree drains. Pause passes only the step group: the loop sits above the
+tree and must live to record the park.
+
+Pause and kill also pass the node's worktree for a report-only sweep: each
+process outside the tree whose working directory lies in the worktree is named
+on stderr as left running and never signaled. A double-forked daemon that left
+the session after its parent exited cannot be tied to the invocation, so the
+sweep is how the operator learns of it. The sweep reads `lsof` on macOS and
+`/proc/<pid>/cwd` on Linux, and it skips the caller and its ancestors (an
+operator may run `fractal pause` from a shell in the worktree) and the processes
+the tree hangs from (the loop and its parents).
+
+Three rails bound the reap. It never signals pid 0 or 1, the caller's own group,
+or the group of any of the caller's ancestors — so an agent that pauses its own
+node keeps the groups it runs in. It signals only groups found through the
+recorded group's session or tree. And when the process table cannot be read, it
+falls back to signaling the recorded groups alone; when `fractal node _reap`
+itself cannot run, `pause.sh` and `kill.sh` fall back to their own group-only
+teardown, so a helper failure never fails the pause or kill.
 
 ## Launch environment
 
