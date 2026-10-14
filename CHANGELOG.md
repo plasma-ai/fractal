@@ -58,15 +58,15 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
-- A node's instructions say it names its own files through `$MEMORY_DIR`,
-  `$PLANS_DIR`, and `$NODE_DIR`, with scratch in `$NODE_DIR/tmp/` — a path at
-  the worktree root is the project, not the node, since file tools resolve
-  relative paths against the worktree root.
 - A node's `fractal commit --init` baseline carries only the node's own seed
   (its data dir under `.fractal/`) and init's `.gitattributes` edit, and refuses
   any other change by name before staging. The baseline skips the wiki refresh
   and the lint, so project content — material copied into a child's tree
   included — goes in an ordinary `fractal commit`, which the lint gates.
+- A node's instructions say it names its own files through `$MEMORY_DIR`,
+  `$PLANS_DIR`, and `$NODE_DIR`, with scratch in `$NODE_DIR/tmp/` — a path at
+  the worktree root is the project, not the node, since file tools resolve
+  relative paths against the worktree root.
 - A crash healed by reconciliation — a later read over a dead loop, or the boot
   that finds the previous loop's rows still open — stamps the run row
   `crashed: loop runtime gone, healed by reconcile`, so `node list` renders
