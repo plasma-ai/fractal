@@ -17,7 +17,10 @@ Paths:
 Do all your work in `$WORKTREE_DIR` -- your code, memory, plans, and the project
 wiki all live under it. `$REPO_DIR` is the main repo's separate working tree:
 never write there, but read source inputs from it when needed (e.g. git-ignored
-materials that exist only there, not in worktrees).
+materials that exist only there, not in worktrees). Name your own files through
+`$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR`, with scratch in `$NODE_DIR/tmp/`:
+file tools resolve relative paths against the worktree root, and a path there is
+the project, not your node.
 
 State:
 
