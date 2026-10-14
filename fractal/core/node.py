@@ -940,9 +940,9 @@ class Node:
     ) -> None:
         """Validate a template charter's fill-sheet before any spend.
 
-        The stale-seed gate: four commissions once shipped with stale pins,
-        stale docket rows, or truncated charters, each costing the node's
-        opening seat plus an adjudication. Checks, all pre-worktree:
+        The stale-seed gate: it refuses a stale pin, a stale docket row, or
+        a truncated charter before the node's opening seat spends on it.
+        Checks, all pre-worktree:
 
         - ``--pin`` (when given) resolves to a commit;
         - the charter carries its two authored sections (a truncated seed
