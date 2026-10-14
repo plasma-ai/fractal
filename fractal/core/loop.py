@@ -339,9 +339,9 @@ class Loop:
         self._node_effort = config.get('effort') or ''
         meta = config.get('meta') or ''
         self._meta_mode = bool(meta)
-        # the boot-static env/prompt vocabulary, derived once (the single
-        # var-map derivation) and pinned for the run
-        self._env_base = _boot_env(node, detached=self._detached, meta=meta)
+        # the boot-pinned mode flags, the one source the step env and the
+        # step prompt both read (every other variable is derived per step)
+        self._boot_modes = _boot_modes(node, detached=self._detached, meta=meta)
         # run/iteration lifecycle state
         self._iter = 0
         self._iter_timestamp = ''
@@ -2437,8 +2437,8 @@ class Loop:
         modes (SYNC.md runs as its own step, so it is skipped there):
         static vars (paths, limits) come from the node's config/git, and
         the run-scoped vars pass through as overrides -- the boot-pinned
-        DETACHED/META flags included, so a mid-run config edit cannot
-        flip a run's mode composition.
+        DETACHED/META flags and meta target included, so a mid-run config
+        edit cannot flip a run's mode composition.
         """
         # refresh the cost budget so each step's context reflects spend so far
         self._build_cost_budget()
@@ -2453,8 +2453,9 @@ class Loop:
             'RESUME_MODE': 'true' if self._resume_mode else 'false',
             # reserve mode is per-iteration (budget can exhaust mid-run)
             'RESERVE_MODE': 'true' if self._reserve else 'false',
-            'DETACHED_MODE': self._env_base['DETACHED_MODE'],
-            'META_MODE': self._env_base['META_MODE'],
+            'DETACHED_MODE': self._boot_modes['DETACHED_MODE'],
+            'META_MODE': self._boot_modes['META_MODE'],
+            'META_TARGET': self._boot_modes['META_TARGET'],
             'DRAIN_MODE': 'true' if self._drain else 'false',
         }
         prompt = self.node.build_prompt(f'{step.path}', overrides=overrides)
@@ -2536,8 +2537,10 @@ class Loop:
     def _agent_env(self: Loop, step_label: str) -> dict[str, str]:
         """Build the per-launch agent environment.
 
-        Rebuilt at every step/SYNC launch, never boot-static: the boot
-        vocabulary (paths, caps, modes, ``AGENT_COMMAND``, timeouts --
+        Rebuilt at every step/SYNC launch, never boot-static: the static
+        vocabulary derived fresh from config (paths, spawn limits) under
+        the boot-pinned mode flags, plus the run parameters (cost caps,
+        ``AGENT_COMMAND``, timeouts --
         ``STEP_TIMEOUT_SECONDS`` carrying the step's own effective
         ceiling, ``_NODE``, ``NODE_BRANCH``) plus live lineage
         (``RUN_ID``, ``ITER_ID``, ``STEP_ID``, ``STEP_MODEL``), the
@@ -2552,7 +2555,7 @@ class Loop:
         step_budget = ''
         if self._step_budget_value is not None:
             step_budget = f'{self._step_budget_value:.6g}'
-        env = dict(self._env_base)
+        env = {**render.variables(self.node), **self._boot_modes}
         overlay = {
             'MAX_COST': self._max_cost_label,
             'MAX_ITER_COST': self._max_iter_cost_label,
@@ -4640,19 +4643,21 @@ def _models_match(pinned: str, served: str) -> bool:
     return False
 
 
-def _boot_env(node: Node, *, detached: bool, meta: str) -> dict[str, str]:
-    """Derive the boot-static env/prompt vocabulary, pinned for the run.
+def _boot_modes(node: Node, *, detached: bool, meta: str) -> dict[str, str]:
+    """Derive the mode flags pinned to their boot values for the run.
 
-    The single var-map derivation (``render.variables``) with the mode
-    flags pinned to their boot values, so a mid-run config edit cannot
-    flip a run's mode composition or its exported environment.
+    ``DETACHED_MODE``, ``META_MODE``, ``META_TARGET``, and
+    ``FRACTAL_HEADLESS`` only: a mid-run config edit cannot flip a run's
+    mode composition or its launch backend. Every other variable
+    (``render.variables``: paths, spawn limits) is derived fresh per step,
+    so a mid-run limit edit reaches the next step's prompt and env alike.
     """
-    base = render.variables(node)
-    base['DETACHED_MODE'] = 'true' if detached else 'false'
-    base['META_MODE'] = 'true' if meta else 'false'
-    base['META_TARGET'] = meta
-    base['FRACTAL_HEADLESS'] = 'true' if node.headless else 'false'
-    return base
+    return {
+        'DETACHED_MODE': 'true' if detached else 'false',
+        'META_MODE': 'true' if meta else 'false',
+        'META_TARGET': meta,
+        'FRACTAL_HEADLESS': 'true' if node.headless else 'false',
+    }
 
 
 def _parse_duration(value: str, label: str) -> int:
