@@ -15,13 +15,33 @@ updated: 2026-08-29T11:30:50Z
 
 ***
 
-Merge refuses while the node is active or paused, while the target node is
-active or paused (a running target's worktree must not be mutated under it —
-except by the target's own loop, which merges its settled children as part of
-its normal iteration), and while the target worktree has uncommitted changes.
-Merges are serialized per repository: `fractal node merge` holds a repo-wide
-merge lock while the script runs, so two sibling merges into one target queue
-instead of interleaving their index writes.
+Merge refuses while the node is active, while the target node is active or
+paused (a running target's worktree must not be mutated under it — except by the
+target's own loop, which merges its settled children as part of its normal
+iteration), and while the target worktree has uncommitted changes. Merges are
+serialized per repository: `fractal node merge` holds a repo-wide merge lock
+while the script runs, so two sibling merges into one target queue instead of
+interleaving their index writes.
+
+## Paused nodes
+
+A paused node merges without leaving `paused`: it runs no loop and no agent, so
+its branch is quiescent, and its run, iteration, and step rows stay open for
+`fractal resume` to adopt. Only committed work lands. `Node.merge` passes
+`merge.sh --carry-dirty`, and the merge-base advance then carries the frozen
+step's uncommitted state the way `git checkout` moves a branch instead of
+skipping on a dirty worktree (a skipped advance would make the next landing
+re-diff from the fork point). Before the target commits, the advance tree is
+built from the staged target tree, and a dry-run two-tree `read-tree` against a
+copy of the node's index plus the untracked-and-ignored clobber guard judge the
+move: an advance that would touch a dirty or staged path or write over an
+untracked or ignored file refuses the whole merge, restoring the target and
+naming the paths. After the commit a two-tree `read-tree -m -u` moves the node's
+index and worktree, keeping its local changes, and a compare-and-swap
+`update-ref` moves its branch; any failure or interrupt there reverses the
+`read-tree`, resets the target to its pre-merge HEAD, and closes the merge event
+`failed`. A `--message` sets the squash commit's text, so a descriptive message
+never needs an amend that would orphan the advance.
 
 ## Untracked files on the target
 

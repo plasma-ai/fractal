@@ -14,6 +14,13 @@ Squash-merge a node's branch into its parent branch.
 The full commit history is preserved on the node's branch.
 
 Options:
+    --carry-dirty     Advance the merge-base the way 'git checkout' moves a
+                      branch, carrying the node's uncommitted state (a paused
+                      node's frozen step): an advance that would touch a dirty
+                      path or an untracked or ignored file refuses the whole
+                      merge, and a failure after the commit rolls the target
+                      and the node back, so the merge lands whole or not at
+                      all (Node.merge passes it for a paused node).
     --continue        Finish a hand-resolved squash: after a conflicted merge,
                       redo 'git merge --squash <branch>' in the target worktree,
                       resolve and stage the conflicts, then pass this flag to
@@ -22,6 +29,7 @@ Options:
                       advance -- exactly like a clean merge.
     --ignore-scope    Land paths outside the node's scope instead of refusing
                       the merge.
+    --message=TEXT    Commit the squash with TEXT instead of 'merge <branch>'.
     --validate=PATH   Run a destination-relative bash script after restoration
                       and index refresh, before committing. It must succeed
                       without changing the staged tree or leaving tracked
@@ -41,8 +49,10 @@ USAGE
 }
 
 WORKTREE_DIR=""
+CARRY_DIRTY=false
 CONTINUE=false
 IGNORE_SCOPE=false
+MESSAGE=""
 USER_TARGET=false
 TARGET_WIKI=""
 VALIDATE=false
@@ -51,8 +61,10 @@ VALIDATION_SCRIPT=""
 for arg in "$@"; do
     case "$arg" in
         --help | -h) usage ;;
+        --carry-dirty) CARRY_DIRTY=true ;;
         --continue) CONTINUE=true ;;
         --ignore-scope) IGNORE_SCOPE=true ;;
+        --message=*) MESSAGE="${arg#*=}" ;;
         --validate=*)
             VALIDATE=true
             VALIDATION_SCRIPT="${arg#*=}"
@@ -443,6 +455,10 @@ CHILD_OLD=""
 NEW_HEAD=""
 SUMMARY=""
 advance_trap() {
+    # a carried advance is part of the merge: cut short, it rolls back whole
+    if [[ "$CARRY_DIRTY" == true && "$ADVANCING" == true ]]; then
+        carry_rollback "merge of $BRANCH was interrupted"
+    fi
     if [[ "$ADVANCING" == true ]]; then
         # -q: drop reset's HEAD-is-now line so the
         # Warning: below is the single user-facing line
@@ -455,7 +471,182 @@ advance_trap() {
     [[ -z "$SUMMARY" ]] || echo "$SUMMARY"
     exit 0
 }
+# list in CLOBBERED the untracked or ignored files the advance from CHILD_OLD
+# to the tree or commit in $1 would write over
+find_clobbered() {
+    # reset --hard writes every path the target tracks, over an untracked or
+    # ignored file of the same name too (a private local.env a sibling landed
+    # on the target); a collision skips the advance and keeps the node's copy;
+    # the disk is probed rather than the untracked listing compared, so a
+    # case-only alias on a case-insensitive filesystem, a directory sitting
+    # where the target adds a file, and a file sitting where it adds a
+    # directory all count -- the worktree is clean at CHILD_OLD (a carried
+    # advance's dirt is tracked, and its index ls-files consults), so anything
+    # on disk at a path that tree lacks is untracked or ignored; on a
+    # case-insensitive filesystem a hit may be a tracked case-variant
+    # (the target replaced Readme.md with README.md), which reset renames
+    # correctly -- not a collision; icase,literal so the path matches only
+    # itself under case folding; likewise a hit the child tracks at or under
+    # that path (the target turned a directory into a file) and a prefix it
+    # tracks (a file into a directory) are type changes reset performs, not
+    # collisions; an unset core.ignorecase is git's default, false, and a
+    # failed read fails closed the same way -- a same-name hit then counts
+    # as a collision and the advance is skipped
+    IGNORE_CASE=$(git -C "$WORKTREE_DIR" config --get core.ignorecase 2>/dev/null || echo false)
+    CLOBBERED=""
+    # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
+    # name is never C-quoted by core.quotePath into a path that exists nowhere
+    while IFS= read -r -d '' ADDED_PATH; do
+        if [[ -e "$WORKTREE_DIR/$ADDED_PATH" || -L "$WORKTREE_DIR/$ADDED_PATH" ]]; then
+            [[ -z "$(git -C "$WORKTREE_DIR" ls-files -- ":(literal)$ADDED_PATH")" ]] || continue
+            if [[ "$IGNORE_CASE" == true ]] \
+                && [[ -n "$(git -C "$WORKTREE_DIR" ls-files -- ":(icase,literal)$ADDED_PATH")" ]]; then
+                continue
+            fi
+            CLOBBERED+="$ADDED_PATH, "
+            continue
+        fi
+        PREFIX="$ADDED_PATH"
+        while [[ "$PREFIX" == */* ]]; do
+            PREFIX="${PREFIX%/*}"
+            git -C "$WORKTREE_DIR" cat-file -e "$CHILD_OLD:$PREFIX" 2>/dev/null && break
+            if [[ -e "$WORKTREE_DIR/$PREFIX" && ! -d "$WORKTREE_DIR/$PREFIX" ]]; then
+                CLOBBERED+="$PREFIX, "
+                break
+            fi
+        done
+    done < <(git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=A "$CHILD_OLD" "$1")
+}
+# a paused node's advance carries its uncommitted state the way git checkout
+# moves a branch -- the frozen step's dirt is what resume continues from, so
+# reset --hard is out and a skipped advance is too (the next landing would
+# re-diff from the fork point); carry_prepare builds the advance tree from the
+# tree the target is about to commit and proves the move safe before anything
+# commits, carry_advance makes it after the commit, and carry_rollback undoes
+# both sides, so the merge lands whole or not at all
+ADVANCE_TREE=""
+TARGET_TREE=""
+CARRY_ERROR=""
+CHILD_MOVED=false
+carry_prepare() {
+    if ! CHILD_HEAD=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null) \
+        || ! CHILD_OLD=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
+        || ! CHILD_INDEX=$(git -C "$WORKTREE_DIR" rev-parse --git-path index 2>/dev/null); then
+        CARRY_ERROR="reading $BRANCH's worktree failed"
+        return 1
+    fi
+    if [[ "$CHILD_HEAD" != "$BRANCH" ]]; then
+        CARRY_ERROR="$BRANCH's worktree is on $CHILD_HEAD, not $BRANCH"
+        return 1
+    fi
+    [[ "$CHILD_INDEX" = /* ]] || CHILD_INDEX="$WORKTREE_DIR/$CHILD_INDEX"
+    # the graft reads the child's seed from its HEAD, not its index: the
+    # advance is a commit on HEAD, and the two-tree update keeps whatever the
+    # paused step staged or left dirty there; the target's tree is the one it
+    # is about to commit, so the check below judges exactly the move made
+    SEED_INDEX="$TMP_DIR/carry-seed-index"
+    ADVANCE_INDEX="$TMP_DIR/carry-advance-index"
+    if ! GIT_INDEX_FILE="$SEED_INDEX" git -C "$WORKTREE_DIR" read-tree "$CHILD_OLD" \
+        || ! GIT_INDEX_FILE="$SEED_INDEX" git -C "$WORKTREE_DIR" ls-files -s -z \
+            -- "${OWN_SEED_SPEC[@]}" >"$TMP_DIR/seed-info" \
+        || ! GIT_INDEX_FILE="$ADVANCE_INDEX" git -C "$WORKTREE_DIR" read-tree "$1" \
+        || ! GIT_INDEX_FILE="$ADVANCE_INDEX" git -C "$WORKTREE_DIR" ls-files -z \
+            -- "${OWN_SEED_SPEC[@]}" >"$TMP_DIR/carry-stale-seed" \
+        || ! GIT_INDEX_FILE="$ADVANCE_INDEX" git -C "$WORKTREE_DIR" update-index -z \
+            --force-remove --stdin <"$TMP_DIR/carry-stale-seed" \
+        || ! GIT_INDEX_FILE="$ADVANCE_INDEX" git -C "$WORKTREE_DIR" update-index -z \
+            --index-info <"$TMP_DIR/seed-info" \
+        || ! ADVANCE_TREE=$(GIT_INDEX_FILE="$ADVANCE_INDEX" git -C "$WORKTREE_DIR" write-tree); then
+        CARRY_ERROR="building $BRANCH's post-squash tree failed"
+        return 1
+    fi
+    # dry-run the two-tree update against a refreshed copy of the child's
+    # index, so the refusal leaves even its stat cache untouched: it refuses a
+    # path the advance changes that the child has staged or dirty, and an
+    # untracked file the advance would write over (git's messages name them)
+    CARRY_INDEX="$TMP_DIR/carry-index"
+    if ! cp "$CHILD_INDEX" "$CARRY_INDEX"; then
+        CARRY_ERROR="copying $BRANCH's index failed"
+        return 1
+    fi
+    GIT_INDEX_FILE="$CARRY_INDEX" git -C "$WORKTREE_DIR" update-index -q --refresh >/dev/null || true
+    if ! GIT_INDEX_FILE="$CARRY_INDEX" git -C "$WORKTREE_DIR" read-tree -m -u -n \
+        "$CHILD_OLD" "$ADVANCE_TREE" 2>"$TMP_DIR/carry-err"; then
+        CARRY_ERROR="advancing $BRANCH's merge-base would change its uncommitted state:"
+        CARRY_ERROR+=" $(grep -v '^Aborting$' "$TMP_DIR/carry-err" | tr '\n' ' ')"
+        CARRY_ERROR+="-- commit, move aside, or resume and finish that work before merging"
+        return 1
+    fi
+    # git's dry run treats an ignored file as expendable; the clobber guard
+    # does not
+    find_clobbered "$ADVANCE_TREE"
+    if [[ -n "$CLOBBERED" ]]; then
+        CARRY_ERROR="advancing $BRANCH's merge-base would write over untracked files in"
+        CARRY_ERROR+=" its worktree: ${CLOBBERED%, }; move them aside before merging"
+        return 1
+    fi
+}
+# record the advance on the target's new HEAD, then move the child's index and
+# worktree by the two-tree update (local changes to paths the advance leaves
+# alone ride along) before the ref, compare-and-swapped against CHILD_OLD; the
+# commit must hold exactly the tree carry_prepare judged
+carry_advance() {
+    ADVANCING=true
+    if ! TARGET_HEAD=$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
+        || [[ "$(git -C "$PARENT_WORKTREE_DIR" rev-parse "HEAD^{tree}" 2>/dev/null)" != "$TARGET_TREE" ]]; then
+        carry_rollback "$PARENT_BRANCH's commit does not hold the tree the advance was judged against"
+    fi
+    if ! ADVANCE_HEAD=$(git -C "$WORKTREE_DIR" commit-tree "$ADVANCE_TREE" -p "$CHILD_OLD" -p "$TARGET_HEAD" \
+        -m "merge $PARENT_BRANCH (post-squash)"); then
+        carry_rollback "recording $BRANCH's post-squash commit failed"
+    fi
+    CHILD_MOVED=true
+    git -C "$WORKTREE_DIR" update-index -q --refresh >/dev/null || true
+    if ! git -C "$WORKTREE_DIR" read-tree -m -u "$CHILD_OLD" "$ADVANCE_HEAD"; then
+        carry_rollback "updating $BRANCH's worktree failed"
+    fi
+    if ! git -C "$WORKTREE_DIR" update-ref -m "merge $PARENT_BRANCH (post-squash)" \
+        "refs/heads/$BRANCH" "$ADVANCE_HEAD" "$CHILD_OLD"; then
+        carry_rollback "moving $BRANCH to its post-squash commit failed"
+    fi
+    ADVANCING=false
+}
+# undo a carried merge after the target committed: the reverse two-tree update
+# returns the child's index and worktree to CHILD_OLD with its dirt intact (a
+# no-op when the forward update never ran), and the target -- clean before the
+# merge, with no loop of its own running -- goes back to its pre-merge HEAD
+carry_rollback() {
+    trap - INT TERM
+    end_merge_event failed
+    if [[ "$CHILD_MOVED" == true ]]; then
+        git -C "$WORKTREE_DIR" update-index -q --refresh >/dev/null || true
+        git -C "$WORKTREE_DIR" read-tree -m -u "$ADVANCE_HEAD" "$CHILD_OLD" 2>/dev/null || true
+    fi
+    git -C "$PARENT_WORKTREE_DIR" reset -q --hard "$TARGET_BEFORE" || true
+    clear_squash_markers
+    if [[ "$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$CHILD_OLD" ]] \
+        && [[ "$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$TARGET_BEFORE" ]] \
+        && target_restored; then
+        echo "Error: $*; the merge was rolled back and both worktrees restored" >&2
+    else
+        echo "Error: $*; the merge could NOT be fully rolled back -- check that" \
+            "$PARENT_BRANCH is at $TARGET_BEFORE and $BRANCH at $CHILD_OLD with its" \
+            "uncommitted work intact before merging again" >&2
+    fi
+    exit 1
+}
 advance_merge_base() {
+    if [[ "$CARRY_DIRTY" == true ]]; then
+        # a no-op arm judges the move here, against the target's own tree
+        if [[ -z "$ADVANCE_TREE" ]]; then
+            if ! TARGET_TREE=$(git -C "$PARENT_WORKTREE_DIR" rev-parse "HEAD^{tree}"); then
+                carry_rollback "reading the tree of $PARENT_BRANCH failed"
+            fi
+            carry_prepare "$TARGET_TREE" || carry_rollback "$CARRY_ERROR"
+        fi
+        carry_advance
+        return 0
+    fi
     if ! CHILD_HEAD=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null); then
         skip_advance "reading $BRANCH's worktree failed"
         return 0
@@ -508,47 +699,7 @@ advance_merge_base() {
         skip_advance "recording the post-squash commit failed"
         return 0
     fi
-    # reset --hard writes every path the target tracks, over an untracked or
-    # ignored file of the same name too (a private local.env a sibling landed
-    # on the target); a collision skips the advance and keeps the node's copy;
-    # the disk is probed rather than the untracked listing compared, so a
-    # case-only alias on a case-insensitive filesystem, a directory sitting
-    # where the target adds a file, and a file sitting where it adds a
-    # directory all count -- the worktree is clean at CHILD_OLD, so anything
-    # on disk at a path that tree lacks is untracked or ignored; on a
-    # case-insensitive filesystem a hit may be a tracked case-variant
-    # (the target replaced Readme.md with README.md), which reset renames
-    # correctly -- not a collision; icase,literal so the path matches only
-    # itself under case folding; likewise a hit the child tracks at or under
-    # that path (the target turned a directory into a file) and a prefix it
-    # tracks (a file into a directory) are type changes reset performs, not
-    # collisions; an unset core.ignorecase is git's default, false, and a
-    # failed read fails closed the same way -- a same-name hit then counts
-    # as a collision and the advance is skipped
-    IGNORE_CASE=$(git -C "$WORKTREE_DIR" config --get core.ignorecase 2>/dev/null || echo false)
-    CLOBBERED=""
-    # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
-    # name is never C-quoted by core.quotePath into a path that exists nowhere
-    while IFS= read -r -d '' ADDED_PATH; do
-        if [[ -e "$WORKTREE_DIR/$ADDED_PATH" || -L "$WORKTREE_DIR/$ADDED_PATH" ]]; then
-            [[ -z "$(git -C "$WORKTREE_DIR" ls-files -- ":(literal)$ADDED_PATH")" ]] || continue
-            if [[ "$IGNORE_CASE" == true ]] \
-                && [[ -n "$(git -C "$WORKTREE_DIR" ls-files -- ":(icase,literal)$ADDED_PATH")" ]]; then
-                continue
-            fi
-            CLOBBERED+="$ADDED_PATH, "
-            continue
-        fi
-        PREFIX="$ADDED_PATH"
-        while [[ "$PREFIX" == */* ]]; do
-            PREFIX="${PREFIX%/*}"
-            git -C "$WORKTREE_DIR" cat-file -e "$CHILD_OLD:$PREFIX" 2>/dev/null && break
-            if [[ -e "$WORKTREE_DIR/$PREFIX" && ! -d "$WORKTREE_DIR/$PREFIX" ]]; then
-                CLOBBERED+="$PREFIX, "
-                break
-            fi
-        done
-    done < <(git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=A "$CHILD_OLD" "$ADVANCE_HEAD")
+    find_clobbered "$ADVANCE_HEAD"
     if [[ -n "$CLOBBERED" ]]; then
         skip_advance "its worktree holds untracked files $PARENT_BRANCH now tracks:" \
             "${CLOBBERED%, }; move them aside, and the next merge that lands work advances it"
@@ -1086,9 +1237,21 @@ if [[ "$VALIDATE" == true ]]; then
     fi
 fi
 
+# ------ carried advance check
+
+# a paused node's advance is judged before the target commits, against the
+# tree the commit will hold, so a refusal restores the target like any other
+if [[ "$CARRY_DIRTY" == true ]]; then
+    if ! TARGET_TREE=$(git -C "$PARENT_WORKTREE_DIR" write-tree); then
+        fail_target "reading the staged squash of $BRANCH failed"
+    fi
+    carry_prepare "$TARGET_TREE" || fail_target "$CARRY_ERROR"
+fi
+
 # commit the squash-merge and report success (-q: drop git's own commit
-# summary so the merge line below stays the single user-facing line)
-if ! git -C "$PARENT_WORKTREE_DIR" commit -q -m "merge $BRANCH"; then
+# summary so the merge line below stays the single user-facing line); a
+# --message replaces the default text verbatim
+if ! git -C "$PARENT_WORKTREE_DIR" commit -q -m "${MESSAGE:-merge $BRANCH}"; then
     fail_target "failed to commit the squash-merge of $BRANCH"
 fi
 # the squash has landed: from here an interrupt must neither leave the child

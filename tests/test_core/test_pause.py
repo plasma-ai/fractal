@@ -66,16 +66,14 @@ def test_pause_signals_and_decorates(
 
 
 def test_paused_rejects_all_but_resume_and_kill(node_with_db: Node) -> None:
-    """A paused node admits only resume, kill, and (fork-only) chat.
+    """A paused node admits only resume, kill, merge, and (fork-only) chat.
 
-    Merge/delete/retire would act on the frozen mid-step worktree, and
-    start (fresh or ``--continue``) would git-clean it and re-arm the
-    budget -- every other path must refuse and name the way out.
+    Delete/retire would act on the frozen mid-step worktree, and start
+    (fresh or ``--continue``) would git-clean it and re-arm the budget --
+    every other path must refuse and name the way out.
     """
     node = node_with_db
     node.status_set('paused')
-    with pytest.raises(RuntimeError, match='Resume or kill it first'):
-        node.merge()
     with pytest.raises(RuntimeError, match='Resume or kill it first'):
         node.delete()
     with pytest.raises(RuntimeError, match='Resume or kill it first'):
@@ -127,9 +125,9 @@ def test_reconcile_leaves_paused_untouched(
     # the loop is gone -- exactly how a paused node looks
     monkeypatch.setattr(node, '_tmux_session_exists', lambda: False)
     # a reject-active op runs the reconcile first; it must land on the
-    # paused guard, not relabel the node exited and merge it
+    # paused guard, not relabel the node exited and delete it
     with pytest.raises(RuntimeError, match='paused'):
-        node.merge()
+        node.delete()
     assert node.status() == 'paused'
     # the open run row survived for resume to adopt
     run = node.db.read('runs', where={'run_id': run_id})[0]

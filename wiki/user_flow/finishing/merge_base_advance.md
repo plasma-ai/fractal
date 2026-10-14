@@ -42,6 +42,11 @@ skips it with a warning rather than failing the landed merge, and an edit to a
 tracked file the commit law's excludes hide (a force-added lock or status file)
 counts as dirt, so the update never overwrites it.
 
+A paused node's advance is never skipped: its dirt is the frozen step resume
+continues from, so the advance carries it the way `git checkout` moves a branch,
+and a move that cannot carry it refuses the whole merge instead (see
+[[user_flow/finishing/merge_guards]]).
+
 ## A resolution lands on the node
 
 The merge-base advance writes the target's adjudicated tree into the node's

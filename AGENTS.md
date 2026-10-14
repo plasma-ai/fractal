@@ -471,7 +471,8 @@ See `pyproject.toml` for formatter/linter config.
   execution: the loop exits (no tmux session is the normal parked state — never
   crash-healed), the run row (and any still-open iteration) stays open for
   `resume` to adopt, the node holds its spawn slot and blocks ancestor
-  finish-drains, and only `resume`/`kill`/`chat` are legal on it; a user-node
+  finish-drains, and only `resume`/`kill`/`chat`/`merge` are legal on it
+  (`merge` lands committed work only; the node stays paused); a user-node
   (tree-wide) pause also latches the root (a `.paused` marker beside the central
   DB), so even depth-1 spawns and starts refuse until the tree-wide resume. Exit
   codes are binary, derived from outcome; rows carry start/end instants

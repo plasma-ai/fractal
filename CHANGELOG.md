@@ -9,6 +9,17 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Added
 
+- `fractal node merge` lands a paused node's committed work into its merge
+  target without leaving `paused`: the run, iteration, and step rows stay open
+  for `fractal resume`, and the frozen step's uncommitted state stays in the
+  node's worktree. The merge-base advance carries that state the way
+  `git checkout` moves a branch; an advance that would touch a dirty path or an
+  untracked or ignored file refuses the whole merge by name, and a failure after
+  the squash commit rolls back both the target and the node. A live node, or a
+  child landing into a live or paused parent, still refuses.
+- `fractal node merge --message=<text>` sets the squash commit's text in place
+  of `merge <branch>`, so a descriptive message needs no amend (an amended
+  squash orphans the merge-base advance recorded against it).
 - A passed `codex` preflight probe is logged: the loop prints
   `=== Preflight: codex probe passed for model '<name>': <N> tokens, $<cost>, outside the ledger ===`
   from the usage the probe's own stream reports, priced at the model's rates
