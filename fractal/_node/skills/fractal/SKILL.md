@@ -226,12 +226,15 @@ pool a cheaper token rate buys more steps, not a lower bill.
    fractal commit "configure <name>" --init
    ```
 
-   Material you copy into a child's tree passes through the repo's commit hooks
-   (if any) at this init commit (CRLF->LF, formatter reflow) -- so a byte-frozen
-   store and its delivered copies diverge *by construction* on the first hooked
-   commit; do not read that divergence as tamper. If you freeze reference bytes
-   for audit, freeze the post-hook form (commit once, then re-pin) or compare
-   normalized (line endings/whitespace) rather than raw.
+   The init commit carries the seed alone and refuses anything else. Commit
+   material you copy into a child's tree with an ordinary
+   `fractal commit "add <material>"` from its worktree, which runs the lint.
+   That commit passes the material through the repo's commit hooks (if any)
+   (CRLF->LF, formatter reflow) -- so a byte-frozen store and its delivered
+   copies diverge *by construction* on the first hooked commit; do not read that
+   divergence as tamper. If you freeze reference bytes for audit, freeze the
+   post-hook form (commit once, then re-pin) or compare normalized (line
+   endings/whitespace) rather than raw.
 
 4. **Launch:**
 

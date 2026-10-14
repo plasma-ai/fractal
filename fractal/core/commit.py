@@ -153,13 +153,18 @@ def commit(
     node_prefix = bounds.node_prefix
     wiki_prefix = bounds.wiki_prefix
     fractal_prefix = bounds.fractal_prefix
+    # the baseline skips the refresh and lint below, so it carries the node's
+    # own seed alone -- project content takes an ordinary, linted commit
+    if init:
+        _baseline_check(node, bounds)
     # check working tree, index, and untracked files for out-of-scope changes
     scoped = not force and not ignore_scope and bool(commit_scopes)
     if scoped:
         _scope_check(node, bounds)
     output: list[str] = []
     # refresh the wiki indexes, then lint (--force and --init skip both: the
-    # backstop save must never block, and the baseline wiki lints dirty); the
+    # backstop save must never block, and the baseline carries only the
+    # node's seed, which the lint does not gate); the
     # seeded hook shells back into `fractal`, so resolve helper CLIs from the
     # invoking installation, not ambient PATH -- a fronted foreign install
     # must not answer the hook's config reads
@@ -695,20 +700,19 @@ def _check_clean(node: Node) -> None:
         )
 
 
-def _scope_check(node: Node, bounds: Scope) -> None:
-    """Refuse changes outside the node's commit scopes.
+def _changed_paths(node: Node) -> set[str]:
+    """Return every changed path in a node's worktree.
 
     Args:
-        node: The node whose worktree to check.
-        bounds: The node's commit boundaries.
+        node: The node whose worktree to read.
 
-    Raises:
-        RuntimeError: Naming every scope root and the offending paths.
+    Returns:
+        The repo-relative paths changed in the working tree or the index
+        against ``HEAD``, and the untracked paths the ignore rules admit.
 
     """
     worktree = node.worktree
-    # collect every changed path (working tree, index, untracked); -z
-    # everywhere so a non-ASCII path is never C-quoted (a quoted path
+    # -z everywhere so a non-ASCII path is never C-quoted (a quoted path
     # starts with '"' and fails every prefix check); raw bytes so a first
     # path's leading whitespace survives (run() strips)
     changed: set[str] = set()
@@ -720,6 +724,53 @@ def _scope_check(node: Node, bounds: Scope) -> None:
         raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
         listing = os.fsdecode(raw)
         changed.update(filter(None, listing.split('\0')))
+    return changed
+
+
+def _baseline_check(node: Node, bounds: Scope) -> None:
+    """Refuse a ``--init`` baseline carrying more than the node's own seed.
+
+    The baseline skips the wiki refresh and the lint, so it carries only
+    fractal's setup: the node's data dir and init's worktree-root
+    ``.gitattributes`` edit. Project content -- material copied into the
+    node's tree included -- takes an ordinary commit, which lints it.
+
+    Args:
+        node: The node whose worktree to check.
+        bounds: The node's commit boundaries.
+
+    Raises:
+        RuntimeError: Naming the node's data dir and the offending paths.
+
+    """
+    seed = f'{bounds.fractal_prefix}/{node.branch}/'
+    attributes_ok = _attributes_is_init_edit(node)
+    offending = sorted(
+        path
+        for path in _changed_paths(node)
+        if not path.startswith(seed)
+        and not (path == '.gitattributes' and attributes_ok)
+    )
+    if offending:
+        listing = '\n'.join(offending)
+        raise RuntimeError(
+            f'The --init baseline commits only the node seed ({seed}) and skips'
+            f' the lint; commit these with an ordinary fractal commit:\n{listing}'
+        )
+
+
+def _scope_check(node: Node, bounds: Scope) -> None:
+    """Refuse changes outside the node's commit scopes.
+
+    Args:
+        node: The node whose worktree to check.
+        bounds: The node's commit boundaries.
+
+    Raises:
+        RuntimeError: Naming every scope root and the offending paths.
+
+    """
+    changed = _changed_paths(node)
     attributes_ok = _attributes_is_init_edit(node)
     offending = out_of_scope(changed, bounds, attributes_ok=attributes_ok)
     if offending:
