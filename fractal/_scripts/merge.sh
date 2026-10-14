@@ -860,8 +860,9 @@ fi
 
 # ------ wiki refresh
 
-# the _index.md merge driver keeps ours per link block, dropping the merged
-# branch's rows, so regenerate each tracked wiki's indexes from the merged
+# the _index.md merge driver keeps both sides' link rows -- the merged branch's
+# appended unsorted, a row one side deleted kept -- and leaves the order to the
+# next wiki update, so regenerate each tracked wiki's indexes from the merged
 # filesystem and stage the refreshed bytes to ride the squash commit (an
 # untracked wiki -- the git-excluded default seed -- carries no merge changes,
 # and adding it would fail); the add is scoped to what the refresh owns --
@@ -911,6 +912,57 @@ if command -v wiki &>/dev/null; then
                 "after merging $BRANCH failed"
         fi
     done
+    # every other wiki root (a folder declaring a tracked .wiki/settings.json,
+    # outside node machinery) regenerates only the indexes the driver merged --
+    # changed on both sides since the merge base; one the parent left alone
+    # arrives as the node committed it -- each by a refresh scoped to its
+    # folder (the whole root for the root's own index), so an index outside
+    # those folders keeps its bytes; an index belongs to the deepest root above
+    # it, and a failed listing fails closed
+    if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z -- ':(glob)**/.wiki/settings.json' \
+        ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-roots" \
+        || ! git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
+            --diff-filter=d HEAD -- ':(glob)**/_index.md' \
+            ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-indexes"; then
+        fail_target "listing the wiki indexes of $BRANCH's squash failed"
+    fi
+    ROOTS=()
+    while IFS= read -r -d '' SETTINGS; do
+        ROOT=${SETTINGS%.wiki/settings.json}
+        ROOTS+=("${ROOT%/}")
+    done <"$TMP_DIR/wiki-roots"
+    MERGE_BASE=$(git -C "$PARENT_WORKTREE_DIR" merge-base HEAD "$BRANCH" 2>/dev/null || true)
+    while IFS= read -r -d '' INDEX; do
+        FOLDER=${INDEX%_index.md}
+        FOLDER=${FOLDER%/}
+        OWNER=""
+        FOUND=false
+        for ROOT in ${ROOTS[@]+"${ROOTS[@]}"}; do
+            if [[ -z "$ROOT" || "$FOLDER" == "$ROOT" || "$FOLDER" == "$ROOT"/* ]] \
+                && { [[ "$FOUND" != true ]] || [[ ${#ROOT} -gt ${#OWNER} ]]; }; then
+                OWNER=$ROOT
+                FOUND=true
+            fi
+        done
+        [[ "$FOUND" == true ]] || continue
+        ROOT_DIR="$PARENT_WORKTREE_DIR${OWNER:+/$OWNER}"
+        FOLDER_DIR="$PARENT_WORKTREE_DIR${FOLDER:+/$FOLDER}"
+        # the project wiki and the memory wiki were refreshed whole above
+        [[ "$FOLDER_DIR/" != "${WIKI_DIR%/}/"* && "$FOLDER_DIR/" != "${MEMORY_DIR%/}/"* ]] || continue
+        # an index the parent left alone since the merge base is the node's own
+        if [[ -n "$MERGE_BASE" ]] \
+            && git -C "$PARENT_WORKTREE_DIR" diff --quiet "$MERGE_BASE" HEAD -- "$INDEX"; then
+            continue
+        fi
+        SUBTREE=${FOLDER#"$OWNER"}
+        SUBTREE=${SUBTREE#/}
+        if ! wiki update --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} >/dev/null \
+            || ! git -C "$PARENT_WORKTREE_DIR" add -u -- "$FOLDER_DIR" \
+            || ! git -C "$PARENT_WORKTREE_DIR" add -- ":(glob)$FOLDER_DIR/**/_index.md"; then
+            fail_target "refreshing the wiki indexes under $FOLDER_DIR" \
+                "after merging $BRANCH failed"
+        fi
+    done <"$TMP_DIR/wiki-indexes"
 fi
 
 # ------ commit and advance
