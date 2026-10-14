@@ -53,17 +53,19 @@ Run-scoped variables have no static derivation -- the caller supplies them as
 overrides, and overrides always win over the derived map. The loop passes its
 live state: `STEP_LABEL`, `ITER_LABEL`, `ITER_TIMESTAMP`, `ITER_REF`,
 `TIME_BUDGET`, `COST_BUDGET`, and the run-scoped mode flags (`CONTINUE_MODE`,
-`RESUME_MODE`, `RESERVE_MODE`). A chat renders the same templates with an
-explicit `N/A (chat)` sentinel for the label and budget fields -- a clear marker
-rather than a blank or stale value -- and `false` for the run-scoped mode flags,
-so no run-only mode document ever joins a chat prompt.
+`RESUME_MODE`, `RESERVE_MODE`, and `DRAIN_MODE`, which is `true` for a drain
+run, launched with `--drain` or carrying the drain signal across a resume). A
+chat renders the same templates with an explicit `N/A (chat)` sentinel for the
+label and budget fields -- a clear marker rather than a blank or stale value --
+and `false` for the run-scoped mode flags, so no run-only mode document ever
+joins a chat prompt.
 
 ## Modes
 
 Mode documents live in `fractal/_node/modes/`. A mode `<NAME>.md` joins the
 prompt exactly when `<NAME>_MODE` is `true` in the merged map: the static modes
 (detached, meta) derive from config, the run-scoped modes (continue, resume,
-reserve) ride in on the loop's overrides. `SYNC.md` never joins the assembly --
-sync runs as its own step. Chat turns are framed separately: the chat mode
-document, preceded by the `NODE.md` charter only for a fresh chat (a forked chat
-already carries the node's context).
+reserve, drain) ride in on the loop's overrides. `SYNC.md` never joins the
+assembly -- sync runs as its own step. Chat turns are framed separately: the
+chat mode document, preceded by the `NODE.md` charter only for a fresh chat (a
+forked chat already carries the node's context).

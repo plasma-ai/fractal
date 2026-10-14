@@ -73,12 +73,17 @@ invocation. The frontmatter is stripped before the step body enters the prompt.
 ## The SYNC pass
 
 When sync mode is enabled, the loop runs a SYNC pass as a pseudo-step before
-every numbered step, labelled with the step it precedes; its prompt is the
-installed package's own `SYNC.md` mode document, never a per-node copy. A failed
-SYNC is non-fatal — the loop notes it and continues into the step — but a SYNC
-that times out fails the iteration: the loop force-commits the work in progress
-and closes the iteration as timed out. A pause landing during SYNC parks the
-node before the step's own agent ever launches.
+every numbered step, labelled with the step it precedes. SYNC is assembled like
+any step: its prompt is the `NODE.md` charter, then the body of the installed
+package's own `SYNC.md` mode document (never a per-node copy), then any active
+modes. SYNC also runs on each poll timeout while the loop waits for children to
+finish (only while an iteration is live) and while a step waits for operator
+approval; each pass gets its own step row, and these waiting passes record any
+outcome but a pause as completed. A failed before-step SYNC is non-fatal — the
+loop notes it and continues into the step — but a SYNC that times out fails the
+iteration: the loop force-commits the work in progress and closes the iteration
+as timed out. A pause landing during SYNC parks the node before the step's own
+agent ever launches.
 
 ## Checkpoints between steps
 
