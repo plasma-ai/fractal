@@ -60,6 +60,12 @@ jobs:
         run: uv build shim --out-dir dist
       - name: Check distribution metadata
         run: uvx twine check dist/*
+      - name: Check wheel contains node seed
+        run: |
+          listing=$(unzip -l dist/plasma_fractal-*.whl)
+          for path in fractal/_node/NODE.md fractal/_node/steps/ fractal/_scripts/ fractal/_assets/git/exclude fractal/core/schema.sql fractal/tui/app.tcss fractal/skills/; do
+            grep -qF "$path" <<< "$listing" || { echo "::error::wheel lacks $path"; exit 1; }
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: dist
