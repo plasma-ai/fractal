@@ -27,12 +27,13 @@ import fractal.util.process
 __all__ = [
     'test_reap_takes_every_group_in_the_tree',
     'test_reap_spares_the_caller_lineage',
+    'test_reap_keeps_sparing_the_caller_lineage_when_ps_fails',
 ]
 
 # the tree script: argv is <dir> <token> <role>; every process records its
 # pid as <dir>/<role>.pid once it is set up, then sleeps until signaled
 _TREE = """
-import json, os, signal, subprocess, sys, time
+import json, os, pathlib, signal, subprocess, sys, time
 
 directory, token, role = sys.argv[1:4]
 
@@ -53,12 +54,20 @@ def wait_for(name):
 
 if role == 'leader':
     # the shapes an agent's tool commands take: a group of its own, a
-    # session of its own, a group that ignores TERM, and a group that forks
-    # a new group as it dies
+    # session of its own, a group that ignores TERM, a group that forks a
+    # new group as it dies, and an orphan whose parent already exited
     spawn('group', process_group=0)
     spawn('session', start_new_session=True)
     spawn('stubborn', process_group=0)
     spawn('forker', process_group=0)
+    spawn('orphaner')
+elif role == 'orphaner':
+    # double fork: the grandchild takes a group of its own and is
+    # reparented once this process exits, so only the session links it
+    if os.fork():
+        os._exit(0)
+    os.setpgid(0, 0)
+    role = 'orphan'
 elif role == 'stubborn':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 elif role == 'forker':
@@ -77,16 +86,34 @@ elif role == 'late':
     signal.signal(signal.SIGTERM, on_term)
     record()
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
-elif role == 'host':
-    # a sibling tool group, then a caller in the host's own group that
-    # reaps the host's tree from inside it
+elif role in ('host', 'blind_host'):
+    # a sibling tool group, then a caller in a group of its own that reaps
+    # the host's tree from inside it -- only the ancestor rule spares the
+    # host's group
     spawn('sibling', process_group=0)
     wait_for('sibling')
-    spawn('caller').wait()
-elif role == 'caller':
+    caller = 'caller' if role == 'host' else 'blind_caller'
+    spawn(caller, process_group=0).wait()
+elif role in ('caller', 'blind_caller'):
     import fractal.util.process
 
-    reaped = fractal.util.process.reap([os.getpgrp()], grace=1.0)
+    if role == 'blind_caller':
+        # ps answers the first snapshot only, then vanishes
+        real = fractal.util.process.snapshot
+        calls = []
+
+        def snapshot():
+            calls.append(None)
+            if len(calls) > 1:
+                raise OSError('ps vanished')
+            return real()
+
+        fractal.util.process.snapshot = snapshot
+    reaped = fractal.util.process.reap(
+        [os.getsid(0)],
+        grace=1.0,
+        mark=pathlib.Path(f'{directory}/abort.mark'),
+    )
     survivors = [process.pid for process in reaped.survivors]
     with open(f'{directory}/caller.json', 'w') as handle:
         json.dump(survivors, handle)
@@ -143,14 +170,15 @@ def test_reap_takes_every_group_in_the_tree(
 ) -> None:
     """Every group the tree holds dies, however its member left the leader.
 
-    A child in its own group is found by session, a ``setsid`` child by
-    parentage (walked before any signal kills its parent), a group forked
+    A child in its own group is found by session, an orphan in its own
+    group whose parent already exited by session alone, a ``setsid`` child
+    by parentage (walked before any signal kills its parent), a group forked
     after the first TERM by the re-walk -- which TERMs it, so it gets a
     graceful shutdown -- and a TERM-ignoring group draws the KILL once
     the grace runs out. Nothing survives to be named.
     """
     leader = tree('leader')
-    roles = ['leader', 'group', 'session', 'stubborn', 'forker']
+    roles = ['leader', 'group', 'session', 'stubborn', 'forker', 'orphan']
     pids = _await_pids(tmp_path, roles)
     start = time.monotonic()
     reaped = fractal.util.process.reap([leader.pid], grace=_GRACE)
@@ -171,9 +199,10 @@ def test_reap_spares_the_caller_lineage(
 ) -> None:
     """A reap run from inside the tree never signals its own lineage.
 
-    The caller sits in the host's group, so both its own group and its
-    parent's are off-limits: the sibling group dies, the host lives, and
-    the caller finishes its reap and reports no survivors.
+    The caller sits in a group of its own under the host, so only the
+    ancestor rule keeps the host's group off-limits: the sibling group
+    dies, the host lives unmarked, and the caller finishes its reap and
+    reports no survivors.
     """
     host = tree('host')
     pids = _await_pids(tmp_path, ['host', 'sibling'])
@@ -187,6 +216,29 @@ def test_reap_spares_the_caller_lineage(
     assert _alive([sibling_pid]) == []
     assert _alive([host_pid]) == [host_pid]
     assert host.poll() is None
+    assert not (tmp_path / 'abort.mark').exists()
+
+
+def test_reap_keeps_sparing_the_caller_lineage_when_ps_fails(
+    tree: Callable[[str], subprocess.Popen],
+    tmp_path: pathlib.Path,
+) -> None:
+    """A process table that vanishes mid-reap never turns on the caller.
+
+    ``ps`` answers the first snapshot only. The reap keeps signaling the
+    groups it already knows, minus the caller's lineage, instead of falling
+    back to the bare root group -- which is the caller's ancestor's: the
+    sibling dies, and the host lives unmarked.
+    """
+    host = tree('blind_host')
+    pids = _await_pids(tmp_path, ['blind_host', 'sibling'])
+    report = tmp_path / 'caller.json'
+    assert report.exists(), 'the caller never finished its reap'
+    host_pid, sibling_pid = pids
+    assert _alive([sibling_pid]) == []
+    assert _alive([host_pid]) == [host_pid]
+    assert host.poll() is None
+    assert not (tmp_path / 'abort.mark').exists()
 
 
 # ------ helpers

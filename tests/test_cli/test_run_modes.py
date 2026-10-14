@@ -102,7 +102,8 @@ __all__ = [
     'test_pause_with_pending_finish_still_finishes_the_iteration',
     'test_abort_reaps_the_agents_tool_groups',
     'test_pause_names_a_worktree_stray_and_leaves_it_running',
-    'test_pause_spares_another_nodes_loop_group',
+    'test_abort_spares_another_nodes_loop_group',
+    'test_pause_reaps_past_a_broken_sibling',
     'test_self_pause_finishes_the_step_unmarked',
     'test_pause_abort_marker_alone_parks_the_step',
     'test_tree_latch_parks_a_booting_loop',
@@ -285,9 +286,11 @@ time.sleep(600)
         while [[ ! -s "$CAPTURE_DIR/tool_$ROLE.pid" ]]; do sleep 0.05; done
     done
     # a prompt carrying SELF-PAUSE pauses the stub's own node from inside the
-    # step's process tree, the way an agent's tool would, recording the exit
+    # step's process tree, in a process group of its own the way an agent's
+    # tool command runs, recording the exit
     if [[ "$PROMPT" == *SELF-PAUSE* ]]; then
-        fractal node pause --reason self >"$CAPTURE_DIR/self_pause.out" 2>&1
+        python3 -c 'import os, sys; os.setpgid(0, 0); os.execvp(sys.argv[1], sys.argv[1:])' \
+            fractal node pause --reason self >"$CAPTURE_DIR/self_pause.out" 2>&1
         echo "$?" >"$CAPTURE_DIR/self_pause.rc"
     fi
     # a prompt carrying USAGE-THEN-HANG emits one usage-bearing frame and hangs
@@ -1193,13 +1196,14 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
     assert alive == [daemon]
 
 
-def test_pause_spares_another_nodes_loop_group(repo: dict) -> None:
-    """A pause never reaps a group another node records as its loop.
+@pytest.mark.parametrize('verb', ['pause', 'kill'])
+def test_abort_spares_another_nodes_loop_group(repo: dict, verb: str) -> None:
+    """Pause and kill never reap a group another node records as its loop.
 
     A node the agent launches stays a child of the agent's tool until its
     launcher returns, so a walk from the agent reaches its loop. The stub
     starts a ``setsid``'d sleeper standing in for that loop, recorded in a
-    sibling node's ``.pgid``, beside the plain tool sleepers: the pause
+    sibling node's ``.pgid``, beside the plain tool sleepers: the verb
     reaps the tools, spares the loop, and names the spared group.
     """
     steps = {
@@ -1208,19 +1212,20 @@ def test_pause_spares_another_nodes_loop_group(repo: dict) -> None:
         ),
         '02-commit.md': '# Commit\n\nCommit step.\n',
     }
-    node = _make_node(repo, 'reapspare', detached=False, sync=False, steps=steps)
-    sibling = _make_node(repo, 'reapsparekid', detached=False, sync=False)
+    node = _make_node(repo, f'spare{verb}', detached=False, sync=False, steps=steps)
+    sibling = _make_node(repo, f'spare{verb}kid', detached=False, sync=False)
     worktree = node['worktree']
     record = sibling['node_dir'] / '.pgid'
 
-    proc, capture, log = _launch_finish_wait(repo, node, capture_name='reap_spare')
+    capture_name = f'reap_spare_{verb}'
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name=capture_name)
     try:
         assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
         # role order: group, loop, session
         group, loop, session = _tool_pids(capture)
         record.write_text(f'{loop}\n', encoding='utf-8')
-        pause = _run(worktree, 'node', 'pause', '--reason', 'spare')
-        assert pause.returncode == 0, pause.stderr
+        abort = _run(worktree, 'node', verb, '--reason', 'spare')
+        assert abort.returncode == 0, abort.stderr
         proc.wait(timeout=60)
         alive = _alive_pids([group, loop, session])
     finally:
@@ -1229,7 +1234,42 @@ def test_pause_spares_another_nodes_loop_group(repo: dict) -> None:
         _kill_tools(capture)
 
     assert alive == [loop], (alive, group, loop, session)
-    assert f'spared process group {loop}' in pause.stderr, pause.stderr
+    assert f'spared process group {loop}' in abort.stderr, abort.stderr
+
+
+def test_pause_reaps_past_a_broken_sibling(repo: dict) -> None:
+    """A sibling node git cannot resolve never stops the reap.
+
+    The spared-group records are found by path from the registry alone, so
+    a sibling whose worktree no longer resolves (its ``.git`` link points
+    nowhere) is skipped, not fatal: the pause still reaps the tools.
+    """
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'reapbroken', detached=False, sync=False, steps=steps)
+    sibling = _make_node(repo, 'reapbrokenkid', detached=False, sync=False)
+    worktree = node['worktree']
+    link = sibling['worktree'] / '.git'
+    saved = link.read_text(encoding='utf-8')
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='reap_broken')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        tools = _tool_pids(capture)
+        assert len(tools) == 2, tools
+        link.write_text('gitdir: /nonexistent\n', encoding='utf-8')
+        pause = _run(worktree, 'node', 'pause', '--reason', 'broken')
+        assert pause.returncode == 0, pause.stderr
+        proc.wait(timeout=60)
+        alive = _alive_pids(tools)
+    finally:
+        link.write_text(saved, encoding='utf-8')
+        _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    assert alive == [], (alive, tools, pause.stderr)
 
 
 def test_self_pause_finishes_the_step_unmarked(repo: dict) -> None:
@@ -1278,13 +1318,19 @@ def test_self_pause_finishes_the_step_unmarked(repo: dict) -> None:
 
 
 def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
-    """The abort marker lands before the reap's signal and alone parks the step.
+    """The reap marks the abort before its signal, and the mark alone parks the step.
 
     With no pause signal at all -- the shape a resume withdrawing the signal
-    mid-abort leaves -- the real ``pause.sh`` still marks the abort before
-    the agent dies, so the loop records the step paused, never failed.
+    mid-abort leaves -- the real ``pause.sh`` hands the marker to the reap,
+    which touches it before the agent dies, so the loop records the step
+    paused, never failed. The tool sleepers dying proves the reap ran (the
+    group-only fallback, which marks on its own, never reaches them).
     """
-    node = _make_node(repo, 'markpause', detached=False, sync=False, steps=_GATE_STEPS)
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'markpause', detached=False, sync=False, steps=steps)
     worktree = node['worktree']
 
     proc, capture, log = _launch_finish_wait(repo, node, capture_name='mark_pause')
@@ -1297,10 +1343,13 @@ def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
             text=True,
         )
         assert abort.returncode == 0, abort.stderr
+        tools = _tool_pids(capture)
+        alive = _alive_pids(tools)
     finally:
         # an unmarked abort fails the step and re-enters the gate, so the
         # launch never exits -- the step rows below name the failure
         _, result = _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
 
     steps_rows = (
         _run(
@@ -1314,6 +1363,8 @@ def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
         .stdout.strip()
         .splitlines()[1:]
     )
+    assert len(tools) == 2, tools
+    assert alive == [], (alive, tools)
     assert steps_rows == ['1,paused'], (steps_rows, result.stdout)
     assert result.returncode == 0, result.stdout
 

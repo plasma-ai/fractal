@@ -1651,7 +1651,7 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         directory -- reported, never signaled.
         """
         worktree_dir = pathlib.Path(worktree) if worktree else None
-        spare = resolve_node(worktree).loop_records() if worktree else []
+        spare = resolve_node(worktree).loop_records if worktree else tuple
         mark = pathlib.Path(abort_marker) if abort_marker else None
         reaped = fractal.util.process.reap(
             pgid,

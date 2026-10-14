@@ -111,7 +111,9 @@ A walk down parent links from the leader and every member then catches tools
 that left the session while their parent is alive, and any session a member
 leads joins the match. The helper TERMs every member group, re-walks, and TERMs
 any group the walk newly finds, for up to five rounds; it waits out the grace
-(five seconds from the scripts, the loop's own grace for a deadline) while still
+(five seconds from the scripts, the loop's own grace for a deadline, two seconds
+when the stream reader dies — enough for a tool's `git commit` to drop
+`.git/index.lock` before the force-commit backstop needs it) while still
 signaling late groups, then KILLs every group with a live member the same way.
 Members still alive after that are named on stderr, which `Node` relays as
 warnings — the survivors on the pause or kill output, and a `Warning:` line in
@@ -131,10 +133,14 @@ Pause and kill also pass the node's worktree for a report-only sweep: each
 process outside the tree whose working directory lies in the worktree is named
 on stderr as left running and never signaled. A double-forked daemon that left
 the session after its parent exited cannot be tied to the invocation, so the
-sweep is how the operator learns of it. The sweep reads `lsof` on macOS and
-`/proc/<pid>/cwd` on Linux, and it skips the caller and its ancestors (an
-operator may run `fractal pause` from a shell in the worktree) and the processes
-the tree hangs from (the loop and its parents).
+sweep is how the operator learns of it. The same holds for the one process the
+walk cannot reach: an orphan from an earlier tool call whose own session's
+leader has exited (`validate.sh &` under a `setsid` shell that already returned)
+sits in no member's session and under no member, so the sweep names it and
+leaves it running. The sweep reads `lsof` on macOS and `/proc/<pid>/cwd` on
+Linux, and it skips the caller and its ancestors (an operator may run
+`fractal pause` from a shell in the worktree) and the processes the tree hangs
+from (the loop and its parents).
 
 Four rails bound the reap. It never signals pid 0 or 1, the caller's own group,
 or the group of any of the caller's ancestors — so an agent that pauses its own
@@ -144,12 +150,17 @@ one: a node the agent launches (`fractal node start` runs the child's loop in a
 new session) stays a child of the agent's tool until its launcher returns, so
 the reap spares every group recorded in another registered node's `.pgid`,
 everything in a session one of its processes leads, and everything below it, and
-names each spared group it reached. The records are re-read before every signal
+names each spared group it reached. The record list comes from the registry by
+path alone (no git, so a sibling whose worktree no longer resolves is skipped,
+never fatal), and both the list and the records are rebuilt before every signal
 round, so a launch that lands mid-reap is honored. It signals only groups found
-through the recorded group's session or tree. And when the process table cannot
-be read, it falls back to signaling the recorded groups alone; when
-`fractal node _reap` itself cannot run, `pause.sh` and `kill.sh` fall back to
-their own group-only teardown, so a helper failure never fails the pause or
+through the recorded group's session or tree. And when the first process table
+cannot be read, it falls back to signaling the recorded groups alone (minus the
+caller's own); when a later read fails, it keeps signaling the groups it already
+knows, minus the protected and spared ones, probing them by signal instead of
+re-walking; the loop falls back to a plain group KILL if the reap itself breaks;
+when `fractal node _reap` itself cannot run, `pause.sh` and `kill.sh` fall back
+to their own group-only teardown, so a helper failure never fails the pause or
 kill.
 
 ## Launch environment

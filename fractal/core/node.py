@@ -817,24 +817,33 @@ class Node:
         launcher returns, so a walk from the agent would otherwise take a
         healthy loop at boot. Paths, not ids -- the reap re-reads them
         before every signal round, catching a record written mid-reap.
-        Best-effort: an unreadable registry answers none.
+        Pure path arithmetic from each registry row's branch (no git), and
+        never raises: the reap runs on a deadline thread and inside pause,
+        so an unreadable registry answers none and an unreadable entry is
+        skipped.
 
         Returns:
-            The ``.pgid`` record path of each registered node with a live
-            worktree, this node's own excluded.
+            The ``.pgid`` record path of each registered node, this node's
+            own excluded.
 
         """
+        result: list[pathlib.Path] = []
         try:
+            repo_dir = self.repo_dir
+            own = self.branch
             rows = self.db.read(query='SELECT node FROM nodes')
+            for row in rows:
+                branch = row['node']
+                if branch == own:
+                    continue
+                try:
+                    project = worktree.project_path(repo_dir, branch)
+                except OSError:
+                    continue
+                worktree_dir = repo_dir / WORKTREES_FOLDER / branch
+                result.append(node_dir(worktree_dir, project, branch) / PGID_FILE)
         except Exception:
-            return []
-        worktrees = fractal.util.git.worktree_map(self.repo_dir)
-        result = []
-        for row in rows:
-            worktree_dir = worktrees.get(row['node'])
-            if row['node'] == self.branch or worktree_dir is None:
-                continue
-            result.append(self.__class__(worktree_dir).node_dir / PGID_FILE)
+            return result
         return result
 
     @classmethod

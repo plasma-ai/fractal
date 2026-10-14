@@ -9,7 +9,7 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import Optional
 
 __all__ = []
@@ -103,7 +103,7 @@ def reap(
     *,
     grace: float = GRACE_SECONDS,
     worktree: Optional[pathlib.Path] = None,
-    spare: Collection[pathlib.Path] = (),
+    spare: Callable[[], Collection[pathlib.Path]] = tuple,
     mark: Optional[pathlib.Path] = None,
 ) -> Reaped:
     """TERM, then KILL, every process group an invocation's tree holds.
@@ -125,19 +125,28 @@ def reap(
     the caller's ancestors -- an agent pausing its own node keeps the
     groups it runs in. Never signals a group recorded in a ``spare`` file,
     nor walks through one: everything in it, in a session one of its
-    processes leads, or below one of its processes is left alone. The
-    files are re-read before every signal round, so a record written
-    mid-reap (a node launch the tree spawned) is honored. When the process
-    table cannot be read, signals the root groups alone with the same
-    grace and names nothing.
+    processes leads, or below one of its processes is left alone. The file
+    list and the files are re-read before every signal round, so a record
+    written mid-reap (a node launch the tree spawned) is honored. When the
+    first snapshot fails, signals the root groups alone (minus the
+    caller's) with the same grace and names nothing; when a later one
+    fails, keeps signaling the groups already known, minus the protected
+    and spared ones, probing them by signal instead of re-walking.
+
+    One process escapes: an orphan from an earlier tool call whose own
+    session's leader has exited (``validate.sh &`` under a ``setsid``
+    shell that already returned) is in no member's session and has no
+    member parent, so nothing links it to the tree; the ``worktree`` sweep
+    names it and leaves it running.
 
     Args:
         roots: Recorded process group ids (each its leader's pid).
         grace: Seconds between the TERM and KILL passes.
         worktree: Also report processes outside the tree whose working
             directory lies inside this directory.
-        spare: Files each recording a process group id to spare (a missing
-            or unreadable file spares nothing).
+        spare: Returns the files each recording a process group id to
+            spare (a missing or unreadable file spares nothing); called
+            before every signal round.
         mark: File to touch just before the first signal to a root group;
             left alone when every root group is protected or spared.
 
@@ -148,33 +157,32 @@ def reap(
     """
     roots = frozenset(root for root in roots if root > 1)
     try:
-        return _reap(roots, grace=grace, worktree=worktree, spare=spare, mark=mark)
+        tree = _Tree(roots, spare, mark)
     except (OSError, subprocess.SubprocessError):
         _reap_groups(roots, grace=grace, mark=mark)
         return Reaped()
+    return _reap(tree, grace=grace, worktree=worktree)
 
 
 # ------ helper functions
 
 
 def _reap(
-    roots: frozenset[int],
+    tree: _Tree,
     *,
     grace: float,
     worktree: Optional[pathlib.Path],
-    spare: Collection[pathlib.Path],
-    mark: Optional[pathlib.Path],
 ) -> Reaped:
-    """Run :func:`reap` over a readable process table."""
-    tree = _Tree(roots, spare, mark)
+    """Run :func:`reap` over a tree whose first snapshot was read."""
     # TERM pass, then the KILL pass over every group still alive
     if grace > 0:
         tree.signal_pass(signal.SIGTERM, wait=grace)
     tree.signal_pass(signal.SIGKILL, wait=SETTLE_SECONDS)
+    live = tree.live()
     survivors = tuple(
         tree.table[pid]
         for pid in sorted(tree.members)
-        if not tree.table[pid].zombie and tree.members[pid] not in tree.protected
+        if not tree.table[pid].zombie and tree.members[pid] in live
     )
     strays: tuple[Process, ...] = ()
     if worktree is not None:
@@ -194,15 +202,18 @@ class _Tree:
     def __init__(
         self: _Tree,
         roots: frozenset[int],
-        spare: Collection[pathlib.Path],
+        spare: Callable[[], Collection[pathlib.Path]],
         mark: Optional[pathlib.Path],
     ) -> None:
         """Initialize ``_Tree`` with its first walk (before any signal)."""
         self.roots = roots
         self.spare = spare
         self.mark = mark
-        self.spared = _read_groups(spare)
+        self.spared = _read_groups(spare())
         self.stopped: set[int] = set()
+        # a later snapshot failure blinds the tree: no re-walks, liveness by
+        # signal probe
+        self.blind = False
         self.table = snapshot()
         self.members: dict[int, int] = {}
         self.walk()
@@ -234,14 +245,20 @@ class _Tree:
 
     def refresh(self: _Tree) -> None:
         """Take a fresh snapshot and re-walk the tree from the known members."""
-        self.spared = _read_groups(self.spare)
-        self.table = snapshot()
+        self.spared = _read_groups(self.spare())
+        if self.blind:
+            return
+        try:
+            self.table = snapshot()
+        except (OSError, subprocess.SubprocessError):
+            self.blind = True
+            return
         self.walk()
         self.seen.update(self.members)
 
     def respare(self: _Tree) -> None:
         """Re-read the spared groups, re-walking when the set changed."""
-        spared = _read_groups(self.spare)
+        spared = _read_groups(self.spare())
         if spared != self.spared:
             self.spared = spared
             self.walk()
@@ -251,6 +268,8 @@ class _Tree:
         groups = {
             pgid for pid, pgid in self.members.items() if not self.table[pid].zombie
         }
+        if self.blind:
+            groups = {group for group in groups if _group_alive(group)}
         return groups - self.protected - self.spared
 
     def signal(self: _Tree, groups: set[int], sig: signal.Signals) -> None:
