@@ -52,13 +52,21 @@ after that update.
 Either way, `fractal node merge` runs `wiki update` on the squash before
 committing: the project wiki and the memory wiki whole, and in every other wiki
 root — a folder declaring a tracked `.wiki/settings.json`, such as a corpus
-beside the project wiki — each index changed on both sides since the merge base,
-through an update scoped to its folder (the whole root for the root's own
-index), so indexes outside those folders keep their bytes. The update reads the
-disk, so the merge refuses an untracked file under the project wiki or in a
-folder it refreshes, naming it: indexed into the squash commit, it would dangle
-in every clean checkout. The memory wiki is the merging node's own, and its next
-commit lands what it holds.
+beside the project wiki — each index the driver merged, whose staged bytes match
+neither side's, through an update scoped to its folder (the whole root for the
+root's own index), so indexes outside those folders keep their bytes. The bytes,
+not the merge base, mark a merged index, so a criss-cross history, where git
+names one of two bases, hides none. An index belongs to the deepest declared
+root above it, every folder is matched literally, and an index in a folder its
+wiki excludes is skipped, as the wiki's own walk skips it.
+
+The update reads the disk, so the merge refuses an untracked file under the
+project wiki or in a folder it refreshes, naming it: indexed into the squash
+commit, it would dangle in every clean checkout. The memory wiki is the merging
+node's own, and its next commit lands what it holds. A wiki declared at the
+worktree root refuses the merge outright: it encloses every folder, so each
+refresh would walk the whole worktree, and node init refuses to spawn under one
+for the same reason.
 
 ## The parent's reconciliation job
 
