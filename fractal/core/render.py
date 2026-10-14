@@ -245,10 +245,11 @@ def variables(node: Node, overrides: Optional[dict[str, str]] = None) -> dict[st
         scope_dir = ' '.join(f'{project_dir / root}' for root in scope)
     else:
         scope_dir = ''
-    # alias config limits and modes
-    max_depth = node.config.get('max_depth', -1)
-    max_children = node.config.get('max_children', -1)
-    max_descendants = node.config.get('max_descendants', -1)
+    # alias config limits (an unset cap is unlimited, rendered -1) and modes
+    max_depth, max_children, max_descendants = (
+        -1 if (limit := node.config.get(key)) is None else limit
+        for key in ('max_depth', 'max_children', 'max_descendants')
+    )
     detached = node.config.get('detached', False)
     meta = node.config.get('meta') or ''
     # merge the static map under the caller's overrides
