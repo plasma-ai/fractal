@@ -900,17 +900,31 @@ if command -v wiki &>/dev/null; then
             WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/${PARENT_WIKI:-wiki}"
         fi
     fi
+    # a wiki declared at the worktree root encloses every folder, so each
+    # refresh below would walk the whole worktree and write past the squash;
+    # node init refuses to spawn under one, and the merge refuses it too
+    if ! ROOT_DECLARED=$(git -C "$PARENT_WORKTREE_DIR" ls-files -- ':(literal).wiki/settings.json'); then
+        fail_target "reading the wiki declarations of $BRANCH's squash failed"
+    fi
+    if [[ -n "$ROOT_DECLARED" ]]; then
+        fail_target "the worktree root declares a wiki (.wiki/settings.json), which" \
+            "every wiki refresh would walk whole; declare the wiki in a folder instead" \
+            "and merge again"
+    fi
     for INDEX_DIR in "$WIKI_DIR" "$MEMORY_DIR"; do
+        # every pathspec names the folder literally, so a glob character in a
+        # folder name never matches a sibling
+        INDEX_REL=${INDEX_DIR#"$PARENT_WORKTREE_DIR"/}
         # guarded: a set -e exit from a failed ls-files would strand the
         # staged squash without the restore below
-        if ! TRACKED=$(git -C "$PARENT_WORKTREE_DIR" ls-files -- "$INDEX_DIR/_index.md"); then
+        if ! TRACKED=$(git -C "$PARENT_WORKTREE_DIR" ls-files -- ":(literal)$INDEX_REL/_index.md"); then
             fail_target "reading the tracked wiki index under $INDEX_DIR" \
                 "after merging $BRANCH failed"
         fi
         [[ -n "$TRACKED" ]] || continue
         if [[ "$INDEX_DIR" == "$WIKI_DIR" ]]; then
             if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
-                -- "$INDEX_DIR" >"$TMP_DIR/wiki-strays"; then
+                -- ":(literal)$INDEX_REL" >"$TMP_DIR/wiki-strays"; then
                 fail_target "listing the untracked files under $INDEX_DIR failed"
             fi
             if [[ -s "$TMP_DIR/wiki-strays" ]]; then
@@ -921,21 +935,29 @@ if command -v wiki &>/dev/null; then
             fi
         fi
         if ! wiki update --path="$INDEX_DIR" >/dev/null \
-            || ! git -C "$PARENT_WORKTREE_DIR" add -u -- "$INDEX_DIR" \
-            || ! git -C "$PARENT_WORKTREE_DIR" add -- \
-                ":(glob)$INDEX_DIR/**/_index.md" "$INDEX_DIR/.wiki"; then
+            || ! git -C "$PARENT_WORKTREE_DIR" add -u -- ":(literal)$INDEX_REL" \
+            || ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
+                -- ":(literal)$INDEX_REL" >"$TMP_DIR/wiki-created"; then
             fail_target "refreshing the wiki indexes under $INDEX_DIR" \
                 "after merging $BRANCH failed"
         fi
+        # of the untracked files now there, stage the indexes the refresh
+        # created and its tool-owned .wiki/ state
+        while IFS= read -r -d '' CREATED; do
+            [[ "$CREATED" == */_index.md || "$CREATED" == "$INDEX_REL/.wiki/"* ]] || continue
+            git -C "$PARENT_WORKTREE_DIR" add -- ":(literal)$CREATED" \
+                || fail_target "staging $CREATED after merging $BRANCH failed"
+        done <"$TMP_DIR/wiki-created"
     done
     # every other wiki root (a folder declaring a tracked .wiki/settings.json,
     # outside node machinery) regenerates only the indexes the driver merged --
-    # changed on both sides since the merge base; one the parent left alone
-    # arrives as the node committed it -- each by a refresh scoped to its
-    # folder (the whole root for the root's own index), so an index outside
-    # those folders keeps its bytes; an untracked file in a refreshed folder is
-    # refused by name, as under the project wiki; an index belongs to the
-    # deepest root above it, and a failed listing fails closed
+    # staged bytes matching neither side's; one matching the node's arrives as
+    # the node committed it -- each by a refresh scoped to its folder (the
+    # whole root for the root's own index), so an index outside those folders
+    # keeps its bytes; an untracked file in a refreshed folder is refused by
+    # name, as under the project wiki, and an index in a folder its wiki
+    # excludes is skipped, as the wiki's own walk skips it; an index belongs to
+    # the deepest root above it, and a failed listing fails closed
     if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z -- ':(glob)**/.wiki/settings.json' \
         ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-roots" \
         || ! git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
@@ -948,45 +970,52 @@ if command -v wiki &>/dev/null; then
         ROOT=${SETTINGS%.wiki/settings.json}
         ROOTS+=("${ROOT%/}")
     done <"$TMP_DIR/wiki-roots"
-    MERGE_BASE=$(git -C "$PARENT_WORKTREE_DIR" merge-base HEAD "$BRANCH" 2>/dev/null || true)
     while IFS= read -r -d '' INDEX; do
         FOLDER=${INDEX%_index.md}
         FOLDER=${FOLDER%/}
         OWNER=""
-        FOUND=false
         for ROOT in ${ROOTS[@]+"${ROOTS[@]}"}; do
-            if [[ -z "$ROOT" || "$FOLDER" == "$ROOT" || "$FOLDER" == "$ROOT"/* ]] \
-                && { [[ "$FOUND" != true ]] || [[ ${#ROOT} -gt ${#OWNER} ]]; }; then
+            if [[ "$FOLDER" == "$ROOT" || "$FOLDER" == "$ROOT"/* ]] \
+                && [[ ${#ROOT} -gt ${#OWNER} ]]; then
                 OWNER=$ROOT
-                FOUND=true
             fi
         done
-        [[ "$FOUND" == true ]] || continue
-        ROOT_DIR="$PARENT_WORKTREE_DIR${OWNER:+/$OWNER}"
-        FOLDER_DIR="$PARENT_WORKTREE_DIR${FOLDER:+/$FOLDER}"
+        [[ -n "$OWNER" ]] || continue
+        ROOT_DIR="$PARENT_WORKTREE_DIR/$OWNER"
+        FOLDER_DIR="$PARENT_WORKTREE_DIR/$FOLDER"
         # the project wiki and the memory wiki were refreshed whole above
         [[ "$FOLDER_DIR/" != "${WIKI_DIR%/}/"* && "$FOLDER_DIR/" != "${MEMORY_DIR%/}/"* ]] || continue
-        # an index the parent left alone since the merge base is the node's own
-        if [[ -n "$MERGE_BASE" ]] \
-            && git -C "$PARENT_WORKTREE_DIR" diff --quiet "$MERGE_BASE" HEAD -- "$INDEX"; then
-            continue
-        fi
+        # the driver merged the index when its staged bytes match neither side's
+        STAGED=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify ":0:$INDEX" 2>/dev/null || true)
+        OURS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "HEAD:$INDEX" 2>/dev/null || true)
+        THEIRS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "$BRANCH:$INDEX" 2>/dev/null || true)
+        [[ "$STAGED" != "$OURS" && "$STAGED" != "$THEIRS" ]] || continue
+        SUBTREE=${FOLDER#"$OWNER"}
+        SUBTREE=${SUBTREE#/}
         if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
-            -- "$FOLDER_DIR" >"$TMP_DIR/wiki-strays"; then
+            -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-strays"; then
             fail_target "listing the untracked files under $FOLDER_DIR failed"
         fi
         if [[ -s "$TMP_DIR/wiki-strays" ]]; then
+            # a folder its wiki excludes is never refreshed, strays or not
+            wiki update --check --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} \
+                >/dev/null 2>"$TMP_DIR/wiki-err" || true
+            grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err" && continue
             STRAYS=$(tr '\0' '\n' <"$TMP_DIR/wiki-strays")
             fail_target "untracked files under $FOLDER_DIR would be indexed by the" \
                 "squash of $BRANCH: ${STRAYS//$'\n'/, }; commit them or move them" \
                 "aside and merge again"
         fi
-        SUBTREE=${FOLDER#"$OWNER"}
-        SUBTREE=${SUBTREE#/}
-        if ! wiki update --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} >/dev/null \
-            || ! git -C "$PARENT_WORKTREE_DIR" add -u -- "$FOLDER_DIR" \
-            || ! git -C "$PARENT_WORKTREE_DIR" add -- ":(glob)$FOLDER_DIR/**/_index.md"; then
+        if ! wiki update --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} >/dev/null 2>"$TMP_DIR/wiki-err"; then
+            grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err" && continue
+            cat "$TMP_DIR/wiki-err" >&2
             fail_target "refreshing the wiki indexes under $FOLDER_DIR" \
+                "after merging $BRANCH failed"
+        fi
+        # nothing untracked was there before the refresh, so staging the whole
+        # folder stages exactly what it wrote
+        if ! git -C "$PARENT_WORKTREE_DIR" add -A -- ":(literal)$FOLDER"; then
+            fail_target "staging the refreshed wiki indexes under $FOLDER_DIR" \
                 "after merging $BRANCH failed"
         fi
     done <"$TMP_DIR/wiki-indexes"
