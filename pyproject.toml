@@ -265,7 +265,7 @@ asyncio_mode = "auto"
 
 [tool.coverage.run]
 # https://coverage.readthedocs.io/en/latest/config.html#run
-source = ["fractal"]
+source_pkgs = ["fractal"]
 omit = ["*/fractal/tui/*"]
 parallel = true
 disable_warnings = ["no-data-collected"]
