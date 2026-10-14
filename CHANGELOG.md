@@ -102,7 +102,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
-  `None` in its charter and step prompts.
+  `None` in its charter and step prompts and in each step's environment. The
+  charter's advice on resourcing children names the limit flags (`--max-depth`,
+  `--max-children`, `--max-descendants`) instead of rendering the node's own
+  values.
 - `node cost remaining`, `spent`, and `breakdown` refuse a `--run`, `--iter`, or
   `--step` id that is not the target's own: another node's run, iteration, or
   step is refused naming its owner, and an id no row carries is refused as

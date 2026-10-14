@@ -129,8 +129,8 @@ Common commands:
   child exits on budget with its owned work unfinished, decide out loud: raise
   its cap and `--continue` it, or absorb the work -- absorbing a deliverable a
   child owns needs explicit justification. Give children enough resources (e.g.
-  `$MAX_DEPTH`, `$MAX_CHILDREN`, `$MAX_DESCENDANTS`) to be managers themselves
-  when the task warrants it.
+  `--max-depth`, `--max-children`, `--max-descendants`) to be managers
+  themselves when the task warrants it.
 - **Scope.** With a scope set, commits are limited to it (with the exception of
   the shared project wiki (`$WIKI_DIR`), which is always allowed); with no scope
   set, the whole worktree is in bounds. COMMIT rejects out-of-scope files -- fix
