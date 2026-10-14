@@ -40,17 +40,25 @@ be split into regions, so it surfaces a whole-file conflict with a repair hint.
 Everything below `***` is authored content and merges three-way, with a hint
 comment planted above add/add body conflicts.
 
-The union leaves the block out of order — appended rows unsorted, a row one side
-deleted still present — by design: the next `wiki update` (which the fractal
-commit pipeline runs; see [[features/wiki_system/index_regeneration]]) re-sorts
-the block from the merged filesystem and prunes stale rows, and a merged-in
-`title` shows in the H1 only after that post-merge update. `fractal node merge`
-runs it on the squash before committing: the project wiki and the memory wiki
-whole, and in every other wiki root — a folder declaring a tracked
-`.wiki/settings.json`, such as a corpus beside the project wiki — each index
-changed on both sides since the merge base, through an update scoped to its
-folder (the whole root for the root's own index), so indexes outside those
-folders keep their bytes.
+How the union comes out depends on the wiki release. A driver that canonicalizes
+the clean merge drops each row one side deleted and writes the block, H1
+included, in the form `wiki update` writes. The released plasma-wiki 1.6.0 does
+not: its merged block can sit out of order, with a row one side deleted still
+present, until the next `wiki update` (which the fractal commit pipeline runs;
+see [[features/wiki_system/index_regeneration]]) re-sorts it from the merged
+filesystem and prunes stale rows, and a merged-in `title` shows in the H1 only
+after that update.
+
+Either way, `fractal node merge` runs `wiki update` on the squash before
+committing: the project wiki and the memory wiki whole, and in every other wiki
+root — a folder declaring a tracked `.wiki/settings.json`, such as a corpus
+beside the project wiki — each index changed on both sides since the merge base,
+through an update scoped to its folder (the whole root for the root's own
+index), so indexes outside those folders keep their bytes. The update reads the
+disk, so the merge refuses an untracked file under the project wiki or in a
+folder it refreshes, naming it: indexed into the squash commit, it would dangle
+in every clean checkout. The memory wiki is the merging node's own, and its next
+commit lands what it holds.
 
 ## The parent's reconciliation job
 

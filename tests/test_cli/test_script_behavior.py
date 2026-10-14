@@ -1245,7 +1245,9 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
     whole-root ``wiki update --check`` fails. The squash regenerates every
     index changed on both sides in each declared wiki root, not only the
     project wiki, so the merged index carries both rows in order; an index the
-    merges never touched keeps its bytes, stale as it is.
+    merges never touched keeps its bytes, stale as it is. The refresh reads the
+    disk, so an untracked draft in a folder it regenerates would be indexed
+    into the commit: the merge refuses it by name and restores the target.
     """
     repo = _init_tree(tmp_path / 'corpusrepo')
     # a declared corpus root beside the project wiki: a folder both siblings
@@ -1281,8 +1283,10 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
     for name in ('one', 'two'):
         init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
         assert init.returncode == 0, init.stderr
+    worktrees = {}
     for name, page in (('one', 'zeta'), ('two', 'alpha')):
         worktree = repo / '.worktrees' / f'main.{name}'
+        worktrees[name] = worktree
         (worktree / 'library' / 'cards' / f'{page}.md').write_text(
             f'---\nname: {page}\ndesc: A {page} card.\n---\n\n# {page}\n\n***\n',
             encoding='utf-8',
@@ -1297,8 +1301,22 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
         )
         _git(worktree, 'add', '-A')
         _git(worktree, 'commit', '-m', f'{page} card')
-        result = _script('merge.sh', repo, f'{worktree}')
-        assert result.returncode == 0, (result.stdout, result.stderr)
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    # an untracked draft in the folder the second merge regenerates refuses
+    # it by name, restoring the target with the draft untouched
+    draft = corpus / 'cards' / 'draft.md'
+    draft.write_text('a bare draft\n', encoding='utf-8')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    refused = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert refused.returncode != 0
+    assert 'library/cards/draft.md' in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert draft.read_text(encoding='utf-8') == 'a bare draft\n'
+    # moved aside, the draft no longer blocks the second sibling's merge
+    draft.unlink()
+    second = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert second.returncode == 0, (second.stdout, second.stderr)
 
     # the shared folder's index lists both cards in order...
     index = _git(repo, 'show', 'main:library/cards/_index.md').stdout

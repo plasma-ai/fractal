@@ -2128,20 +2128,19 @@ def test_merge_excludes_subproject_node_seed(git_repo: pathlib.Path) -> None:
 def test_merge_refreshes_parent_wiki_indexes(tmp_path: pathlib.Path, wiki: str) -> None:
     """The squash-merge folds regenerated wiki indexes into the merge commit.
 
-    The ``_index.md`` merge driver keeps ours per link block, dropping the
-    merged branch's link rows, so ``merge.sh`` runs ``wiki update`` on the
-    parent's tracked wikis after the squash and stages the refreshed bytes --
-    the merge commit carries current indexes and leaves the parent clean.
-    The staging covers only what the refresh owns: an operator's untracked
-    draft under the parent wiki never rides the merge commit. The project
+    The ``_index.md`` merge driver's link block need not be the form ``wiki
+    update`` writes, so ``merge.sh`` runs ``wiki update`` on the parent's
+    tracked wikis after the squash and stages the refreshed bytes -- the merge
+    commit carries current indexes and leaves the parent clean. The refresh
+    reads the disk, so an operator's untracked draft under the project wiki
+    would be indexed into the commit: the merge refuses it by name and
+    restores the parent, and lands once the draft moves aside. The project
     wiki is the configured folder, whatever its name: a corpus at ``wiki/``
     beside a ``docs`` project wiki keeps its stale index.
     """
     git_repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
     project_dir, _ = _init_and_commit(git_repo, 'feature')
     corpus = _files(git_repo / 'wiki')
-    # an untracked operator draft in the parent wiki (outside the refresh)
-    (git_repo / wiki / 'draft.txt').write_text('operator scratch\n', encoding='utf-8')
     # the child commits a wiki page, leaving the generated index stale
     (project_dir / wiki / 'topic.md').write_text(
         '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
@@ -2149,19 +2148,26 @@ def test_merge_refreshes_parent_wiki_indexes(tmp_path: pathlib.Path, wiki: str) 
     )
     _git(project_dir, 'add', f'{wiki}/topic.md')
     _git(project_dir, 'commit', '-m', 'add topic page')
+    # an untracked operator draft in the parent wiki refuses the merge...
+    draft = git_repo / wiki / 'draft.txt'
+    draft.write_text('operator scratch\n', encoding='utf-8')
+    pre_head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
+    with pytest.raises(RuntimeError, match=f'{wiki}/draft.txt'):
+        Node(project_dir).merge()
+    # ...restoring the parent with the draft untouched
+    assert _git(git_repo, 'rev-parse', 'HEAD').stdout.strip() == pre_head
+    assert draft.read_text(encoding='utf-8') == 'operator scratch\n'
 
-    # squash-merge into the parent (main)
+    # moved aside, the draft no longer blocks the squash-merge into main
+    draft.rename(git_repo / 'draft.txt')
     Node(project_dir).merge()
 
     # the merge commit carries the regenerated index row for the new page...
     index = _git(git_repo, 'show', f'main:{wiki}/_index.md').stdout
     assert '[[topic' in index
-    # ...the untracked parent draft stayed out of the merge commit...
-    tracked = _git(git_repo, 'ls-files', f'{wiki}/draft.txt').stdout
-    assert tracked.strip() == ''
-    # ...and the refresh left no residue beyond the draft
+    # ...and the refresh left no residue beyond the moved draft
     status = _git(git_repo, 'status', '--porcelain').stdout
-    assert status.strip() == f'?? {wiki}/draft.txt'
+    assert status.strip() == '?? draft.txt'
     # a corpus beside the configured wiki kept its bytes
     if wiki != 'wiki':
         assert _files(git_repo / 'wiki') == corpus

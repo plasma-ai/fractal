@@ -106,7 +106,10 @@ may include breaking changes, each listed under a Breaking heading.
   base gets a `wiki update` scoped to its folder before validation and rides the
   squash commit. Two siblings that add pages to one folder of a corpus wiki no
   longer land its index out of order, failing a whole-root
-  `wiki update --check`; an index outside those folders keeps its bytes.
+  `wiki update --check`; an index outside those folders keeps its bytes. The
+  refresh reads the disk, so the merge refuses an untracked file under the
+  project wiki or in a refreshed folder, naming it, instead of indexing it into
+  the squash commit, where its row would dangle in every clean checkout.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The
