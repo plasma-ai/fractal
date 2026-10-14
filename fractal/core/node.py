@@ -1020,6 +1020,38 @@ class Node:
                     f'Docket row does not resolve at {anchor}: {row!r} (stale seed).'
                 )
 
+    def resolve_init_parent(self: Node, path: Optional[PathLike]) -> Node:
+        """Resolve the node a child initialized from this node nests under.
+
+        Args:
+            path: The init's project path; a path under ``.worktrees/``
+                names the parent when no ambient caller does.
+
+        Returns:
+            The calling node, else the existing node of a ``.worktrees/``
+            path, else this node.
+
+        """
+        # prefer the calling node (_NODE) so an agent's child nests under it,
+        # not the repo-root user node; fall back to self for a top-level spawn
+        parent = self.resolve_caller()
+        # only adopt an ambient caller that lives in this repo -- a _NODE pointing
+        # at a different repo would register the child in the wrong DB (split-brain)
+        if parent is not None and parent.repo_dir != self.repo_dir:
+            parent = None
+        # no ambient caller but a path under .worktrees/ (the CLI derives path
+        # from cwd, so this is a manual init from inside a worktree): parent on
+        # that worktree's node rather than the root default
+        if parent is None and path is not None:
+            parts = pathlib.Path(path).parts
+            if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
+                candidate = Node(self.repo_dir / WORKTREES_FOLDER / parts[1])
+                if candidate.exists():
+                    parent = candidate
+        if parent is None or not parent.exists():
+            parent = self
+        return parent
+
     def init(
         self: Node,
         name: Optional[str] = None,
@@ -1298,24 +1330,7 @@ class Node:
                 ' The base is the squash-merge target, so it must be'
                 ' checked out in this repository.'
             )
-        # prefer the calling node (_NODE) so an agent's child nests under it,
-        # not the repo-root user node; fall back to self for a top-level spawn
-        parent = self.resolve_caller()
-        # only adopt an ambient caller that lives in this repo -- a _NODE pointing
-        # at a different repo would register the child in the wrong DB (split-brain)
-        if parent is not None and parent.repo_dir != self.repo_dir:
-            parent = None
-        # no ambient caller but a path under .worktrees/ (the CLI derives path
-        # from cwd, so this is a manual init from inside a worktree): parent on
-        # that worktree's node rather than the root default
-        if parent is None and path is not None:
-            parts = pathlib.Path(path).parts
-            if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
-                candidate = Node(self.repo_dir / WORKTREES_FOLDER / parts[1])
-                if candidate.exists():
-                    parent = candidate
-        if parent is None or not parent.exists():
-            parent = self
+        parent = self.resolve_init_parent(path)
         # validate parent node
         if not parent.exists():
             raise FileNotFoundError(
