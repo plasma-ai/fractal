@@ -623,6 +623,9 @@ def node_merge(app: typer.Typer) -> typer.Typer:
         ' restored, refreshed squash; it must preserve the staged tree.'
     )
     validate = typer.Option(None, '--validate', help=validate_help)
+    # message option
+    message_help = "Squash commit message (default: 'merge <branch>')."
+    message = typer.Option(None, '--message', help=message_help)
     # delete flag
     delete_help = (
         'Delete the node (worktree, branch, and subtree) after a successful merge.'
@@ -641,11 +644,17 @@ def node_merge(app: typer.Typer) -> typer.Typer:
         continue_: bool = continue_,
         ignore_scope: bool = ignore_scope,
         validate: Optional[str] = validate,
+        message: Optional[str] = message,
         delete: bool = delete,
         force: bool = force,
         path: str = path,
     ) -> None:
-        """Squash-merge a node's branch into its parent."""
+        """Squash-merge a node's branch into its parent.
+
+        A paused node merges too: its committed work lands, its uncommitted
+        mid-step state stays in its worktree, and it stays paused for
+        ``fractal resume``.
+        """
         node = resolve_target(path, node)
         # --delete tears down the subtree; pre-flight every one of the
         # teardown's refusals (the cwd inside a doomed worktree, a live or
@@ -681,6 +690,7 @@ def node_merge(app: typer.Typer) -> typer.Typer:
             continue_merge=continue_,
             ignore_scope=ignore_scope,
             validation_script=validate,
+            message=message,
         )
         if output:
             typer.echo(output)

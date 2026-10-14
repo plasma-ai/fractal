@@ -4006,6 +4006,7 @@ class Node:
         continue_merge: bool = False,
         ignore_scope: bool = False,
         validation_script: str | None = None,
+        message: str | None = None,
     ) -> tuple[str, str]:
         """Squash-merge the node's branch into its merge target.
 
@@ -4039,6 +4040,18 @@ class Node:
         merge restores the target; a failed continue preserves the staged
         resolution. A no-op merge does not run the script.
 
+        ``message`` replaces the squash commit's default ``merge <branch>``
+        text verbatim, so a descriptive message never needs an amend (an
+        amended squash orphans the merge-base advance recorded against it).
+
+        A paused node merges without leaving ``paused``: it runs no loop and
+        no agent, so its branch is quiescent, and its run, iteration, and step
+        rows stay open for :meth:`resume` to adopt. Only committed work lands;
+        the advance carries the frozen step's uncommitted state the way
+        ``git checkout`` moves a branch, refusing the whole merge when it
+        would touch a dirty path or an untracked or ignored file, and rolling
+        the target and the node back when anything fails after the commit.
+
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
         worktree -- except from inside the target's own loop, which merges
@@ -4058,8 +4071,6 @@ class Node:
         current = self.status()
         if current == 'active':
             raise RuntimeError('Cannot merge an active node. Stop or kill it first.')
-        if current == 'paused':
-            raise RuntimeError('Cannot merge a paused node. Resume or kill it first.')
         # the target must be settled too: merge.sh squashes, refreshes
         # indexes, and commits inside the target worktree, and its failure
         # paths reset --hard -- racing a live target loop would absorb or
@@ -4095,6 +4106,12 @@ class Node:
             args.append('--ignore-scope')
         if validation_script is not None:
             args.append(f'--validate={validation_script}')
+        if message is not None:
+            args.append(f'--message={message}')
+        # a paused node's worktree holds its frozen step's uncommitted work,
+        # which the advance must carry rather than skip or reset away
+        if current == 'paused':
+            args.append('--carry-dirty')
         # the target's user-ness from the repo's record: a root checked out in
         # a linked worktree carries no self-ignored seed there to probe
         if any(user.branch == target_branch for user in Node.user_nodes(self.repo_dir)):
