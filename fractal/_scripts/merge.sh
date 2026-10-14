@@ -860,15 +860,20 @@ fi
 
 # ------ wiki refresh
 
-# the _index.md merge driver keeps ours per link block, dropping the merged
-# branch's rows, so regenerate each tracked wiki's indexes from the merged
-# filesystem and stage the refreshed bytes to ride the squash commit (an
-# untracked wiki -- the git-excluded default seed -- carries no merge changes,
-# and adding it would fail); the add is scoped to what the refresh owns --
-# tracked-file updates plus any new _index.md and tool-owned .wiki/ state --
-# so an untracked draft under the wiki never rides the merge commit; stdout
-# is silenced so the merge summary below stays the single user-facing line;
-# a failed refresh restores the parent exactly like a conflict
+# the _index.md merge driver unions both sides' link rows, and its block need
+# not be the form wiki update writes (the released plasma-wiki 1.6.0 appends
+# the merged branch's rows unsorted and keeps a row one side deleted), so
+# regenerate each tracked wiki's indexes from the merged filesystem and stage
+# the refreshed bytes to ride the squash commit (an untracked wiki -- the
+# git-excluded default seed -- carries no merge changes, and adding it would
+# fail); the refresh reads the disk, so an untracked file under the project
+# wiki would be indexed into the squash commit and dangle in every clean
+# checkout -- the merge refuses it by name (the memory wiki is the merging
+# node's own, and its next commit lands what it holds); the add is scoped to
+# what the refresh owns -- tracked-file updates plus any new _index.md and
+# tool-owned .wiki/ state; stdout is silenced so the merge summary below stays
+# the single user-facing line; a failed refresh restores the parent exactly
+# like a conflict
 if command -v wiki &>/dev/null; then
     PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo ".")
     if [[ "$PARENT_PROJECT" == "." ]]; then
@@ -903,6 +908,18 @@ if command -v wiki &>/dev/null; then
                 "after merging $BRANCH failed"
         fi
         [[ -n "$TRACKED" ]] || continue
+        if [[ "$INDEX_DIR" == "$WIKI_DIR" ]]; then
+            if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
+                -- "$INDEX_DIR" >"$TMP_DIR/wiki-strays"; then
+                fail_target "listing the untracked files under $INDEX_DIR failed"
+            fi
+            if [[ -s "$TMP_DIR/wiki-strays" ]]; then
+                STRAYS=$(tr '\0' '\n' <"$TMP_DIR/wiki-strays")
+                fail_target "untracked files under $INDEX_DIR would be indexed by the" \
+                    "squash of $BRANCH: ${STRAYS//$'\n'/, }; commit them or move them" \
+                    "aside and merge again"
+            fi
+        fi
         if ! wiki update --path="$INDEX_DIR" >/dev/null \
             || ! git -C "$PARENT_WORKTREE_DIR" add -u -- "$INDEX_DIR" \
             || ! git -C "$PARENT_WORKTREE_DIR" add -- \
@@ -911,6 +928,68 @@ if command -v wiki &>/dev/null; then
                 "after merging $BRANCH failed"
         fi
     done
+    # every other wiki root (a folder declaring a tracked .wiki/settings.json,
+    # outside node machinery) regenerates only the indexes the driver merged --
+    # changed on both sides since the merge base; one the parent left alone
+    # arrives as the node committed it -- each by a refresh scoped to its
+    # folder (the whole root for the root's own index), so an index outside
+    # those folders keeps its bytes; an untracked file in a refreshed folder is
+    # refused by name, as under the project wiki; an index belongs to the
+    # deepest root above it, and a failed listing fails closed
+    if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z -- ':(glob)**/.wiki/settings.json' \
+        ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-roots" \
+        || ! git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
+            --diff-filter=d HEAD -- ':(glob)**/_index.md' \
+            ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-indexes"; then
+        fail_target "listing the wiki indexes of $BRANCH's squash failed"
+    fi
+    ROOTS=()
+    while IFS= read -r -d '' SETTINGS; do
+        ROOT=${SETTINGS%.wiki/settings.json}
+        ROOTS+=("${ROOT%/}")
+    done <"$TMP_DIR/wiki-roots"
+    MERGE_BASE=$(git -C "$PARENT_WORKTREE_DIR" merge-base HEAD "$BRANCH" 2>/dev/null || true)
+    while IFS= read -r -d '' INDEX; do
+        FOLDER=${INDEX%_index.md}
+        FOLDER=${FOLDER%/}
+        OWNER=""
+        FOUND=false
+        for ROOT in ${ROOTS[@]+"${ROOTS[@]}"}; do
+            if [[ -z "$ROOT" || "$FOLDER" == "$ROOT" || "$FOLDER" == "$ROOT"/* ]] \
+                && { [[ "$FOUND" != true ]] || [[ ${#ROOT} -gt ${#OWNER} ]]; }; then
+                OWNER=$ROOT
+                FOUND=true
+            fi
+        done
+        [[ "$FOUND" == true ]] || continue
+        ROOT_DIR="$PARENT_WORKTREE_DIR${OWNER:+/$OWNER}"
+        FOLDER_DIR="$PARENT_WORKTREE_DIR${FOLDER:+/$FOLDER}"
+        # the project wiki and the memory wiki were refreshed whole above
+        [[ "$FOLDER_DIR/" != "${WIKI_DIR%/}/"* && "$FOLDER_DIR/" != "${MEMORY_DIR%/}/"* ]] || continue
+        # an index the parent left alone since the merge base is the node's own
+        if [[ -n "$MERGE_BASE" ]] \
+            && git -C "$PARENT_WORKTREE_DIR" diff --quiet "$MERGE_BASE" HEAD -- "$INDEX"; then
+            continue
+        fi
+        if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
+            -- "$FOLDER_DIR" >"$TMP_DIR/wiki-strays"; then
+            fail_target "listing the untracked files under $FOLDER_DIR failed"
+        fi
+        if [[ -s "$TMP_DIR/wiki-strays" ]]; then
+            STRAYS=$(tr '\0' '\n' <"$TMP_DIR/wiki-strays")
+            fail_target "untracked files under $FOLDER_DIR would be indexed by the" \
+                "squash of $BRANCH: ${STRAYS//$'\n'/, }; commit them or move them" \
+                "aside and merge again"
+        fi
+        SUBTREE=${FOLDER#"$OWNER"}
+        SUBTREE=${SUBTREE#/}
+        if ! wiki update --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} >/dev/null \
+            || ! git -C "$PARENT_WORKTREE_DIR" add -u -- "$FOLDER_DIR" \
+            || ! git -C "$PARENT_WORKTREE_DIR" add -- ":(glob)$FOLDER_DIR/**/_index.md"; then
+            fail_target "refreshing the wiki indexes under $FOLDER_DIR" \
+                "after merging $BRANCH failed"
+        fi
+    done <"$TMP_DIR/wiki-indexes"
 fi
 
 # ------ commit and advance

@@ -1235,6 +1235,98 @@ def test_merge_sibling_wiki_work_lands_without_conflict(
     assert '.wiki/cache' not in tracked
 
 
+def test_merge_orders_sibling_rows_in_every_wiki_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Sibling pages in one folder of a corpus wiki land with its index in order.
+
+    The ``_index.md`` merge driver appends the second sibling's row after the
+    first's, so a clean merge leaves the folder's index out of order and a
+    whole-root ``wiki update --check`` fails. The squash regenerates every
+    index changed on both sides in each declared wiki root, not only the
+    project wiki, so the merged index carries both rows in order; an index the
+    merges never touched keeps its bytes, stale as it is. The refresh reads the
+    disk, so an untracked draft in a folder it regenerates would be indexed
+    into the commit: the merge refuses it by name and restores the target.
+    """
+    repo = _init_tree(tmp_path / 'corpusrepo')
+    # a declared corpus root beside the project wiki: a folder both siblings
+    # add a page to, and a folder whose index no merge touches
+    corpus = repo / 'library'
+    (corpus / '.wiki').mkdir(parents=True)
+    (corpus / '.wiki' / 'settings.json').write_text('{}\n', encoding='utf-8')
+    for folder in (corpus, corpus / 'cards', corpus / 'other'):
+        folder.mkdir(exist_ok=True)
+        (folder / '_index.md').write_text(
+            f'---\nname: {folder.name}\ndesc: The {folder.name} folder.\n---\n'
+            f'# {folder.name}\n\n***\n',
+            encoding='utf-8',
+        )
+    for name in ('first', 'second'):
+        (corpus / 'other' / f'{name}.md').write_text(
+            f'---\nname: {name}\ndesc: A {name} page.\n---\n\n# {name}\n\n***\n',
+            encoding='utf-8',
+        )
+    _wiki_update(corpus)
+    _wiki_update(repo / 'wiki')
+    # leave the untouched folder's index stale: its two rows swapped
+    other = corpus / 'other' / '_index.md'
+    lines = other.read_text(encoding='utf-8').split('\n')
+    rows = [i for i, line in enumerate(lines) if line.startswith('[[other/')]
+    lines[rows[0]], lines[rows[1]] = lines[rows[1]], lines[rows[0]]
+    stale = '\n'.join(lines)
+    other.write_text(stale, encoding='utf-8')
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'add corpus')
+    # both siblings fork from the same tip; the first adds a page that sorts
+    # last, so the driver appends the second's row after it
+    for name in ('one', 'two'):
+        init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
+        assert init.returncode == 0, init.stderr
+    worktrees = {}
+    for name, page in (('one', 'zeta'), ('two', 'alpha')):
+        worktree = repo / '.worktrees' / f'main.{name}'
+        worktrees[name] = worktree
+        (worktree / 'library' / 'cards' / f'{page}.md').write_text(
+            f'---\nname: {page}\ndesc: A {page} card.\n---\n\n# {page}\n\n***\n',
+            encoding='utf-8',
+        )
+        # the node refreshes only its own folder, as a gated node does
+        subprocess.run(
+            ['wiki', 'update', f'--path={worktree / "library"}', 'cards'],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_cli_env(),
+        )
+        _git(worktree, 'add', '-A')
+        _git(worktree, 'commit', '-m', f'{page} card')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    # an untracked draft in the folder the second merge regenerates refuses
+    # it by name, restoring the target with the draft untouched
+    draft = corpus / 'cards' / 'draft.md'
+    draft.write_text('a bare draft\n', encoding='utf-8')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    refused = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert refused.returncode != 0
+    assert 'library/cards/draft.md' in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert draft.read_text(encoding='utf-8') == 'a bare draft\n'
+    # moved aside, the draft no longer blocks the second sibling's merge
+    draft.unlink()
+    second = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert second.returncode == 0, (second.stdout, second.stderr)
+
+    # the shared folder's index lists both cards in order...
+    index = _git(repo, 'show', 'main:library/cards/_index.md').stdout
+    assert index.index('[[cards/alpha') < index.index('[[cards/zeta'), index
+    # ...the index no merge touched kept its stale bytes...
+    assert _git(repo, 'show', 'main:library/other/_index.md').stdout == stale
+    # ...and the refresh left the target clean
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
 def test_failed_merge_restore_removes_the_staged_child_additions(
     tmp_path: pathlib.Path,
 ) -> None:
