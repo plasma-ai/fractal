@@ -58,6 +58,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
+- A node's record directories admit `.py` files — plain text like the seeded
+  `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
+  instead of being withheld as not a node record. Keys, archives, and binaries
+  stay refused.
 - A crash healed by reconciliation — a later read over a dead loop, or the boot
   that finds the previous loop's rows still open — stamps the run row
   `crashed: loop runtime gone, healed by reconcile`, so `node list` renders

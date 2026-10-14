@@ -779,6 +779,7 @@ _RECORD_SUFFIXES = (
     '.csv',
     '.json',
     '.md',
+    '.py',
     '.sh',
     '.toml',
     '.tsv',
