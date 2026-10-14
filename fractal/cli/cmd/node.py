@@ -9,6 +9,7 @@ from typing import Optional
 
 import typer
 
+import fractal.util
 from fractal.cli.utils import (
     StreamRenderer,
     command,
@@ -55,6 +56,7 @@ __all__ = [
     'node_launch',
     'node_seed',
     'node_scope',
+    'node_reap',
 ]
 
 # consumers bind list columns by header name, never by position
@@ -1610,6 +1612,47 @@ def node_scope(app: typer.Typer) -> typer.Typer:
             listing = os.fsencode('\n'.join(offending))
             typer.echo(listing)
             raise SystemExit(1)
+
+    return app
+
+
+def node_reap(app: typer.Typer) -> typer.Typer:
+    """Register the ``_reap`` command."""
+    # pgid option
+    pgid_help = 'Recorded process group to reap with its whole tree (repeatable).'
+    pgid = typer.Option(..., '--pgid', help=pgid_help)
+    # worktree option
+    worktree_help = 'Also report processes outside the tree working in this directory.'
+    worktree = typer.Option(None, '--worktree', help=worktree_help)
+    # grace option
+    grace_help = 'Seconds between the TERM and KILL passes.'
+    grace = typer.Option(fractal.util.process.GRACE_SECONDS, '--grace', help=grace_help)
+
+    @command(app, '_reap')
+    def _reap(
+        pgid: list[int] = pgid,
+        worktree: Optional[str] = worktree,
+        grace: float = grace,
+    ) -> None:
+        """Reap process groups with their trees (invoked by pause.sh and kill.sh).
+
+        Names on stderr each tree member still alive after the KILL and,
+        with ``--worktree``, each process outside the tree whose working
+        directory lies in that directory -- reported, never signaled.
+        """
+        worktree_dir = pathlib.Path(worktree) if worktree else None
+        reaped = fractal.util.process.reap(pgid, grace=grace, worktree=worktree_dir)
+        for process in reaped.survivors:
+            typer.echo(
+                f'Warning: pid {process.pid} survived the reap: {process.command}',
+                err=True,
+            )
+        for process in reaped.strays:
+            typer.echo(
+                f'Warning: pid {process.pid} works in the worktree outside the'
+                f' reaped tree (left running): {process.command}',
+                err=True,
+            )
 
     return app
 

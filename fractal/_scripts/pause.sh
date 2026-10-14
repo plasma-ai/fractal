@@ -79,19 +79,23 @@ fi
 # signal mid-abort can never demote the park to a failure
 touch "${STEP_PGID_FILE%.step_pgid}.pause_abort"
 
-# TERM the agent group only -- the loop and its stream reader live outside
-# it and must survive to record the paused step; when timeout(1) leads the
-# group it forwards the TERM to the agent
-kill -TERM -- "-$STEP_PGID" 2>/dev/null || true
+# reap the agent's whole tree -- its tool commands run in groups (or sessions)
+# of their own; the loop lives above the tree and survives to record the park;
+# survivors and worktree strays are named on stderr
+if ! fractal node _reap --pgid="$STEP_PGID" --worktree="$WORKTREE_DIR"; then
+    # the helper could not run: TERM the agent group alone; when timeout(1)
+    # leads the group it forwards the TERM to the agent
+    kill -TERM -- "-$STEP_PGID" 2>/dev/null || true
 
-WAITED=0
-while kill -0 -- "-$STEP_PGID" 2>/dev/null && ((WAITED < 5)); do
-    sleep 1
-    ((WAITED++)) || true
-done
+    WAITED=0
+    while kill -0 -- "-$STEP_PGID" 2>/dev/null && ((WAITED < 5)); do
+        sleep 1
+        ((WAITED++)) || true
+    done
 
-if kill -0 -- "-$STEP_PGID" 2>/dev/null; then
-    kill -KILL -- "-$STEP_PGID" 2>/dev/null || true
+    if kill -0 -- "-$STEP_PGID" 2>/dev/null; then
+        kill -KILL -- "-$STEP_PGID" 2>/dev/null || true
+    fi
 fi
 
 echo "Aborted in-flight agent (pgid $STEP_PGID)"

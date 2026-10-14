@@ -9,7 +9,6 @@ import os
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -54,7 +53,7 @@ _FRONTMATTER_LINE = re.compile(r'^([a-z_]+):\s*(.+)$')
 # NN- step filename: a digit prefix, a dash, and a name
 _STEP_PREFIX = re.compile(r'^([0-9]+)-.*\.md$')
 
-# grace between the deadline's TERM and the follow-up KILL on the step group
+# grace between the deadline's TERM and the follow-up KILL on the step tree
 _KILL_GRACE_SECONDS = 10.0
 
 # cap consecutive setup failures so a deterministically broken setup.sh ends
@@ -2612,7 +2611,7 @@ class Loop:
         Records ``.step_pgid``, redirects stderr to ``<agent>.err``
         (copied to a durable ``tmp/err/`` snapshot on failure/timeout),
         parses the stream in-process, enforces the deadline
-        (TERM-grace-KILL on the group), and attributes the outcome
+        (TERM-grace-KILL on the invocation's tree), and attributes the outcome
         (completed / timed out / paused / failed / budget stop).
         """
         node = self.node
@@ -2724,29 +2723,15 @@ class Loop:
             except PermissionError:
                 pass
             timed_out.set()
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                return
-            deadline = time.monotonic() + _KILL_GRACE_SECONDS
-            while time.monotonic() < deadline:
-                # reap the leader (clears its zombie so the group probe below
-                # reads true), then check the WHOLE group: a survivor that traps
-                # TERM -- e.g. a grandchild holding the stdout pipe -- must still
-                # draw the KILL, which a leader-only poll() would skip, leaving
-                # the reader blocked on that pipe for the rest of the run
-                process.poll()
-                try:
-                    os.killpg(process.pid, 0)
-                except ProcessLookupError:
-                    return
-                except PermissionError:
-                    pass
-                time.sleep(0.1)
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            # reap the invocation's whole tree -- tool commands run in groups
+            # of their own, and a TERM-trapping survivor holding the stdout
+            # pipe must still draw the KILL or the reader blocks on it
+            reaped = fractal.util.process.reap([process.pid], grace=_KILL_GRACE_SECONDS)
+            for survivor in reaped.survivors:
+                print(
+                    f'Warning: pid {survivor.pid} survived the reap: {survivor.command}',
+                    file=sys.stderr,
+                )
 
         timer: Optional[threading.Timer] = None
         if self._step_limit_seconds > 0:
@@ -2774,12 +2759,15 @@ class Loop:
         except Exception as error:
             stream_error = error
             # the reader died with the agent possibly still writing -- drop
-            # the group so a blocked writer cannot outlive its step
+            # the whole tree so a blocked writer cannot outlive its step
             if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                reaped = fractal.util.process.reap([process.pid], grace=0)
+                for survivor in reaped.survivors:
+                    print(
+                        f'Warning: pid {survivor.pid} survived the reap:'
+                        f' {survivor.command}',
+                        file=sys.stderr,
+                    )
         finally:
             # a truncated stream (no result frame) ends mid-line with no summary
             close = getattr(self._render, 'close', None)

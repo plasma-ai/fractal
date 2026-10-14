@@ -3714,6 +3714,9 @@ class Node:
             if event_id is not None:
                 self.record.event_end(event_id=event_id, status='failed')
             raise
+        # the reap names what it left alive on stderr
+        for line in result.stderr.splitlines():
+            self.log(message=line, level=logging.WARNING)
         # mark active rows as killed; a loop that landed its own terminal
         # between the signal and the reap keeps it -- the row marking is
         # already fenced, so the status stamp must not overwrite either
@@ -3820,12 +3823,15 @@ class Node:
             event_id = self.record.event_start('pause', metadata=reason or '')
             self.record.signal_set('pause', reason or '')
         try:
-            self._run_script('pause.sh', f'{self._root}')
+            result = self._run_script('pause.sh', f'{self._root}')
         except Exception:
             # the signal is durable -- the loop still parks at its next
             # checkpoint -- but the failed abort must surface
             self.record.event_end(event_id=event_id, status='failed')
             raise
+        # the reap names what it left alive on stderr
+        for line in result.stderr.splitlines():
+            self.log(message=line, level=logging.WARNING)
         self.record.event_end(event_id=event_id, status='completed')
         return True
 
