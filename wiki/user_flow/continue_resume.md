@@ -80,8 +80,10 @@ loops reclassify the abort and park with status `paused`. What paused preserves:
 - The **pause latch**: a paused subtree admits no new work — spawning under it,
   starting into it, and resuming a descendant while an ancestor is frozen all
   refuse until the ancestor resumes.
-- Legal verbs on a paused node: `resume`, `kill`, and `chat` (you can
-  interrogate a frozen node). Merge, delete, retire, and start all refuse.
+- Legal verbs on a paused node: `resume`, `kill`, `chat` (you can interrogate a
+  frozen node), and `merge`, which lands committed work only — the node stays
+  paused and its frozen step's uncommitted state stays in its worktree (see
+  [[user_flow/finishing/merge_guards]]). Delete, retire, and start all refuse.
 
 ## Resume: thawing
 

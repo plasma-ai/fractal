@@ -395,12 +395,28 @@ never touches a paused node.
 
 While parked, a node:
 
-- accepts only ``resume``, ``kill``, and ``node chat`` — ``start``,
-  ``merge``, ``delete``, ``retire``, and ``node init --reset`` all refuse
+- accepts only ``resume``, ``kill``, ``node chat``, and ``node merge`` —
+  ``start``, ``delete``, ``retire``, and ``node init --reset`` all refuse
   over it;
 - still holds its spawn slot against the width and descendant caps;
 - blocks its ancestors' finish-drains (a parent cannot drain-complete over a
   parked child).
+
+Landing a paused node
+~~~~~~~~~~~~~~~~~~~~~
+
+``fractal node merge <node>`` on a paused node lands its *committed* work in
+its merge target and leaves it ``paused``: its run, iteration, and step rows
+are untouched, so ``fractal resume`` adopts the same run afterwards. The
+frozen step's uncommitted work stays in the node's worktree. The merge-base
+advance carries that state the way ``git checkout`` moves a branch; if the
+advance would change a path the node holds dirty or staged, or write over an
+untracked or ignored file, the whole merge refuses and names the paths, and a
+failure after the squash commit rolls back both the target and the node. The
+target must still be settled (a depth-1 node lands into its user branch even
+during a tree-wide pause); a live node, or a child landing into a live or
+paused parent, still refuses. ``--message`` sets the squash commit's text, so
+a descriptive message needs no amend (an amended squash orphans the advance).
 
 The pause latch
 ~~~~~~~~~~~~~~~
