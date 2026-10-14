@@ -635,6 +635,9 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
     memory = node.node_dir / 'memory' / 'state.md'
     memory.parent.mkdir(parents=True, exist_ok=True)
     memory.write_text('finding of record\n', encoding='utf-8')
+    checker = node.node_dir / 'memory' / 'evidence' / 'main.py'
+    checker.parent.mkdir(parents=True, exist_ok=True)
+    checker.write_text('print("checked")\n', encoding='utf-8')
     (node.node_dir / '.env').write_text(
         'AWS_SECRET_ACCESS_KEY=hunter2\n',
         encoding='utf-8',
@@ -647,6 +650,7 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
     tracked = _git(project_dir, 'ls-files').stdout
     # the record landed; nothing secret-shaped or binary did
     assert 'memory/state.md' in tracked
+    assert 'memory/evidence/main.py' in tracked
     for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
         assert parked not in tracked, parked
     # the refusal is named, not inferred from an absent file

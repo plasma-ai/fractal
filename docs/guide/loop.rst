@@ -570,7 +570,7 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    temp files). New content under the node directory is admitted only by a
    content allowlist: ``NODE.md`` and ``config.json`` at the node-directory
    root, and under ``memory/``, ``plans/``, ``scripts/``, ``skills/``, and
-   ``steps/`` files with a text suffix (``.md``, ``.json``, ``.sh``,
+   ``steps/`` files with a text suffix (``.md``, ``.json``, ``.py``, ``.sh``,
    ``.toml``, ``.yaml``/``.yml``, ``.csv``/``.tsv``, ``.txt``) plus, inside
    those directories, the tool state ``.wiki/`` and ``.gitkeep``. Anything
    else a node parks there — a key, a ``.env`` file, an archive, a

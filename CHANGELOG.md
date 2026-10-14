@@ -58,6 +58,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
+- A node's record directories admit `.py` files — plain text like the seeded
+  `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
+  instead of being withheld as not a node record. Keys, archives, and binaries
+  stay refused.
 - A node's `fractal commit --init` baseline carries only the node's own seed
   (its data dir under `.fractal/`) and init's `.gitattributes` edit, and refuses
   any other change by name before staging. The baseline skips the wiki refresh
