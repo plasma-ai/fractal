@@ -707,7 +707,7 @@ class Node:
         node; one that steps outside every worktree resolves to no actor
         and would fail open. Each guard closes that from its own side
         rather than here: the drain adds process-lineage attribution
-        (:meth:`drain_lineage` -- the recorded agent process group, which
+        (:meth:`drain_lineage` -- the recorded agent's session, which
         moving cannot rewrite), and the mailbox seal sits on the
         owner-only channel rule, which asks what a caller may read rather
         than who it claims to be.
@@ -761,12 +761,14 @@ class Node:
         the environment and steps into a sibling worktree resolves to a
         real but WRONG node the drain never binds; one that steps outside
         every worktree resolves to no node and fails open. Neither is a
-        lie the seat can tell about its *process group*: the loop spawns
-        each agent invocation as its own group leader and records the id
-        (``.step_pgid``), so every command that seat runs inherits it.
-        Ask the tree which of its open runs drain, then whether this
-        process sits in one of their seats -- attribution by lineage,
-        which no ``env -u`` or ``cd`` rewrites.
+        lie the seat can tell about its *session*: the loop spawns each
+        agent invocation as its own session leader and records the id
+        (``.step_pgid``), and every command that seat runs stays in that
+        session, even one the agent CLI starts in its own process group
+        (only a deliberate ``setsid`` leaves it). Ask the tree which of
+        its open runs drain, then whether this process sits in one of
+        their seats -- attribution by lineage, which no ``env -u`` or
+        ``cd`` rewrites.
 
         Identity-checked like the reap's (:func:`_recorded_group`), so a
         stale handle naming a recycled id never refuses an unrelated
@@ -778,7 +780,7 @@ class Node:
 
         """
         try:
-            pgid = os.getpgid(0)
+            sid = os.getsid(0)
         except OSError:
             return False
         # the tree's open runs carrying a drain signal (the central DB is
@@ -805,7 +807,7 @@ class Node:
                 recorded = int(pgid_file.read_text(encoding='utf-8').strip())
             except (OSError, ValueError):
                 continue
-            if recorded == pgid and _recorded_group(pgid, recorded_at) is True:
+            if recorded == sid and _recorded_group(sid, recorded_at) is True:
                 return True
         return False
 
@@ -6879,7 +6881,7 @@ def _draining(node: Node) -> bool:
     of those still ask the seat who it is, and a seat that moves can
     answer wrongly -- so the last source asks the operating system
     instead: whether this process sits in a draining seat's recorded
-    process group (:meth:`Node.drain_lineage`).
+    session (:meth:`Node.drain_lineage`).
 
     Args:
         node: Any node of the tree the verb acts on -- the drain that

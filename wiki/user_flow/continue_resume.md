@@ -137,9 +137,11 @@ actor, which survives an env scrub but still falls back to the node owning the
 working directory — so a seat that steps into a sibling worktree resolves to a
 real but *wrong* node, and one that steps outside every worktree resolves to
 none and fails open. `Node.drain_lineage` closes both: the loop makes each agent
-invocation its own process group leader and records the id (`.step_pgid`), so
-every command that seat runs inherits it, and the tree asks which of its open
-draining runs owns this process. No `env -u` or `cd` rewrites a process group.
-The handle is identity-checked like the orphan reap's, so a stale record naming
-a recycled id never refuses an unrelated caller, and a caller in any other group
-— an operator's shell — acts normally while the drain runs.
+invocation its own session leader and records the id (`.step_pgid`), every
+command that seat runs stays in that session — even one the agent CLI starts in
+its own process group — and the tree asks which of its open draining runs owns
+this process's session. No `env -u` or `cd` rewrites a session; only a
+deliberate `setsid` leaves it. The handle is identity-checked like the orphan
+reap's, so a stale record naming a recycled id never refuses an unrelated
+caller, and a caller in any other session — an operator's shell — acts normally
+while the drain runs.
