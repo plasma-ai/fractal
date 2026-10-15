@@ -34,9 +34,14 @@ __all__ = [
     'test_paused_no_op_merge_advances_past_a_restored_path',
 ]
 
+# the frozen step's dirty edit to a tracked file, its staged new file, and
+# its untracked scratch file
 FROZEN_EDIT = 'frozen mid-step edit\n'
 FROZEN_STAGED = 'frozen staged file\n'
 FROZEN_UNTRACKED = 'frozen scratch\n'
+
+# a file the target tracks at the node's fork, a sibling's later edit of it,
+# and the new file that sibling lands
 SHARED = 'shared at the fork\n'
 SHARED_EDIT = 'shared, edited by a sibling\n'
 SIBLING = 'landed by a sibling\n'
