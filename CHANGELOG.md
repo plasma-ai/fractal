@@ -121,11 +121,13 @@ may include breaking changes, each listed under a Breaking heading.
   a plain string `source`. A root with an object `source` (`custom`,
   `internal`), one whose metadata names no id, or one with no rollout or two is
   not recognized, and a log naming it refuses the step.
-- The `plasma-wiki` runtime requirement is `>=1.5,<2`: the seeded wiki skill
+- The `plasma-wiki` runtime requirement is `>=1.7,<2`: the seeded wiki skill
   relies on `wiki update` pruning stale index rows without a flag and the
   `_index.md` merge driver fractal installs unions both sides' link rows, both
-  wiki 1.3 behaviors, and 1.5 removes the 1.4 slowdown of `wiki lint` and
-  `wiki update` on wikis of several thousand pages.
+  wiki 1.3 behaviors, 1.5 removes the 1.4 slowdown of `wiki lint` and
+  `wiki update` on wikis of several thousand pages, and 1.7 keeps a row one side
+  deleted out of the merged index and leaves a clean merge's rows in the order
+  `wiki update` writes them, the behavior fractal's merge tests pin.
 
 ### Fixed
 
