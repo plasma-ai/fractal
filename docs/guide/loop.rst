@@ -440,14 +440,15 @@ The first stuck launch in an attempt **steers** the step. The stuck row
 closes ``stopped`` with ``steered: thinking cap`` or ``steered: no action for
 30 minutes`` in its metadata. The step is then relaunched on a row of its
 own (marked ``steer``) as a resume of the same session, in detached mode
-too. The relaunch's whole prompt is the package's ``modes/STALL.md``: write
-what you have to your plan file now, then take the next concrete action. The
-steer is not a retry and does not use ``step_retries``, and the step's own
-timeout still counts from the attempt's first launch. Like a retry, the
-steer first polls the signals: a pause parks the step instead (the stuck row
-closes ``stopped``, and resume re-enters the step), and a stop, a finish, or
-a spent subtree ceiling abandons it, closing the row ``failed`` with
-``<trigger>; steer abandoned``.
+too. The relaunch's whole prompt is the package's ``modes/STALL.md``, which
+tells the agent that its last launch went too long without an action and asks
+it to write down what it has (in its plan file when the iteration has one),
+then take the next concrete action. The steer is not a retry and does not use
+``step_retries``, and the step's own timeout still counts from the attempt's
+first launch. Like a retry, the steer first polls the signals: a pause parks
+the step instead (the stuck row closes ``stopped``, and resume re-enters the
+step), and a stop, a finish, or a spent subtree ceiling abandons it, closing
+the row ``failed`` with ``<trigger>; steer abandoned``.
 
 A second stuck launch after the steer, by either trigger, is a **stall**. The
 step closes ``exited`` with ``stalled: <trigger>, after a steer``, naming the

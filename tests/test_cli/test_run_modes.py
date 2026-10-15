@@ -168,7 +168,7 @@ _DETACHED_MARKER = 'Each step is a separate session'  # modes/DETACHED.md
 _CONTINUE_MARKER = 'This node was continued'  # modes/CONTINUE.md
 _RESUME_MARKER = 'This node was paused mid-run'  # modes/RESUME.md
 _RESERVE_MARKER = 'Reserve Mode'  # modes/RESERVE.md
-_STALL_MARKER = 'ran out of room while still thinking'  # modes/STALL.md
+_STALL_MARKER = 'went too long without an action'  # modes/STALL.md
 
 
 # marker that arms the stub's gate: a step prompt carrying it makes the stub
