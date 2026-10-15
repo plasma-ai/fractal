@@ -524,13 +524,18 @@ def test_list_flags_stale_active_rows(
 
 
 @pytest.mark.parametrize(
-    argnames=('frontmatter', 'last'),
-    argvalues=[('', '20m!'), ('---\ntimeout: 1h\n---\n', '20m')],
-    ids=['node-step-timeout', 'own-timeout'],
+    argnames=('step_timeout', 'frontmatter', 'last'),
+    argvalues=[
+        ('10m', '', '20m!'),
+        ('10m', '---\ntimeout: 1h\n---\n', '20m'),
+        (3600, '', '20m!'),
+    ],
+    ids=['node-step-timeout', 'own-timeout', 'numeric-step-timeout'],
 )
 def test_list_stale_flag_waits_out_the_active_steps_timeout(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    step_timeout: object,
     frontmatter: str,
     last: str,
 ) -> None:
@@ -539,10 +544,12 @@ def test_list_stale_flag_waits_out_the_active_steps_timeout(
     A step file's ``timeout:`` line bounds that step in place of the node's
     ``step_timeout``, so a node quiet past the node value but inside its
     active step's own longer timeout is working, not stale; a step without
-    one keeps the node value.
+    one keeps the node value. A hand-edited ``step_timeout`` with no unit
+    suffix reads as no step limit, so the row still lists, judged against
+    the staleness floor alone.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
-    child.config.set('step_timeout', '10m')
+    child.config.set('step_timeout', step_timeout)
     steps_dir = child.node_dir / 'steps'
     for existing in steps_dir.glob('*.md'):
         existing.unlink()

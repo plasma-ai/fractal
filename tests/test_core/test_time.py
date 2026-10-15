@@ -40,6 +40,7 @@ from tests._helpers import _age_iter, _age_run, _age_step, _past_timestamp
 __all__ = [
     'test_time_remaining_none_without_any_timeout',
     'test_time_limit_reads_configured_scopes',
+    'test_time_limit_reads_a_numeric_duration_as_unset',
     'test_run_timeout_counts_down_from_run_start',
     'test_run_timeout_clamps_to_zero_on_overspend',
     'test_run_timeout_none_without_active_run',
@@ -97,6 +98,34 @@ def test_time_limit_reads_configured_scopes(node_with_db: Node) -> None:
     assert node.time.limit('step') is None
     # the no-scope default is the soonest configured limit
     assert node.time.limit() == 300.0
+
+
+@pytest.mark.parametrize(
+    argnames=('key', 'scope'),
+    argvalues=[
+        ('timeout', 'run'),
+        ('iter_timeout', 'iter'),
+        ('step_timeout', 'step'),
+    ],
+    ids=['run', 'iter', 'step'],
+)
+def test_time_limit_reads_a_numeric_duration_as_unset(
+    node_with_db: Node,
+    key: str,
+    scope: str,
+) -> None:
+    """A bare-number duration in config reads as no limit, never a crash.
+
+    ``config.json`` is hand-editable and ``Config.set`` stores any value, so
+    a duration can arrive as a number with no unit suffix; like any duration
+    that does not parse, it reads as no limit (the cockpit shows it as no
+    cap) rather than raising out of every reader of the limit.
+    """
+    node = node_with_db
+    # whole seconds with no unit suffix, as a hand edit writes them
+    node.config.set(key, 3600)
+    assert node.time.limit(scope) is None
+    assert node.time.limit() is None
 
 
 def test_run_timeout_counts_down_from_run_start(node_with_db: Node) -> None:

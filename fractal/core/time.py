@@ -166,7 +166,7 @@ class Time:
             raise ValueError(f"scope must be 'run', 'iter', or 'step', got {scope!r}.")
         if not timeout:
             return None
-        return fractal.util.parse_duration_seconds(timeout)
+        return fractal.util.parse_duration_seconds(f'{timeout}')
 
     def _step_limit(self: Time) -> Optional[float]:
         """Return the active step's effective ceiling seconds.
@@ -187,7 +187,7 @@ class Time:
 
         # the node default
         timeout = self._node.config.get('step_timeout')
-        default = fractal.util.parse_duration_seconds(timeout) if timeout else None
+        default = fractal.util.parse_duration_seconds(f'{timeout}') if timeout else None
         steps_dir = self._node.node_dir / 'steps'
         step_id, _, _ = self._node.record.resolve_context(active=True)
         if step_id is None:
