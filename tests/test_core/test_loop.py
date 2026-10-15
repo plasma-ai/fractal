@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 import pytest
 
+import fractal.util
 from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
 from fractal.core import loop as loop_module, pricing, worktree
 from fractal.core.agent import StreamEvent, StreamResult
@@ -64,6 +65,8 @@ __all__ = [
     'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
+    'test_killed_claude_launch_prices_from_its_transcript',
+    'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_agent_launch_failure_books_a_failed_step',
     'test_setup_tolerates_non_utf8_output',
     'test_unsupported_provider_frontmatter_refuses_the_step',
@@ -351,6 +354,22 @@ _RESULT = {
 }
 
 
+# rates for the transcript-priced launch: every claude bucket distinct, and a
+# sub-agent model at its own rates
+_CLAUDE_PRICING = {
+    'claude-fable-5': {
+        'input_cost_per_token': 3e-6,
+        'output_cost_per_token': 1.5e-5,
+        'cache_read_input_token_cost': 3e-7,
+        'cache_creation_input_token_cost': 3.75e-6,
+    },
+    'claude-haiku-5': {
+        'input_cost_per_token': 1e-6,
+        'output_cost_per_token': 5e-6,
+    },
+}
+
+
 def _echo(frame: dict[str, Any]) -> str:
     """Return the shell command printing one stream frame as a line."""
     return f"printf '%s\\n' '{json.dumps(frame)}'"
@@ -366,15 +385,25 @@ class ScriptedClaude(ClaudeAgent):
 
     Each launch runs the next script in place of ``claude`` (``SID`` in it
     becomes the launch's session), in the production spawn shape: its own
-    process group, a text stdout pipe.
+    process group, a text stdout pipe. With ``transcripts``, each launch
+    first appends its next batch of entries to the session's transcript,
+    stamped at the spawn unless an entry carries its own stamp. Every
+    settled cost flush is kept with its finality.
     """
 
-    def __init__(self: ScriptedClaude, node: Node, scripts: list[str]) -> None:
+    def __init__(
+        self: ScriptedClaude,
+        node: Node,
+        scripts: list[str],
+        transcripts: Optional[list[list[dict[str, Any]]]] = None,
+    ) -> None:
         """Initialize ``ScriptedClaude``."""
         super().__init__(node, 'claude')
         self.scripts = list(scripts)
+        self.transcripts = list(transcripts or [])
         self.argvs: list[tuple[str, ...]] = []
         self.spawned: list[subprocess.Popen] = []
+        self.flushed: list[tuple[float, bool]] = []
 
     def __deepcopy__(self: ScriptedClaude, memo: dict[int, Any]) -> ScriptedClaude:
         """Share the stand-in: event payloads copy their source, not processes."""
@@ -387,6 +416,14 @@ class ScriptedClaude(ClaudeAgent):
     ) -> subprocess.Popen:
         """Run the next script, recording the launch's argv."""
         self.argvs.append(invocation.argv)
+        if self.transcripts:
+            path = self._transcript(f'{invocation.session}')
+            assert path is not None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            now = fractal.util.time.utc_now()
+            with path.open('a', encoding='utf-8') as handle:
+                for entry in self.transcripts.pop(0):
+                    handle.write(json.dumps({'timestamp': now, **entry}) + '\n')
         script = self.scripts.pop(0).replace('SID', f'{invocation.session}')
         process = subprocess.Popen(
             ['bash', '-c', script],
@@ -398,6 +435,12 @@ class ScriptedClaude(ClaudeAgent):
         )
         self.spawned.append(process)
         return process
+
+    def on_record_cost(self: ScriptedClaude, *args: Any, **kwargs: Any) -> Event:
+        """Keep the settled figure and its finality alongside the ledger write."""
+        event = super().on_record_cost(*args, **kwargs)
+        self.flushed.append((event.cost, event.final))
+        return event
 
 
 class ScriptedLoop(MockLoop):
@@ -470,20 +513,26 @@ def hung_probe(
 def scripted_claude(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[Callable[[list[str]], ScriptedClaude]]:
+    tmp_path: pathlib.Path,
+) -> Iterator[Callable[..., ScriptedClaude]]:
     """Yield a ``ScriptedClaude`` factory on a 1s no-progress clock; reap after.
 
     Each step runs under a 10s ceiling, so a launch the loop fails to end
-    still ends.
+    still ends. Claude's config home is a throwaway, so pricing a killed
+    launch from its transcript never reads the operator's.
     """
     monkeypatch.setenv('_NODE', '')
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', f'{tmp_path / "claude-home"}')
     monkeypatch.setattr(loop_module, 'NO_PROGRESS_SECONDS', 1)
     _configure(loop_node, step_timeout='10s', step_retries=3)
     loop_node.radio.init()
     agents: list[ScriptedClaude] = []
 
-    def make(scripts: list[str]) -> ScriptedClaude:
-        agent = ScriptedClaude(loop_node, scripts)
+    def make(
+        scripts: list[str],
+        transcripts: Optional[list[list[dict[str, Any]]]] = None,
+    ) -> ScriptedClaude:
+        agent = ScriptedClaude(loop_node, scripts, transcripts)
         agents.append(agent)
         return agent
 
@@ -1636,6 +1685,112 @@ def test_launch_prices_the_step_from_the_finish_frame(
     # the step completed and the finish frame's figure is its recorded cost
     step = loop_node.db.read('steps', where={'step': 1})[0]
     assert (step['status'], step['cost']) == ('completed', pytest.approx(cost))
+
+
+def test_killed_claude_launch_prices_from_its_transcript(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch killed before its result frame books its transcript's usage.
+
+    The stalled PLAN launch's stream priced each reply from its first
+    frame; claude's transcript holds each reply's final usage -- split
+    across lines that grow -- plus a sub-agent reply at its own model, so
+    the step books their sum as an estimate. Entries stamped outside the
+    launch window and an unpriced model stay out of the sum. The steered
+    relaunch, whose result frame names its cost, keeps that figure over
+    its own transcript entries.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    # the reply's first frame on the stream, then the transcript's lines
+    first = {
+        'input_tokens': 100,
+        'cache_read_input_tokens': 10_000,
+        'output_tokens': 10,
+    }
+    grown = {**first, 'output_tokens': 400}
+    final = {**first, 'output_tokens': 900}
+    second = {'input_tokens': 50, 'output_tokens': 300}
+    sidechain = {'input_tokens': 2_000, 'output_tokens': 700}
+    outside = {'output_tokens': 50_000}
+    killed = [
+        _assistant_entry('msg_old', outside, timestamp='2020-01-01T00:00:00.000Z'),
+        _assistant_entry('msg_a', first),
+        _assistant_entry('msg_a', grown),
+        _assistant_entry('msg_a', final),
+        _assistant_entry('msg_b', second),
+        _assistant_entry('msg_b', second),
+        _assistant_entry(
+            'msg_side', sidechain, model='claude-haiku-5', isSidechain=True
+        ),
+        _assistant_entry('msg_mystery', outside, model='mystery-model'),
+        _assistant_entry('msg_late', outside, timestamp='2999-01-01T00:00:00.000Z'),
+    ]
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', first),
+        _assistant_frame('msg_b', second),
+        'exec sleep 30',
+    )
+    agent = scripted_claude(
+        [stalled, _claude_script(_INIT, _RESULT), _claude_script(_INIT, _RESULT)],
+        [killed, [_assistant_entry('msg_c', outside)], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+
+    settled = (
+        (100 * 3e-6 + 10_000 * 3e-7 + 900 * 1.5e-5)
+        + (50 * 3e-6 + 300 * 1.5e-5)
+        + (2_000 * 1e-6 + 700 * 5e-6)
+    )
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == [
+        pytest.approx(settled),
+        _RESULT['total_cost_usd'],
+        _RESULT['total_cost_usd'],
+    ]
+    # the settled figure is an estimate; the result frames are authoritative
+    assert agent.flushed[-3:] == [
+        (pytest.approx(settled), False),
+        (_RESULT['total_cost_usd'], True),
+        (_RESULT['total_cost_usd'], True),
+    ]
+
+
+def test_killed_claude_launch_without_a_transcript_stays_unpriced(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A killed launch with no transcript stays NULL and logs why, once."""
+    caplog.set_level(logging.WARNING)
+    agent = scripted_claude(
+        [
+            _claude_script(_INIT, 'exec sleep 30'),
+            _claude_script(_INIT, _RESULT),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+    ScriptedLoop(loop_node, agent).run()
+
+    assert (
+        _step_rows(loop_node)[0] == 'PLAN/stopped/steered: no action for 1s; unpriced'
+    )
+    stalled = agent.argvs[0]
+    session = stalled[stalled.index('--session-id') + 1]
+    unpriced = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith('launch unpriced')
+    ]
+    assert unpriced == [f'launch unpriced: no transcript for session {session}']
 
 
 def test_agent_launch_failure_books_a_failed_step(
@@ -5490,6 +5645,35 @@ def test_stop_during_the_inter_iteration_sleep_ends_the_run(
 
 
 # ------ helpers
+
+
+def _assistant_frame(message_id: str, usage: dict[str, int]) -> dict[str, Any]:
+    """Return a claude stream frame of one thinking block of a top-level reply."""
+    frame = json.loads(json.dumps(_THINKING_REPLY))
+    frame['message'].update(id=message_id, model='claude-fable-5', usage=usage)
+    return frame
+
+
+def _assistant_entry(
+    message_id: str,
+    usage: dict[str, int],
+    *,
+    model: str = 'claude-fable-5',
+    **fields: Any,
+) -> dict[str, Any]:
+    """Return a claude transcript line of one reply's content block."""
+    return {
+        'type': 'assistant',
+        'isSidechain': False,
+        **fields,
+        'message': {
+            'id': message_id,
+            'model': model,
+            'role': 'assistant',
+            'content': [{'type': 'text', 'text': ''}],
+            'usage': usage,
+        },
+    }
 
 
 def _step_rows(node: Node) -> list[str]:

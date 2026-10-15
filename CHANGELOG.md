@@ -132,6 +132,14 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- A Claude step killed before its result frame (a deadline, a stall or thinking
+  cap, a pause, a dead stream) is priced from Claude Code's own session
+  transcript instead of keeping only the stream's partial figure, which was
+  often none. Each reply written during the launch counts once, at its final
+  token usage and its own model, sub-agent replies in the same transcript
+  included; the sum is booked as a non-final figure when it is higher than the
+  streamed one. With no readable transcript the step keeps the streamed figure
+  (or `NULL`) and the agent logs `launch unpriced: <reason>`.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the

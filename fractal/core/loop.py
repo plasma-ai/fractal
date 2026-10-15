@@ -2881,6 +2881,10 @@ class Loop:
             except Exception:
                 pass
 
+        # the launch's window opens at the spawn: a killed launch is priced
+        # from the provider's record of this window alone
+        launched = fractal.util.time.utc_now()
+
         # run in the worktree (the project) so a bare relative write lands in
         # the deliverable tree, never inside .fractal/; capture stderr
         # straight to a log so auth/startup failures are not hidden -- a
@@ -3061,6 +3065,23 @@ class Loop:
         agent_status = process.wait()
         if timer is not None:
             timer.cancel()
+
+        # a launch that ended without its authoritative cost (killed, or its
+        # stream dead before the closing figure) is priced from the
+        # provider's own usage record, read once the process has exited and
+        # flushed it
+        if self._step_id is not None and (result is None or not result.final):
+            try:
+                agent.settle_cost(
+                    self._step_id,
+                    started=launched,
+                    ended=fractal.util.time.utc_now(),
+                )
+            except Exception as error:
+                print(
+                    f'Warning: pricing the ended launch failed ({error})',
+                    file=sys.stderr,
+                )
 
         # the invocation is over -- drop the group handle so a later
         # pause/kill can never signal a recycled pgid

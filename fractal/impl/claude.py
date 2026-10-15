@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import logging
 import os
 import pathlib
 import re
@@ -544,6 +546,41 @@ class ClaudeAgent(Agent):
             return found[-1]
         return None
 
+    def _settle_cost(
+        self: ClaudeAgent,
+        session: str,
+        *,
+        started: str,
+        ended: str,
+    ) -> Optional[float]:
+        """Price the launch's window from claude's own session transcript.
+
+        Claude writes each reply to the transcript as it streams, so a
+        launch killed before its result frame still left each reply's
+        final usage on disk, where the stream priced only each reply's
+        first frame. An absent or unreadable transcript, or a window with
+        no priced usage, logs the reason and returns ``None``.
+        """
+        try:
+            found = self.transcript(session)
+        except (OSError, ValueError) as e:
+            self.log(f'launch unpriced: transcript unreadable: {e}', logging.WARNING)
+            return None
+        if not found['exists']:
+            self.log(
+                f'launch unpriced: no transcript for session {session}',
+                logging.WARNING,
+            )
+            return None
+        cost = _transcript_cost(found['content'], started=started, ended=ended)
+        if cost is None:
+            self.log(
+                f'launch unpriced: no priced usage in session {session}'
+                f' between {started} and {ended}',
+                logging.WARNING,
+            )
+        return cost
+
     def _rates(self: ClaudeAgent, model: str) -> Optional[dict[str, Any]]:
         """Resolve pricing through the claude slug-alias chain."""
         return _rates(model)
@@ -605,6 +642,60 @@ def _is_continuation(message: dict[str, Any]) -> bool:
         if isinstance(block, dict) and block.get('type') == 'text':
             return (block.get('text') or '').startswith(_CONTINUATION_PREFIX)
     return False
+
+
+def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[float]:
+    """Price the assistant entries a transcript stamped within a window.
+
+    Claude splits a reply across lines, one per content block under the
+    reply's message id, each carrying the reply's usage as it stood when
+    written; the last line of an id is its final usage. Sidechain
+    (sub-agent) replies written into the same transcript count at their
+    own model. Each id is priced at its own model, and an unpriced model
+    drops out of the sum, never the rest; ``None`` when nothing in the
+    window priced.
+
+    Args:
+        content: The transcript's raw JSONL text.
+        started: The window's opening instant (ISO 8601 UTC).
+        ended: The window's closing instant (ISO 8601 UTC).
+
+    """
+    opened = dt.datetime.fromisoformat(started)
+    closed = dt.datetime.fromisoformat(ended)
+    # keep the final usage per message id (later lines overwrite earlier)
+    replies: dict[str, tuple[dict[str, Any], Optional[str]]] = {}
+    for line in content.splitlines():
+        # tolerate malformed lines and a torn tail (the file may be mid-write)
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict) or entry.get('type') != 'assistant':
+            continue
+        try:
+            stamped = dt.datetime.fromisoformat(entry['timestamp'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # a zone-less stamp cannot be placed against the UTC window
+        if stamped.tzinfo is None or not opened <= stamped <= closed:
+            continue
+        message = entry.get('message')
+        if not isinstance(message, dict):
+            continue
+        message_id = message.get('id')
+        usage = message.get('usage')
+        model = message.get('model')
+        if isinstance(message_id, str) and isinstance(usage, dict):
+            replies[message_id] = (usage, model if isinstance(model, str) else None)
+    total: Optional[float] = None
+    for usage, model in replies.values():
+        # a zero figure is a missing one (a gateway zeroes its usage), not a
+        # free reply -- it must not turn an unknowable launch into $0
+        cost = _compute_cost(usage, model)
+        if cost:
+            total = (total or 0.0) + cost
+    return total
 
 
 def _model_usage_tokens(entry: dict[str, Any]) -> dict[str, Any]:
