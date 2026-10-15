@@ -191,7 +191,8 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   untracked file in a refreshed folder refuses the merge by name, while one in
   a sibling a glob would match does not; an index in a folder its wiki
   excludes is skipped; and a failed refresh restores the target with the child
-  unadvanced. Untracked files are judged by the wiki's own rules: a file only
+  unadvanced, as does a failed declaration read, listing, or staging step
+  around it. Untracked files are judged by the wiki's own rules: a file only
   a personal ignore hides refuses the merge, since the wiki would index it,
   and one under a dot-prefixed folder neither refuses it nor rides the squash.
   A merged index whose folder encloses another declared wiki, which the wiki
@@ -287,6 +288,7 @@ __all__ = [
     'test_merge_judges_untracked_files_by_the_wikis_own_rules',
     'test_merge_lands_a_merged_index_whose_folder_encloses_another_wiki',
     'test_merge_restores_the_target_when_a_corpus_refresh_fails',
+    'test_merge_restores_the_target_when_a_wiki_refresh_step_fails',
     'test_failed_merge_restore_removes_the_staged_child_additions',
     'test_merge_leaves_the_target_clean_when_scratch_creation_fails',
     'test_merge_advances_the_merge_base_past_a_refused_estate_file',
@@ -1749,6 +1751,102 @@ def test_merge_restores_the_target_when_a_corpus_refresh_fails(
     assert _git(repo, 'rev-parse', 'main.two').stdout == child
     retry = _script('merge.sh', repo, f'{worktrees["two"]}')
     assert retry.returncode == 0, (retry.stdout, retry.stderr)
+
+
+@pytest.mark.parametrize(
+    argnames=('call', 'step', 'subject'),
+    argvalues=[
+        # the worktree-root wiki declaration
+        (
+            '" $* " == *" ls-files -- :(literal).wiki/settings.json "*',
+            'reading the wiki declarations of',
+            "main.two's squash failed",
+        ),
+        # the untracked files under the project wiki
+        (
+            '" $* " == *" --others "* && " $* " == *" :(literal)wiki "*',
+            'listing the untracked files under',
+            'stepfailrepo/wiki failed',
+        ),
+        # the index the project wiki's refresh created
+        (
+            '" $* " == *" add -- :(literal)wiki/sub/_index.md "*',
+            'staging wiki/sub/_index.md',
+            'after merging main.two failed',
+        ),
+        # the declared roots and the indexes the squash touched
+        (
+            '" $* " == *" :(glob)**/.wiki/settings.json "*',
+            'listing the wiki indexes of',
+            "main.two's squash failed",
+        ),
+        # the untracked files in the corpus folder the merge refreshes
+        (
+            '" $* " == *" --others "* && " $* " == *" :(literal)library/cards "*',
+            'listing the untracked files under',
+            'stepfailrepo/library/cards failed',
+        ),
+        # the refreshed corpus folder's tracked updates
+        (
+            '" $* " == *" add -u -- :(literal)library/cards "*',
+            'staging the refreshed wiki indexes under',
+            'stepfailrepo/library/cards after merging main.two failed',
+        ),
+    ],
+    ids=[
+        'root-declarations',
+        'project-strays',
+        'created-index-add',
+        'roots-listing',
+        'corpus-strays',
+        'folder-staging',
+    ],
+)
+def test_merge_restores_the_target_when_a_wiki_refresh_step_fails(
+    tmp_path: pathlib.Path,
+    call: str,
+    step: str,
+    subject: str,
+) -> None:
+    """Each git step of the wiki refresh fails closed, restoring the target.
+
+    The refresh runs after the squash is staged, so a declaration read, a
+    listing, or a staging step git cannot complete refuses the merge like a
+    conflict -- the step named, no commit, the target's tracked state reset,
+    and the child unadvanced -- instead of exiting under ``set -e`` with the
+    squash left staged for the target's next commit.
+    """
+    repo = _init_tree(tmp_path / 'stepfailrepo')
+    _declare_wiki(repo / 'library', 'cards')
+    _git(repo, 'add', '-A', '--', 'library')
+    _git(repo, 'commit', '-m', 'declare the corpus')
+    worktrees = _sibling_pages(repo, 'library', 'cards')
+    # the second sibling also adds a project-wiki folder without an index,
+    # which the project wiki's refresh creates
+    sub = worktrees['two'] / 'wiki' / 'sub'
+    sub.mkdir()
+    _write_page(sub / 'page.md')
+    _git(worktrees['two'], 'add', '-A')
+    _git(worktrees['two'], 'commit', '-m', 'project wiki folder')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    child = _git(repo, 'rev-parse', 'main.two').stdout
+    bindir = _git_shim(tmp_path, f'if [[ {call} ]]; then\n    exit 1\nfi\n')
+    env = _cli_env()
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+
+    refused = _script('merge.sh', repo, f'{worktrees["two"]}', env=env)
+
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
+    assert step in refused.stderr, refused.stderr
+    assert subject in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'rev-parse', 'main.two').stdout == child
+    # the restore judges the target by its tracked state, as merge.sh does
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=no').stdout
+    assert status == '', status
 
 
 def test_failed_merge_restore_removes_the_staged_child_additions(
