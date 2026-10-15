@@ -201,7 +201,7 @@ def test_parser_maps_the_stream_protocol_claude() -> None:
             'total_cost_usd': 0.0432,
         },
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert [event.kind for event in events] == [
         'session',
         'tool',
@@ -252,14 +252,14 @@ def test_parser_captures_the_session_once_and_prefers_the_stream_model(
     init: dict[str, Any] = {'type': 'system', 'subtype': 'init', 'session_id': 'sess-m'}
     if init_model is not None:
         init['model'] = init_model
-    events = parser.feed(json.dumps(init))
+    events = _feed(parser, json.dumps(init))
     assert [(event.kind, event.session, event.model) for event in events] == [
         ('session', 'sess-m', recorded),
     ]
     assert parser.session == 'sess-m'
     assert parser.model == recorded
     # later frames carrying the id emit no second session event
-    assert parser.feed(json.dumps({'type': 'system', 'session_id': 'sess-m'})) == []
+    assert _feed(parser, json.dumps({'type': 'system', 'session_id': 'sess-m'})) == []
 
 
 def test_parser_restamps_the_served_model_from_assistant_rows() -> None:
@@ -312,7 +312,7 @@ def test_parser_restamps_the_served_model_from_assistant_rows() -> None:
             'message': {'id': 'msg_d', 'model': 'claude-fable-5'},
         },
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert [(event.kind, event.session, event.model) for event in events] == [
         ('session', 'sess-d', 'claude-fable-5'),
         ('session', 'sess-d', 'claude-opus-4-8'),
@@ -334,7 +334,7 @@ def test_parser_error_result() -> None:
         'duration_ms': 100,
         'result': 'boom',
     }
-    (event,) = parser.feed(json.dumps(frame))
+    (event,) = _feed(parser, json.dumps(frame))
     assert event.kind == 'result'
     assert event.failed
     assert event.message == 'boom'
@@ -358,7 +358,7 @@ def test_parser_null_duration() -> None:
         'duration_ms': None,
         'total_cost_usd': 0.01,
     }
-    (event,) = parser.feed(json.dumps(frame))
+    (event,) = _feed(parser, json.dumps(frame))
     assert event.duration == 0.0
     assert event.turns == 1
 
@@ -381,7 +381,7 @@ def test_parser_marks_a_budget_stop(subtype: str, stopped: bool) -> None:
         'num_turns': 1,
         'duration_ms': 1000,
     }
-    (event,) = parser.feed(json.dumps(frame))
+    (event,) = _feed(parser, json.dumps(frame))
     assert event.budget_stopped is stopped
     assert parser.budget_stopped is stopped
 
@@ -504,7 +504,7 @@ def test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply(
             *_GIVE_UP_FRAMES,
         ]
     )
-    events = [event for line in lines for event in parser.feed(line)]
+    events = [event for line in lines for event in _feed(parser, line)]
     caps = [event for event in events if event.kind == 'thinking_cap']
     assert len(caps) == (1 if capped else 0)
     if capped:
@@ -521,7 +521,7 @@ def test_parser_tolerates_garbage_claude() -> None:
     """Malformed, non-object, and unknown lines yield nothing, never raise."""
     parser = ClaudeParser()
     junk = ['', '   ', 'not json', '[1, 2]', '"text"', '{}', '{"type": "mystery"}']
-    assert [event for line in junk for event in parser.feed(line)] == []
+    assert [event for line in junk for event in _feed(parser, line)] == []
     assert parser.session is None
     assert parser.cost is None
 
@@ -543,7 +543,7 @@ def test_parser_tolerates_present_null_payloads_claude() -> None:
         '{"type": "stream_event", "event":'
         ' {"type": "content_block_delta", "delta": null}}',
     ]
-    assert [event for line in frames for event in parser.feed(line)] == []
+    assert [event for line in frames for event in _feed(parser, line)] == []
 
 
 def test_parser_ignores_a_non_numeric_result_cost() -> None:
@@ -563,7 +563,7 @@ def test_parser_ignores_a_non_numeric_result_cost() -> None:
             'total_cost_usd': '0.05',
         },
     ]
-    (result,) = [event for line in _lines(frames) for event in parser.feed(line)]
+    (result,) = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert result.kind == 'result'
     assert result.cost is None
     assert parser.cost is None
@@ -618,7 +618,7 @@ def test_events_render_through_the_production_renderer_claude(
         },
     ]
     for line in _lines(frames):
-        for event in parser.feed(line):
+        for event in _feed(parser, line):
             render(event)
     out = capsys.readouterr().out
     assert 'Hello world' in out
@@ -652,7 +652,7 @@ def test_renderer_closes_a_truncated_stream_on_a_fresh_line(
         },
     ]
     for line in _lines(frames):
-        for event in parser.feed(line):
+        for event in _feed(parser, line):
             render(event)
     # close is idempotent -- the run ends on exactly one fresh line and
     # exactly one placeholder summary
@@ -678,7 +678,7 @@ def test_parser_flushes_cost_per_assistant_event(
         {'type': 'assistant', 'message': {'usage': _USAGE_FIRST}},
         {'type': 'assistant', 'message': {'usage': _USAGE_SECOND}},
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert [event.kind for event in events] == ['cost', 'cost']
     assert [event.cost for event in events] == [
         pytest.approx(_USAGE_FIRST_COST),
@@ -704,7 +704,7 @@ def test_parser_prices_a_multi_block_message_once(
         {'type': 'assistant', 'message': {'id': 'msg_a', 'usage': _USAGE_FIRST}},
         {'type': 'assistant', 'message': {'id': 'msg_b', 'usage': _USAGE_SECOND}},
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     # two cost events (one per distinct id), not three
     assert [event.cost for event in events] == [
         pytest.approx(_USAGE_FIRST_COST),
@@ -733,7 +733,7 @@ def test_parser_result_overwrites_the_accumulated_estimate(
             'num_turns': 1,
         },
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert parser.cost == 0.9
     assert parser.final
     assert events[-1].cost == 0.9
@@ -752,7 +752,7 @@ def test_parser_unpriced_model_accumulates_no_cost(
     monkeypatch.setattr(pricing, '_load', lambda: {})
     parser = ClaudeParser(model='mystery')
     frames = [{'type': 'assistant', 'message': {'usage': _USAGE_FIRST}}]
-    assert [event for line in _lines(frames) for event in parser.feed(line)] == []
+    assert [event for line in _lines(frames) for event in _feed(parser, line)] == []
     assert parser.cost is None
 
 
@@ -1074,7 +1074,7 @@ def test_routed_parser_prices_the_result_usage_through_the_chain(
             'duration_ms': 10,
         },
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     # no zero-dollar accrual event fires; the close carries the chain price
     assert [event.cost for event in events if event.kind == 'cost'] == []
     (result,) = [event for event in events if event.kind == 'result']
@@ -1085,7 +1085,7 @@ def test_routed_parser_prices_the_result_usage_through_the_chain(
     # an unpriced slug closes with no figure rather than the gateway estimate
     monkeypatch.setattr(pricing, '_load', lambda: {})
     unpriced = _RoutedClaudeParser(model='mystery/model')
-    events = [event for line in _lines(frames) for event in unpriced.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(unpriced, line)]
     (result,) = [event for event in events if event.kind == 'result']
     assert result.cost is None
     assert unpriced.cost is None
@@ -1131,7 +1131,7 @@ def test_routed_parser_sums_the_result_model_usage_per_model(
         },
     ]
     parser = _RoutedClaudeParser(model='anthropic/claude-haiku-4.5')
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     (result,) = [event for event in events if event.kind == 'result']
     rates = _PRICING['claude-fable-5']
     expected = sum(
@@ -1151,7 +1151,7 @@ def test_routed_parser_sums_the_result_model_usage_per_model(
         lambda: {'openrouter/anthropic/claude-haiku-4.5': _PRICING['claude-fable-5']},
     )
     unpriced = _RoutedClaudeParser(model='anthropic/claude-haiku-4.5')
-    events = [event for line in _lines(frames) for event in unpriced.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(unpriced, line)]
     (result,) = [event for event in events if event.kind == 'result']
     assert result.cost is None
     assert unpriced.cost is None
@@ -1203,7 +1203,7 @@ def test_routed_parser_tolerates_gateway_null_usage(
         },
     ]
     # no TypeError; the priced close counts only the non-null buckets
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     (result,) = [event for event in events if event.kind == 'result']
     rates = _PRICING['claude-fable-5']
     expected = 10 * rates['input_cost_per_token'] + 45 * rates['output_cost_per_token']
@@ -1482,6 +1482,13 @@ def _continuation_frame(*, parent: Optional[str] = None) -> dict[str, Any]:
         'session_id': 'sess-1',
         'isSynthetic': True,
     }
+
+
+def _feed(parser: ClaudeParser, line: str) -> list[Any]:
+    """Feed one line, dropping the idle-clock events the clock tests pin."""
+    return [
+        event for event in parser.feed(line) if event.kind not in ('acting', 'waiting')
+    ]
 
 
 def _lines(frames: list[dict[str, Any]]) -> list[str]:

@@ -57,9 +57,10 @@ _STEP_PREFIX = re.compile(r'^([0-9]+)-.*\.md$')
 # grace between the deadline's TERM and the follow-up KILL on the step tree
 _KILL_GRACE_SECONDS = 10.0
 
-#: Seconds of the agent's own idle time -- from its launch or a tool result
-#: (or its last visible text) to its next tool call or text, paused while its
-#: own tools run -- after which the loop ends the launch as stuck.
+#: Seconds of the agent's own idle time -- counted while it holds control
+#: (from its launch, a tool result, visible text, or a wake-up), paused while
+#: a tool runs or its turn has ended -- after which the loop ends the launch
+#: as stuck.
 NO_PROGRESS_SECONDS = 1800
 
 # grace between the TERM and KILL when the stream reader dies -- short, but
@@ -2885,32 +2886,28 @@ class Loop:
         # a thinking cap raises out of the stream driver, so the reader's
         # death below ends the invocation; SYNC runs as its own unsteered step
         watch_cap = step.path != self._sync_file
-        # the agent's own idle clock: running from the launch, each tool
-        # result, and each visible text; paused (None) while its own tools
-        # run -- thinking and sub-agent frames never touch it
+        # the agent's own idle clock, kept by the stream's acting/waiting
+        # events: running from the launch and each time the agent takes
+        # control, paused (None) while it has handed control off, and pushed
+        # back by a timed pause
         idle_since: Optional[float] = time.monotonic()
-        tools_running = 0
 
         def _render(event: StreamEvent) -> None:
-            nonlocal idle_since, tools_running
+            nonlocal idle_since
             if self._render is not None:
                 self._render(event)
             if watch_cap and event.kind == 'thinking_cap':
                 raise _ThinkingCap(event.session)
-            if event.subagent:
-                return
-            if event.kind == 'tool':
-                tools_running += 1
-                idle_since = None
-            elif event.kind == 'tool_result':
-                tools_running = max(0, tools_running - 1)
-                if tools_running == 0:
-                    idle_since = time.monotonic()
-            elif event.kind == 'text' and tools_running == 0:
+            if event.kind == 'acting':
                 idle_since = time.monotonic()
+            elif event.kind == 'waiting':
+                if event.duration is None:
+                    idle_since = None
+                elif idle_since is not None:
+                    idle_since += event.duration
 
         # poll the idle clock (the reader blocks on stdout, so it cannot);
-        # cancelled with the deadline timer once the invocation is over
+        # stopped once the stream ends, however it ends
         watchdog_done = threading.Event()
 
         def _watchdog() -> None:
@@ -2968,6 +2965,7 @@ class Loop:
                             file=sys.stderr,
                         )
         finally:
+            watchdog_done.set()
             # a truncated stream (no result frame) ends mid-line with no summary
             close = getattr(self._render, 'close', None)
             if close is not None:
@@ -2975,7 +2973,6 @@ class Loop:
         agent_status = process.wait()
         if timer is not None:
             timer.cancel()
-        watchdog_done.set()
 
         # the invocation is over -- drop the group handle so a later
         # pause/kill can never signal a recycled pgid

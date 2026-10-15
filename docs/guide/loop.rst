@@ -395,12 +395,16 @@ Two triggers mark a Claude launch as **stuck**, and both take the same path:
   ``max_tokens``, or that Claude Code follows with its own "Output token
   limit hit" continuation. Sub-agent replies, and replies that reached text
   or a tool call, are left alone.
-- **No action for 30 minutes.** A watchdog times the agent's own idle span.
-  The clock starts at the launch and at each tool result, restarts at each
-  piece of visible text, and is paused while one of the agent's own tools
-  runs (a sub-agent included). Thinking never counts as an action, and
-  sub-agent frames never touch the clock. At 30 minutes the watchdog ends
-  the agent the way the step deadline does.
+- **No action for 30 minutes.** A watchdog times the agent's own idle span,
+  counted only while the agent holds control. The clock runs from the
+  launch, from a result that answers the agent's last pending tool call,
+  from each visible text block, and from each wake-up after its turn ends
+  (Claude Code's background-task notice, a new reply). It pauses while a
+  tool call (a sub-agent included) awaits its result, and when the agent
+  ends its turn, since Claude Code then waits on background work such as a
+  long build. An API retry's backoff does not count. Thinking never counts
+  as an action, and sub-agent frames never touch the clock. At 30 minutes
+  the watchdog ends the agent the way the step deadline does.
 
 The first stuck launch in an attempt **steers** the step. The stuck row
 closes ``stopped`` with ``steered: thinking cap`` or ``steered: no action for

@@ -57,6 +57,8 @@ __all__ = [
     'test_no_progress_clock_pauses_while_a_tool_runs',
     'test_thinking_never_resets_the_no_progress_clock',
     'test_thinking_cap_then_no_progress_stalls_the_step',
+    'test_idle_clock_holds_while_the_agent_waits',
+    'test_idle_clock_fires_on_a_silent_agent',
     'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
@@ -231,6 +233,121 @@ class TrackingLoop(MockLoop):
         event = super().on_step_failure(*args, **kwargs)
         self.calls.append(event)
         return event
+
+
+# a live claude 2.1.300 capture (trimmed, session as @SESSION@): a background
+# command, a turn's end and result, then claude's wake-up and a second reply
+_BACKGROUND_WAIT = (
+    pathlib.Path(__file__).parent / 'streams' / 'claude_background_wait.jsonl'
+)
+
+# claude stream-json frames for the scripted stand-in (SID: the launch's
+# session); thinking streams as raw partial-message deltas, never an action
+_INIT = {'type': 'system', 'subtype': 'init', 'session_id': 'SID'}
+_TOOL_START = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_start',
+        'content_block': {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TOOL_RESULT = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'ok'}],
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TOOL_FRAME = {
+    'type': 'assistant',
+    'message': {
+        'id': 'msg_1',
+        'role': 'assistant',
+        'content': [{'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash', 'input': {}}],
+        'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_MESSAGE_START = {
+    'type': 'stream_event',
+    'event': {'type': 'message_start', 'message': {'id': 'msg_2', 'content': []}},
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_API_RETRY = {
+    'type': 'system',
+    'subtype': 'api_retry',
+    'retry_delay_ms': 3000,
+    'session_id': 'SID',
+}
+_THINKING = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_delta',
+        'delta': {'type': 'thinking_delta', 'thinking': 'hmm'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TEXT = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_delta',
+        'delta': {'type': 'text_delta', 'text': 'Done.'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_REPLY = {
+    'type': 'assistant',
+    'message': {
+        'id': 'msg_1',
+        'role': 'assistant',
+        'content': [{'type': 'thinking', 'thinking': '', 'signature': 'CAQS'}],
+        'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+# claude's output-cap continuation, verbatim from a real transcript
+_CONTINUATION_TEXT = (
+    'Output token limit hit. Resume directly \u2014 no apology, no recap of what'
+    ' you were doing. Pick up mid-thought if that is where the cut happened.'
+    ' Break remaining work into smaller pieces.'
+)
+_CONTINUATION = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [{'type': 'text', 'text': _CONTINUATION_TEXT}],
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+    'isSynthetic': True,
+}
+_RESULT = {
+    'type': 'result',
+    'subtype': 'success',
+    'session_id': 'SID',
+    'total_cost_usd': 0.001,
+    'num_turns': 1,
+    'duration_ms': 1,
+}
+
+
+def _echo(frame: dict[str, Any]) -> str:
+    """Return the shell command printing one stream frame as a line."""
+    return f"printf '%s\\n' '{json.dumps(frame)}'"
+
+
+def _claude_script(*parts: Any) -> str:
+    """Join frames (printed) and raw shell commands into one stand-in script."""
+    return '; '.join(_echo(part) if isinstance(part, dict) else part for part in parts)
 
 
 class ScriptedClaude(ClaudeAgent):
@@ -1222,6 +1339,69 @@ def test_thinking_cap_then_no_progress_stalls_the_step(
         'PLAN/stopped/steered: thinking cap; unpriced',
         'PLAN/exited/stalled: no action for 1s, after a steer; unpriced',
         'EXECUTE/stopped/failed on PLAN',
+    ]
+
+
+@pytest.mark.parametrize(
+    'script',
+    [
+        # the live capture: the agent backgrounds a command and ends its turn
+        # (a result), claude waits, then a task notice wakes it to finish
+        pytest.param(
+            f"sed -n -e 's/@SESSION@/SID/g' -e '1,18p' {_BACKGROUND_WAIT}; sleep 3;"
+            f" sed -n -e 's/@SESSION@/SID/g' -e '19,$p' {_BACKGROUND_WAIT}",
+            id='background-wait',
+        ),
+        # a tool call seen only on its assistant frame (no partial messages)
+        pytest.param(
+            _claude_script(_INIT, _TOOL_FRAME, 'sleep 3', _TOOL_RESULT, _RESULT),
+            id='assistant-frame-tool',
+        ),
+        # an API retry's backoff is no time of the agent's
+        pytest.param(
+            _claude_script(_INIT, _API_RETRY, 'sleep 2', _TEXT, _RESULT),
+            id='api-retry',
+        ),
+    ],
+)
+def test_idle_clock_holds_while_the_agent_waits(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    script: str,
+) -> None:
+    """Waiting on a tool, background work, or a retry is never idling."""
+    agent = scripted_claude([script, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+
+
+@pytest.mark.parametrize(
+    'script',
+    [
+        # silent from its launch
+        pytest.param(_claude_script(_INIT, 'exec sleep 30'), id='launch'),
+        # a call left unanswered when a new reply starts holds no pause
+        pytest.param(
+            _claude_script(_INIT, _TOOL_START, _MESSAGE_START, 'exec sleep 30'),
+            id='unanswered-call',
+        ),
+    ],
+)
+def test_idle_clock_fires_on_a_silent_agent(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    script: str,
+) -> None:
+    """An agent holding control in silence past the clock is steered."""
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([script, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 3
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
     ]
 
 
@@ -5147,92 +5327,6 @@ def test_stop_during_the_inter_iteration_sleep_ends_the_run(
 
 
 # ------ helpers
-
-
-# claude stream-json frames for the scripted stand-in (SID: the launch's
-# session); thinking streams as raw partial-message deltas, never an action
-_INIT = {'type': 'system', 'subtype': 'init', 'session_id': 'SID'}
-_TOOL_START = {
-    'type': 'stream_event',
-    'event': {
-        'type': 'content_block_start',
-        'content_block': {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash'},
-    },
-    'parent_tool_use_id': None,
-    'session_id': 'SID',
-}
-_TOOL_RESULT = {
-    'type': 'user',
-    'message': {
-        'role': 'user',
-        'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'ok'}],
-    },
-    'parent_tool_use_id': None,
-    'session_id': 'SID',
-}
-_THINKING = {
-    'type': 'stream_event',
-    'event': {
-        'type': 'content_block_delta',
-        'delta': {'type': 'thinking_delta', 'thinking': 'hmm'},
-    },
-    'parent_tool_use_id': None,
-    'session_id': 'SID',
-}
-_TEXT = {
-    'type': 'stream_event',
-    'event': {
-        'type': 'content_block_delta',
-        'delta': {'type': 'text_delta', 'text': 'Done.'},
-    },
-    'parent_tool_use_id': None,
-    'session_id': 'SID',
-}
-_THINKING_REPLY = {
-    'type': 'assistant',
-    'message': {
-        'id': 'msg_1',
-        'role': 'assistant',
-        'content': [{'type': 'thinking', 'thinking': '', 'signature': 'CAQS'}],
-        'stop_reason': None,
-    },
-    'parent_tool_use_id': None,
-    'session_id': 'SID',
-}
-# claude's output-cap continuation, verbatim from a real transcript
-_CONTINUATION_TEXT = (
-    'Output token limit hit. Resume directly \u2014 no apology, no recap of what'
-    ' you were doing. Pick up mid-thought if that is where the cut happened.'
-    ' Break remaining work into smaller pieces.'
-)
-_CONTINUATION = {
-    'type': 'user',
-    'message': {
-        'role': 'user',
-        'content': [{'type': 'text', 'text': _CONTINUATION_TEXT}],
-    },
-    'parent_tool_use_id': None,
-    'session_id': 'SID',
-    'isSynthetic': True,
-}
-_RESULT = {
-    'type': 'result',
-    'subtype': 'success',
-    'session_id': 'SID',
-    'total_cost_usd': 0.001,
-    'num_turns': 1,
-    'duration_ms': 1,
-}
-
-
-def _echo(frame: dict[str, Any]) -> str:
-    """Return the shell command printing one stream frame as a line."""
-    return f"printf '%s\\n' '{json.dumps(frame)}'"
-
-
-def _claude_script(*parts: Any) -> str:
-    """Join frames (printed) and raw shell commands into one stand-in script."""
-    return '; '.join(_echo(part) if isinstance(part, dict) else part for part in parts)
 
 
 def _step_rows(node: Node) -> list[str]:
