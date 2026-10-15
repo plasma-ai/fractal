@@ -235,6 +235,10 @@ may include breaking changes, each listed under a Breaking heading.
   met at launch stays a step failure with the same words. Three such launch
   refusals in a row read as the `PAUSED: billing` backoff, which the preflight
   check forestalls.
+- A drain run's lineage guard recognizes its seat's commands: it matches the
+  caller's session against the recorded agent group, so a command the agent CLI
+  runs in its own process group still refuses spawns and re-arms after scrubbing
+  `_DRAIN` and leaving its worktree.
 
 ## [1.3.0] - 2026-09-17
 
