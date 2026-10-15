@@ -859,15 +859,16 @@ class Node:
     def loop_records(self: Node) -> list[pathlib.Path]:
         """Return the loop group record of every other node in this tree.
 
-        A process-tree reap spares the groups these record: a node launched
-        from this node's agent stays a child of that agent until its
-        launcher returns, so a walk from the agent would otherwise take a
-        healthy loop at boot. Paths, not ids -- the reap re-reads them
-        before every signal round, catching a record written mid-reap.
-        Pure path arithmetic from each registry row's branch (no git), and
-        never raises: the reap runs on a deadline thread and inside pause,
-        so an unreadable registry answers none and an unreadable entry is
-        skipped.
+        A process-tree reap spares the groups these record: a node this
+        node's agent launches headless stays a child of the agent's tool
+        while its launcher runs (a tmux launch forks the loop from the tmux
+        server, outside the agent's tree), so a walk from the agent would
+        otherwise take a healthy loop at boot. Paths, not ids -- the reap
+        re-reads them before every signal round, catching a record written
+        mid-reap. Pure path arithmetic from each registry row's branch (no
+        git), and never raises: the reap runs on a deadline thread and
+        inside pause, so an unreadable registry answers none and an
+        unreadable entry is skipped.
 
         Returns:
             The ``.pgid`` record path of each registered node, this node's
@@ -3816,7 +3817,8 @@ class Node:
         """Pause the node and its active descendants (parent-first).
 
         Signals ``pause`` then aborts each node's in-flight agent invocation
-        (``pause.sh`` reaps the recorded step process group), so every loop
+        (``pause.sh`` reaps the in-flight agent's whole process tree and
+        names survivors and other processes in the worktree), so every loop
         reclassifies the abort and parks: it exits with status ``paused``,
         leaving its run and iteration rows open for :meth:`resume` to adopt.
         Fans out parent-first -- the inverse of every other signal -- so a

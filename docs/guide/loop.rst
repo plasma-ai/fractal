@@ -494,7 +494,8 @@ A deadline that has already passed before launch records the step as timed
 out without spawning anything.
 
 Enforcement is in-process: at the limit the loop sends ``SIGTERM`` to the
-agent's whole process group, waits a 10-second grace, then ``SIGKILL``\ s any
+agent's whole process tree (every group in its session or below it, other
+nodes' loops spared), waits a 10-second grace, then ``SIGKILL``\ s any
 survivor. An agent that shuts down cleanly within the grace is still recorded
 as timed out — the limit was reached.
 

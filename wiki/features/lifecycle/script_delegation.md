@@ -149,9 +149,10 @@ Four rails bound the reap. It never signals pid 0 or 1, the caller's own group,
 or the group of any of the caller's ancestors — so an agent that pauses its own
 node keeps the groups it runs in, its step finishes, and the loop parks at the
 next checkpoint. It never signals another node's loop group, nor walks through
-one: a node the agent launches (`fractal node start` runs the child's loop in a
-new session) stays a child of the agent's tool until its launcher returns, so
-the reap spares every group recorded in another registered node's `.pgid`,
+one: a node the agent launches headless (`fractal node start` runs the child's
+loop in a new session) stays a child of the agent's tool while its launcher runs
+— a tmux launch forks the loop from the tmux server, outside the agent's tree —
+so the reap spares every group recorded in another registered node's `.pgid`,
 everything in a session one of its processes leads, and everything below it, and
 names each spared group it reached. The record list comes from the registry by
 path alone (no git, so a sibling whose worktree no longer resolves is skipped,

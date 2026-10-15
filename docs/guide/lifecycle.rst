@@ -395,13 +395,19 @@ session while parked is normal**, and crash reconciliation deliberately
 never touches a paused node.
 
 The abort takes the agent's whole process tree, not just its process group:
-agent CLIs run tool commands in groups (or sessions) of their own, and those
-die with the agent. ``kill`` and a step deadline reap the same way. Anything
-still alive after the forced kill is named in the command's output, and so is
-any other process working in the node's worktree, which is reported but left
-running. If the first read of the process table fails, the abort falls back to
-TERMing every recorded group except the caller's own, so a self-pause run from a
-tool shell in a group of its own can still abort its own step.
+agent CLIs run tool commands in groups (or sessions) of their own, and every
+one still linked to the agent dies with it. ``kill`` and a step deadline reap
+the same way. Anything still alive after the forced kill is named in the
+command's output, and so is any other process working in the node's
+worktree, which is reported but left running. That includes a job an earlier
+tool call left behind under a session leader that has since exited
+(``validate.sh &`` under a ``setsid`` shell that already returned): nothing
+links it to the agent any more, so it is named, never ended. A pause run from
+inside the step, by the agent's own tool, spares the process groups its
+caller runs in, so the step finishes and the loop parks at the next
+checkpoint. Only if the first read of the process table fails does the abort
+fall back to TERMing every recorded group except the caller's own, so a
+self-pause from a tool shell in a group of its own then aborts its own step.
 
 While parked, a node:
 

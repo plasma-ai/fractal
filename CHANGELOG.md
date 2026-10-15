@@ -172,20 +172,17 @@ may include breaking changes, each listed under a Breaking heading.
   that uses no `step_retries`. A second stuck launch after the steer ends the
   step `exited` as stalled, never retried, fails the iteration as a timeout
   does, and posts a `step stalled` notice to the node's outbox for the parent.
-- `fractal node pause`, `fractal node kill`, a step deadline, and a stream
-  failure end the agent's whole process tree instead of only its process group.
-  Agent CLIs run tool commands in groups or sessions of their own, so those kept
-  running after the agent died — an evidence replay or a validation script
-  holding a build lock had to be found and killed by hand. The reap finds every
-  process in the agent's session or below it before the first signal, re-walks
-  after each round of TERMs, and KILLs what remains after the grace; it spares
-  any other node's loop the agent launched. Pause and kill name any survivor,
-  and any other process working in the node's worktree, which they report but
-  leave running.
-- The crashed-node heal and a timed-out `codex` preflight probe end the agent's
-  whole process tree instead of only its process group, so tools the agent
-  started in groups or sessions of their own no longer outlive a loop that died
-  or a probe that hung. Both spare any other node's loop and name survivors.
+- `fractal node pause`, `fractal node kill`, a step deadline, a stream failure,
+  the crashed-node heal, and a timed-out `codex` preflight probe end the agent's
+  whole process tree instead of only its process group. Agent CLIs run tool
+  commands in groups or sessions of their own, so those kept running after the
+  agent died — an evidence replay or a validation script holding a build lock
+  had to be found and killed by hand. The reap finds every process in the
+  agent's session or below it before the first signal, re-walks after each round
+  of TERMs, and KILLs what remains after the grace; it spares any other node's
+  loop the agent launched and names any survivor. Pause and kill also name any
+  other process working in the node's worktree, which they report but leave
+  running.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives `$MAX_CHILDREN` and the other config-derived variables from
