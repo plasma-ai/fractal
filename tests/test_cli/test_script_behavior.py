@@ -52,7 +52,9 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 - **``merge.sh`` merge-base advance** judges the child worktree by the commit
   content law (``fractal commit --check``), so an estate file the law refuses
   (a parked ``.env``) never blocks the advance -- only work a commit would
-  take (dirty tracked edits, committable untracked files) skips it.
+  take (dirty tracked edits, committable untracked files) skips it, as does
+  a commit the child made after the squash took its tip, which the advance
+  would otherwise revert.
 - **``merge.sh`` merge-base advance shape** records the target's post-squash
   commit on the child as a real two-parent commit whose tree is the target's
   with the child's own and descendant seeds grafted back from its HEAD: the
@@ -290,6 +292,7 @@ __all__ = [
     'test_merge_advance_brings_the_targets_fractal_pages_to_the_child',
     'test_merge_skips_the_advance_when_the_child_index_is_locked',
     'test_merge_skips_the_advance_when_reading_the_child_worktree_fails',
+    'test_merge_skips_the_advance_when_the_child_moves_mid_merge',
     'test_merge_skips_the_advance_over_a_private_ignored_file',
     'test_merge_skips_the_advance_over_a_path_the_target_renamed_onto',
     'test_merge_advance_moves_a_tracked_case_variant',
@@ -2206,6 +2209,46 @@ def test_merge_skips_the_advance_when_reading_the_child_worktree_fails(
     rows = json.loads(activity.stdout)
     merges = [row['status'] for row in rows if row['event'] == 'merge']
     assert merges == ['completed'], rows
+
+
+def test_merge_skips_the_advance_when_the_child_moves_mid_merge(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A child commit made during the merge skips the advance and survives.
+
+    The advance records the target's tree on the commit the squash took; from
+    a commit made since, it would delete that commit's files as adjudicated
+    away. The merge lands, the advance is skipped with a warning naming the
+    move, and the late commit stays on the child's branch and disk. A
+    validator that commits in the child's worktree stands in for a writer
+    racing the merge.
+    """
+    repo = _init_tree(tmp_path / 'movedrepo')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work')
+    late = worktree / 'late.txt'
+    (repo / 'check.sh').write_text(
+        f'printf "late\\n" > "{late}"\n'
+        f'git -C "{worktree}" add late.txt\n'
+        f'git -C "{worktree}" commit -q -m late\n',
+        encoding='utf-8',
+    )
+    _git(repo, 'add', 'check.sh')
+    _git(repo, 'commit', '-m', 'a validator that commits in the child')
+    result = _script('merge.sh', repo, f'{worktree}', '--validate=check.sh')
+
+    # the squash landed; the advance was skipped, so the late commit is still
+    # the child's tip with its file on disk
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
+    assert 'main.task moved during the merge' in result.stderr, result.stderr
+    assert _git(worktree, 'log', '-1', '--format=%s').stdout.strip() == 'late'
+    assert late.read_text(encoding='utf-8') == 'late\n'
+    assert _git(worktree, 'status', '--porcelain').stdout == ''
 
 
 @pytest.mark.parametrize(
@@ -5872,8 +5915,9 @@ def test_merge_serializes_concurrent_sibling_merges(tmp_path: pathlib.Path) -> N
     second's on top, the target clean, no squash state behind.
 
     The first squash is held open at a gate with a ``git`` shim that parks
-    before running the real ``merge --squash``; the second squash only marks
-    its start, so a merge that reaches it while the first is parked shows.
+    before running the real ``merge --squash``; a later squash only marks its
+    start, so a merge that reaches its squash while the first is parked
+    shows.
     """
     repo = _init_tree(tmp_path / 'racerepo')
     names = ('a', 'b')
@@ -5890,11 +5934,13 @@ def test_merge_serializes_concurrent_sibling_merges(tmp_path: pathlib.Path) -> N
     ready_b = tmp_path / 'gate_ready_b'
     bindir = _git_shim(
         tmp_path,
-        'if [[ " $* " == *" merge --squash main.a "* ]]; then\n'
-        f'    touch "{ready_a}"\n'
-        f'    while [[ ! -e "{release_a}" ]]; do sleep 0.05; done\n'
-        'elif [[ " $* " == *" merge --squash main.b "* ]]; then\n'
-        f'    touch "{ready_b}"\n'
+        'if [[ " $* " == *" merge "* && " $* " == *" --squash "* ]]; then\n'
+        f'    if [[ ! -e "{ready_a}" ]]; then\n'
+        f'        touch "{ready_a}"\n'
+        f'        while [[ ! -e "{release_a}" ]]; do sleep 0.05; done\n'
+        '    else\n'
+        f'        touch "{ready_b}"\n'
+        '    fi\n'
         'fi\n',
     )
     env = _cli_env()

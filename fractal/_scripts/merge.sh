@@ -130,6 +130,18 @@ fi
 WORKTREE_Q=$(printf '%q' "$WORKTREE_DIR")
 PARENT_Q=$(printf '%q' "$PARENT_WORKTREE_DIR")
 
+# ------ squash tip
+
+# every read of the node's content -- the collision and provenance checks, the
+# squash, the refresh's index judgement, the advance -- takes this one commit,
+# so a commit the node makes during the merge (a relaunched loop, a hand
+# commit) is neither squashed unchecked nor reverted by the advance
+if ! SQUASH_TIP=$(git -C "$WORKTREE_DIR" rev-parse -q --verify "refs/heads/$BRANCH^{commit}"); then
+    echo "Error: $WORKTREE_DIR is not on a branch of its own ($BRANCH);" \
+        "check out the node's branch before merging" >&2
+    exit 1
+fi
+
 # ------ seed prefix and scope roots
 
 # a sub-project node nests its seed under <project>/.fractal
@@ -263,7 +275,7 @@ if [[ "$CONTINUE" != true ]]; then
     # directory counts too, so the prefixes are probed like the advance does,
     # stopping at a prefix HEAD tracks (a file the node replaced with a
     # directory is the squash's own type change, not a collision)
-    MERGE_BASE=$(git -C "$PARENT_WORKTREE_DIR" merge-base HEAD "$BRANCH" 2>/dev/null || echo HEAD)
+    MERGE_BASE=$(git -C "$PARENT_WORKTREE_DIR" merge-base HEAD "$SQUASH_TIP" 2>/dev/null || echo HEAD)
     COLLIDING=""
     # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
     # name is never C-quoted by core.quotePath into a path that exists nowhere
@@ -285,7 +297,7 @@ if [[ "$CONTINUE" != true ]]; then
             fi
         done
     done < <(git -C "$PARENT_WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=AM \
-        "$MERGE_BASE" "$BRANCH")
+        "$MERGE_BASE" "$SQUASH_TIP")
     if [[ -n "$COLLIDING" ]]; then
         echo "Error: merging $BRANCH into $PARENT_BRANCH would overwrite untracked files in" \
             "$PARENT_BRANCH's worktree: ${COLLIDING%, }; move them aside or drop them from" \
@@ -324,7 +336,7 @@ else
     SQUASH_SHA=$(awk '/^commit /{print $2; exit}' "$SQUASH_MSG_FILE")
     if [[ -n "$SQUASH_SHA" ]] \
         && ! git -C "$PARENT_WORKTREE_DIR" merge-base --is-ancestor \
-            "$SQUASH_SHA" "$BRANCH" 2>/dev/null; then
+            "$SQUASH_SHA" "$SQUASH_TIP" 2>/dev/null; then
         echo "Error: the squash in progress in $PARENT_BRANCH's worktree does" \
             "not come from $BRANCH; commit or abort it before merging this node" >&2
         exit 1
@@ -332,7 +344,7 @@ else
     # the squash must cover the branch's whole offering: SQUASH_MSG lists every
     # commit it took, so a commit the node made after the hand squash (an
     # iteration, a nested merge) is one the advance would write over
-    UNSQUASHED=$(comm -23 <(git -C "$PARENT_WORKTREE_DIR" rev-list HEAD.."$BRANCH" | sort) \
+    UNSQUASHED=$(comm -23 <(git -C "$PARENT_WORKTREE_DIR" rev-list HEAD.."$SQUASH_TIP" | sort) \
         <(awk '/^commit /{print $2}' "$SQUASH_MSG_FILE" | sort))
     if [[ -n "$UNSQUASHED" ]]; then
         echo "Error: $BRANCH has commits newer than the squash in progress in" \
@@ -530,7 +542,7 @@ CARRY_ERROR=""
 CHILD_MOVED=false
 carry_prepare() {
     if ! CHILD_HEAD=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null) \
-        || ! CHILD_OLD=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
+        || ! CHILD_TIP=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
         || ! CHILD_INDEX=$(git -C "$WORKTREE_DIR" rev-parse --git-path index 2>/dev/null); then
         CARRY_ERROR="reading $BRANCH's worktree failed"
         return 1
@@ -539,6 +551,13 @@ carry_prepare() {
         CARRY_ERROR="$BRANCH's worktree is on $CHILD_HEAD, not $BRANCH"
         return 1
     fi
+    # the advance moves only the commit the squash took: from a later one it
+    # would record that commit's work as adjudicated away and delete its files
+    if [[ "$CHILD_TIP" != "$SQUASH_TIP" ]]; then
+        CARRY_ERROR="$BRANCH moved during the merge; merge again"
+        return 1
+    fi
+    CHILD_OLD=$SQUASH_TIP
     [[ "$CHILD_INDEX" = /* ]] || CHILD_INDEX="$WORKTREE_DIR/$CHILD_INDEX"
     # the graft reads the child's seed from its HEAD, not its index: the
     # advance is a commit on HEAD, and the two-tree update keeps whatever the
@@ -671,6 +690,11 @@ advance_merge_base() {
     if ! CHILD_OLD=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
         || ! TARGET_HEAD=$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD 2>/dev/null); then
         skip_advance "reading the commits to record failed"
+        return 0
+    fi
+    # the advance from a commit made since the squash would revert it
+    if [[ "$CHILD_OLD" != "$SQUASH_TIP" ]]; then
+        skip_advance "$BRANCH moved during the merge"
         return 0
     fi
     # the child's seed entries as its (clean) index holds them, in the
@@ -817,7 +841,7 @@ if [[ "$CONTINUE" != true ]]; then
     # below stays the single user-facing line; stderr captured and replayed
     # only on failure, where it carries git's abort reason -- on success it
     # carries only git's own "went well" notice)
-    if ! SQUASH_STDERR=$(git -C "$PARENT_WORKTREE_DIR" merge --squash "$BRANCH" 2>&1 >/dev/null); then
+    if ! SQUASH_STDERR=$(git -C "$PARENT_WORKTREE_DIR" merge --squash "$SQUASH_TIP" 2>&1 >/dev/null); then
         [[ -z "$SQUASH_STDERR" ]] || echo "$SQUASH_STDERR" >&2
         # distinguish a real content conflict (unmerged index entries) from a
         # merge that aborted before staging anything (an untracked-file collision,
@@ -1139,7 +1163,7 @@ if command -v wiki &>/dev/null; then
         # the driver merged the index when its staged bytes match neither side's
         STAGED=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify ":0:$INDEX" 2>/dev/null || true)
         OURS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "HEAD:$INDEX" 2>/dev/null || true)
-        THEIRS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "$BRANCH:$INDEX" 2>/dev/null || true)
+        THEIRS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "$SQUASH_TIP:$INDEX" 2>/dev/null || true)
         [[ "$STAGED" != "$OURS" && "$STAGED" != "$THEIRS" ]] || continue
         SUBTREE=${FOLDER#"$OWNER"}
         SUBTREE=${SUBTREE#/}

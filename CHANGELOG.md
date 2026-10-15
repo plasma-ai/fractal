@@ -24,8 +24,10 @@ may include breaking changes, each listed under a Breaking heading.
   the squash commit rolls back both the target and the node. A step frozen
   inside a git operation (a conflicted merge, squash, cherry-pick, or revert, a
   rebase stopped part-way, or a git command's `index.lock`) refuses the merge
-  before anything changes, naming the operation. A live node, or a child landing
-  into a live or paused parent, still refuses.
+  before anything changes, naming the operation. `fractal resume` waits for a
+  running merge before relaunching a paused node, and a commit the node makes
+  during the merge refuses it. A live node, or a child landing into a live or
+  paused parent, still refuses.
 - `fractal node merge --message=<text>` sets the squash commit's text in place
   of `merge <branch>`, so a descriptive message needs no amend (an amended
   squash orphans the merge-base advance recorded against it).
@@ -158,6 +160,11 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- `node merge` reads the merging node's tip once, before the squash: the squash,
+  its collision and `--continue` provenance checks, the wiki-root refresh's
+  judgement, and the merge-base advance all take that commit, so a commit the
+  node makes during the merge skips the advance with a warning instead of being
+  reverted by it.
 - A Claude step killed before its result frame (a deadline, a stall or thinking
   cap, a pause, a dead stream) is priced from Claude Code's own session
   transcript instead of keeping only the stream's partial figure, which was

@@ -4021,15 +4021,19 @@ class Node:
         # worktree whose info/exclude predates the current block heals here
         # and the adopted run's cleanup and commits see fresh ignores
         self._git_exclude()
-        # the resume event lands before the relaunch so the booting loop's
-        # deadline credit sees the pause..resume span closed
-        event_id = self.record.event_start('resume')
-        try:
-            self._run_script('resume.sh', f'{self._root}')
-        except Exception:
-            self.record.event_end(event_id=event_id, status='failed')
-            raise
-        self.record.event_end(event_id=event_id, status='completed')
+        # a merge's carried advance rewrites a paused node's worktree, so the
+        # relaunch waits for one in flight by taking the merge flock, as
+        # reseed does
+        with worktree.merge_lock(self.repo_dir):
+            # the resume event lands before the relaunch so the booting loop's
+            # deadline credit sees the pause..resume span closed
+            event_id = self.record.event_start('resume')
+            try:
+                self._run_script('resume.sh', f'{self._root}')
+            except Exception:
+                self.record.event_end(event_id=event_id, status='failed')
+                raise
+            self.record.event_end(event_id=event_id, status='completed')
 
     def pause_latched(
         self: Node,
@@ -4133,15 +4137,19 @@ class Node:
 
         A paused node merges without leaving ``paused``: it runs no loop and
         no agent, so its branch is quiescent, and its run, iteration, and step
-        rows stay open for :meth:`resume` to adopt. Only committed work lands;
-        the advance carries the frozen step's uncommitted state the way
-        ``git checkout`` moves a branch, refusing the whole merge when it
-        would touch a dirty path or an untracked or ignored file, and rolling
-        the target and the node back when anything fails after the commit. A
-        frozen step stopped inside a git operation -- a merge, squash merge,
-        cherry-pick, revert, or rebase, or a git command still running or
-        killed with its ``index.lock`` held -- refuses the merge before
-        anything changes.
+        rows stay open for :meth:`resume` to adopt. A resume relaunches the
+        loop only under the merge lock, and the merge re-reads the node's
+        status once it holds that lock, refusing a node that changed status
+        while it waited; a commit the node gains during the merge anyway
+        refuses it, since the advance would revert that commit. Only
+        committed work lands; the advance carries the frozen step's
+        uncommitted state the way ``git checkout`` moves a branch, refusing
+        the whole merge when it would touch a dirty path or an untracked or
+        ignored file, and rolling the target and the node back when anything
+        fails after the commit. A frozen step stopped inside a git operation
+        -- a merge, squash merge, cherry-pick, revert, or rebase, or a git
+        command still running or killed with its ``index.lock`` held --
+        refuses the merge before anything changes.
 
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
@@ -4220,6 +4228,14 @@ class Node:
         # one squash at a time per repo: two sibling merges racing into the
         # same target interleave their index writes and leave it half-merged
         with worktree.merge_lock(self.repo_dir):
+            # the status the arguments were built from must still hold: a
+            # resume relaunches a paused node only under this lock, so no
+            # relaunch starts while the script runs
+            if (status := self.status()) != current:
+                raise RuntimeError(
+                    f'Cannot merge: the node went from {current} to {status}'
+                    ' while the merge waited. Merge again.'
+                )
             # a frozen step can stop inside a git operation, which the carried
             # advance would move the branch under (git itself refuses to
             # switch branches mid-merge); a probe that cannot answer raises

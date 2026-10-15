@@ -27,27 +27,34 @@ interleaving their index writes.
 
 A paused node merges without leaving `paused`: it runs no loop and no agent, so
 its branch is quiescent, and its run, iteration, and step rows stay open for
-`fractal resume` to adopt. Only committed work lands. A frozen step that stopped
-inside a git operation — a merge, squash merge, cherry-pick, or revert stopped
-on a conflict, a rebase stopped part-way, or the `index.lock` of a git command
-still running or killed — refuses the merge before anything changes, naming the
-operation and its marker: resume the node and let it finish or abort the
-operation, or finish or abort it by hand in the worktree, then merge again
-(remove a stale `index.lock` only once no git process runs there). `Node.merge`
-passes `merge.sh --carry-dirty`, and the merge-base advance then carries the
-frozen step's uncommitted state the way `git checkout` moves a branch instead of
-skipping on a dirty worktree (a skipped advance would make the next landing
-re-diff from the fork point). Before the target commits, the advance tree is
-built from the staged target tree, and a dry-run two-tree `read-tree` against a
-copy of the node's index plus the untracked-and-ignored clobber guard judge the
-move: an advance that would touch a dirty or staged path or write over an
-untracked or ignored file refuses the whole merge, restoring the target and
-naming the paths. After the commit a two-tree `read-tree -m -u` moves the node's
-index and worktree, keeping its local changes, and a compare-and-swap
-`update-ref` moves its branch; any failure or interrupt there reverses the
-`read-tree`, resets the target to its pre-merge HEAD, and closes the merge event
-`failed`. A `--message` sets the squash commit's text, so a descriptive message
-never needs an amend that would orphan the advance.
+`fractal resume` to adopt. A resume relaunches the loop only under the merge
+lock, so it waits for a running merge, and the merge re-reads the node's status
+once it holds the lock, refusing a node that left `paused` while it waited; a
+commit the node gains during the merge anyway (a hand commit) refuses the merge
+(`<node> moved during the merge`), since the advance would revert it.
+
+Only committed work lands. A frozen step that stopped inside a git operation — a
+merge, squash merge, cherry-pick, or revert stopped on a conflict, a rebase
+stopped part-way, or the `index.lock` of a git command still running or killed —
+refuses the merge before anything changes, naming the operation and its marker:
+resume the node and let it finish or abort the operation, or finish or abort it
+by hand in the worktree, then merge again (remove a stale `index.lock` only once
+no git process runs there).
+
+`Node.merge` passes `merge.sh --carry-dirty`, and the merge-base advance then
+carries the frozen step's uncommitted state the way `git checkout` moves a
+branch instead of skipping on a dirty worktree (a skipped advance would make the
+next landing re-diff from the fork point). Before the target commits, the
+advance tree is built from the staged target tree, and a dry-run two-tree
+`read-tree` against a copy of the node's index plus the untracked-and-ignored
+clobber guard judge the move: an advance that would touch a dirty or staged path
+or write over an untracked or ignored file refuses the whole merge, restoring
+the target and naming the paths. After the commit a two-tree `read-tree -m -u`
+moves the node's index and worktree, keeping its local changes, and a
+compare-and-swap `update-ref` moves its branch; any failure or interrupt there
+reverses the `read-tree`, resets the target to its pre-merge HEAD, and closes
+the merge event `failed`. A `--message` sets the squash commit's text, so a
+descriptive message never needs an amend that would orphan the advance.
 
 ## Untracked files on the target
 

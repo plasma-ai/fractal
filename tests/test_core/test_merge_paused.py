@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
+import sys
+import threading
+import time
 
 import pytest
 
+from fractal.constants import MERGE_LOCK_FILE, WORKTREES_FOLDER
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _git, _stub_run_script
 
 from .conftest import _parse_project_dir
 
@@ -17,10 +22,23 @@ __all__ = [
     'test_paused_merge_validation_refusal_changes_nothing',
     'test_paused_merge_refuses_an_advance_over_dirty_paths',
     'test_paused_merge_refuses_an_unfinished_git_operation',
+    'test_paused_merge_refuses_a_branch_that_moved_mid_merge',
+    'test_resume_waits_for_a_running_merge',
 ]
 
 FROZEN_EDIT = 'frozen mid-step edit\n'
 FROZEN_UNTRACKED = 'frozen scratch\n'
+
+# a standalone holder of the real merge lock file: acquire an exclusive
+# fcntl.flock on argv[1], signal readiness via argv[2], then block -- the same
+# lock and mode Node.merge and Node._resume contend
+_LOCK_HOLDER = (
+    'import fcntl, sys, time; '
+    "f = open(sys.argv[1], 'a'); "
+    'fcntl.flock(f, fcntl.LOCK_EX); '
+    "open(sys.argv[2], 'w').close(); "
+    'time.sleep(120)'
+)
 
 
 def test_paused_merge_lands_twice_and_carries_the_frozen_step(
@@ -166,6 +184,85 @@ def test_paused_merge_refuses_an_unfinished_git_operation(
     _assert_frozen(node)
 
 
+def test_paused_merge_refuses_a_branch_that_moved_mid_merge(
+    git_repo: pathlib.Path,
+) -> None:
+    """A commit the node makes during the merge refuses it and survives.
+
+    The advance moves only the commit the squash took: from a later one it
+    would delete that commit's files as adjudicated away, so the merge
+    refuses and restores the target, and the late commit keeps its file on
+    the node's branch and disk. A validator that commits in the node's
+    worktree stands in for a writer racing the merge.
+    """
+    _, node = _paused_child(git_repo)
+    late = node.worktree / 'late.txt'
+    (git_repo / 'check.sh').write_text(
+        f'printf "late\\n" > "{late}"\n'
+        f'git -C "{node.worktree}" add late.txt\n'
+        f'git -C "{node.worktree}" commit -q -m late -- late.txt\n',
+        encoding='utf-8',
+    )
+    _git(git_repo, 'add', 'check.sh')
+    _git(git_repo, 'commit', '-m', 'a validator that commits in the node')
+    head = _git(git_repo, 'rev-parse', 'HEAD').stdout
+
+    moved = re.escape(f'{node.branch} moved during the merge')
+    with pytest.raises(RuntimeError, match=moved):
+        node.merge(validation_script='check.sh')
+
+    # the target is back where it was...
+    assert _git(git_repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(git_repo, 'status', '--porcelain').stdout == ''
+    # ...and the late commit kept its file on disk and in the node's tree
+    assert late.read_text(encoding='utf-8') == 'late\n'
+    tracked = _git(node.worktree, 'ls-tree', '--name-only', 'HEAD', 'late.txt').stdout
+    assert tracked.strip() == 'late.txt'
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+
+
+def test_resume_waits_for_a_running_merge(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A resume relaunches a paused node only once a running merge lets go.
+
+    A merge's carried advance rewrites the paused node's worktree, so the
+    relaunch takes the repo's merge lock first: while another process holds
+    it the relaunch waits, and it runs once the lock is released.
+    """
+    root, _ = _paused_child(git_repo)
+    run_scripts = _stub_run_script(monkeypatch, Node)
+    lock_file = git_repo / WORKTREES_FOLDER / MERGE_LOCK_FILE
+    ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
+    holder = subprocess.Popen(
+        [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
+    )
+    resumer = threading.Thread(target=root.resume)
+    try:
+        _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
+        resumer.start()
+        # the relaunch waits behind the held lock
+        resumer.join(timeout=3)
+        assert resumer.is_alive()
+        assert run_scripts == []
+        # the holder dies, the kernel releases the lock, and the relaunch runs
+        holder.kill()
+        holder.wait(timeout=5)
+        resumer.join(timeout=60)
+        assert not resumer.is_alive()
+        assert [call[0] for call in run_scripts] == ['resume.sh']
+    finally:
+        # the holder is a single leaf process, so a pid kill reaps it fully
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
+        if resumer.is_alive():
+            resumer.join(timeout=60)
+
+
 # ------ helpers
 
 
@@ -195,6 +292,19 @@ def _assert_frozen(node: Node) -> None:
     assert (node.worktree / 'scratch.txt').read_text(
         encoding='utf-8'
     ) == FROZEN_UNTRACKED
+
+
+def _await_ready(
+    marker: pathlib.Path,
+    *,
+    proc: subprocess.Popen,
+    deadline: float,
+) -> None:
+    """Block (bounded) until ``marker`` appears, failing if ``proc`` dies first."""
+    while not marker.exists():
+        assert proc.poll() is None, 'holder exited before acquiring the lock'
+        assert time.monotonic() < deadline, 'holder never signalled ready'
+        time.sleep(0.02)
 
 
 def _snapshot(repo: pathlib.Path, node: Node) -> tuple[str, ...]:
