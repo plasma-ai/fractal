@@ -95,7 +95,7 @@ def snapshot() -> dict[int, Process]:
 
     Raises:
         OSError: When ``ps`` cannot run.
-        subprocess.CalledProcessError: When ``ps`` fails.
+        RuntimeError: When ``ps`` fails.
 
     """
     result = subprocess.run(
@@ -103,8 +103,10 @@ def snapshot() -> dict[int, Process]:
         capture_output=True,
         text=True,
         errors='replace',
-        check=True,
     )
+    if result.returncode != 0:
+        error = result.stderr.strip()
+        raise RuntimeError(f'ps failed (exit {result.returncode}): {error!r}')
     table = {}
     for line in result.stdout.splitlines():
         # ps escapes control characters in a command, so each process is one
@@ -206,7 +208,7 @@ def reap(
     owned = _read_groups([owner]) if owner is not None else frozenset()
     try:
         tree = _Tree(roots, spare, mark)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, RuntimeError):
         _reap_groups(roots, grace=grace, mark=mark)
         return Reaped()
     if outside_only and roots & tree.protected:
@@ -351,7 +353,7 @@ class _Tree:
             return
         try:
             self.table = snapshot()
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, RuntimeError):
             self.blind = True
             return
         self.walk()
