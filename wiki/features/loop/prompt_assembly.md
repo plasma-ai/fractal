@@ -19,7 +19,9 @@ assembly, owned by `fractal/core/render.py`, concatenates three layers joined by
 blank lines: the node's `NODE.md` charter, the step file's body with its
 frontmatter stripped, and every active mode document. One merged variable map
 both selects the active modes and substitutes the assembled text in a single
-pass.
+pass. On the iteration a resume re-enters, the loop appends an unread-inbox
+digest after rendering, to SYNC's prompt too, so the digest is never
+substituted.
 
 ## Substitution grammar
 

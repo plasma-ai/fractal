@@ -410,8 +410,8 @@ class Loop:
                 self._iter_timeout_seconds = self._interval_seconds
         # SYNC_MODE gates the SYNC step run before each step; unlike the
         # prompt-injection modes (DETACHED_MODE/CONTINUE_MODE/RESUME_MODE/
-        # RESERVE_MODE/META_MODE) SYNC.md is run as its own step, not appended
-        # to step prompts (the prompt builder skips it)
+        # RESERVE_MODE/DRAIN_MODE/META_MODE) SYNC.md is run as its own step, not
+        # appended to step prompts (the prompt builder skips it)
         sync = config.get('sync')
         self._sync_mode = True if sync is None else bool(sync)
         # pin the boot-time modes so a mid-run config edit cannot flip a run's
