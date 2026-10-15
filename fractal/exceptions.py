@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Union
+from typing import Optional, Union
 
 __all__ = [
     'AbstractMethodError',
@@ -62,3 +62,15 @@ class DirtyWorktreeError(RuntimeError):
 
 class _Abort(Exception):
     """Raised by the loop when a preflight or adoption abort ends the run (exit 1)."""
+
+
+class _ThinkingCap(Exception):
+    """Raised by the loop through the stream driver to end a thinking-capped launch.
+
+    Carries the capped launch's session, which the steer resumes.
+    """
+
+    def __init__(self: _ThinkingCap, session: Optional[str]) -> None:
+        """Initialize ``_ThinkingCap``."""
+        super().__init__('reply hit the output cap while thinking')
+        self.session = session

@@ -209,10 +209,16 @@ class StreamEvent:
     """One semantic frame parsed from an agent's output stream.
 
     ``kind`` is one of: ``'session' | 'text' | 'tool' | 'tool_result' |
-    'cost' | 'result' | 'error'``. Fields are populated per kind; absent
-    facts stay ``None`` (a result with no cost fact reads ``$?``). Consumers
-    (renderer, TUI bubbles, record verbs) branch on ``kind`` only --
-    never on the provider.
+    'cost' | 'result' | 'error' | 'thinking_cap'``. Fields are populated
+    per kind; absent facts stay ``None`` (a result with no cost fact reads
+    ``$?``). Consumers (renderer, TUI bubbles, record verbs) branch on
+    ``kind`` only -- never on the provider.
+
+    A ``'thinking_cap'`` (carrying ``session``) reports a top-level reply
+    that hit the output-token cap while still thinking -- no text and no
+    tool call -- as the agent moves to continue past it: the continuation
+    loses the cut-off thought, so the agent restarts it and caps again.
+    Sub-agent replies never report one.
     """
 
     # NOTE: fields cluster by the event kind that populates them rather than

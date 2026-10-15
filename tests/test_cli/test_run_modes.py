@@ -146,6 +146,8 @@ __all__ = [
     'test_iter_failure_reason_names_missing_steps_not_agent',
     'test_failed_step_stderr_snapshot_and_exit_coded_reason',
     'test_stream_borne_failure_reason_carries_the_cause',
+    'test_thinking_cap_steers_the_capped_session_once',
+    'test_thinking_cap_after_the_steer_stalls_without_retry',
     'test_cost_cap_guard_failure_reason_is_durable',
     'test_drain_wait_sync_failure_keeps_completed_with_note',
     'test_gate_teardown_reaps_full_process_group',
@@ -158,6 +160,7 @@ _DETACHED_MARKER = 'Each step is a separate session'  # modes/DETACHED.md
 _CONTINUE_MARKER = 'This node was continued'  # modes/CONTINUE.md
 _RESUME_MARKER = 'This node was paused mid-run'  # modes/RESUME.md
 _RESERVE_MARKER = 'Reserve Mode'  # modes/RESERVE.md
+_STALL_MARKER = 'ran out of room while still thinking'  # modes/STALL.md
 
 
 # marker that arms the stub's gate: a step prompt carrying it makes the stub
@@ -257,6 +260,25 @@ if [[ "$SELF" == "claude" ]]; then
     # recorded); the marker tells load starvation from a streamed-then-hung stub
     if [[ "$PROMPT" == *INIT-THEN-HANG* ]]; then
         touch "$CAPTURE_DIR/init_hung"
+        exec sleep 60
+    fi
+    # a prompt carrying THINKING-CAP streams a thinking-only reply cut at the
+    # output cap plus claude's own synthetic continuation, then hangs as the
+    # auto-continued reply would -- the loop must end the call; CAP-TWICE also
+    # flags the session (once per capture) so its steered resume caps again
+    CAP=""
+    if [[ "$PROMPT" == *THINKING-CAP* ]]; then CAP=1; fi
+    if [[ -f "$CAPTURE_DIR/recap_$SID" ]]; then
+        rm -f "$CAPTURE_DIR/recap_$SID"
+        CAP=1
+    fi
+    if [[ -n "$CAP" ]]; then
+        if [[ "$PROMPT" == *CAP-TWICE* ]] && [[ ! -f "$CAPTURE_DIR/recapped" ]]; then
+            touch "$CAPTURE_DIR/recap_$SID" "$CAPTURE_DIR/recapped"
+        fi
+        printf '{"type":"assistant","message":{"id":"msg_cap_%s","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"","signature":"CAQS"}],"stop_reason":null},"parent_tool_use_id":null,"session_id":"%s"}\\n' "$N" "$SID"
+        printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Output token limit hit. Resume directly -- no apology, no recap of what you were doing."}]},"parent_tool_use_id":null,"session_id":"%s","isSynthetic":true}\\n' "$SID"
+        echo "$$" > "$CAPTURE_DIR/capped_$N.txt"
         exec sleep 60
     fi
     # a prompt carrying FAIL-WITH-STDERR prints a diagnosis to stderr and
@@ -387,6 +409,12 @@ _FAIL_STDERR = 'stub failure: credentials expired'
 # step, not the exit code, and the .err capture stays blank)
 _STREAM_ERROR_MARKER = 'ERROR-ON-STREAM'
 _STREAM_ERROR_DETAIL = 'stub stream failure: quota exhausted'
+
+# the thinking-cap mode: a claude body carrying the marker streams a
+# thinking-only reply cut at the output cap and claude's continuation, then
+# hangs; adding the twice marker makes the steered resume cap as well
+_THINKING_CAP_MARKER = 'THINKING-CAP'
+_CAP_TWICE_MARKER = 'CAP-TWICE'
 
 # rates + expected cost for the killed-step assertion (Anthropic convention:
 # disjoint buckets); the usage figures must match the stub's emitted frame
@@ -3346,6 +3374,140 @@ def test_stream_borne_failure_reason_carries_the_cause(repo: dict) -> None:
     assert 'AgentStreamError' in snapshot.read_text(encoding='utf-8')
 
 
+# ------ thinking cap
+
+
+@pytest.mark.parametrize('detached', [False, True], ids=['continuous', 'detached'])
+def test_thinking_cap_steers_the_capped_session_once(
+    repo: dict,
+    detached: bool,
+) -> None:
+    """A thinking-only reply at the output cap ends the call and steers once.
+
+    The loop ends the capped invocation instead of letting claude
+    auto-continue, then resumes the very session the stream captured --
+    in detached mode too -- with ``STALL.md`` as the whole prompt. The
+    capped launch's row closes stopped and the steered one books its own
+    row marked ``steer``; neither is a retry, and the next step runs as
+    it always does.
+    """
+    name = 'capsteer' + ('det' if detached else '')
+    steps = {
+        '01-plan.md': f'# Plan\n\nPlanning step. {_THINKING_CAP_MARKER}\n',
+        '02-beta.md': '# Beta\n\nSecond step.\n',
+    }
+    node = _make_node(repo, name, detached=detached, sync=False, steps=steps)
+    worktree = node['worktree']
+    # bound the red run: an unended capped call hangs until the step timeout
+    assert _run(worktree, 'config', '_set', 'step_timeout=20s').returncode == 0
+    calls, result = _run_loop(repo, node, capture_name=name)
+    capture = repo['root'] / f'capture_{name}'
+
+    # the plan call capped, was ended (not orphaned), and its session resumed
+    # by a steer carrying only STALL.md; beta then ran once, unaffected
+    assert len(calls) == 3, (calls, result.stdout)
+    plan, steer, beta = calls[1], calls[2], calls[3]
+    assert 'Planning step' in plan['prompt']
+    flag, session = plan['session'].split()
+    assert flag == '--session-id'
+    pid = int((capture / 'capped_1.txt').read_text(encoding='utf-8'))
+    assert _alive_pids([pid]) == []
+    assert steer['session'] == f'--resume {session}'
+    assert _STALL_MARKER in steer['prompt']
+    assert 'Planning step' not in steer['prompt']
+    assert 'Second step' in beta['prompt']
+    assert not (capture / 'capped_2.txt').exists()
+
+    # the capped row stopped with the steer named (unpriced: the stub's capped
+    # reply carries no usage); the steer's row completed
+    rows = _step_rows(worktree, f'main.{name}')
+    assert rows == [
+        'plan/stopped/thinking cap; steered; unpriced',
+        'plan/completed/steer',
+        'beta/completed/',
+    ], result.stdout
+    iters = _query_column(
+        worktree,
+        "SELECT status || '/' || COALESCE(metadata, '') FROM iters"
+        f" WHERE node = 'main.{name}' ORDER BY rowid",
+    )
+    assert iters == ['completed/'], result.stdout
+
+
+def test_thinking_cap_after_the_steer_stalls_without_retry(repo: dict) -> None:
+    """A second cap after the steer stalls the step: no retry, parent told.
+
+    The steered resume capping too ends the step stalled -- booked like a
+    timeout (exited, with the stall reason) so even ``step_retries`` 3
+    buys no retry -- the iteration fails over to the next one as after a
+    timed-out step, and a notice on the node's outbox reaches the
+    parent's feed naming the node, step, iteration and reason.
+    """
+    steps = {
+        '01-plan.md': (
+            f'# Plan\n\nPlanning step. {_THINKING_CAP_MARKER} {_CAP_TWICE_MARKER}\n'
+        ),
+        '02-beta.md': '# Beta\n\nSecond step.\n',
+    }
+    node = _make_node(repo, 'capstall', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+    for setting in ('step_retries=3', 'step_timeout=20s', 'max_iters=2'):
+        assert _run(worktree, 'config', '_set', setting).returncode == 0
+    calls, result = _run_loop(repo, node, capture_name='capstall')
+    capture = repo['root'] / 'capture_capstall'
+
+    # iteration 1: plan caps, the steer caps -- stalled, no retry, no beta;
+    # iteration 2: plan caps once and its steer completes, then beta runs
+    assert len(calls) == 5, (calls, result.stdout)
+    assert _STALL_MARKER in calls[2]['prompt']
+    assert 'Planning step' in calls[3]['prompt']
+    assert _STALL_MARKER in calls[4]['prompt']
+    assert 'Second step' in calls[5]['prompt']
+    pids = [
+        int((capture / f'capped_{num}.txt').read_text(encoding='utf-8'))
+        for num in (1, 2, 3)
+    ]
+    assert _alive_pids(pids) == []
+
+    # the capped rows are unpriced: the stub's capped reply carries no usage
+    rows = _step_rows(worktree, 'main.capstall')
+    stall = 'stalled: reply hit the output cap while thinking, after a steer'
+    assert rows == [
+        'plan/stopped/thinking cap; steered; unpriced',
+        f'plan/exited/{stall}; unpriced',
+        'beta/stopped/failed on plan',
+        'plan/stopped/thinking cap; steered; unpriced',
+        'plan/completed/steer',
+        'beta/completed/',
+    ], result.stdout
+    iters = _query_column(
+        worktree,
+        "SELECT status || '/' || COALESCE(metadata, '') FROM iters"
+        " WHERE node = 'main.capstall' ORDER BY rowid",
+    )
+    assert iters == [f'failed/plan {stall}', 'completed/'], result.stdout
+
+    # the parent follows the node's outbox, so the notice is in its feed
+    feed = _run(repo['root'], 'radio', 'feed').stdout
+    notices = [line for line in feed.splitlines() if 'step stalled: plan' in line]
+    assert len(notices) == 1, feed
+    run_id = (
+        _run(
+            worktree,
+            'db',
+            '_query',
+            "SELECT run_id FROM runs WHERE node = 'main.capstall'"
+            ' ORDER BY rowid DESC LIMIT 1',
+            '--csv',
+        )
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+    sent = _run(worktree, 'radio', 'sent').stdout
+    assert f'Node main.capstall stalled on step plan at iteration {run_id}.1' in sent
+    assert stall in sent
+
+
 def test_cost_cap_guard_failure_reason_is_durable(repo: dict) -> None:
     """A cost cap over an unpriceable model aborts the boot naming the guard.
 
@@ -3616,6 +3778,21 @@ def _make_node(
         _git(worktree, 'add', '-A')
         _git(worktree, 'commit', '-m', f'setup {name}')
     return {'worktree': worktree, 'node_dir': node_dir}
+
+
+def _query_column(worktree: pathlib.Path, sql: str) -> list[str]:
+    """Return a one-column ``db _query``'s values (CSV-decoded, header dropped)."""
+    out = _run(worktree, 'db', '_query', sql, '--csv').stdout
+    return [row[0] for row in csv.reader(io.StringIO(out))][1:]
+
+
+def _step_rows(worktree: pathlib.Path, branch: str) -> list[str]:
+    """Return a node's step rows, oldest first, as ``name/status/metadata``."""
+    return _query_column(
+        worktree,
+        "SELECT step_name || '/' || status || '/' || COALESCE(metadata, '')"
+        f" FROM steps WHERE node = '{branch}' ORDER BY rowid",
+    )
 
 
 def _collect_calls(capture: pathlib.Path) -> dict[int, dict[str, str]]:

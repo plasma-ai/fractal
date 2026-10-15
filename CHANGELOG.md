@@ -124,6 +124,14 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- A Claude step whose reply hits the output-token cap while still thinking no
+  longer loops until the step timeout. Claude Code's auto-continuation drops the
+  cut-off thinking, so the agent restarted the thought and capped again. The
+  loop now ends the agent at the first such cap and resumes the same session
+  once with `modes/STALL.md` ("write what you have to your plan file now"), on a
+  `steer` row that uses no `step_retries`. A second cap after the steer ends the
+  step `exited` as stalled, never retried, fails the iteration as a timeout
+  does, and posts a `step stalled` notice to the node's outbox for the parent.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives `$MAX_CHILDREN` and the other config-derived variables from

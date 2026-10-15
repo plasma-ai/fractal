@@ -381,6 +381,36 @@ them. While an active node's newest launches carry this signature,
 ``fractal node list`` shows ``PAUSED: billing`` in its ``detail`` column
 (see :doc:`/cli/node`).
 
+Thinking caps
+~~~~~~~~~~~~~
+
+A Claude reply can hit the 128,000-token output cap while still thinking,
+with no text and no tool call. Claude Code then continues on its own, but the
+continuation drops the cut-off thinking, so the agent starts the thought over
+and hits the cap again, until the step times out. The loop watches for this
+case — a thinking-only top-level reply followed by Claude Code's own
+"Output token limit hit" continuation — and ends the agent before it
+continues. Sub-agent replies, and replies that reached text or a tool call,
+are left alone.
+
+The first cap in an attempt **steers** the step: the capped row closes
+``stopped`` with ``thinking cap; steered`` in its metadata, and the step is
+relaunched on a row of its own (marked ``steer``) as a resume of the capped
+session, in detached mode too. The relaunch's whole prompt is the package's
+``modes/STALL.md``: write what you have to your plan file now, then take the
+next concrete action. The steer is not a retry and does not use
+``step_retries``, and the step's own timeout still counts from the
+attempt's first launch.
+
+A second cap after the steer is a **stall**. The step closes ``exited`` with
+``stalled: reply hit the output cap while thinking, after a steer``, and like
+a timeout it never retries. The steps after it are booked ``stopped``, the
+work in progress is force-committed, the iteration fails with
+``<step> stalled: ...``, and the loop moves on to the next iteration. The
+loop also posts a ``step stalled: <step>`` notice to the node's outbox,
+which the parent follows, naming the node, step, iteration, and reason. The
+SYNC step is never steered.
+
 Time limits
 -----------
 

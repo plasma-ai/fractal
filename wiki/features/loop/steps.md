@@ -4,8 +4,8 @@ desc: |
   The step sequence of an iteration: how step files are discovered and
   ordered, what each of the five seed steps instructs, the frontmatter
   overrides a step file can carry, the SYNC pass that precedes each step,
-  the checkpoints the loop runs between steps, and the retry and model-drop
-  re-dispatch policies.
+  the checkpoints the loop runs between steps, the retry and model-drop
+  re-dispatch policies, and the thinking-cap steer and stall.
 created: 2026-07-21T04:51:13Z
 updated: 2026-07-21T04:51:13Z
 ---
@@ -116,6 +116,29 @@ attempt that spent them. A step with `requires_approval` arms an approval gate
 on each attempt's row; a failure retry follows a failed attempt whose wait never
 ran, and a model-drop re-dispatch (below) produces new work, so its fresh demand
 is deliberate — an approval never transfers between attempts.
+
+## Thinking caps
+
+A Claude reply that hits the output-token cap while still thinking (no text, no
+tool call) loops: Claude Code auto-continues with an injected user turn, but the
+continuation drops the cut-off thinking, so the agent restarts the thought and
+caps again until the step times out. The Claude parser reports a
+provider-neutral `thinking_cap` stream event when that continuation follows a
+thinking-only top-level reply; it reads the reply's content across its per-block
+frames because the stream's `stop_reason` is always null on assistant frames.
+Sub-agent replies never count.
+
+For a work step (never SYNC) the loop ends the invocation on the stream-error
+path — the render callback raises, so the reader's death kills the agent's group
+— and steers once per attempt: the capped row closes `stopped` /
+`thinking cap; steered`, and a new row marked `steer` resumes the capped session
+(detached nodes included) with the package's `modes/STALL.md` as its whole
+prompt. The steer is neither a retry nor a retry row, and the step ceiling keeps
+counting from the attempt's first launch. A cap after the steer is a stall: the
+row closes `exited` with the stall reason, the step skips the retry gate exactly
+as a timeout does (no new lifecycle status), the iteration fails as after a
+timed-out step, and the loop posts a `step stalled` notice to the node's outbox,
+which the parent's feed follows.
 
 ## Model drops
 

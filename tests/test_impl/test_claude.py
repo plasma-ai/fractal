@@ -33,6 +33,7 @@ __all__ = [
     'test_parser_error_result',
     'test_parser_null_duration',
     'test_parser_marks_a_budget_stop',
+    'test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply',
     'test_parser_tolerates_garbage_claude',
     'test_parser_tolerates_present_null_payloads_claude',
     'test_parser_ignores_a_non_numeric_result_cost',
@@ -88,6 +89,44 @@ _USAGE_SECOND = {
     'output_tokens': 100,
 }
 _USAGE_SECOND_COST = 50 * 3e-6 + 100 * 1.5e-5
+
+# claude's give-up after its last continuation: a synthetic error reply, then
+# an is_error result whose subtype still reads success
+_GIVE_UP_FRAMES: list[dict[str, Any]] = [
+    {
+        'type': 'assistant',
+        'message': {
+            'model': '<synthetic>',
+            'id': '0bd9e489-14d4-4866-bfeb-6cdd65e78a68',
+            'role': 'assistant',
+            'stop_reason': 'stop_sequence',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': "API Error: Claude's response exceeded the 128000"
+                    ' output token maximum.',
+                },
+            ],
+        },
+        'parent_tool_use_id': None,
+        'session_id': 'sess-1',
+        'error': 'max_output_tokens',
+        'is_api_error_message': True,
+    },
+    {
+        'type': 'result',
+        'subtype': 'success',
+        'is_error': True,
+        'terminal_reason': 'api_error',
+        'api_error': 'max_output_tokens',
+        'result': "API Error: Claude's response exceeded the 128000 output token"
+        ' maximum.',
+        'num_turns': 4,
+        'duration_ms': 12253,
+        'total_cost_usd': 0.0015,
+        'session_id': 'sess-1',
+    },
+]
 
 
 def test_capability_flags_report_provider_facts_claude(node_with_db: Node) -> None:
@@ -345,6 +384,69 @@ def test_parser_marks_a_budget_stop(subtype: str, stopped: bool) -> None:
     (event,) = parser.feed(json.dumps(frame))
     assert event.budget_stopped is stopped
     assert parser.budget_stopped is stopped
+
+
+@pytest.mark.parametrize(
+    argnames=('reply', 'capped'),
+    argvalues=[
+        # the defect: the whole reply was thinking when the cap cut it
+        pytest.param([('thinking', 'msg_1', None)], True, id='thinking-only'),
+        # a reply that reached text or a tool call before the cap has work to
+        # continue from -- claude's own continuation is the right response
+        pytest.param(
+            [('thinking', 'msg_1', None), ('text', 'msg_1', None)],
+            False,
+            id='text',
+        ),
+        pytest.param(
+            [('thinking', 'msg_1', None), ('tool_use', 'msg_1', None)],
+            False,
+            id='tool-use',
+        ),
+        # a sub-agent's thinking-only cap and continuation are its own
+        # business; the top-level reply before them launched the sub-agent
+        pytest.param(
+            [
+                ('tool_use', 'msg_1', None),
+                ('thinking', 'msg_2', 'toolu_1'),
+                ('continuation', None, 'toolu_1'),
+            ],
+            False,
+            id='sidechain',
+        ),
+    ],
+)
+def test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply(
+    reply: list[tuple[str, Optional[str], Optional[str]]],
+    capped: bool,
+) -> None:
+    """A continuation after a thinking-only top-level reply is a thinking cap.
+
+    Frames are trimmed from a real ``stream-json`` capture: claude emits one
+    assistant frame per content block (``stop_reason`` always null), then
+    injects a synthetic continuation when a reply hits the output cap; after
+    its last continuation it gives up with a synthetic error reply and an
+    ``is_error`` result, which parse as a plain failed result.
+    """
+    parser = ClaudeParser()
+    # each reply entry is (block type, message id, parent tool-use id)
+    frames = [
+        {'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'},
+        *(_reply_frame(*entry) for entry in reply),
+        _continuation_frame(),
+        *_GIVE_UP_FRAMES,
+    ]
+    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    caps = [event for event in events if event.kind == 'thinking_cap']
+    assert len(caps) == (1 if capped else 0)
+    if capped:
+        (cap,) = caps
+        assert cap.session == 'sess-1'
+    # the give-up tail closes as a failed result carrying claude's message
+    result = events[-1]
+    assert result.kind == 'result'
+    assert result.failed
+    assert 'output token maximum' in (result.message or '')
 
 
 def test_parser_tolerates_garbage_claude() -> None:
@@ -1212,6 +1314,66 @@ class _TrackingClaudeAgent(ClaudeAgent):
         event = super().on_record_cost(*args, **kwargs)
         self.flushed.append(event.cost)
         return event
+
+
+def _reply_frame(
+    kind: str,
+    message_id: Optional[str],
+    parent: Optional[str],
+) -> dict[str, Any]:
+    """Return one claude frame of a reply: a content block or a continuation.
+
+    Claude emits an assistant frame per content block, ``stop_reason``
+    always null; ``kind`` names the block (``thinking``/``text``/
+    ``tool_use``) or ``continuation`` for its synthetic output-cap turn.
+    """
+    if kind == 'continuation':
+        return _continuation_frame(parent=parent)
+    blocks = {
+        'thinking': {'type': 'thinking', 'thinking': '', 'signature': 'CAQS'},
+        'text': {'type': 'text', 'text': 'Rivers are'},
+        'tool_use': {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Agent', 'input': {}},
+    }
+    return _assistant_frame(f'{message_id}', blocks[kind], parent=parent)
+
+
+def _assistant_frame(
+    message_id: str,
+    block: dict[str, Any],
+    *,
+    parent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Return a claude assistant frame carrying one content block."""
+    return {
+        'type': 'assistant',
+        'message': {
+            'model': 'claude-fable-5',
+            'id': message_id,
+            'type': 'message',
+            'role': 'assistant',
+            'content': [block],
+            'stop_reason': None,
+            'usage': {'input_tokens': 2, 'output_tokens': 4},
+        },
+        'parent_tool_use_id': parent,
+        'session_id': 'sess-1',
+    }
+
+
+def _continuation_frame(*, parent: Optional[str] = None) -> dict[str, Any]:
+    """Return claude's synthetic user turn continuing a reply cut at the cap."""
+    text = (
+        'Output token limit hit. Resume directly \u2014 no apology, no recap of'
+        ' what you were doing. Pick up mid-thought if that is where the cut'
+        ' happened. Break remaining work into smaller pieces.'
+    )
+    return {
+        'type': 'user',
+        'message': {'role': 'user', 'content': [{'type': 'text', 'text': text}]},
+        'parent_tool_use_id': parent,
+        'session_id': 'sess-1',
+        'isSynthetic': True,
+    }
 
 
 def _lines(frames: list[dict[str, Any]]) -> list[str]:

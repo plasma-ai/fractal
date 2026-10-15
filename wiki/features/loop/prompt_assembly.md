@@ -69,6 +69,9 @@ Mode documents live in `fractal/_node/modes/`. A mode `<NAME>.md` joins the
 prompt exactly when `<NAME>_MODE` is `true` in the merged map: the static modes
 (detached, meta) derive from config, the run-scoped modes (continue, resume,
 reserve, drain) ride in on the loop's overrides. `SYNC.md` never joins the
-assembly -- sync runs as its own step. Chat turns are framed separately: the
-chat mode document, preceded by the `NODE.md` charter only for a fresh chat (a
-forked chat already carries the node's context).
+assembly -- sync runs as its own step. `STALL.md` never joins either: it is the
+whole prompt of a thinking-cap steer, rendered with the same variable map, since
+the resumed session already holds the step (see [[features/loop/steps|steps]]).
+Chat turns are framed separately: the chat mode document, preceded by the
+`NODE.md` charter only for a fresh chat (a forked chat already carries the
+node's context).
