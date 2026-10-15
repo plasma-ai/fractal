@@ -68,6 +68,7 @@ __all__ = [
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
     'test_killed_claude_launch_prices_from_its_transcript',
+    'test_killed_wake_up_after_a_result_prices_from_the_transcript',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_agent_launch_failure_books_a_failed_step',
     'test_setup_tolerates_non_utf8_output',
@@ -1819,6 +1820,63 @@ def test_killed_claude_launch_prices_from_its_transcript(
         + (50 * 3e-6 + 300 * 1.5e-5)
         + (2_000 * 1e-6 + 700 * 5e-6)
     )
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == [
+        pytest.approx(settled),
+        _RESULT['total_cost_usd'],
+        _RESULT['total_cost_usd'],
+    ]
+    # the settled figure is an estimate; the result frames are authoritative
+    assert agent.flushed[-3:] == [
+        (pytest.approx(settled), False),
+        (_RESULT['total_cost_usd'], True),
+        (_RESULT['total_cost_usd'], True),
+    ]
+
+
+def test_killed_wake_up_after_a_result_prices_from_the_transcript(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch killed in a wake-up after its turn's result still settles.
+
+    Claude Code outlives a turn's result while background work runs, then
+    wakes the agent for a new reply that spends past the figure the result
+    settled; killed inside that reply, the launch books its transcript's
+    sum as an estimate.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    # the reply's first frame on the stream, then the transcript's lines
+    first = {'input_tokens': 100, 'output_tokens': 10}
+    final = {**first, 'output_tokens': 900}
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_1', first),
+        _RESULT,
+        _TASK_NOTICE,
+        _MESSAGE_START,
+        _assistant_frame('msg_2', first),
+        'exec sleep 30',
+    )
+    written = [
+        _assistant_entry('msg_1', first),
+        _assistant_entry('msg_2', first),
+        _assistant_entry('msg_2', final),
+    ]
+    agent = scripted_claude(
+        [stalled, _claude_script(_INIT, _RESULT), _claude_script(_INIT, _RESULT)],
+        [written],
+    )
+    ScriptedLoop(loop_node, agent).run()
+
+    settled = (100 * 3e-6 + 10 * 1.5e-5) + (100 * 3e-6 + 900 * 1.5e-5)
     assert _step_rows(loop_node) == [
         'PLAN/stopped/steered: no action for 1s',
         'PLAN/completed/steer',

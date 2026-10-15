@@ -330,6 +330,8 @@ class ClaudeParser(StreamParser):
             self._reply_blocks = set()
             self._reply_capped = False
             self._pending.clear()
+            # a reply after a result spends past the figure the result settled
+            self.final = False
 
     def _thinking_cap(self: ClaudeParser) -> list[StreamEvent]:
         """Report the tracked reply's thinking cap, once, if it only thought.

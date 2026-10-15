@@ -130,25 +130,29 @@ step prices its own rows alone.
 A Claude launch that ends without its result frame -- killed by a deadline, a
 stall or thinking cap, a pause, or a dead stream -- carries only the stream's
 running estimate, which prices each reply from its first frame (or nothing, when
-the kill cut a reply off before its frame). Once the process exits, the loop
-calls `Agent.settle_cost` with the launch's window (its spawn instant to its
-exit), and the claude backend prices that window from Claude Code's own session
-transcript, resolved through `Agent.transcript`, and from the sub-agent
-transcripts Claude Code keeps beside it (`<session>/subagents/agent-*.jsonl`,
-whose sidechain entries carry the parent session): every `assistant` entry
-stamped inside the window, deduplicated by message id across the files keeping
-the **last** line -- Claude splits a reply across lines, one per content block,
-and each line carries the reply's usage as it stood when written, so the last is
-the final usage. The files are joined with a newline, so a torn last line in one
-cannot swallow the next file's first record. Each reply is priced at its own
-model; an unpriced model (or a zeroed gateway figure) drops out without voiding
-the rest. The sum lands through `record_cost` with `final=False` when it exceeds
-the recorded figure -- both undercount a killed launch, so the higher is the
-closer. An absent or unreadable session transcript, or a window with no priced
-usage, leaves the row as it was and logs `launch unpriced: <reason>` at warning
-level on the agent's logger; a sub-agent transcript that cannot be read is left
-out of the sum with `launch partly unpriced: <reason>`. The ledger has no
-estimate column: `fractal node cost` reports the figure like any other.
+the kill cut a reply off before its frame). A reply that starts after a result
+-- Claude Code waking the agent once background work ends -- spends past the
+figure that result settled, so the parser's `final` flag clears at each new
+top-level reply and only the next result frame sets it again. Once the process
+exits, the loop calls `Agent.settle_cost` for any launch whose stream did not
+end final, with the launch's window (its spawn instant to its exit), and the
+claude backend prices that window from Claude Code's own session transcript,
+resolved through `Agent.transcript`, and from the sub-agent transcripts Claude
+Code keeps beside it (`<session>/subagents/agent-*.jsonl`, whose sidechain
+entries carry the parent session): every `assistant` entry stamped inside the
+window, deduplicated by message id across the files keeping the **last** line --
+Claude splits a reply across lines, one per content block, and each line carries
+the reply's usage as it stood when written, so the last is the final usage. The
+files are joined with a newline, so a torn last line in one cannot swallow the
+next file's first record. Each reply is priced at its own model; an unpriced
+model (or a zeroed gateway figure) drops out without voiding the rest. The sum
+lands through `record_cost` with `final=False` when it exceeds the recorded
+figure -- both undercount a killed launch, so the higher is the closer. An
+absent or unreadable session transcript, or a window with no priced usage,
+leaves the row as it was and logs `launch unpriced: <reason>` at warning level
+on the agent's logger; a sub-agent transcript that cannot be read is left out of
+the sum with `launch partly unpriced: <reason>`. The ledger has no estimate
+column: `fractal node cost` reports the figure like any other.
 
 ## Rollups and the per-run subtree
 

@@ -9,6 +9,7 @@ the config-home transcript layout. Stream-level cases drive the base
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ __all__ = [
     'test_stream_detached_keeps_session_unpersisted_claude',
     'test_stream_records_full_per_invocation_cost',
     'test_stream_truncated_records_accumulated_cost',
+    'test_stream_reopens_a_settled_cost_at_a_reply_after_its_result',
     'test_stream_survives_missing_pricing_cache',
     'test_invocation_modes_build_the_pinned_argv_claude',
     'test_invocation_honors_command_model_budget_and_settings',
@@ -98,6 +100,16 @@ _USAGE_SECOND_COST = 50 * 3e-6 + 100 * 1.5e-5
 _OPENED = '2026-01-01T00:00:00.000Z'
 _WRITTEN = '2026-01-01T00:00:01.000Z'
 _CLOSED = '2026-01-01T00:00:02.000Z'
+
+# a live claude 2.1.300 capture (trimmed, session as @SESSION@): a turn's
+# result on line 18, then claude's wake-up on a background task's notice and
+# a new reply (from line 23) closed by its own result on line 33
+_BACKGROUND_WAIT = (
+    pathlib.Path(__file__).parents[1]
+    / 'test_core'
+    / 'streams'
+    / 'claude_background_wait.jsonl'
+)
 
 # claude's give-up after its last continuation: a synthetic error reply, then
 # an is_error result whose subtype still reads success
@@ -957,6 +969,34 @@ def test_stream_truncated_records_accumulated_cost(
     ]
     row = node.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
+
+
+@pytest.mark.parametrize(
+    argnames=('count', 'final'),
+    argvalues=[
+        # the turn's result settles the launch's cost
+        pytest.param(18, True, id='result'),
+        # the wake-up's reply spends past the settled figure
+        pytest.param(25, False, id='wake-up-reply'),
+        # until its own result settles the cost again
+        pytest.param(33, True, id='wake-up-result'),
+    ],
+)
+def test_stream_reopens_a_settled_cost_at_a_reply_after_its_result(
+    node_with_db: Node,
+    count: int,
+    final: bool,
+) -> None:
+    """A reply after a result leaves the stream's cost an estimate again.
+
+    Claude Code outlives a turn's result while background work runs, then
+    wakes the agent for a new reply, so a launch killed inside that reply
+    must still read as unsettled for the loop to price it.
+    """
+    backend = ClaudeAgent(node_with_db, 'claude')
+    with _BACKGROUND_WAIT.open(encoding='utf-8') as file:
+        lines = list(itertools.islice(file, count))
+    assert backend.stream(lines).final is final
 
 
 def test_stream_survives_missing_pricing_cache(
