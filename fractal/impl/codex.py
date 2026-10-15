@@ -79,7 +79,7 @@ _UNAVAILABLE = re.compile(
     r'|\boverloaded\b'
     r'|\bat capacity\b'
     r'|experiencing high demand',
-    re.IGNORECASE,
+    flags=re.IGNORECASE,
 )
 
 # the rollout window captured before each spawn, keyed by its live process --

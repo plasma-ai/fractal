@@ -52,7 +52,7 @@ _UNAVAILABLE = re.compile(
     r'|\b(?:overloaded|rate_limit|api)_error\b'
     r'|\boverloaded\b'
     r'|\bservice unavailable\b',
-    re.IGNORECASE,
+    flags=re.IGNORECASE,
 )
 
 # the openrouter route authenticates on the key alone
@@ -604,8 +604,8 @@ class ClaudeAgent(Agent):
             return None
         if not found['exists']:
             self.log(
-                f'launch unpriced: no transcript for session {session}',
-                logging.WARNING,
+                message=f'launch unpriced: no transcript for session {session}',
+                level=logging.WARNING,
             )
             return None
         # read each sub-agent's transcript beside the session's -- one pass
@@ -618,16 +618,17 @@ class ClaudeAgent(Agent):
                 contents.append(path.read_text(encoding='utf-8', errors='replace'))
             except OSError as e:
                 self.log(
-                    f'launch partly unpriced: sub-agent transcript unreadable: {e}',
-                    logging.WARNING,
+                    message='launch partly unpriced: sub-agent transcript'
+                    f' unreadable: {e}',
+                    level=logging.WARNING,
                 )
         content = '\n'.join(contents)
         cost = _transcript_cost(content, started=started, ended=ended)
         if cost is None:
             self.log(
-                f'launch unpriced: no priced usage in session {session}'
+                message=f'launch unpriced: no priced usage in session {session}'
                 f' between {started} and {ended}',
-                logging.WARNING,
+                level=logging.WARNING,
             )
         return cost
 
