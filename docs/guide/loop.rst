@@ -510,8 +510,9 @@ How the walls interact:
 - ``setup.sh`` is unbounded — the walls gate step launches only.
 
 A step that times out fails the iteration and records
-``<step> timed out (<limit>s)``; an iteration that times out with no launch
-to blame records plain ``timed out``.
+``<step> timed out (<limit>s)``, naming the effective ceiling (a steered
+launch names the step's whole timeout, which its stuck launch shared); an
+iteration that times out with no launch to blame records plain ``timed out``.
 
 Cost ceilings
 -------------

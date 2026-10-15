@@ -482,6 +482,7 @@ class Loop:
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
         self._step_limit_seconds = 0
+        self._step_ceiling_seconds = 0
         self._step_timeout_effective = self._step_timeout_seconds
         self._step_budget_value: Optional[float] = None
         # a steered launch: the stuck session it resumes and the
@@ -2114,8 +2115,8 @@ class Loop:
                     # a deadline that expired before the launch resolved no
                     # ceiling, so the label skips the parenthetical
                     limit = ''
-                    if self._step_limit_seconds > 0:
-                        limit = f' ({self._step_limit_seconds}s)'
+                    if self._step_ceiling_seconds > 0:
+                        limit = f' ({self._step_ceiling_seconds}s)'
                     self._fail_reason = f'{step_name} timed out{limit}'
                     step_status = 'exited'
                     step_exit_code = 1
@@ -2553,22 +2554,27 @@ class Loop:
             )
 
         # compute step time limit: min(run remaining, iteration
-        # remaining, step timeout)
+        # remaining, step timeout) -- and the ceiling a timeout names: the
+        # step's whole timeout when it binds, a steer's charge included
         self._step_limit_seconds = 0
+        self._step_ceiling_seconds = 0
         deadline = self._soonest_deadline()
         if deadline > 0:
             remaining = deadline - int(time.time())
             if remaining <= 0:
                 return close(StepResult(status='timed out', exit_code=124))
             self._step_limit_seconds = remaining
+            self._step_ceiling_seconds = remaining
         if self._step_timeout_effective > 0:
             step_timeout = self._step_timeout_effective - self._steer_elapsed
             if step_timeout <= 0:
+                self._step_ceiling_seconds = self._step_timeout_effective
                 return close(StepResult(status='timed out', exit_code=124))
             no_limit = self._step_limit_seconds == 0
             tighter = step_timeout < self._step_limit_seconds
             if no_limit or tighter:
                 self._step_limit_seconds = step_timeout
+                self._step_ceiling_seconds = self._step_timeout_effective
 
         # a cost cap requires spend the loop can track: token-priced and
         # routed agents price from token counts, so a cap needs a priceable

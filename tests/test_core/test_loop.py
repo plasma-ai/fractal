@@ -99,6 +99,7 @@ __all__ = [
     'test_pending_finish_between_iterations_starts_none',
     'test_run_records_step_attribution_matrix',
     'test_step_timeout_reason_names_step_and_limit',
+    'test_steered_timeout_names_the_step_ceiling',
     'test_deadline_expired_before_launch_keeps_the_plain_reason',
     'test_step_failure_books_never_run_steps_and_a_described_backstop',
     'test_sync_timeout_save_carries_the_reason_body',
@@ -3191,6 +3192,61 @@ def test_step_timeout_reason_names_step_and_limit(
     run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert (run['status'], run['exit_code']) == ('exited', 1)
     assert run['metadata'] == f'Timed out at iteration {loop._run_id}.1 (30s/step)'
+
+
+@pytest.mark.parametrize(
+    argnames=('stuck_seconds', 'launches'),
+    argvalues=[
+        # the steer runs on the seconds the stuck launch left, and spends them
+        pytest.param(2, 2, id='remainder'),
+        # the stuck launch spent the whole ceiling: the steer never launches
+        pytest.param(30, 1, id='spent'),
+    ],
+)
+def test_steered_timeout_names_the_step_ceiling(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    stuck_seconds: int,
+    launches: int,
+) -> None:
+    """A steer's timeout names the step's own ceiling, never what was left of it.
+
+    The steer is charged the stuck launch's seconds, so it runs on the
+    remainder of the step's timeout -- or not at all when none is left --
+    but the iteration reason names the ceiling the step was given, as an
+    unsteered timeout does.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_timeout='30s')
+    # the stuck launch runs the loop's clock forward
+    elapsed = [0.0]
+    monotonic = time.monotonic
+
+    def _monotonic() -> float:
+        return monotonic() + elapsed[0]
+
+    monkeypatch.setattr('fractal.core.loop.time.monotonic', _monotonic)
+
+    class StuckLoop(MockLoop):
+        """Mock loop whose first launch takes ``stuck_seconds``."""
+
+        def _launch(self: StuckLoop, *args: Any, **kwargs: Any) -> StepResult:
+            if not self.launched:
+                elapsed[0] += stuck_seconds
+            return super()._launch(*args, **kwargs)
+
+    stuck = StepResult(status='stuck', exit_code=1, reason='thinking cap', session='s1')
+    timeout = StepResult(status='timed out', exit_code=124)
+    loop = StuckLoop(loop_node, results=[stuck, timeout])
+    assert loop.run() == 0
+    assert len(loop.launched) == launches
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: thinking cap',
+        'PLAN/exited/timed out; steer',
+    ]
+    iteration = loop_node.db.read('iters', where={'node': loop_node.branch})[0]
+    assert iteration['metadata'] == 'PLAN timed out (30s)'
 
 
 def test_deadline_expired_before_launch_keeps_the_plain_reason(
