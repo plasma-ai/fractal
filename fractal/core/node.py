@@ -4096,8 +4096,8 @@ class Node:
         *,
         continue_merge: bool = False,
         ignore_scope: bool = False,
-        validation_script: str | None = None,
-        message: str | None = None,
+        validation_script: Optional[str] = None,
+        message: Optional[str] = None,
     ) -> tuple[str, str]:
         """Squash-merge the node's branch into its merge target.
 
