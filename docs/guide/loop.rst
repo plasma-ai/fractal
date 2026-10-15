@@ -801,7 +801,8 @@ Step rows land with these statuses:
      - ``stalled: <trigger>, after a steer``
    * - steered relaunch
      - as above
-     - suffixed ``; steer`` (``steer`` alone when there is no other reason)
+     - suffixed ``; steer`` (``steer`` alone when there is no other reason;
+       a stall's reason already names the steer)
    * - retry attempt
      - as above
      - suffixed ``; retry``
