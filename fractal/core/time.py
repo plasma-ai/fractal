@@ -211,14 +211,17 @@ class Time:
                 pass
             else:
                 return float(seconds) if seconds > 0 else None
-        # the row's step file; the SYNC pseudo-step runs from the package's
+        # the row's step file; the built-in sync pass (a SYNC row at step 0
+        # or under sync mode, as the loop reads it) runs from the package's
         # mode doc, and a vanished, unreadable, or malformed file falls back
         # to the node value, as at launch
         row = self.db.read('steps', where={'step_id': step_id}, limit=1)[0]
+        sync = self._node.config.get('sync')
+        sync_mode = True if sync is None else bool(sync)
         try:
-            if row['step_name'] == 'SYNC':
-                sync = self._node._package_dir / '_node' / 'modes' / 'SYNC.md'
-                step = Step.load(sync)
+            if row['step_name'] == 'SYNC' and (row['step'] == 0 or sync_mode):
+                sync_file = self._node._package_dir / '_node' / 'modes' / 'SYNC.md'
+                step = Step.load(sync_file)
             else:
                 iter_rows = self.db.read('steps', where={'iter_id': row['iter_id']})
                 step = Step.find(

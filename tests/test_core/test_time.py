@@ -52,6 +52,7 @@ __all__ = [
     'test_step_limit_follows_the_active_steps_timeout',
     'test_step_limit_prefers_the_seats_exported_ceiling',
     'test_step_limit_tells_same_named_step_files_apart',
+    'test_step_limit_tells_a_sync_pass_from_a_user_sync_step',
     'test_idle_step_limit_counts_step_file_timeouts',
     'test_steered_step_counts_down_from_its_stuck_launch',
     'test_time_remaining_credits_paused_spans',
@@ -357,6 +358,52 @@ def test_step_limit_tells_same_named_step_files_apart(
         if number < 3:
             node.record.step_end(step_id=step_id, status='completed', exit_code=0)
     assert node.time.limit('step') == 10800.0
+
+
+@pytest.mark.parametrize(
+    argnames=('sync', 'rows', 'limit'),
+    argvalues=[
+        (True, ((1, 'SYNC'),), NODE_STEP_TIMEOUT_SECONDS),
+        (False, ((0, 'SYNC'),), NODE_STEP_TIMEOUT_SECONDS),
+        (False, ((1, 'PLAN'), (2, 'SYNC')), 21600.0),
+    ],
+    ids=['sync-pass', 'drain-pass', 'user-step'],
+)
+def test_step_limit_tells_a_sync_pass_from_a_user_sync_step(
+    node_with_db: Node,
+    sync: bool,
+    rows: tuple[tuple[int, str], ...],
+    limit: float,
+) -> None:
+    """A SYNC row is the built-in pass at step 0 or under sync mode.
+
+    The pass runs the package's mode doc, which carries no ``timeout:``,
+    so ``step_timeout`` bounds it; with sync off no pass runs before a
+    step, so a numbered SYNC row is a user step file of that name, bounded
+    by its own ``timeout:`` line. The last row is the active one.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    node.config.set('sync', sync)
+    steps_dir = node.node_dir / 'steps'
+    steps_dir.mkdir()
+    (steps_dir / '01-PLAN.md').write_text('# PLAN\n', encoding='utf-8')
+    (steps_dir / '02-SYNC.md').write_text(
+        '---\ntimeout: 6h\n---\n# SYNC\n',
+        encoding='utf-8',
+    )
+    run_id = node.record.run_start()
+    iter_id = node.record.iter_start(run_id=run_id, iter=1)
+    for index, (number, name) in enumerate(rows, 1):
+        step_id = node.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=number,
+            step_name=name,
+        )
+        if index < len(rows):
+            node.record.step_end(step_id=step_id, status='completed', exit_code=0)
+    assert node.time.limit('step') == limit
 
 
 @pytest.mark.parametrize(
