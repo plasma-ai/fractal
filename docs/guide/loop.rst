@@ -713,8 +713,9 @@ continuous mode — the iteration's session id. A step row is booked **per
 launch attempt** with the step number and name, status, a binary exit code,
 the agent/model/session, the cost (flushed as the stream reports it, so even
 a killed step keeps its last figure — except ``codex``, which prices the
-whole invocation after a clean exit and records none for a killed step), and
-a short reason in its metadata.
+whole invocation after a clean exit and records none for a killed step; a
+``claude`` step killed before its result frame is priced from its session
+transcript instead, see :doc:`agents`), and a short reason in its metadata.
 
 Step rows land with these statuses:
 

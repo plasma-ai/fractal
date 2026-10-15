@@ -427,6 +427,7 @@ def test_stream_records_sessions_and_costs(node_with_db: Node) -> None:
         session='sess-1',
         model='opus-4.8',
         cost=0.42,
+        final=True,
         budget_stopped=False,
         models=('opus-4.8',),
     )

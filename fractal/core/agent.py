@@ -293,6 +293,8 @@ class StreamResult:
     session: Optional[str]
     model: Optional[str]
     cost: Optional[float]
+    # cost: authoritative vs estimate
+    final: bool = False
     budget_stopped: bool = False
     # NOTE: every distinct model the stream's own rows named, in order -- the
     #   step row keeps only the last, so a mid-stream substitution that
@@ -814,6 +816,7 @@ class Agent:
             session=parser.session,
             model=parser.model,
             cost=parser.cost,
+            final=parser.final,
             budget_stopped=parser.budget_stopped,
             # parser state is raw wire text -- sanitize here like session
             # and model above, or a lone-surrogate model name reaches SQLite
@@ -955,6 +958,60 @@ class Agent:
                 super()._record_cost(step_id, cost, final=final)
         """
         return self.node.record.step_cost(step_id=step_id, cost=cost)
+
+    def settle_cost(
+        self: Agent,
+        step_id: int,
+        *,
+        started: str,
+        ended: str,
+    ) -> None:
+        """Price a launch that ended without its authoritative cost.
+
+        A launch killed before its closing cost fact (a deadline, a stall,
+        a thinking cap, a pause, a dead stream) leaves its step row at the
+        stream's running estimate, or NULL when none flushed. A backend
+        whose provider keeps its own usage record prices the launch's
+        window from it through ``_settle_cost``; the figure lands as an
+        estimate (``final=False``), and only above the recorded one --
+        each undercounts a killed launch, so the higher is the closer.
+
+        Args:
+            step_id: The launch's step row, stamped with its session.
+            started: The launch's spawn instant (ISO 8601 UTC).
+            ended: The launch's exit instant (ISO 8601 UTC).
+
+        """
+        rows = self.node.db.read('steps', where={'step_id': step_id}, limit=1)
+        if not rows or rows[0]['session'] is None:
+            return
+        cost = self._settle_cost(rows[0]['session'], started=started, ended=ended)
+        if cost is None:
+            return
+        recorded = rows[0]['cost']
+        if recorded is not None and recorded >= cost:
+            return
+        self.record_cost(step_id, cost, final=False)
+
+    def _settle_cost(
+        self: Agent,
+        session: str,
+        *,
+        started: str,
+        ended: str,
+    ) -> Optional[float]:
+        """Hook for pricing a launch's window from the provider's own record.
+
+        Default returns ``None`` (the stream's figure stands). Override in
+        a backend whose provider persists per-message usage, returning the
+        launch's own spend (per invocation) or ``None`` with the reason
+        logged::
+
+            def _settle_cost(self, session, *, started, ended):
+                usage = provider.usage(session, since=started, until=ended)
+                return _compute_cost(usage, self.model)
+        """
+        return None
 
     def tracks_cost(self: Agent, model: Optional[str] = None) -> bool:
         """Return whether spend will be recorded.
