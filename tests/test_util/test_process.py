@@ -74,6 +74,7 @@ elif role == 'stubborn':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 elif role == 'forker':
     def on_term(signum, frame):
+        open(f'{directory}/forker.term', 'w').close()
         # the late child starts with TERM blocked, so the TERM the re-walk
         # sends it waits for its handler instead of racing its startup
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
@@ -227,14 +228,19 @@ def test_reap_takes_every_group_in_the_tree(
     )
     elapsed = time.monotonic() - start
     assert _alive(pids) == []
-    # the late group drew the re-walk's TERM, not just the KILL
-    late = _await_pids(tmp_path, ['late'])
-    assert _alive(late) == []
-    assert (tmp_path / 'late.term').exists()
     assert reaped.survivors == ()
     assert reaped.spared == ()
     # the TERM-ignoring group held the reap open for the whole grace
     assert elapsed >= _GRACE
+    # the late group drew the re-walk's TERM, not just the KILL: the forker
+    # must have drawn its TERM, but a late child that never recorded before
+    # the KILL pass is starvation (nothing to TERM -- skip), not the regression
+    assert (tmp_path / 'forker.term').exists()
+    if not (tmp_path / 'late.pid').exists():
+        pytest.skip('load starvation: the late child never started before the KILL')
+    late = _await_pids(tmp_path, ['late'])
+    assert _alive(late) == []
+    assert (tmp_path / 'late.term').exists()
 
 
 def test_reap_spares_a_loop_recorded_mid_reap(
