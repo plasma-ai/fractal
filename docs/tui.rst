@@ -116,8 +116,10 @@ The **measures matrix** is the cockpit's cost-and-time view: rows ``step`` /
 ``iter`` / ``run`` by columns ``time`` / ``cost``, each cell
 ``<current>/<ceiling>`` with a green-to-red gauge of the fraction used
 (``-`` and an empty gauge when uncapped). The run-cost gauge turns yellow
-once spend enters the configured reserve budget and red at the cap. Open
-rows' clocks and gauges keep ticking between database writes.
+once spend enters the configured reserve budget and red at the cap. The
+step time ceiling is the displayed step's own: its ``timeout:`` frontmatter,
+else ``step_timeout``. Open rows' clocks and gauges keep ticking between
+database writes.
 
 **Config chips** render the node's ``config.json`` values in schema order
 (skipping the keys the card already shows, like ``max_iters`` and the cap
