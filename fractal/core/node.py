@@ -108,6 +108,10 @@ _CLAIM_RETRY_SECONDS = 2.0
 # flight, so the sweep re-attempts the descendant instead of skipping it
 _CLAIM_IN_FLIGHT = 'claim in flight'
 
+# TERM-to-KILL grace for the crash heal's reap of a dead loop's recorded
+# groups and their trees
+_ORPHAN_GRACE_SECONDS = 2.0
+
 # argv shapes a launch pane carries at every exec stage (env/start.sh, then
 # the exec'd loop): a pane command bearing one while naming another worktree
 # is provably another tree's launch, while a command bearing neither -- an
@@ -605,18 +609,23 @@ class Node:
         reap acts on the caller's ``snapshot`` (the record state its liveness
         verdict judged; taken fresh when none rides in), never a kill-time
         re-read -- a record a relaunch rewrote since names a live loop, which
-        keeps both its group and its record. The reap follows ``kill.sh``'s
-        TERM-grace-KILL cadence and logs an ``orphan`` event naming each
-        reaped pgid. Best-effort: a dead, recycled, or foreign group reads as
-        already gone -- recycled meaning the OS re-issued a dead group's id
-        to an unrelated same-user group, which answers a liveness probe but
-        is younger than its record (:func:`_recorded_group`).
+        keeps both its group and its record. Both judged groups are the
+        roots of one process-tree reap, as in ``kill.sh``: every group the
+        agent's tools started dies with them, other nodes' loop groups are
+        spared, and survivors are named on stderr. Logs an ``orphan`` event
+        naming each reaped pgid. Best-effort: a dead, recycled, or foreign
+        group reads as already gone -- recycled meaning the OS re-issued a
+        dead group's id to an unrelated same-user group, which answers a
+        liveness probe but is younger than its record
+        (:func:`_recorded_group`).
         """
         if snapshot is None:
             snapshot = self._records_snapshot()
-        for name, entry in zip((PGID_FILE, STEP_PGID_FILE), snapshot):
-            pgid_file = self.node_dir / name
+        records = list(zip((PGID_FILE, STEP_PGID_FILE), snapshot))
+        judged: list[int] = []
+        for _, entry in records:
             if entry is None:
+                judged.append(0)
                 continue
             recorded_at, content = entry
             # trust the record only while its group is still alive; a record
@@ -634,16 +643,48 @@ class Node:
             # an unrelated group -- spare any group younger than its record
             if pgid > 0 and _recorded_group(pgid, recorded_at) is not True:
                 pgid = 0
-            # reap the group and audit the reap
+            judged.append(pgid)
+        # reap the judged groups' whole trees in one pass, sparing other
+        # nodes' loops -- the agent's tools run in groups of their own
+        groups = [pgid for pgid in judged if pgid > 0]
+        if groups:
+            try:
+                reaped = fractal.util.process.reap(
+                    groups,
+                    grace=_ORPHAN_GRACE_SECONDS,
+                    spare=self.loop_records,
+                )
+            except Exception as error:
+                # the reap broke: the heal must still land on the groups
+                print(
+                    f'Warning: process-tree reap failed ({error});'
+                    ' killing the recorded groups only',
+                    file=sys.stderr,
+                )
+                for pgid in groups:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+            else:
+                for group in reaped.spared:
+                    print(
+                        f"Note: spared process group {group} (another node's loop)",
+                        file=sys.stderr,
+                    )
+                for survivor in reaped.survivors:
+                    print(
+                        f'Warning: pid {survivor.pid} survived the reap:'
+                        f' {survivor.command}',
+                        file=sys.stderr,
+                    )
+        for (name, entry), pgid in zip(records, judged):
+            if entry is None:
+                continue
+            recorded_at, content = entry
+            pgid_file = self.node_dir / name
+            # audit the reap
             if pgid > 0:
-                try:
-                    os.killpg(pgid, signal.SIGTERM)
-                    for _ in range(10):
-                        time.sleep(0.2)
-                        os.killpg(pgid, 0)
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
                 event_id = self.record.event_start(
                     'orphan',
                     metadata=f'reaped pgid {pgid}',
