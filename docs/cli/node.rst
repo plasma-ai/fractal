@@ -1096,11 +1096,11 @@ default the soonest of the configured run, iteration, and step deadlines
 answers; ``--scope`` narrows to one: ``run`` reads ``timeout``, ``iter``
 reads ``iter_timeout`` (falling back to ``interval``), ``step`` reads the
 active step's ``timeout:`` frontmatter, else ``step_timeout`` — the ceiling
-the loop enforces for that step. Inside a step, the node's own seat reads the
-exact ceiling its launch exported (``$STEP_TIMEOUT_SECONDS``); any other
-caller reads the step file, which the loop reads only once per iteration, so
-an edit made mid-iteration shows here before the loop enforces it at the next
-iteration. A steered step counts down from its stuck launch, as the loop's
+the loop enforces for that step, which its launch records on the step row.
+The loop reads step files only once per iteration, so an edit made
+mid-iteration shows here from the step's next launch, when the loop enforces
+it; the node's own seat reads the same ceiling from ``$STEP_TIMEOUT_SECONDS``.
+A steered step counts down from its stuck launch, as the loop's
 deadline does. Paused spans are credited back to run and iteration deadlines.
 Two non-numeric answers are distinct: ``no limit`` means no timeout is
 configured for the queried scope; ``not running`` means a limit exists but no

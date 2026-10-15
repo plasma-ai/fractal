@@ -55,22 +55,25 @@ have no timeout configured, and `not running` when a limit exists but no run,
 iteration, or step is currently active to anchor it. The countdown clamps at
 zero — an overrun deadline reads `0s`, never negative.
 
-The step limit resolves from the active step row: its name locates the step file
-in the node's `steps/` (the SYNC pseudo-step reads the package's mode doc),
-whose `timeout:` line substitutes for `step_timeout` by the same rule the loop
-applies at launch. The row's step number is the file's position when the
-iteration began, which a file added since shifts, so a name that several files
-share is told apart by occurrence: the earlier step numbers of the iteration
-carrying the same name count the same-named files ahead of it. An idle node has
+The step limit is the ceiling the active step's launch enforces, which the loop
+records on the step row as it resolves it: the step file's `timeout:` line
+substituting for `step_timeout`, by the rule the loop applies at launch, or `-1`
+when the launch has none. The loop reads step files once per iteration, so an
+edit made mid-iteration takes effect at the step's next launch, and every reader
+reports the recorded ceiling until then. The node's own seat reads the same
+ceiling from its exported `STEP_TIMEOUT_SECONDS` when its exported `STEP_ID`
+names the active step. A row with no recorded ceiling — opened before the
+database gained the column, or whose stamp failed — resolves its step file
+instead. Its name locates the file in the node's `steps/`; a SYNC row at step 0
+or under sync mode is the built-in pass, which reads the package's mode doc. A
+name that several files share is told apart by occurrence: the earlier step
+numbers of the iteration carrying the same name count the same-named files ahead
+of it, which holds while only differently-named files change. An idle node has
 no current step, so its step limit is `step_timeout`, else the tightest step
 file's own `timeout:`, and a node with either reads `not running`, as the run
-and iteration scopes do. The node's own seat skips that lookup: when its
-exported `STEP_ID` names the active step, its exported `STEP_TIMEOUT_SECONDS` is
-the exact ceiling the launch enforces. The lookup can run ahead of the loop,
-which reads step files once per iteration: an edit made mid-iteration shows to
-every other reader before the loop enforces it at the next iteration. The
-cockpit's step time ceiling resolves the displayed step's file the same way, and
-its step clock carries the same steer charge as the countdown below.
+and iteration scopes do. The cockpit's step time ceiling reads the displayed
+step's recorded ceiling the same way, and its step clock carries the same steer
+charge as the countdown below.
 
 The step countdown starts where the loop's step deadline does. A steered
 relaunch opens a row of its own, but the loop charges the stuck launch's span
