@@ -95,6 +95,7 @@ __all__ = [
     'test_retry_of_an_approval_gated_step_re_arms_the_gate',
     'test_step_retries_zero_disables_the_retry',
     'test_pause_during_retry_backoff_parks',
+    'test_signal_before_the_steer_parks_or_abandons_it',
     'test_ceiling_trip_during_retry_backoff_abandons_the_retry',
     'test_finish_during_retry_backoff_interrupts_the_wait',
     'test_models_match_admits_pin_forms_and_flags_variants',
@@ -2852,6 +2853,53 @@ def test_pause_during_retry_backoff_parks(
     assert loop_node.status() == 'paused'
 
 
+@pytest.mark.parametrize(
+    argnames=('signal', 'status', 'row'),
+    argvalues=[
+        # a pause parks with the stuck row closed; resume re-enters the step
+        pytest.param(
+            'pause',
+            'paused',
+            'PLAN/stopped/thinking cap; paused before the steer',
+            id='pause',
+        ),
+        # a stop abandons the steer to the failure path, like a retry
+        pytest.param(
+            'stop',
+            'stopped',
+            'PLAN/failed/thinking cap; steer abandoned',
+            id='stop',
+        ),
+    ],
+)
+def test_signal_before_the_steer_parks_or_abandons_it(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    signal: str,
+    status: str,
+    row: str,
+) -> None:
+    """A signal landing with a stuck launch buys no steer, as with a retry."""
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retry_backoff='1s')
+
+    class SignalingLoop(MockLoop):
+        """Mock loop whose stuck launch lands beside a signal."""
+
+        def _launch(self: SignalingLoop, *args: Any, **kwargs: Any) -> StepResult:
+            self.node.record.signal_set(signal, 'operator')
+            return super()._launch(*args, **kwargs)
+
+    stuck = StepResult(status='stuck', exit_code=1, reason='thinking cap', session='s1')
+    loop = SignalingLoop(loop_node, results=[stuck])
+    assert loop.run() == 0
+    # one launch, no steer: the signal won
+    assert loop.launched == ['step 1 of 1 (PLAN)']
+    assert loop_node.status() == status
+    assert _step_rows(loop_node) == [row]
+
+
 def test_ceiling_trip_during_retry_backoff_abandons_the_retry(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -5151,13 +5199,17 @@ _THINKING_REPLY = {
     'parent_tool_use_id': None,
     'session_id': 'SID',
 }
+# claude's output-cap continuation, verbatim from a real transcript
+_CONTINUATION_TEXT = (
+    'Output token limit hit. Resume directly \u2014 no apology, no recap of what'
+    ' you were doing. Pick up mid-thought if that is where the cut happened.'
+    ' Break remaining work into smaller pieces.'
+)
 _CONTINUATION = {
     'type': 'user',
     'message': {
         'role': 'user',
-        'content': [
-            {'type': 'text', 'text': 'Output token limit hit. Resume directly.'}
-        ],
+        'content': [{'type': 'text', 'text': _CONTINUATION_TEXT}],
     },
     'parent_tool_use_id': None,
     'session_id': 'SID',

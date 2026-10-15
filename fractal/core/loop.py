@@ -1985,17 +1985,30 @@ class Loop:
                 # the first stuck launch ends its row stopped and relaunches
                 # the step on its session; stuck again after the steer, by
                 # either trigger, is a stall
-                if result.status == 'stuck':
-                    if not steered:
-                        steered = True
-                        self._steer_session = result.session
-                        self._steer_elapsed = duration
-                        print(
-                            f'--- Step {step_num}/{step_count} ({step_name}):'
-                            f' {result.reason}; steering ({duration}s) ---'
+                trigger = f'{result.reason}'
+                if result.status == 'stuck' and not steered:
+                    # the steer buys a launch, so it polls what a retry's
+                    # backoff polls: a pause parks with the stuck row closed
+                    # (resume re-enters the step), and a stop, finish, or
+                    # spent ceiling abandons it to the failure path
+                    paused = self._check_pause()
+                    abandoned = not paused and (
+                        self._check_stop()
+                        or self._check_finish()
+                        or self._check_subtree_ceiling()
+                    )
+                    if abandoned:
+                        self._fail_reason = f'{step_name} {trigger}; steer abandoned'
+                        result = dataclasses.replace(
+                            result,
+                            status='failed',
+                            reason=f'{trigger}; steer abandoned',
                         )
+                    else:
                         if self._step_id is not None:
-                            steer_reason = f'steered: {result.reason}'
+                            steer_reason = f'steered: {trigger}'
+                            if paused:
+                                steer_reason = f'{trigger}; paused before the steer'
                             if attempt > 0:
                                 steer_reason = f'{steer_reason}; retry'
                             try:
@@ -2007,12 +2020,23 @@ class Loop:
                                 )
                             except Exception:
                                 pass
+                        if paused:
+                            self._paused = True
+                            return True
+                        steered = True
+                        self._steer_session = result.session
+                        self._steer_elapsed = duration
+                        print(
+                            f'--- Step {step_num}/{step_count} ({step_name}):'
+                            f' {trigger}; steering ({duration}s) ---'
+                        )
                         continue
+                elif result.status == 'stuck':
                     result = dataclasses.replace(
                         result,
                         status='stalled',
                         exit_code=1,
-                        reason=f'stalled: {result.reason}, after a steer',
+                        reason=f'stalled: {trigger}, after a steer',
                     )
 
                 if result.status == 'timed out':
@@ -2069,7 +2093,7 @@ class Loop:
                         f'--- Step {step_num}/{step_count} ({step_name}):'
                         f' stalled ({duration}s) ---'
                     )
-                    self._send_stall_notice(step_name, f'{result.reason}')
+                    self._send_stall_notice(step_name, f'{trigger}, after a steer')
                 elif result.status == 'failed':
                     step_status = 'failed'
                     step_exit_code = 1

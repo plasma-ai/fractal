@@ -326,7 +326,7 @@ time.sleep(600)
             touch "$CAPTURE_DIR/recap_$SID" "$CAPTURE_DIR/recapped"
         fi
         printf '{"type":"assistant","message":{"id":"msg_cap_%s","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"","signature":"CAQS"}],"stop_reason":null},"parent_tool_use_id":null,"session_id":"%s"}\\n' "$N" "$SID"
-        printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Output token limit hit. Resume directly -- no apology, no recap of what you were doing."}]},"parent_tool_use_id":null,"session_id":"%s","isSynthetic":true}\\n' "$SID"
+        printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces."}]},"parent_tool_use_id":null,"session_id":"%s","isSynthetic":true}\\n' "$SID"
         echo "$$" > "$CAPTURE_DIR/capped_$N.txt"
         exec sleep 60
     fi
@@ -3830,7 +3830,8 @@ def test_thinking_cap_after_the_steer_stalls_without_retry(repo: dict) -> None:
     )
     sent = _run(worktree, 'radio', 'sent').stdout
     assert f'Node main.capstall stalled on step plan at iteration {run_id}.1' in sent
-    assert stall in sent
+    assert 'stalled: thinking cap, after a steer' not in sent
+    assert 'thinking cap, after a steer' in sent
 
 
 def test_cost_cap_guard_failure_reason_is_durable(repo: dict) -> None:

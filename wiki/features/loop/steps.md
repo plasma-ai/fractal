@@ -124,7 +124,7 @@ Two triggers mark a launch stuck, and both take one path through the loop.
 A **thinking cap**: a Claude reply that hits the output-token cap while still
 thinking (no text, no tool call) loops, because Claude Code auto-continues with
 an injected user turn that drops the cut-off thinking, so the agent restarts the
-thought and caps again until the step times out. The Claude parser reports a
+thought and caps again, spending the step's time. The Claude parser reports a
 provider-neutral `thinking_cap` stream event, once per reply, for a top-level
 reply whose blocks were all thinking. Either of two signals triggers it: the raw
 API `message_delta` with a `max_tokens` stop (the loop always passes
@@ -152,8 +152,11 @@ raises), the watchdog through the deadline routine; the stuck row closes
 `stopped` / `steered: <trigger>`, and a new row marked `steer` resumes the same
 session (detached nodes included) with the package's `modes/STALL.md` as its
 whole prompt. The steer is neither a retry nor a retry row, and the step ceiling
-keeps counting from the attempt's first launch. Stuck again after the steer, by
-either trigger, is a stall: the row closes `exited` with
+keeps counting from the attempt's first launch. The steer buys a launch, so it
+first polls what a retry's backoff polls: a pause parks with the stuck row
+closed (resume re-enters the step), and a stop, finish, or spent subtree ceiling
+abandons it to the failure path as a `failed` row. Stuck again after the steer,
+by either trigger, is a stall: the row closes `exited` with
 `stalled: <trigger>, after a steer`, the step skips the retry gate exactly as a
 timeout does (no new lifecycle status), the iteration fails as after a timed-out
 step, and the loop posts a `step stalled` notice naming the trigger to the

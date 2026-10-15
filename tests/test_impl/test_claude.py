@@ -407,6 +407,18 @@ _CAPPED_THINKING = (
             True,
             id='continuation',
         ),
+        # the wording past the opening varies by version
+        pytest.param(
+            [('thinking', 'msg_1', None), ('reasoning_continuation', None, None)],
+            True,
+            id='continuation-wording',
+        ),
+        # the transcript's shape: plain-string content flagged isMeta
+        pytest.param(
+            [('thinking', 'msg_1', None), ('meta_continuation', None, None)],
+            True,
+            id='continuation-string',
+        ),
         # the undocumented flag on claude's injected turn is never required
         pytest.param(
             [('thinking', 'msg_1', None), ('unflagged_continuation', None, None)],
@@ -1384,10 +1396,23 @@ def _reply_frame(
     (``start`` for ``message_start``, ``<block>_start`` for a
     ``content_block_start``, ``stop`` for a ``max_tokens``
     ``message_delta``), or ``continuation`` for claude's injected turn
-    (``unflagged_continuation`` without its ``isSynthetic`` flag).
+    (``unflagged_continuation`` without its ``isSynthetic`` flag,
+    ``reasoning_continuation`` in another version's wording,
+    ``meta_continuation`` in the transcript's plain-string ``isMeta`` shape).
     """
     if kind == 'continuation':
         return _continuation_frame(parent=parent)
+    if kind == 'reasoning_continuation':
+        frame = _continuation_frame(parent=parent)
+        text = 'Output token limit hit while you were still reasoning.'
+        frame['message']['content'][0]['text'] = text
+        return frame
+    if kind == 'meta_continuation':
+        frame = _continuation_frame(parent=parent)
+        del frame['isSynthetic']
+        frame['isMeta'] = True
+        frame['message']['content'] = frame['message']['content'][0]['text']
+        return frame
     if kind == 'unflagged_continuation':
         frame = _continuation_frame(parent=parent)
         del frame['isSynthetic']

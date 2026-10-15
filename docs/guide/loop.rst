@@ -386,10 +386,11 @@ Stuck steps
 
 Two triggers mark a Claude launch as **stuck**, and both take the same path:
 
-- **Thinking cap.** A reply can hit the 128,000-token output cap while still
+- **Thinking cap.** A reply can hit the model's output-token cap while still
   thinking, with no text and no tool call. Claude Code then continues on its
   own, but the continuation drops the cut-off thinking, so the agent starts
-  the thought over and hits the cap again, until the step times out. The
+  the thought over and hits the cap again, spending the step's time on
+  thoughts it never finishes. The
   loop watches for a thinking-only top-level reply that the API stops at
   ``max_tokens``, or that Claude Code follows with its own "Output token
   limit hit" continuation. Sub-agent replies, and replies that reached text
@@ -408,7 +409,11 @@ own (marked ``steer``) as a resume of the same session, in detached mode
 too. The relaunch's whole prompt is the package's ``modes/STALL.md``: write
 what you have to your plan file now, then take the next concrete action. The
 steer is not a retry and does not use ``step_retries``, and the step's own
-timeout still counts from the attempt's first launch.
+timeout still counts from the attempt's first launch. Like a retry, the
+steer first polls the signals: a pause parks the step instead (the stuck row
+closes ``stopped``, and resume re-enters the step), and a stop, a finish, or
+a spent subtree ceiling abandons it, closing the row ``failed`` with
+``<trigger>; steer abandoned``.
 
 A second stuck launch after the steer, by either trigger, is a **stall**. The
 step closes ``exited`` with ``stalled: <trigger>, after a steer``, naming the
