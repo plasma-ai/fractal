@@ -2268,7 +2268,10 @@ def test_killed_claude_launch_prices_from_its_transcript(
         _assistant_entry('msg_b', second),
         _assistant_entry('msg_b', second),
         _assistant_entry(
-            'msg_side', sidechain, model='claude-haiku-5', isSidechain=True
+            message_id='msg_side',
+            usage=sidechain,
+            model='claude-haiku-5',
+            isSidechain=True,
         ),
         _assistant_entry('msg_mystery', outside, model='mystery-model'),
         _assistant_entry('msg_late', outside, timestamp='2999-01-01T00:00:00.000Z'),
@@ -2279,9 +2282,10 @@ def test_killed_claude_launch_prices_from_its_transcript(
         _assistant_frame('msg_b', second),
         'exec sleep 30',
     )
+    finished = _claude_script(_INIT, _RESULT)
     agent = scripted_claude(
-        [stalled, _claude_script(_INIT, _RESULT), _claude_script(_INIT, _RESULT)],
-        [killed, [_assistant_entry('msg_c', outside)], []],
+        scripts=[stalled, finished, finished],
+        transcripts=[killed, [_assistant_entry('msg_c', outside)], []],
     )
     ScriptedLoop(loop_node, agent).run()
 

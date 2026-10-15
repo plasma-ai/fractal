@@ -16,7 +16,7 @@ import threading
 import time
 import traceback
 import typing
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import fractal.util
 from fractal.constants import (
@@ -68,7 +68,7 @@ _REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS +
 #: (from its launch, a tool result, visible text, or a wake-up), paused while
 #: a tool runs or its turn has ended -- after which the loop ends the launch
 #: as stuck.
-NO_PROGRESS_SECONDS = 1800
+NO_PROGRESS_SECONDS = 1_800
 
 # grace between the TERM and KILL when the stream reader dies -- short, but
 # long enough for a tool's ``git commit`` to drop ``.git/index.lock``, which
@@ -241,7 +241,7 @@ class Step:
         """Return the raw ``detached:`` frontmatter value, if any."""
         return self.frontmatter.get('detached')
 
-    def limit(self: Step, default: _Default) -> int | _Default:
+    def limit(self: Step, default: _Default) -> Union[int, _Default]:
         """Return the step's effective ceiling in seconds.
 
         The one rule every reader of a step's ceiling shares: the
@@ -3004,7 +3004,7 @@ class Loop:
                     ' killing the step group only',
                     file=sys.stderr,
                 )
-                _killpg(process.pid, signal.SIGKILL)
+                fractal.util.process._killpg(process.pid, signal.SIGKILL)
                 return
             for group in reaped.spared:
                 print(f"Note: spared process group {group} (another node's loop)")
@@ -3105,7 +3105,7 @@ class Loop:
                         ' killing the step group only',
                         file=sys.stderr,
                     )
-                    _killpg(process.pid, signal.SIGKILL)
+                    fractal.util.process._killpg(process.pid, signal.SIGKILL)
                 else:
                     for group in reaped.spared:
                         print(
@@ -3144,7 +3144,7 @@ class Loop:
         if self._step_id is not None and (result is None or not result.final):
             try:
                 agent.settle_cost(
-                    self._step_id,
+                    step_id=self._step_id,
                     started=launched,
                     ended=fractal.util.time.utc_now(),
                 )
@@ -4307,7 +4307,7 @@ class Loop:
                 seconds = Step.load(path).limit(self._step_timeout_seconds)
             except (OSError, ValueError):
                 seconds = self._step_timeout_seconds
-            if seconds is None or seconds <= 0:
+            if seconds <= 0:
                 unbraked = True
                 break
         if not unbraked:
@@ -5256,14 +5256,6 @@ def _span(seconds: int) -> str:
     if seconds >= 60 and seconds % 60 == 0:
         return f'{seconds // 60} minutes'
     return f'{seconds}s'
-
-
-def _killpg(pgid: int, sig: signal.Signals) -> None:
-    """Signal a process group, ignoring one that is gone or not ours."""
-    try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 def _one_line(text: str) -> str:
