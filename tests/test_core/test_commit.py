@@ -27,6 +27,7 @@ __all__ = [
     'test_user_node_commit_init_commits_baseline',
     'test_commit_pushes_unless_local',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_child_baseline_carries_only_its_seed',
     'test_child_baseline_refuses_a_file_moved_into_its_seed',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
@@ -39,7 +40,6 @@ __all__ = [
     'test_estate_add_refuses_non_record_files_with_no_ignore_layer',
     'test_estate_commits_its_own_tool_state',
     'test_estate_commits_the_template_provenance',
-    'test_child_baseline_carries_only_its_seed',
     'test_refused_estate_content_leaves_the_clean_check_quiet',
     'test_commit_stamps_iteration_from_args_or_open_row',
     'test_commit_rejects_prelabeled_agent_messages',
@@ -225,6 +225,49 @@ def test_user_init_baseline_survives_a_hostile_external_ignore(
     # runtime state still never rides the baseline
     assert '.status' not in tracked
     assert '.db' not in tracked
+
+
+def test_child_baseline_carries_only_its_seed(tmp_path: pathlib.Path) -> None:
+    """A child's ``--init`` baseline commits its seed alone.
+
+    The baseline skips the wiki refresh and the lint, so it carries only
+    fractal's setup: material copied into the child's tree refuses it by
+    name, with nothing staged or committed. With the material set aside the
+    seed commits as the baseline, and the material then lands through an
+    ordinary commit, which the lint gates.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    material = project_dir / 'reference.txt'
+    material.write_text('copied material\n', encoding='utf-8')
+    head = _git(project_dir, 'rev-parse', 'HEAD').stdout
+
+    with pytest.raises(RuntimeError, match='commits only the node seed') as refused:
+        node.commit('configure', init=True)
+
+    # the refusal names the copied file, and nothing was staged or committed
+    assert 'reference.txt' in str(refused.value)
+    assert _git(project_dir, 'rev-parse', 'HEAD').stdout == head
+    assert _git(project_dir, 'diff', '--cached', '--name-only').stdout == ''
+    # set aside, the material no longer blocks the seed's baseline...
+    aside = tmp_path / 'reference.txt'
+    material.rename(aside)
+    node.commit('configure', init=True)
+    subject = _git(project_dir, 'log', '-1', '--format=%s').stdout.strip()
+    assert subject == 'main.task: init (configure)'
+    tracked = _git(project_dir, 'ls-files').stdout
+    assert '.fractal/main.task/NODE.md' in tracked
+    assert 'reference.txt' not in tracked
+    # ...and returned, it lands through an ordinary commit
+    aside.rename(material)
+    node.commit('add reference material')
+    assert 'reference.txt' in _git(project_dir, 'ls-files').stdout
+    node.commit(check=True)
 
 
 def test_child_baseline_refuses_a_file_moved_into_its_seed(
@@ -826,49 +869,6 @@ def test_estate_commits_the_template_provenance(tmp_path: pathlib.Path) -> None:
     assert 'NOT staged' not in result
     assert 'are not node records' not in result
     # and the tree reads back clean
-    node.commit(check=True)
-
-
-def test_child_baseline_carries_only_its_seed(tmp_path: pathlib.Path) -> None:
-    """A child's ``--init`` baseline commits its seed alone.
-
-    The baseline skips the wiki refresh and the lint, so it carries only
-    fractal's setup: material copied into the child's tree refuses it by
-    name, with nothing staged or committed. With the material set aside the
-    seed commits as the baseline, and the material then lands through an
-    ordinary commit, which the lint gates.
-    """
-    repo = _make_git_repo(tmp_path / 'repo')
-    Node(repo).init(agent='claude', user=True)
-    output = Node(repo).init(name='task', agent='claude', local=True)
-    project_dir = _parse_project_dir(output)
-    _git(project_dir, 'config', 'user.email', 'test@test.com')
-    _git(project_dir, 'config', 'user.name', 'Test')
-    node = Node(project_dir)
-    material = project_dir / 'reference.txt'
-    material.write_text('copied material\n', encoding='utf-8')
-    head = _git(project_dir, 'rev-parse', 'HEAD').stdout
-
-    with pytest.raises(RuntimeError, match='commits only the node seed') as refused:
-        node.commit('configure', init=True)
-
-    # the refusal names the copied file, and nothing was staged or committed
-    assert 'reference.txt' in str(refused.value)
-    assert _git(project_dir, 'rev-parse', 'HEAD').stdout == head
-    assert _git(project_dir, 'diff', '--cached', '--name-only').stdout == ''
-    # set aside, the material no longer blocks the seed's baseline...
-    aside = tmp_path / 'reference.txt'
-    material.rename(aside)
-    node.commit('configure', init=True)
-    subject = _git(project_dir, 'log', '-1', '--format=%s').stdout.strip()
-    assert subject == 'main.task: init (configure)'
-    tracked = _git(project_dir, 'ls-files').stdout
-    assert '.fractal/main.task/NODE.md' in tracked
-    assert 'reference.txt' not in tracked
-    # ...and returned, it lands through an ordinary commit
-    aside.rename(material)
-    node.commit('add reference material')
-    assert 'reference.txt' in _git(project_dir, 'ls-files').stdout
     node.commit(check=True)
 
 
