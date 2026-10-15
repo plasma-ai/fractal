@@ -454,7 +454,9 @@ fail_target() {
 # --check'): an estate file the law refuses to commit (a parked credential) can
 # never clear, so counting it as dirt would pin the base to the fork point
 # forever; the squash already landed on the target, so a failure here must
-# never fail the merge
+# never fail the merge -- except a paused node's carried advance, which is
+# part of the merge: judged before the commit, it rolls the whole merge back
+# when it fails after
 skip_advance() {
     echo "Warning: skipped advancing $BRANCH's merge-base ($*);" \
         "a later re-merge may re-diff from the fork point" >&2
@@ -466,7 +468,8 @@ skip_advance() {
 # the reset began, so repeating it is safe -- else leave the child at its old
 # commit; warn only when an advance was underway, close the event as
 # completed, print the arm's summary, and exit 0 -- the merge succeeded, only
-# the advance was cut short
+# the advance was cut short; a carried advance cut short before the node's
+# branch moved rolls the whole merge back instead
 ADVANCING=false
 CHILD_OLD=""
 NEW_HEAD=""
@@ -500,13 +503,12 @@ advance_trap() {
 find_clobbered() {
     # reset --hard writes every path the target tracks, over an untracked or
     # ignored file of the same name too (a private local.env a sibling landed
-    # on the target); a collision skips the advance and keeps the node's copy;
-    # the disk is probed rather than the untracked listing compared, so a
-    # case-only alias on a case-insensitive filesystem, a directory sitting
-    # where the target adds a file, and a file sitting where it adds a
-    # directory all count -- the worktree is clean at CHILD_OLD (a carried
-    # advance's dirt is tracked, and its index ls-files consults), so anything
-    # on disk at a path that tree lacks is untracked or ignored; on a
+    # on the target); the disk is probed rather than the untracked listing
+    # compared, so a case-only alias on a case-insensitive filesystem, a
+    # directory sitting where the target adds a file, and a file sitting where
+    # it adds a directory all count -- the worktree is clean at CHILD_OLD (a
+    # carried advance's dirt is tracked, and its index ls-files consults), so
+    # anything on disk at a path that tree lacks is untracked or ignored; on a
     # case-insensitive filesystem a hit may be a tracked case-variant
     # (the target replaced Readme.md with README.md), which reset renames
     # correctly -- not a collision; icase,literal so the path matches only
@@ -634,7 +636,8 @@ carry_prepare() {
         CARRY_ERROR+=" -- commit, move aside, or resume and finish that work before merging"
         return 1
     fi
-    # git's dry run treats an ignored file as expendable; this guard does not
+    # git's dry run treats an ignored file as expendable; this guard does not,
+    # and a collision refuses the whole merge
     find_clobbered "$ADVANCE_TREE"
     if [[ -n "$CLOBBERED" ]]; then
         CARRY_ERROR="advancing $BRANCH's merge-base would write over untracked files in"
@@ -838,6 +841,7 @@ advance_merge_base() {
         skip_advance "recording the post-squash commit failed"
         return 0
     fi
+    # a collision skips the advance and keeps the node's copy
     find_clobbered "$ADVANCE_HEAD"
     if [[ -n "$CLOBBERED" ]]; then
         skip_advance "its worktree holds untracked files $PARENT_BRANCH now tracks:" \
@@ -1157,20 +1161,21 @@ fi
 wiki_owned() {
     [[ "/${1#"$2"/}" != */.* || "$1" == "$2/.wiki/"* ]]
 }
-# the _index.md merge driver unions both sides' link rows, and its block need
-# not be the form wiki update writes (the released plasma-wiki 1.6.0 appends
-# the merged branch's rows unsorted and keeps a row one side deleted), so
-# regenerate each tracked wiki's indexes from the merged filesystem and stage
-# the refreshed bytes to ride the squash commit (an untracked wiki -- the
-# git-excluded default seed -- carries no merge changes, and adding it would
-# fail); the refresh reads the disk, so an untracked file under the project
-# wiki would be indexed into the squash commit and dangle in every clean
-# checkout -- the merge refuses it by name (the memory wiki is the merging
-# node's own, and its next commit lands what it holds); the add is scoped to
-# what the refresh owns -- tracked-file updates plus any new _index.md and
-# tool-owned .wiki/ state; stdout is silenced so the merge summary below stays
-# the single user-facing line; a failed refresh restores the parent exactly
-# like a conflict
+# the _index.md merge driver unions both sides' link rows and orders them only
+# when the target's index is already in its wiki class's form and the class
+# loads -- a hand-edited index, a failing .wiki/wiki.py hook, or a conflict
+# resolved by hand lands as merged, and no driver adds a row for a page
+# committed without one -- so regenerate each tracked wiki's indexes from the
+# merged filesystem and stage the refreshed bytes to ride the squash commit
+# (an untracked wiki -- the git-excluded default seed -- carries no merge
+# changes, and adding it would fail); the refresh reads the disk, so an
+# untracked file under the project wiki would be indexed into the squash
+# commit and dangle in every clean checkout -- the merge refuses it by name
+# (the memory wiki is the merging node's own, and its next commit lands what
+# it holds); the add is scoped to what the refresh owns -- tracked-file
+# updates plus any new _index.md and tool-owned .wiki/ state; stdout is
+# silenced so the merge summary below stays the single user-facing line; a
+# failed refresh restores the parent exactly like a conflict
 if command -v wiki &>/dev/null; then
     PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo ".")
     if [[ "$PARENT_PROJECT" == "." ]]; then
@@ -1344,6 +1349,10 @@ if command -v wiki &>/dev/null; then
         done <"$TMP_DIR/wiki-strays"
         if [[ -n "$STRAYS" ]]; then
             # a folder its wiki excludes is never refreshed, strays or not
+            # NOTE: the phrase is plasma-wiki's Wiki._resolve_folder refusal,
+            #   which exits 2 like every wiki error -- a reworded message turns
+            #   this skip into a refused merge, safe but blocking, and
+            #   test_merge_skips_an_index_in_a_folder_its_wiki_excludes pins it
             wiki update --check --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} \
                 >/dev/null 2>"$TMP_DIR/wiki-err" || true
             grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err" && continue
