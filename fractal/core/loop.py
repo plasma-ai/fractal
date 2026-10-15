@@ -4188,10 +4188,9 @@ class Loop:
         )
         if any(seconds > 0 for seconds in timeouts):
             return
-        # a step file's own timeout: brakes its launch, so the exposure
-        # stands only while some launch has no ceiling -- SYNC runs on the
-        # unset node value, and an unreadable or malformed file falls back
-        # to it
+        # a step file's own timeout: brakes its launch, so the exposure stands
+        # only while some launch has no ceiling -- SYNC runs on the unset
+        # node value, and an unreadable or malformed file falls back to it
         launches = sorted((self.node.node_dir / 'steps').glob('*.md'))
         if self._sync_mode and self._sync_file.is_file():
             launches.append(self._sync_file)

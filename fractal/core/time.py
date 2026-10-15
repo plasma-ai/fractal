@@ -110,12 +110,12 @@ class Time:
             )
         if not rows:
             return None
-        # subtract elapsed time from the budget, crediting paused spans -- a
-        # pause parks the loop with the run/iter rows left open, so the raw
-        # wall clock would charge the frozen time against the deadline (a
-        # step never spans a pause: the interrupted step row closes paused
-        # and resume opens a fresh one); a steered step also owes its stuck
-        # launch's span
+        # subtract elapsed time from the budget, crediting paused
+        # spans -- a pause parks the loop with the run/iter rows
+        # left open, so the raw wall clock would charge the frozen
+        # time against the deadline (a step never spans a pause: the
+        # interrupted step row closes paused and resume opens a fresh
+        # one); a steered step also owes its stuck launch's span
         elapsed = fractal.util.time.elapsed(rows[0]['started_at'])
         if scope in ('run', 'iter'):
             elapsed -= self._pause_credit(run_id=run_id, since=rows[0]['started_at'])
@@ -206,7 +206,7 @@ class Time:
                     limits.append(float(seconds))
             return min(limits, default=None)
         # the node's own seat: its launch exported the enforced ceiling
-        # (``-1`` when none); seat-editable, so garbage falls through
+        # ('-1' when none); seat-editable, so garbage falls through
         if os.environ.get('STEP_ID') == f'{step_id}':
             try:
                 seconds = int(os.environ.get('STEP_TIMEOUT_SECONDS', ''))

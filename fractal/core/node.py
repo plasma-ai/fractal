@@ -75,9 +75,8 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # quiet-time floor for the listing's staleness flag: an active loop writes
-# activity at least once per step, so silence past max(step limit, 5m) --
-# the active step's effective ceiling -- earns the '!' suffix on the
-# rendered age
+# activity at least once per step, so silence past max(step limit, 5m) -- the
+# active step's effective ceiling -- earns the '!' suffix on the rendered age
 _STALE_AGE_FLOOR_SECONDS = 300.0
 
 # the listing's spend column is a steering read, not an invoice, so it
@@ -5579,8 +5578,7 @@ class Node:
             # render the newest activity instant as the 'last' age; an
             # active node quiet past max(step limit, 5m) is flagged stale
             # ('12m!'), the step limit being the child's active step's
-            # effective ceiling (a gone worktree falls back to the floor
-            # alone)
+            # effective ceiling (a gone worktree falls back to the floor alone)
             last = None
             timestamp = recent.get(row['node'])
             if timestamp is not None:
