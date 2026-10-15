@@ -103,6 +103,10 @@ _BILLING_BACKOFF_CAP_SECONDS = 3600
 # a failed launch this quick with zero recorded cost never reached paid
 # inference -- the billing/credit-outage signature
 _BILLING_INSTANT_SECONDS = 10
+# provider-outage retry pacing: each consecutive failure the agent names as
+# its provider being unavailable doubles the retry wait from the step-retry
+# backoff to the billing breaker's cap -- an outage outlasts a fixed backoff
+_UNAVAILABLE_BACKOFF_CAP_SECONDS = _BILLING_BACKOFF_CAP_SECONDS
 
 # the dash-segment widths a dated model snapshot stamps: one YYYYMMDD run,
 # or a dashed YYYY-MM-DD (a dotted date normalizes to the same three) -- the
@@ -280,7 +284,9 @@ class StepResult:
     ``budget_stopped`` set, never a failure. ``stuck`` is a launch the
     loop ended at a thinking cap or after no action for
     ``NO_PROGRESS_SECONDS``, its ``reason`` naming which; ``stalled`` is a
-    steered launch that got stuck again.
+    steered launch that got stuck again. ``unavailable`` marks a failure
+    the agent's backend names as its provider being unavailable (an
+    overloaded or erroring API), which paces the retry exponentially.
     """
 
     status: str
@@ -289,6 +295,7 @@ class StepResult:
     session: Optional[str] = None
     cost: Optional[float] = None
     budget_stopped: bool = False
+    unavailable: bool = False
 
 
 class Loop:
@@ -453,6 +460,7 @@ class Loop:
         self._setup_fails = 0
         self._setup_abort = False
         self._billing_fails = 0
+        self._unavailable_fails = 0
         self._fail_reason: Optional[str] = None
         self._time_budget = 'no limit'
         self._step_time_budget = 'no limit'
@@ -2304,6 +2312,7 @@ class Loop:
                     return True
 
                 self._book_billing(result, duration)
+                self._book_unavailable(result)
 
                 # every drop lands an event; the first re-dispatches the step
                 # once (infrastructure weather can silently serve a different
@@ -2340,19 +2349,24 @@ class Loop:
 
                 # only a failed launch buys a retry, and only
                 # while attempts remain; a billing-shaped failure waits the
-                # breaker's exponential clock instead of the hot default
+                # breaker's exponential clock instead of the hot default, and
+                # a provider-unavailable one doubles the default per
+                # consecutive failure
                 if result.status != 'failed' or attempt >= self._step_retries:
                     break
-                billing = self._billing_fails >= _BILLING_OUTAGE_THRESHOLD
-                if billing:
-                    backoff_label = f'{self._billing_wait()}s (billing breaker)'
+                retry_wait: Optional[int] = None
+                if self._billing_fails >= _BILLING_OUTAGE_THRESHOLD:
+                    retry_wait = self._billing_wait()
+                    backoff_label = f'{retry_wait}s (billing breaker)'
+                elif self._unavailable_fails:
+                    retry_wait = self._unavailable_wait()
+                    backoff_label = f'{retry_wait}s (provider unavailable)'
                 else:
                     backoff_label = self._step_retry_backoff
                 print(
                     f'--- Step {step_num}/{step_count} ({step_name}):'
                     f' retrying in {backoff_label} ---'
                 )
-                retry_wait = self._billing_wait() if billing else None
                 if not self._retry_backoff(seconds=retry_wait):
                     # a pause landing during the backoff parks; stop, finish,
                     # and the spent subtree ceiling abandon the retry to the
@@ -2983,11 +2997,16 @@ class Loop:
         # control, paused (None) while it has handed control off, and pushed
         # back by a timed pause
         idle_since: Optional[float] = time.monotonic()
+        # failed result frames' detail -- a backend that reports its failure
+        # there (claude) names the provider error nowhere else
+        failures: list[str] = []
 
         def _render(event: StreamEvent) -> None:
             nonlocal idle_since
             if self._render is not None:
                 self._render(event)
+            if event.kind == 'result' and event.failed and event.message:
+                failures.append(event.message)
             if watch_cap and event.kind == 'thinking_cap':
                 raise _ThinkingCap(event.session)
             if event.kind == 'acting':
@@ -3126,6 +3145,22 @@ class Loop:
 
         # attribute the outcome
         agent_borne = isinstance(stream_error, AgentStreamError)
+
+        # the backend reads its provider's outage shapes off everything the
+        # failed launch said: failed result frames, the stream's own error,
+        # and the stderr capture
+        def _unavailable() -> bool:
+            details = [*failures]
+            if agent_borne:
+                details.append(f'{stream_error}')
+            try:
+                details.append(
+                    agent.err_path.read_text(encoding='utf-8', errors='replace')
+                )
+            except OSError:
+                pass
+            return agent.unavailable('\n'.join(details))
+
         if idle.is_set() and not timed_out.is_set():
             # the watchdog ended an agent that sat idle -- a pause racing it
             # still parks; the caller-minted session stands in when the
@@ -3214,6 +3249,7 @@ class Loop:
                     reason=reason,
                     session=session_out,
                     cost=cost_out,
+                    unavailable=_unavailable(),
                 )
         if timed_out.is_set():
             # the deadline fired but the agent shut down cleanly within the
@@ -3261,6 +3297,7 @@ class Loop:
                 reason=f'{self._fail_reason}: {detail}',
                 session=session_out,
                 cost=cost_out,
+                unavailable=agent_borne and _unavailable(),
             )
         # a budget stop reported on the stream keeps its attribution even
         # when the agent exits 0
@@ -3464,6 +3501,7 @@ class Loop:
         # stands (the caller's is restored below) -- its cost is what the
         # dead-credits signature is read against
         self._book_billing(result, duration)
+        self._book_unavailable(result)
 
         if not strict:
             print(f'--- SYNC ({close or label}): done ---')
@@ -3593,7 +3631,8 @@ class Loop:
 
         Args:
             seconds: Wait to sleep out; ``None`` takes the step-retry
-                backoff (the billing breaker passes its own clock).
+                backoff (the billing breaker and the provider-outage
+                pacing pass their own clocks).
 
         Returns:
             Whether the retry may proceed (``False`` abandons it).
@@ -3623,6 +3662,16 @@ class Loop:
             _BILLING_BACKOFF_CAP_SECONDS,
             _BILLING_BACKOFF_BASE_SECONDS * 2**doublings,
         )
+
+    def _unavailable_wait(self: Loop) -> int:
+        """Return the provider-outage retry wait, doubling to the cap.
+
+        Never shorter than the step-retry backoff, so a configured backoff
+        above the cap still holds.
+        """
+        base = self._step_retry_backoff_seconds
+        doublings = self._unavailable_fails - 1
+        return max(base, min(_UNAVAILABLE_BACKOFF_CAP_SECONDS, base * 2**doublings))
 
     def _billing_gate(self: Loop, steps: list[Step], step_num: int) -> bool:
         """Hold the next launch through the breaker's backoff, if it is armed.
@@ -3713,6 +3762,27 @@ class Loop:
                 self._billing_fails += 1
             else:
                 self._billing_fails = 0
+
+    def _book_unavailable(self: Loop, result: StepResult) -> None:
+        """Fold one agent launch's outcome into the provider-outage streak.
+
+        Every launch counts, work step and SYNC alike, as the billing
+        breaker's does: a completed launch clears the streak, a failure
+        the backend names as its provider being unavailable extends it,
+        and any other failed or timed-out launch breaks it. Deliberate
+        outcomes (paused, budget-skipped) leave it untouched.
+
+        Args:
+            result: The launch's result.
+
+        """
+        if result.status == 'completed':
+            self._unavailable_fails = 0
+        elif result.status in ('failed', 'timed out'):
+            if result.unavailable:
+                self._unavailable_fails += 1
+            else:
+                self._unavailable_fails = 0
 
     def _billing_failure(self: Loop, result: StepResult, duration: int) -> bool:
         """Return whether a failed launch carries the billing signature.

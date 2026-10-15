@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import signal
 import sqlite3
 import subprocess
@@ -127,6 +128,10 @@ __all__ = [
     'test_billing_failures_back_off_exponentially_and_a_success_clears',
     'test_billing_gate_holds_the_sync_launch_and_counts_it',
     'test_interrupted_billing_gate_books_the_consumed_steps',
+    'test_provider_unavailable_retries_back_off_exponentially_to_the_cap',
+    'test_a_success_resets_the_provider_unavailable_backoff',
+    'test_non_provider_failures_keep_the_fixed_backoff',
+    'test_launch_reads_the_provider_outage_off_the_result_frame',
     'test_rejected_retunes_warn_once_not_every_iteration',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
@@ -457,6 +462,16 @@ class ScriptedLoop(MockLoop):
         """Launch the scripted agent through the base ``Loop._launch``."""
         kwargs['agent'] = self.agent
         return Loop._launch(self, step, prompt, **kwargs)
+
+
+class PaidLoop(MockLoop):
+    """Mock loop whose every launch spends, so no failure reads as billing."""
+
+    def _launch(self: PaidLoop, step: Step, prompt: str, **kwargs: Any) -> StepResult:
+        """Pop the next scripted outcome and stamp a real spend on its row."""
+        result = super()._launch(step, prompt, **kwargs)
+        self.node.record.step_cost(step_id=self._step_id, cost=0.5)
+        return result
 
 
 @pytest.fixture
@@ -3738,6 +3753,10 @@ def test_err_snapshots_keep_every_attempts_diagnosis(loop_node: Node) -> None:
             """Drain nothing and report an empty stream outcome."""
             return MockResult()
 
+        def unavailable(self: MockAgent, detail: str) -> bool:
+            """Name no provider outage."""
+            return False
+
     node = loop_node
     loop = Loop(node)
     loop._run_id = node.record.run_start()
@@ -4500,6 +4519,142 @@ def test_interrupted_billing_gate_books_the_consumed_steps(
     run = node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert run['status'] == 'exited'
     assert 'budget' in run['metadata']
+
+
+def test_provider_unavailable_retries_back_off_exponentially_to_the_cap(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Consecutive provider outages double the retry wait up to the cap.
+
+    An overloaded or erroring API outlasts a fixed backoff: the defaults
+    burn every retry inside one outage. Each consecutive failure the
+    backend names as its provider being unavailable doubles the wait from
+    ``step_retry_backoff``, the cap bounds it, and ``step_retries`` still
+    bounds the attempts (scaled down: a 1s backoff under a 4s cap).
+    """
+    monkeypatch.setenv('_NODE', '')
+    sleeps: list[float] = []
+    monkeypatch.setattr('fractal.core.loop.time.sleep', sleeps.append)
+    monkeypatch.setattr(loop_module, '_UNAVAILABLE_BACKOFF_CAP_SECONDS', 4)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=4, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    loop = PaidLoop(loop_node, results=[outage] * 5)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    waits = re.findall(r'retrying in (.*) ---', out)
+    assert waits == [
+        '1s (provider unavailable)',
+        '2s (provider unavailable)',
+        '4s (provider unavailable)',
+        '4s (provider unavailable)',
+    ]
+    # the announced waits are the waits slept, and the attempts stay bounded
+    assert len(sleeps) == 1 + 2 + 4 + 4
+    assert len(loop.launched) == 5
+
+
+def test_a_success_resets_the_provider_unavailable_backoff(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A completed launch ends the outage: the next one waits the base again.
+
+    The streak spans steps and iterations, since an outage belongs to the
+    provider, not to one step -- so only a success may clear it, or a
+    recovered provider would leave every later failure on the outage's
+    longest wait.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, max_iters=2, step_retries=2, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    done = StepResult(status='completed')
+    loop = PaidLoop(loop_node, results=[outage, outage, done, outage, done])
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [
+        '1s (provider unavailable)',
+        '2s (provider unavailable)',
+        '1s (provider unavailable)',
+    ]
+
+
+def test_non_provider_failures_keep_the_fixed_backoff(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A failure the backend does not name an outage retries on the fixed backoff.
+
+    An agent or tool error is work that failed, not weather to wait out,
+    and consecutive means consecutive: one mid-outage breaks the streak,
+    so the next outage starts over from the base.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=4, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    error = StepResult(status='failed', exit_code=1, reason='agent error (exit 1)')
+    loop = PaidLoop(loop_node, results=[outage, outage, error, error, outage])
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [
+        '1s (provider unavailable)',
+        '2s (provider unavailable)',
+        '1s',
+        '1s',
+    ]
+
+
+@pytest.mark.parametrize(
+    argnames=('result', 'wait'),
+    argvalues=[
+        pytest.param(
+            'API Error: 529 {"type":"error","error":{"type":"overloaded_error",'
+            '"message":"Overloaded"}}',
+            '1s (provider unavailable)',
+            id='overloaded',
+        ),
+        pytest.param(
+            'API Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
+            '"message":"prompt is too long"}}',
+            '1s',
+            id='agent-error',
+        ),
+    ],
+)
+def test_launch_reads_the_provider_outage_off_the_result_frame(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    capsys: pytest.CaptureFixture,
+    result: str,
+    wait: str,
+) -> None:
+    """The real launch hands the backend what the failed launch said.
+
+    Claude names a spent API retry only on its failed result frame, never
+    on stderr, so the launch must carry that frame's detail to the
+    backend's classifier for the retry to wait out the outage.
+    """
+    frame = {
+        'type': 'result',
+        'subtype': 'success',
+        'is_error': True,
+        'result': result,
+        'session_id': 'SID',
+    }
+    script = _claude_script(_INIT, frame, 'exit 1')
+    agent = scripted_claude([script, script])
+    _configure(loop_node, step_retries=1, step_retry_backoff='1s')
+    ScriptedLoop(loop_node, agent).run()
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [wait]
 
 
 def test_rejected_retunes_warn_once_not_every_iteration(

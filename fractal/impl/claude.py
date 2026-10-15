@@ -40,6 +40,18 @@ _CONTINUATION_PREFIX = 'Output token limit hit'
 #: Content block types of a reply that is still thinking.
 _THINKING_BLOCKS = frozenset({'thinking', 'redacted_thinking'})
 
+# Claude Code's provider-outage shapes, as its failed result frame names
+# them once its own API retries are spent: an `API Error: <status>` line
+# (529 overloaded, a 5xx, a 429 rate limit), the API's error types, or the
+# overloaded/unavailable wording
+_UNAVAILABLE = re.compile(
+    r'API Error:\s*(?:Repeated\s+)?(?:429|5\d\d)\b'
+    r'|\b(?:overloaded|rate_limit|api)_error\b'
+    r'|\boverloaded\b'
+    r'|\bservice unavailable\b',
+    re.IGNORECASE,
+)
+
 # the openrouter route authenticates on the key alone
 _NO_KEY = (
     'OPENROUTER_API_KEY is not set\n'
@@ -584,6 +596,10 @@ class ClaudeAgent(Agent):
     def _rates(self: ClaudeAgent, model: str) -> Optional[dict[str, Any]]:
         """Resolve pricing through the claude slug-alias chain."""
         return _rates(model)
+
+    def _unavailable(self: ClaudeAgent, detail: str) -> bool:
+        """Match Claude Code's overloaded, erroring, or rate-limited API."""
+        return _UNAVAILABLE.search(detail) is not None
 
     def tracks_cost(self: ClaudeAgent, model: Optional[str] = None) -> bool:
         """Return whether spend will be recorded.

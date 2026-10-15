@@ -59,6 +59,7 @@ __all__ = [
     'test_routed_parser_tolerates_gateway_null_usage',
     'test_routed_tracking_and_preflight_gate_on_the_route',
     'test_rates_falls_back_through_the_openrouter_chain_claude',
+    'test_unavailable_names_the_provider_outage_shapes_claude',
     'test_config_model_walks_the_settings_chain',
     'test_seed_config_disables_fast_mode_claude',
     'test_transcript_resolves_the_config_home_slug',
@@ -1264,6 +1265,63 @@ def test_rates_falls_back_through_the_openrouter_chain_claude(
     }
     # every miss returns None (unpriced), never a guessed entry
     assert claude._rates('mystery/model') is None
+
+
+@pytest.mark.parametrize(
+    argnames=('detail', 'unavailable'),
+    argvalues=[
+        pytest.param(
+            'API Error: 529 {"type":"error","error":{"type":"overloaded_error",'
+            '"message":"Overloaded"}}',
+            True,
+            id='overloaded-529',
+        ),
+        pytest.param('API Error: Repeated 529 Overloaded errors', True, id='repeated'),
+        pytest.param(
+            'API Error: 500 {"type":"error","error":{"type":"api_error",'
+            '"message":"Internal server error"}}',
+            True,
+            id='server-error',
+        ),
+        pytest.param(
+            'API Error: 503 upstream connect error or disconnect/reset before headers',
+            True,
+            id='service-unavailable',
+        ),
+        pytest.param(
+            'API Error: 429 {"type":"error","error":{"type":"rate_limit_error",'
+            '"message":"Number of request tokens has exceeded your rate limit"}}',
+            True,
+            id='rate-limit',
+        ),
+        pytest.param(
+            "API Error: Claude's response exceeded the 128000 output token maximum.",
+            False,
+            id='output-cap',
+        ),
+        pytest.param(
+            'API Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
+            '"message":"prompt is too long"}}',
+            False,
+            id='bad-request',
+        ),
+        pytest.param('Credit balance is too low', False, id='billing'),
+        pytest.param('error_max_turns', False, id='max-turns'),
+        pytest.param(
+            "Error: ENOENT: no such file or directory, open 'plan.md'",
+            False,
+            id='tool-error',
+        ),
+    ],
+)
+def test_unavailable_names_the_provider_outage_shapes_claude(
+    node_with_db: Node,
+    detail: str,
+    unavailable: bool,
+) -> None:
+    """Only an overloaded, erroring, or rate-limited API reads as an outage."""
+    backend = ClaudeAgent(node_with_db, 'claude')
+    assert backend.unavailable(detail) is unavailable
 
 
 def test_config_model_walks_the_settings_chain(

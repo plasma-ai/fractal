@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -62,6 +63,25 @@ _CHUNK = 1 << 20
 # refusal for a new or grown rollout the spawn scan can bind to no thread --
 # its unplaceable-rollout sites all raise it, so the wording stays identical
 _UNEXPLAINED = 'Rollout window saw a rollout it cannot explain: {name!r}'
+
+# codex's provider-outage shapes, as its error frames name them: the give-up
+# after its own reconnects (the last `Reconnecting... N/N`, then a bare
+# `stream disconnected before completion`), a 429 or 5xx status, or the
+# overloaded/unavailable/at-capacity wording -- an earlier reconnect, which
+# carries the disconnect in parentheses, is a retry codex may still recover
+# from
+_UNAVAILABLE = re.compile(
+    r'(?<!\()stream disconnected before completion'
+    r'|reconnecting(?:\.{3}|\u2026)\s*(\d+)/\1\b'
+    r'|(?:unexpected status|last status:?)\s*(?:429|5\d\d)\b'
+    r'|\b(?:429|5\d\d)\s+(?:too many requests|internal server error|bad gateway'
+    r'|service unavailable|gateway timeout)\b'
+    r'|\bservice unavailable\b'
+    r'|\boverloaded\b'
+    r'|\bat capacity\b'
+    r'|experiencing high demand',
+    re.IGNORECASE,
+)
 
 # the rollout window captured before each spawn, keyed by its live process --
 # an entry dies with the Popen, so a stream abandoned before finish_stream
@@ -389,6 +409,10 @@ class CodexAgent(Agent):
     def _rates(self: CodexAgent, model: str) -> Optional[dict[str, Any]]:
         """Resolve pricing through the codex slug-alias chain."""
         return _rates(model)
+
+    def _unavailable(self: CodexAgent, detail: str) -> bool:
+        """Match codex's reconnect give-up and its overloaded or erroring API."""
+        return _UNAVAILABLE.search(detail) is not None
 
     def _preflight(
         self: CodexAgent,

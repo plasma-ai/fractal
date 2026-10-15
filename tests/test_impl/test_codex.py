@@ -86,6 +86,7 @@ __all__ = [
     'test_routed_invocation_splices_the_provider_table',
     'test_routed_preflight_demands_the_key_and_names_openrouter_causes',
     'test_rates_falls_back_through_the_openrouter_chain_codex',
+    'test_unavailable_names_the_provider_outage_shapes_codex',
     'test_invocation_refuses_fork',
     'test_config_model_reads_the_toml_top_level',
     'test_seed_config_disables_fast_mode_codex',
@@ -1676,6 +1677,98 @@ def test_rates_falls_back_through_the_openrouter_chain_codex(
     assert codex._rates('openai/gpt-5.3-codex') == {'input_cost_per_token': 3e-6}
     # every miss returns None (unpriced), never a guessed entry
     assert codex._rates('mystery/model') is None
+
+
+@pytest.mark.parametrize(
+    argnames=('detail', 'unavailable'),
+    argvalues=[
+        # captured from a live outage: codex exited mid-reconnect, turn unfinished
+        pytest.param(
+            'codex reported an error: Reconnecting... 2/5 (unexpected status 503'
+            ' Service Unavailable: An error occurred while processing your request.'
+            ' You can retry your request, or contact us through our help center',
+            True,
+            id='captured-503-mid-reconnect',
+        ),
+        pytest.param(
+            'Reconnecting... 5/5 (stream disconnected before completion: error'
+            ' sending request for url (https://chatgpt.com/backend-api/codex/responses))',
+            True,
+            id='reconnect-give-up',
+        ),
+        pytest.param(
+            'stream disconnected before completion: Transport error: error decoding'
+            ' response body',
+            True,
+            id='stream-disconnected',
+        ),
+        pytest.param(
+            'exceeded retry limit, last status: 503 Service Unavailable',
+            True,
+            id='service-unavailable',
+        ),
+        pytest.param(
+            'unexpected status 500 Internal Server Error: {"error":{"message":"An'
+            ' error occurred while processing your request."}}',
+            True,
+            id='server-error',
+        ),
+        pytest.param(
+            'exceeded retry limit, last status: 429 Too Many Requests',
+            True,
+            id='rate-limit',
+        ),
+        pytest.param(
+            "We're currently experiencing high demand, which may cause temporary"
+            ' errors.',
+            True,
+            id='high-demand',
+        ),
+        # the capacity refusal alone, with no status code beside it
+        pytest.param(
+            'Selected model is at capacity. Please try a different model.',
+            True,
+            id='model-at-capacity',
+        ),
+        # a reconnect codex still had attempts left for, beside a fatal error
+        pytest.param(
+            'Reconnecting... 2/5 (stream disconnected before completion: idle'
+            ' timeout waiting for SSE); boom',
+            False,
+            id='mid-reconnect',
+        ),
+        # the same outage's stderr noise, which alone names no outage
+        pytest.param(
+            'ERROR codex_core::session: failed to record rollout items: thread'
+            ' 019a2c4e not found\n'
+            'ERROR codex_core::tools::router: error=write_stdin failed: Unknown'
+            ' process id 1042',
+            False,
+            id='captured-codex-core-errors',
+        ),
+        pytest.param('model not supported', False, id='model'),
+        pytest.param(
+            'unexpected status 400 Bad Request: {"detail":"The model is not'
+            ' supported when using Codex with a ChatGPT account."}',
+            False,
+            id='bad-request',
+        ),
+        pytest.param(
+            "You've hit your usage limit. Try again in 3 days.",
+            False,
+            id='usage-limit',
+        ),
+        pytest.param('exec command failed: exit status 1', False, id='tool-error'),
+    ],
+)
+def test_unavailable_names_the_provider_outage_shapes_codex(
+    node_with_db: Node,
+    detail: str,
+    unavailable: bool,
+) -> None:
+    """Only the reconnect give-up and an overloaded or erroring API read as an outage."""
+    backend = CodexAgent(node_with_db, 'codex')
+    assert backend.unavailable(detail) is unavailable
 
 
 def test_invocation_refuses_fork(node_with_db: Node) -> None:
