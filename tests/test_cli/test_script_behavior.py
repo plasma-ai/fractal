@@ -191,7 +191,9 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   untracked file in a refreshed folder refuses the merge by name, while one in
   a sibling a glob would match does not; an index in a folder its wiki
   excludes is skipped; and a failed refresh restores the target with the child
-  unadvanced.
+  unadvanced. Untracked files are judged by the wiki's own rules: a file only
+  a personal ignore hides refuses the merge, since the wiki would index it,
+  and one under a dot-prefixed folder neither refuses it nor rides the squash.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
   a conflicted merge with the merge's own tail -- ``.fractal/`` restore and
   seed strip, footprint check, commit, merge-base advance -- and refuses when
@@ -280,6 +282,7 @@ __all__ = [
     'test_merge_regenerates_an_index_merged_over_a_criss_cross_base',
     'test_merge_refuses_a_wiki_declared_at_the_worktree_root',
     'test_merge_skips_an_index_in_a_folder_its_wiki_excludes',
+    'test_merge_judges_untracked_files_by_the_wikis_own_rules',
     'test_merge_restores_the_target_when_a_corpus_refresh_fails',
     'test_failed_merge_restore_removes_the_staged_child_additions',
     'test_merge_leaves_the_target_clean_when_scratch_creation_fails',
@@ -1553,6 +1556,74 @@ def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
     merged = _git(repo, 'show', 'main:library/.notes/_index.md').stdout
     assert 'first line, edited by one' in merged, merged
     assert 'last line, edited by two' in merged, merged
+    status = _git(repo, 'status', '--porcelain').stdout.strip()
+    assert status == ('?? library/.notes/scratch.txt' if stray else ''), status
+
+
+@pytest.mark.parametrize(
+    argnames=('folder', 'stray', 'refused'),
+    argvalues=[
+        # a file only a personal ignore hides, which the wiki indexes anyway
+        ('library/cards', 'notes.bak', True),
+        # a file under a dot folder, which the wiki's walk never lists
+        ('library/cards', '.scratch/x.txt', False),
+        # the same pair under the project wiki
+        ('wiki', 'notes.bak', True),
+        ('wiki', '.scratch/x.txt', False),
+    ],
+    ids=[
+        'corpus-personal-ignore',
+        'corpus-dot-folder',
+        'project-personal-ignore',
+        'project-dot-folder',
+    ],
+)
+def test_merge_judges_untracked_files_by_the_wikis_own_rules(
+    tmp_path: pathlib.Path,
+    folder: str,
+    stray: str,
+    refused: bool,
+) -> None:
+    """The refresh's untracked-file guard follows the wiki's own walk.
+
+    The wiki indexes by the repository's ignore rules alone, so a file only a
+    personal ``core.excludesFile`` hides would get a row in the squash commit
+    while the file itself stays behind: the merge refuses it by name. A file
+    under a dot-prefixed folder is never indexed, so it neither refuses the
+    merge nor rides the squash commit.
+    """
+    repo = _init_tree(tmp_path / 'strayrepo')
+    _declare_wiki(repo / 'library', 'cards')
+    _git(repo, 'add', '-A', '--', 'library')
+    _git(repo, 'commit', '-m', 'declare the corpus')
+    worktrees = _sibling_pages(repo, 'library', 'cards')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    # a personal ignore hides *.bak from git, not from the wiki
+    personal = tmp_path / 'personal-ignore'
+    personal.write_text('*.bak\n', encoding='utf-8')
+    _git(repo, 'config', 'core.excludesFile', f'{personal}')
+    relative = f'{folder}/{stray}'
+    (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+    (repo / relative).write_text('a stray\n', encoding='utf-8')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+
+    result = _script('merge.sh', repo, f'{worktrees["two"]}')
+
+    if refused:
+        # refused by name, the target restored around the stray
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert relative in result.stderr, result.stderr
+        assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+        assert _git(repo, 'status', '--porcelain').stdout == ''
+    else:
+        # landed, with the stray neither indexed nor committed
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        index = _git(repo, 'show', f'main:{folder}/_index.md').stdout
+        assert '.scratch' not in index, index
+        status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+        assert status.splitlines() == [f'?? {relative}'], status
+    assert (repo / relative).read_text(encoding='utf-8') == 'a stray\n'
 
 
 def test_merge_restores_the_target_when_a_corpus_refresh_fails(

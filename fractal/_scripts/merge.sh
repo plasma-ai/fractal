@@ -1143,6 +1143,13 @@ fi
 
 # ------ wiki refresh
 
+# whether $1, untracked under wiki root $2, is the refresh's to index or
+# stage: the wiki's walk lists no dot-prefixed file or folder below its root
+# (mirrors plasma-wiki's Wiki._is_excluded_file and Wiki._is_excluded_dir),
+# while the root's own .wiki/ state is the tool's
+wiki_owned() {
+    [[ "/${1#"$2"/}" != */.* || "$1" == "$2/.wiki/"* ]]
+}
 # the _index.md merge driver unions both sides' link rows, and its block need
 # not be the form wiki update writes (the released plasma-wiki 1.6.0 appends
 # the merged branch's rows unsorted and keeps a row one side deleted), so
@@ -1206,14 +1213,25 @@ if command -v wiki &>/dev/null; then
         fi
         [[ -n "$TRACKED" ]] || continue
         if [[ "$INDEX_DIR" == "$WIKI_DIR" ]]; then
-            if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
-                -- ":(literal)$INDEX_REL" >"$TMP_DIR/wiki-strays"; then
+            # the wiki indexes by the repository's own ignore rules alone, with
+            # core.excludesFile pinned out (mirrors plasma-wiki's
+            # Wiki._check_ignore), so the strays are listed by them too: a file
+            # only a personal ignore hides would still get a row
+            if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+                --others --exclude-standard -- ":(literal)$INDEX_REL" >"$TMP_DIR/wiki-strays"; then
                 fail_target "listing the untracked files under $INDEX_DIR failed"
             fi
-            if [[ -s "$TMP_DIR/wiki-strays" ]]; then
-                STRAYS=$(tr '\0' '\n' <"$TMP_DIR/wiki-strays")
+            STRAYS=""
+            # read NUL-delimited so a path with spaces stays one entry and a
+            # non-ASCII name is never C-quoted by core.quotePath into a path
+            # that exists nowhere
+            while IFS= read -r -d '' STRAY; do
+                wiki_owned "$STRAY" "$INDEX_REL" || continue
+                STRAYS+="$STRAY, "
+            done <"$TMP_DIR/wiki-strays"
+            if [[ -n "$STRAYS" ]]; then
                 fail_target "untracked files under $INDEX_DIR would be indexed by the" \
-                    "squash of $BRANCH: ${STRAYS//$'\n'/, }; commit them or move them" \
+                    "squash of $BRANCH: ${STRAYS%, }; commit them or move them" \
                     "aside and merge again"
             fi
         fi
@@ -1225,8 +1243,10 @@ if command -v wiki &>/dev/null; then
                 "after merging $BRANCH failed"
         fi
         # of the untracked files now there, stage the indexes the refresh
-        # created and its tool-owned .wiki/ state
+        # created and its tool-owned .wiki/ state -- a file the walk never
+        # lists stays out of the squash
         while IFS= read -r -d '' CREATED; do
+            wiki_owned "$CREATED" "$INDEX_REL" || continue
             [[ "$CREATED" == */_index.md || "$CREATED" == "$INDEX_REL/.wiki/"* ]] || continue
             git -C "$PARENT_WORKTREE_DIR" add -- ":(literal)$CREATED" \
                 || fail_target "staging $CREATED after merging $BRANCH failed"
@@ -1275,18 +1295,27 @@ if command -v wiki &>/dev/null; then
         [[ "$STAGED" != "$OURS" && "$STAGED" != "$THEIRS" ]] || continue
         SUBTREE=${FOLDER#"$OWNER"}
         SUBTREE=${SUBTREE#/}
-        if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
-            -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-strays"; then
+        # the strays by the wiki's own ignore rules, as under the project wiki
+        # (mirrors plasma-wiki's Wiki._check_ignore)
+        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+            --others --exclude-standard -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-strays"; then
             fail_target "listing the untracked files under $FOLDER_DIR failed"
         fi
-        if [[ -s "$TMP_DIR/wiki-strays" ]]; then
+        STRAYS=""
+        # read NUL-delimited so a path with spaces stays one entry and a
+        # non-ASCII name is never C-quoted by core.quotePath into a path that
+        # exists nowhere
+        while IFS= read -r -d '' STRAY; do
+            wiki_owned "$STRAY" "$OWNER" || continue
+            STRAYS+="$STRAY, "
+        done <"$TMP_DIR/wiki-strays"
+        if [[ -n "$STRAYS" ]]; then
             # a folder its wiki excludes is never refreshed, strays or not
             wiki update --check --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} \
                 >/dev/null 2>"$TMP_DIR/wiki-err" || true
             grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err" && continue
-            STRAYS=$(tr '\0' '\n' <"$TMP_DIR/wiki-strays")
             fail_target "untracked files under $FOLDER_DIR would be indexed by the" \
-                "squash of $BRANCH: ${STRAYS//$'\n'/, }; commit them or move them" \
+                "squash of $BRANCH: ${STRAYS%, }; commit them or move them" \
                 "aside and merge again"
         fi
         if ! wiki update --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} >/dev/null 2>"$TMP_DIR/wiki-err"; then
@@ -1295,12 +1324,25 @@ if command -v wiki &>/dev/null; then
             fail_target "refreshing the wiki indexes under $FOLDER_DIR" \
                 "after merging $BRANCH failed"
         fi
-        # nothing untracked was there before the refresh, so staging the whole
-        # folder stages exactly what it wrote
-        if ! git -C "$PARENT_WORKTREE_DIR" add -A -- ":(literal)$FOLDER"; then
+        # stage what the refresh wrote, as the project wiki's is staged above:
+        # tracked-file updates, then the indexes it created and, for a root's
+        # own index, the root's .wiki/ state -- an untracked file the walk
+        # never lists stays out of the squash
+        if ! git -C "$PARENT_WORKTREE_DIR" add -u -- ":(literal)$FOLDER" \
+            || ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
+                -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-created"; then
             fail_target "staging the refreshed wiki indexes under $FOLDER_DIR" \
                 "after merging $BRANCH failed"
         fi
+        # read NUL-delimited so a path with spaces stays one entry and a
+        # non-ASCII name is never C-quoted by core.quotePath into a path that
+        # exists nowhere
+        while IFS= read -r -d '' CREATED; do
+            wiki_owned "$CREATED" "$OWNER" || continue
+            [[ "$CREATED" == */_index.md || "$CREATED" == "$OWNER/.wiki/"* ]] || continue
+            git -C "$PARENT_WORKTREE_DIR" add -- ":(literal)$CREATED" \
+                || fail_target "staging $CREATED after merging $BRANCH failed"
+        done <"$TMP_DIR/wiki-created"
     done <"$TMP_DIR/wiki-indexes"
 fi
 
