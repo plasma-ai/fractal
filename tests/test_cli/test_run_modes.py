@@ -63,6 +63,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -1234,7 +1235,9 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
 
     A double-forked daemon leaves the agent's session and loses its parent
     before the pause, so no walk can tie it to the invocation; the pause's
-    working-directory sweep names it in the output and leaves it alive.
+    working-directory sweep names it in the output and leaves it alive. The
+    node's own loop group is no stray: the launch backgrounds a sleeper in
+    it, working in the worktree too, and the sweep names the daemon alone.
     """
     steps = {
         '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_DAEMON_MARKER}\n',
@@ -1243,7 +1246,12 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
     node = _make_node(repo, 'reapstray', detached=False, sync=False, steps=steps)
     worktree = node['worktree']
 
-    proc, capture, log = _launch_finish_wait(repo, node, capture_name='reap_stray')
+    proc, capture, log = _launch_finish_wait(
+        repo=repo,
+        node=node,
+        capture_name='reap_stray',
+        prelude='sleep 600 &',
+    )
     try:
         assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
         (daemon,) = _tool_pids(capture)
@@ -1255,7 +1263,8 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
         _finish_wait_result(proc, capture, log)
         _kill_tools(capture)
 
-    assert f'pid {daemon} works in the worktree' in pause.stderr, pause.stderr
+    strays = {int(pid) for pid in re.findall(r'pid (\d+) works in', pause.stderr)}
+    assert strays == {daemon}, pause.stderr
     assert 'left running' in pause.stderr, pause.stderr
     assert alive == [daemon]
 
@@ -1268,7 +1277,8 @@ def test_abort_spares_another_nodes_loop_group(repo: dict, verb: str) -> None:
     launcher returns, so a walk from the agent reaches its loop. The stub
     starts a ``setsid``'d sleeper standing in for that loop, recorded in a
     sibling node's ``.pgid``, beside the plain tool sleepers: the verb
-    reaps the tools, spares the loop, and names the spared group.
+    reaps the tools, spares the loop, and names the spared group -- never
+    as a stray, though the loop works in the worktree it was started in.
     """
     steps = {
         '01-gate.md': (
@@ -1299,6 +1309,7 @@ def test_abort_spares_another_nodes_loop_group(repo: dict, verb: str) -> None:
 
     assert alive == [loop], (alive, group, loop, session)
     assert f'spared process group {loop}' in abort.stderr, abort.stderr
+    assert f'pid {loop} works in' not in abort.stderr, abort.stderr
 
 
 def test_pause_reaps_past_a_broken_sibling(repo: dict) -> None:
@@ -4497,13 +4508,16 @@ def _launch_finish_wait(
     *,
     capture_name: str,
     stub_cost: str = '0.001',
+    prelude: Optional[str] = None,
 ) -> tuple[subprocess.Popen, pathlib.Path, pathlib.Path]:
     """Start the loop for a gated finish-wait; return ``(proc, capture, log)``.
 
     Drives the loop via ``Popen`` (the finish-wait scenarios arrange conditions
     while the gated step blocks the loop) with output teed to ``log`` so the wait
-    banners are observable mid-run. The caller releases the gate
-    (``capture/gate_release``) and finalizes with ``_finish_wait_result``.
+    banners are observable mid-run. A ``prelude`` runs in the launch's shell,
+    which then execs the loop, so what it starts shares the loop's process
+    group. The caller releases the gate (``capture/gate_release``) and
+    finalizes with ``_finish_wait_result``.
     """
     root = repo['root']
     worktree = node['worktree']
@@ -4517,6 +4531,8 @@ def _launch_finish_wait(
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
     cmd = _loop_cmd(worktree)
+    if prelude is not None:
+        cmd = ['bash', '-c', f'{prelude} exec "$@"', 'bash', *cmd]
     # tee combined output to a file (not a PIPE): the wait blocks the loop, so the
     # log must be readable mid-run; the parent closes its handle right after spawn
     # (the child keeps the dup'd fd) so nothing has to be drained to keep it alive

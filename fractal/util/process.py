@@ -103,6 +103,7 @@ def reap(
     *,
     grace: float = GRACE_SECONDS,
     worktree: Optional[pathlib.Path] = None,
+    owner: Optional[pathlib.Path] = None,
     spare: Callable[[], Collection[pathlib.Path]] = tuple,
     mark: Optional[pathlib.Path] = None,
 ) -> Reaped:
@@ -146,7 +147,13 @@ def reap(
         roots: Recorded process group ids (each its leader's pid).
         grace: Seconds between the TERM and KILL passes.
         worktree: Also report processes outside the tree whose working
-            directory lies inside this directory.
+            directory lies inside this directory, except the ones the tree
+            hangs from, the caller's lineage, the ``owner`` group, and
+            everything at or below a spared group.
+        owner: File recording the process group that owns the invocation
+            (the node's own loop), whose processes the ``worktree`` sweep
+            never names; read before the first signal, since an abort
+            parks the loop, which drops its record mid-reap.
         spare: Returns the files each recording a process group id to
             spare (a missing or unreadable file spares nothing); called
             before every signal round.
@@ -159,12 +166,14 @@ def reap(
 
     """
     roots = frozenset(root for root in roots if root > 1)
+    # read before any signal: an abort parks the loop, which drops this record
+    owned = _read_groups([owner]) if owner is not None else frozenset()
     try:
         tree = _Tree(roots, spare, mark)
     except (OSError, subprocess.SubprocessError):
         _reap_groups(roots, grace=grace, mark=mark)
         return Reaped()
-    return _reap(tree, grace=grace, worktree=worktree)
+    return _reap(tree, grace=grace, worktree=worktree, owned=owned)
 
 
 # ------ helper functions
@@ -175,6 +184,7 @@ def _reap(
     *,
     grace: float,
     worktree: Optional[pathlib.Path],
+    owned: frozenset[int],
 ) -> Reaped:
     """Run :func:`reap` over a tree whose first snapshot was read."""
     # TERM pass, then the KILL pass over every group still alive
@@ -189,11 +199,21 @@ def _reap(
     )
     strays: tuple[Process, ...] = ()
     if worktree is not None:
-        excluded = tree.seen | tree.owners | set(tree.lineage)
+        # no stray: the tree, what it hangs from, the caller, the owner's
+        # loop group, and everything at or below another node's loop -- a
+        # child's loop works in the worktree of the tool that started it
+        excluded = (
+            tree.seen
+            | tree.owners
+            | set(tree.lineage)
+            | _blocked(tree.table, tree.read_spared())
+        )
         strays = tuple(
             tree.table[pid]
             for pid in sorted(_cwd_inside(worktree, tree.table))
-            if pid not in excluded and not tree.table[pid].zombie
+            if pid not in excluded
+            and tree.table[pid].pgid not in owned
+            and not tree.table[pid].zombie
         )
     spared = tuple(sorted(tree.stopped))
     return Reaped(survivors=survivors, strays=strays, spared=spared)
@@ -330,17 +350,7 @@ def _walk(
     descendants.
     """
     # block every spared process and everything below it
-    blocked = {pid for pid, process in table.items() if process.pgid in spared}
-    while True:
-        leaders = {pid for pid in blocked if table[pid].sid == pid}
-        below = {
-            pid
-            for pid, process in table.items()
-            if process.sid in leaders or process.ppid in blocked
-        }
-        if below <= blocked:
-            break
-        blocked |= below
+    blocked = _blocked(table, spared)
     # seed, then close over sessions and parentage, stopping at blocked ones
     candidates = {
         pid
@@ -364,6 +374,25 @@ def _walk(
             for pid, process in table.items()
             if pid > 1 and (process.sid in sessions or process.ppid in members)
         }
+
+
+def _blocked(table: Mapping[int, Process], spared: frozenset[int]) -> set[int]:
+    """Return every process in ``table`` at or below a spared group.
+
+    Covers each spared group's processes, the sessions they lead, and
+    their descendants.
+    """
+    result = {pid for pid, process in table.items() if process.pgid in spared}
+    while True:
+        leaders = {pid for pid in result if table[pid].sid == pid}
+        below = {
+            pid
+            for pid, process in table.items()
+            if process.sid in leaders or process.ppid in result
+        }
+        if below <= result:
+            return result
+        result |= below
 
 
 def _lineage(pid: int, table: Mapping[int, Process]) -> list[int]:

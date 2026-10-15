@@ -21,7 +21,7 @@ from fractal.cli.utils import (
     resolve_node,
     resolve_target,
 )
-from fractal.constants import STATUSES, WORKTREES_FOLDER
+from fractal.constants import PGID_FILE, STATUSES, WORKTREES_FOLDER
 from fractal.core.agent import seed_agents
 from fractal.core.commit import out_of_scope, scope_boundaries
 from fractal.core.config import parse_reserve_budget
@@ -1650,15 +1650,18 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         Names on stderr each tree member still alive after the KILL and,
         with ``--worktree``, each spared loop group the walk reached and
         each process outside the tree whose working directory lies in that
-        directory -- reported, never signaled.
+        directory, other than a node's loop -- reported, never signaled.
         """
         worktree_dir = pathlib.Path(worktree) if worktree else None
-        spare = resolve_node(worktree).loop_records if worktree else tuple
+        node = resolve_node(worktree) if worktree else None
+        spare = node.loop_records if node else tuple
+        owner = node.node_dir / PGID_FILE if node else None
         mark = pathlib.Path(abort_marker) if abort_marker else None
         reaped = fractal.util.process.reap(
             pgid,
             grace=grace,
             worktree=worktree_dir,
+            owner=owner,
             spare=spare,
             mark=mark,
         )
