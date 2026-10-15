@@ -236,8 +236,8 @@ class StreamRenderer:
         elif event.kind == 'tool':
             self._break()
             print(f'\n{_DIM}{_BLUE}> {event.tool}{_RESET}', end='', flush=True)
-        # tool results, truncated to a preview
-        elif event.kind == 'tool_result':
+        # tool results, truncated to a preview (an empty one shows nothing)
+        elif event.kind == 'tool_result' and event.message:
             lines = event.message.split('\n')
             preview = '\n'.join(lines[:8])
             if len(preview) > _TOOL_RESULT_MAX:

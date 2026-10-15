@@ -5,7 +5,7 @@ desc: |
   ordered, what each of the five seed steps instructs, the frontmatter
   overrides a step file can carry, the SYNC pass that precedes each step,
   the checkpoints the loop runs between steps, the retry and model-drop
-  re-dispatch policies, and the thinking-cap steer and stall.
+  re-dispatch policies, and the steer and stall of a stuck step.
 created: 2026-07-21T04:51:13Z
 updated: 2026-07-21T04:51:13Z
 ---
@@ -117,32 +117,47 @@ on each attempt's row; a failure retry follows a failed attempt whose wait never
 ran, and a model-drop re-dispatch (below) produces new work, so its fresh demand
 is deliberate — an approval never transfers between attempts.
 
-## Thinking caps
+## Stuck steps
 
-A Claude reply that hits the output-token cap while still thinking (no text, no
-tool call) loops: Claude Code auto-continues with an injected user turn, but the
-continuation drops the cut-off thinking, so the agent restarts the thought and
-caps again until the step times out. The Claude parser reports a
+Two triggers mark a launch stuck, and both take one path through the loop.
+
+A **thinking cap**: a Claude reply that hits the output-token cap while still
+thinking (no text, no tool call) loops, because Claude Code auto-continues with
+an injected user turn that drops the cut-off thinking, so the agent restarts the
+thought and caps again until the step times out. The Claude parser reports a
 provider-neutral `thinking_cap` stream event, once per reply, for a top-level
 reply whose blocks were all thinking. Either of two signals triggers it: the raw
 API `message_delta` with a `max_tokens` stop (the loop always passes
 `--include-partial-messages`, and the stop lands before Claude Code requests the
 continuation), or, as a backstop, Claude Code's "Output token limit hit"
 continuation, matched on its text alone since its flag is undocumented.
-Assistant frames cannot serve: their `stop_reason` is always null. Sub-agent
-replies never count.
+Assistant frames cannot serve: their `stop_reason` is always null.
 
-For a work step (never SYNC) the loop ends the invocation on the stream-error
-path — the render callback raises, so the reader's death kills the agent's group
-— and steers once per attempt: the capped row closes `stopped` /
-`thinking cap; steered`, and a new row marked `steer` resumes the capped session
-(detached nodes included) with the package's `modes/STALL.md` as its whole
-prompt. The steer is neither a retry nor a retry row, and the step ceiling keeps
-counting from the attempt's first launch. A cap after the steer is a stall: the
-row closes `exited` with the stall reason, the step skips the retry gate exactly
-as a timeout does (no new lifecycle status), the iteration fails as after a
-timed-out step, and the loop posts a `step stalled` notice to the node's outbox,
-which the parent's feed follows.
+**No progress**: a watchdog thread in the launch times the agent's own idle span
+against the module constant `NO_PROGRESS_SECONDS` (1800). The clock starts at
+the launch and each tool result, restarts at visible text, and pauses while the
+agent's own tools run; it reads only the neutral `tool`, `tool_result`, and
+`text` stream events, skipping those flagged `subagent`, so thinking never
+resets it. The reader blocks on stdout, so the watchdog polls the clock and, at
+the threshold, ends the group through the deadline's own TERM-grace-KILL routine
+under a flag of its own; it is cancelled with the deadline timer. It arms only
+for an agent whose stream reports progress (`Agent.reports_progress`): Claude,
+whose parser emits every tool result, an empty one included. Codex's stream
+marks command starts but not their completion, and its other tool items are not
+mapped, so it stays unwatched.
+
+For a work step (never SYNC) the first stuck launch per attempt is steered: the
+thinking cap ends the invocation on the stream-error path (the render callback
+raises), the watchdog through the deadline routine; the stuck row closes
+`stopped` / `steered: <trigger>`, and a new row marked `steer` resumes the same
+session (detached nodes included) with the package's `modes/STALL.md` as its
+whole prompt. The steer is neither a retry nor a retry row, and the step ceiling
+keeps counting from the attempt's first launch. Stuck again after the steer, by
+either trigger, is a stall: the row closes `exited` with
+`stalled: <trigger>, after a steer`, the step skips the retry gate exactly as a
+timeout does (no new lifecycle status), the iteration fails as after a timed-out
+step, and the loop posts a `step stalled` notice naming the trigger to the
+node's outbox, which the parent's feed follows.
 
 ## Model drops
 

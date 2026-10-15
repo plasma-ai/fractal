@@ -241,6 +241,9 @@ class StreamEvent:
     failed: bool = False
     # error detail / tool-result body
     message: Optional[str] = None
+    # tool/tool_result/text from a sub-agent the agent launched (claude's
+    # sidechain) -- not the agent's own action
+    subagent: bool = False
 
 
 def _sanitize(value: Optional[str]) -> Optional[str]:
@@ -355,6 +358,10 @@ class Agent:
     cost_scope: str = 'call'
     # accepts a hard per-step budget flag
     enforces_budget: bool = False
+    # the stream's tool/tool_result/text events mark the agent's own actions
+    # as they happen -- a tool on its call, a result (even an empty one) on
+    # its completion -- so the loop can time the agent's idle spans
+    reports_progress: bool = False
     # emits a result frame per step (opencode's step_finish), not one per turn
     # -- so a non-final result is mid-turn and only a final one closes a chat
     # turn; every other backend emits one terminal result

@@ -3422,7 +3422,7 @@ def test_thinking_cap_steers_the_capped_session_once(
     # reply carries no usage); the steer's row completed
     rows = _step_rows(worktree, f'main.{name}')
     assert rows == [
-        'plan/stopped/thinking cap; steered; unpriced',
+        'plan/stopped/steered: thinking cap; unpriced',
         'plan/completed/steer',
         'beta/completed/',
     ], result.stdout
@@ -3471,12 +3471,12 @@ def test_thinking_cap_after_the_steer_stalls_without_retry(repo: dict) -> None:
 
     # the capped rows are unpriced: the stub's capped reply carries no usage
     rows = _step_rows(worktree, 'main.capstall')
-    stall = 'stalled: reply hit the output cap while thinking, after a steer'
+    stall = 'stalled: thinking cap, after a steer'
     assert rows == [
-        'plan/stopped/thinking cap; steered; unpriced',
+        'plan/stopped/steered: thinking cap; unpriced',
         f'plan/exited/{stall}; unpriced',
         'beta/stopped/failed on plan',
-        'plan/stopped/thinking cap; steered; unpriced',
+        'plan/stopped/steered: thinking cap; unpriced',
         'plan/completed/steer',
         'beta/completed/',
     ], result.stdout

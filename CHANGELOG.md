@@ -9,6 +9,11 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Added
 
+- A no-progress watchdog for Claude steps: 30 minutes of the agent's own idle
+  time (from its launch, a tool result, or visible text to its next tool call or
+  text, paused while its own tools run; thinking never counts) marks the launch
+  stuck exactly like a thinking cap — the first steers the step, a second stalls
+  it — with the step row naming which trigger fired. Codex is not watched yet.
 - `fractal node merge` lands a paused node's committed work into its merge
   target without leaving `paused`: the run, iteration, and step rows stay open
   for `fractal resume`, and the frozen step's uncommitted state stays in the
@@ -129,9 +134,10 @@ may include breaking changes, each listed under a Breaking heading.
   cut-off thinking, so the agent restarted the thought and capped again. The
   loop now ends the agent at the first such cap and resumes the same session
   once with `modes/STALL.md` ("write what you have to your plan file now"), on a
-  `steer` row that uses no `step_retries`. A second cap after the steer ends the
-  step `exited` as stalled, never retried, fails the iteration as a timeout
-  does, and posts a `step stalled` notice to the node's outbox for the parent.
+  `steer` row that uses no `step_retries`. A second stuck launch after the steer
+  ends the step `exited` as stalled, never retried, fails the iteration as a
+  timeout does, and posts a `step stalled` notice to the node's outbox for the
+  parent.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives `$MAX_CHILDREN` and the other config-derived variables from

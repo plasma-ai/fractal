@@ -111,19 +111,27 @@ class ClaudeParser(StreamParser):
                     delta = event.get('delta') or {}
                     if delta.get('stop_reason') == 'max_tokens':
                         events += self._thinking_cap()
+            subagent = not top_level
             if event_type == 'content_block_start':
                 block = event.get('content_block') or {}
                 if block.get('type') == 'tool_use':
-                    events.append(StreamEvent(kind='tool', tool=block.get('name', '?')))
+                    tool = block.get('name', '?')
+                    events.append(
+                        StreamEvent(kind='tool', tool=tool, subagent=subagent)
+                    )
                 elif block.get('type') == 'text':
                     # a new text block opens on a fresh line
-                    events.append(StreamEvent(kind='text', text='\n'))
+                    events.append(
+                        StreamEvent(kind='text', text='\n', subagent=subagent)
+                    )
             elif event_type == 'content_block_delta':
                 delta = event.get('delta') or {}
                 if delta.get('type') == 'text_delta':
                     text = delta.get('text', '')
                     if text:
-                        events.append(StreamEvent(kind='text', text=text))
+                        events.append(
+                            StreamEvent(kind='text', text=text, subagent=subagent)
+                        )
         # tool results
         elif message_type == 'user':
             content = (message.get('message') or {}).get('content') or []
@@ -144,14 +152,15 @@ class ClaudeParser(StreamParser):
                     # boundary data: coerce an unexpected payload shape to text
                     if not isinstance(result, str):
                         result = str(result) if result is not None else ''
-                    if result:
-                        events.append(
-                            StreamEvent(
-                                kind='tool_result',
-                                failed=bool(item.get('is_error', False)),
-                                message=result,
-                            )
+                    # an empty result still completes its call
+                    events.append(
+                        StreamEvent(
+                            kind='tool_result',
+                            failed=bool(item.get('is_error', False)),
+                            message=result,
+                            subagent=not top_level,
                         )
+                    )
         # price cost per message as it arrives: the authoritative result
         # frame never comes from a killed agent (when it does come, it
         # overwrites the estimate); usage is message-level and repeats on
@@ -323,6 +332,7 @@ class ClaudeAgent(Agent):
     needs_pricing = False
     cost_scope = 'call'
     enforces_budget = True
+    reports_progress = True
     providers = ('openrouter',)
 
     __parser__ = ClaudeParser

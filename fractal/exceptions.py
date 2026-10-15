@@ -72,5 +72,5 @@ class _ThinkingCap(Exception):
 
     def __init__(self: _ThinkingCap, session: Optional[str]) -> None:
         """Initialize ``_ThinkingCap``."""
-        super().__init__('reply hit the output cap while thinking')
+        super().__init__('thinking cap')
         self.session = session

@@ -4,7 +4,7 @@ desc: |
   The iteration loop: the step sequence, prompt assembly, plans, the commit
   pipeline, and run and iteration accounting.
 created: 2026-07-21T04:35:35Z
-updated: 2026-10-15T00:22:21Z
+updated: 2026-10-15T00:53:51Z
 ---
 
 # features/loop
@@ -33,7 +33,7 @@ substitution.
 are discovered and ordered, what each of the five seed steps instructs, the
 frontmatter overrides a step file can carry, the SYNC pass that precedes each
 step, the checkpoints the loop runs between steps, the retry and model-drop
-re-dispatch policies, and the thinking-cap steer and stall.
+re-dispatch policies, and the steer and stall of a stuck step.
 
 ***
 

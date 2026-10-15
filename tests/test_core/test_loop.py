@@ -24,7 +24,7 @@ from typing import Any, Optional
 import pytest
 
 from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
-from fractal.core import pricing, worktree
+from fractal.core import loop as loop_module, pricing, worktree
 from fractal.core.agent import StreamEvent, StreamResult
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
@@ -53,6 +53,10 @@ __all__ = [
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
     'test_agent_borne_stream_error_keeps_the_exit_code',
+    'test_no_progress_steers_then_stalls_without_retry',
+    'test_no_progress_clock_pauses_while_a_tool_runs',
+    'test_thinking_never_resets_the_no_progress_clock',
+    'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
@@ -228,6 +232,61 @@ class TrackingLoop(MockLoop):
         return event
 
 
+class ScriptedClaude(ClaudeAgent):
+    """The real claude backend and parser over a scripted bash stand-in.
+
+    Each launch runs the next script in place of ``claude`` (``SID`` in it
+    becomes the launch's session), in the production spawn shape: its own
+    process group, a text stdout pipe.
+    """
+
+    def __init__(self: ScriptedClaude, node: Node, scripts: list[str]) -> None:
+        """Initialize ``ScriptedClaude``."""
+        super().__init__(node, 'claude')
+        self.scripts = list(scripts)
+        self.argvs: list[tuple[str, ...]] = []
+        self.spawned: list[subprocess.Popen] = []
+
+    def __deepcopy__(self: ScriptedClaude, memo: dict[int, Any]) -> ScriptedClaude:
+        """Share the stand-in: event payloads copy their source, not processes."""
+        return self
+
+    def _spawn(
+        self: ScriptedClaude,
+        invocation: Any,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Run the next script, recording the launch's argv."""
+        self.argvs.append(invocation.argv)
+        script = self.scripts.pop(0).replace('SID', f'{invocation.session}')
+        process = subprocess.Popen(
+            ['bash', '-c', script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            **kwargs,
+        )
+        self.spawned.append(process)
+        return process
+
+
+class ScriptedLoop(MockLoop):
+    """Mock loop running the REAL launch over a ``ScriptedClaude``."""
+
+    def __init__(self: ScriptedLoop, node: Node, agent: ScriptedClaude) -> None:
+        """Initialize ``ScriptedLoop``."""
+        super().__init__(node)
+        self.agent = agent
+
+    def _launch(
+        self: ScriptedLoop, step: Step, prompt: str, **kwargs: Any
+    ) -> StepResult:
+        """Launch the scripted agent through the base ``Loop._launch``."""
+        kwargs['agent'] = self.agent
+        return Loop._launch(self, step, prompt, **kwargs)
+
+
 @pytest.fixture
 def loop_node(node_with_db: Node) -> Node:
     """Return a DB-backed node with the seed files a loop reads at boot."""
@@ -276,6 +335,39 @@ def hung_probe(
             pass
         process.wait(timeout=5)
         process.stdout.close()
+
+
+@pytest.fixture
+def scripted_claude(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[Callable[[list[str]], ScriptedClaude]]:
+    """Yield a ``ScriptedClaude`` factory on a 1s no-progress clock; reap after.
+
+    Each step runs under a 10s ceiling, so a launch the loop fails to end
+    still ends.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr(loop_module, 'NO_PROGRESS_SECONDS', 1)
+    _configure(loop_node, step_timeout='10s', step_retries=3)
+    loop_node.radio.init()
+    agents: list[ScriptedClaude] = []
+
+    def make(scripts: list[str]) -> ScriptedClaude:
+        agent = ScriptedClaude(loop_node, scripts)
+        agents.append(agent)
+        return agent
+
+    yield make
+    # each stand-in led its own group: sweep whatever a launch left behind
+    for agent in agents:
+        for process in agent.spawned:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            process.stdout.close()
 
 
 # ------ step parsing and discovery
@@ -1041,6 +1133,95 @@ def test_agent_borne_stream_error_keeps_the_exit_code(
     assert (step['metadata'] or '').startswith(
         'agent error (exit 3): sample reported an error: quota exhausted; stub crashed'
     )
+
+
+# ------ no-progress watchdog
+
+
+def test_no_progress_steers_then_stalls_without_retry(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """An agent idle past the clock is steered once, then stalls unretried.
+
+    After its tool result the agent goes silent: the watchdog ends it and
+    the step resumes the same session with ``STALL.md``. The steered
+    launch goes silent too, so the step stalls -- no retry even with
+    ``step_retries`` 3 -- the next step never runs, and the parent's feed
+    (the node's outbox) names the node, step, iteration and trigger.
+    """
+    silent = _claude_script(_INIT, _TOOL_START, _TOOL_RESULT, 'exec sleep 30')
+    agent = scripted_claude([silent, _claude_script(_INIT, 'exec sleep 30')])
+    loop = ScriptedLoop(loop_node, agent)
+    loop.run()
+
+    # two launches, the second resuming the first's session on STALL.md
+    first, steer = agent.argvs
+    session = first[first.index('--session-id') + 1]
+    assert steer[steer.index('--resume') + 1] == session
+    assert 'ran out of room while still thinking' in steer[-1]
+    assert all(process.poll() is not None for process in agent.spawned)
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/exited/stalled: no action for 1s, after a steer; unpriced',
+        'EXECUTE/stopped/failed on PLAN',
+    ]
+    sent = loop_node.radio.sent(channel='outbox')
+    (notice,) = [row for row in sent if row['subject'] == 'step stalled: PLAN']
+    assert f'Node {loop_node.branch} stalled on step PLAN' in notice['data']
+    assert 'no action for 1s' in notice['data']
+
+
+def test_no_progress_clock_pauses_while_a_tool_runs(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A tool running past the clock is the agent waiting, never idling."""
+    tool = _claude_script(_INIT, _TOOL_START, 'sleep 3', _TOOL_RESULT, _TEXT, _RESULT)
+    agent = scripted_claude([tool, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+
+
+def test_thinking_never_resets_the_no_progress_clock(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """Thinking deltas streaming past the clock still read as no action."""
+    thinking = _claude_script(
+        _INIT, f'for _ in $(seq 30); do {_echo(_THINKING)}; sleep 0.2; done'
+    )
+    agent = scripted_claude(
+        [
+            thinking,
+            _claude_script(_INIT, _TEXT, _RESULT),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 3
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+
+
+def test_thinking_cap_then_no_progress_stalls_the_step(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """Either trigger after the steer stalls the step, named by the second."""
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    agent = scripted_claude([capped, _claude_script(_INIT, 'exec sleep 30')])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/exited/stalled: no action for 1s, after a steer; unpriced',
+        'EXECUTE/stopped/failed on PLAN',
+    ]
 
 
 def test_launch_stamps_the_effort_on_the_step_row(
@@ -3035,6 +3216,7 @@ def test_err_snapshots_keep_every_attempts_diagnosis(loop_node: Node) -> None:
 
         name = 'claude'
         enforces_budget = False
+        reports_progress = False
 
         def __init__(
             self: MockAgent, err_path: pathlib.Path, diagnoses: list[str]
@@ -4917,6 +5099,97 @@ def test_stop_during_the_inter_iteration_sleep_ends_the_run(
 
 
 # ------ helpers
+
+
+# claude stream-json frames for the scripted stand-in (SID: the launch's
+# session); thinking streams as raw partial-message deltas, never an action
+_INIT = {'type': 'system', 'subtype': 'init', 'session_id': 'SID'}
+_TOOL_START = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_start',
+        'content_block': {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TOOL_RESULT = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'ok'}],
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_delta',
+        'delta': {'type': 'thinking_delta', 'thinking': 'hmm'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TEXT = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_delta',
+        'delta': {'type': 'text_delta', 'text': 'Done.'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_REPLY = {
+    'type': 'assistant',
+    'message': {
+        'id': 'msg_1',
+        'role': 'assistant',
+        'content': [{'type': 'thinking', 'thinking': '', 'signature': 'CAQS'}],
+        'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_CONTINUATION = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [
+            {'type': 'text', 'text': 'Output token limit hit. Resume directly.'}
+        ],
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+    'isSynthetic': True,
+}
+_RESULT = {
+    'type': 'result',
+    'subtype': 'success',
+    'session_id': 'SID',
+    'total_cost_usd': 0.001,
+    'num_turns': 1,
+    'duration_ms': 1,
+}
+
+
+def _echo(frame: dict[str, Any]) -> str:
+    """Return the shell command printing one stream frame as a line."""
+    return f"printf '%s\\n' '{json.dumps(frame)}'"
+
+
+def _claude_script(*parts: Any) -> str:
+    """Join frames (printed) and raw shell commands into one stand-in script."""
+    return '; '.join(_echo(part) if isinstance(part, dict) else part for part in parts)
+
+
+def _step_rows(node: Node) -> list[str]:
+    """Return the node's step rows, oldest first, as ``name/status/metadata``."""
+    rows = node.db.read('steps', where={'node': node.branch})
+    return [
+        f'{row["step_name"]}/{row["status"]}/{row["metadata"] or ""}'
+        for row in sorted(rows, key=lambda row: row['step_id'])
+    ]
 
 
 def _configure(node: Node, **values: Any) -> None:
