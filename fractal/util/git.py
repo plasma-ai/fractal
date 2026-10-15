@@ -9,6 +9,18 @@ from typing import Literal, Optional
 
 __all__ = []
 
+# the git-dir entries an unfinished merge, squash, cherry-pick, revert, or
+# rebase leaves behind, and the lock a git command killed mid-write leaves
+_IN_PROGRESS = (
+    'MERGE_HEAD',
+    'SQUASH_MSG',
+    'CHERRY_PICK_HEAD',
+    'REVERT_HEAD',
+    'rebase-merge',
+    'rebase-apply',
+    'index.lock',
+)
+
 
 @typing.overload
 def run(
@@ -240,3 +252,35 @@ def prunable(repo_dir: pathlib.Path) -> bool:
     cmd = ['worktree', 'list', '--porcelain']
     output = run(cmd, cwd=repo_dir, check=False)
     return any(line.startswith('prunable ') for line in (output or '').splitlines())
+
+
+def in_progress(path: pathlib.Path) -> list[str]:
+    """Return the git operations a worktree has in progress.
+
+    Names each git-dir entry an unfinished operation leaves -- a merge's
+    ``MERGE_HEAD``, a squash's ``SQUASH_MSG``, ``CHERRY_PICK_HEAD``,
+    ``REVERT_HEAD``, a rebase's ``rebase-merge`` or ``rebase-apply`` -- and
+    the ``index.lock`` a git command killed mid-write leaves, resolved for
+    the worktree (a linked worktree keeps its own) in one ``git rev-parse
+    --git-path`` call. A path outside any git worktree reports nothing.
+
+    Args:
+        path: A directory inside the worktree.
+
+    Returns:
+        The entries present, in that order.
+
+    """
+    cmd = ['rev-parse']
+    for name in _IN_PROGRESS:
+        cmd.extend(['--git-path', name])
+    output = run(cmd, cwd=path, check=False)
+    if output is None:
+        return []
+    # git prints each path relative to the directory it ran in, or absolute
+    # for a linked worktree, so the join resolves both
+    return [
+        name
+        for name, entry in zip(_IN_PROGRESS, output.splitlines())
+        if (path / entry).exists()
+    ]

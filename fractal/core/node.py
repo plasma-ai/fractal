@@ -3802,6 +3802,8 @@ class Node:
         # the reap names what it left alive on stderr
         for line in result.stderr.splitlines():
             self.log(message=line, level=logging.WARNING)
+        # name any git operation the abort left in progress
+        self._warn_git_in_progress()
         # mark active rows as killed; a loop that landed its own terminal
         # between the signal and the reap keeps it -- the row marking is
         # already fenced, so the status stamp must not overwrite either
@@ -3926,8 +3928,27 @@ class Node:
         # the reap names what it left alive on stderr
         for line in result.stderr.splitlines():
             self.log(message=line, level=logging.WARNING)
+        # name any git operation the abort left in progress
+        self._warn_git_in_progress()
         self.record.event_end(event_id=event_id, status='completed')
         return result.stdout.strip()
+
+    def _warn_git_in_progress(self: Node) -> None:
+        """Warn of each git operation the worktree has in progress.
+
+        An abort can cut a git command short -- an agent's merge, rebase,
+        or index write -- and the operation stays in the worktree until
+        finished or aborted, where a later merge of this node trips over
+        it; pause and kill name each one after the reap.
+        """
+        for name in fractal.util.git.in_progress(self._root):
+            self.log(
+                message=(
+                    f'Warning: {self._root} has a git operation in progress'
+                    f' ({name}); finish or abort it before merging this node'
+                ),
+                level=logging.WARNING,
+            )
 
     def resume(self: Node) -> str:
         """Resume the node and its paused descendants (leaf-first).
