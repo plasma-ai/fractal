@@ -153,6 +153,7 @@ __all__ = [
     'test_a_fast_outage_never_arms_the_billing_breaker',
     'test_an_outage_past_the_retries_holds_the_next_launch',
     'test_an_interrupted_outage_hold_books_the_consumed_steps',
+    'test_the_outage_streak_moves_only_on_what_launches_say',
     'test_retry_waits_end_at_the_run_deadline',
     'test_launch_reads_the_provider_outage_off_the_result_frame',
     'test_launch_reads_the_provider_outage_off_error_frames_and_stderr',
@@ -5514,6 +5515,65 @@ def test_an_interrupted_outage_hold_books_the_consumed_steps(
     ]
     iteration = loop_node.db.read('iters', where={'iter': 2})[0]
     assert (iteration['status'], iteration['exit_code']) == ('stopped', 0)
+
+
+@pytest.mark.parametrize(
+    argnames=('case', 'waits', 'holds'),
+    argvalues=[
+        # a configured backoff above the cap still holds
+        pytest.param('floor', ['8s (provider unavailable)'] * 2, [], id='floor'),
+        # a SYNC's outage extends the streak: its step's first launch holds
+        # and its retry waits twice the base
+        pytest.param('sync', ['2s (provider unavailable)'], ['1s'], id='sync'),
+        # a timed-out launch breaks the streak
+        pytest.param('timeout', ['1s (provider unavailable)'] * 2, [], id='timeout'),
+        # a budget-skipped launch bought nothing and leaves it standing
+        pytest.param(
+            'skip',
+            ['1s (provider unavailable)', '2s (provider unavailable)'],
+            ['1s'],
+            id='skip',
+        ),
+    ],
+)
+def test_the_outage_streak_moves_only_on_what_launches_say(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    case: str,
+    waits: list[str],
+    holds: list[str],
+) -> None:
+    """The outage wait floors at the backoff, and only launches move its streak.
+
+    The streak counts every launch, a before-step SYNC included; a
+    failure that names no outage, a timeout among them, breaks it; a step
+    skipped over budget bought no launch, so it leaves the streak
+    standing for the next step's hold and retry.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=1, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    if case == 'floor':
+        monkeypatch.setattr(loop_module, '_UNAVAILABLE_BACKOFF_CAP_SECONDS', 4)
+        _configure(loop_node, step_retries=2, step_retry_backoff='8s')
+        results = [outage] * 3
+    elif case == 'sync':
+        _configure(loop_node, sync=True)
+        results = [outage, outage]
+    elif case == 'timeout':
+        _configure(loop_node, max_iters=2)
+        results = [outage, StepResult(status='timed out', exit_code=124), outage]
+    else:
+        _seed_steps(loop_node, ['01-PLAN.md', '02-EXECUTE.md'])
+        results = [outage, StepResult(status='skipped', exit_code=125), outage]
+    loop = PaidLoop(loop_node, results=results)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == waits
+    assert re.findall(r'probing again in (\d+s)', out) == holds
 
 
 def test_retry_waits_end_at_the_run_deadline(
