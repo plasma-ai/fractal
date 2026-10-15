@@ -665,6 +665,10 @@ def scripted_claude(
     """
     monkeypatch.setenv('_NODE', '')
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', f'{tmp_path / "claude-home"}')
+    # NOTE: a real 1s clock -- the stand-ins' frames come from a live
+    #   subprocess no fake clock can drive, so a case that checks the clock
+    #   holds needs its first waiting frame within 1s of the spawn; bash
+    #   prints it in milliseconds, wide margin for CPU contention under -n auto
     monkeypatch.setattr(loop_module, 'NO_PROGRESS_SECONDS', 1)
     _configure(loop_node, step_timeout='10s', step_retries=3)
     loop_node.radio.init()
@@ -1913,8 +1917,8 @@ def test_a_capped_or_idle_sync_runs_to_its_result(
 
 
 @pytest.mark.parametrize(
-    'script',
-    [
+    argnames='script',
+    argvalues=[
         # the live capture: the agent backgrounds a command and ends its turn
         # (a result), claude waits, then a task notice wakes it to finish
         pytest.param(
@@ -1955,8 +1959,8 @@ def test_idle_clock_holds_while_the_agent_waits(
 
 
 @pytest.mark.parametrize(
-    'script',
-    [
+    argnames='script',
+    argvalues=[
         # silent from its launch
         pytest.param(_claude_script(_INIT, 'exec sleep 30'), id='launch'),
         # a call left unanswered when a new reply starts holds no pause
@@ -2289,11 +2293,8 @@ def test_killed_claude_launch_prices_from_its_transcript(
     )
     ScriptedLoop(loop_node, agent).run()
 
-    settled = (
-        (100 * 3e-6 + 10_000 * 3e-7 + 900 * 1.5e-5)
-        + (50 * 3e-6 + 300 * 1.5e-5)
-        + (2_000 * 1e-6 + 700 * 5e-6)
-    )
+    # each reply's final usage, the sub-agent's at its own model's rates
+    settled = _price(final) + _price(second) + _price(sidechain, 'claude-haiku-5')
     assert _step_rows(loop_node) == [
         'PLAN/stopped/steered: no action for 1s',
         'PLAN/completed/steer',
