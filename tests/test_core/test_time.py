@@ -37,6 +37,7 @@ from typing import Optional
 
 import pytest
 
+from fractal.constants import STEER_REASON_PREFIX
 from fractal.core.node import Node
 from tests._helpers import _age_iter, _age_run, _age_step, _past_timestamp
 
@@ -529,7 +530,7 @@ def test_idle_step_limit_counts_step_file_timeouts(
 @pytest.mark.parametrize(
     argnames=('status', 'metadata', 'charged'),
     argvalues=[
-        ('stopped', 'steered: no progress for 1800s', 600.0),
+        ('stopped', f'{STEER_REASON_PREFIX}no action for 30 minutes', 600.0),
         ('failed', 'agent error (exit 1)', 0.0),
     ],
     ids=['steer', 'retry'],

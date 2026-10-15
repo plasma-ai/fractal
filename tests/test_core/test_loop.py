@@ -64,6 +64,7 @@ __all__ = [
     'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_idle_clock_holds_while_the_agent_waits',
     'test_idle_clock_fires_on_a_silent_agent',
+    'test_steered_launch_reports_the_deadline_it_runs_under',
     'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
@@ -1577,6 +1578,51 @@ def test_idle_clock_fires_on_a_silent_agent(
         'PLAN/completed/steer',
         'EXECUTE/completed/',
     ]
+
+
+def test_steered_launch_reports_the_deadline_it_runs_under(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A steered relaunch's step countdown matches the deadline the loop arms.
+
+    The loop charges the stuck launch's span against the steered launch's
+    ceiling, and ``time remaining`` finds that span by the reason the steer
+    closed the stuck row with -- so the countdown the steered launch reads
+    is the deadline it runs under, never a fresh ceiling.
+    """
+    # a no-progress clock long enough to give the stuck launch a span
+    monkeypatch.setattr(loop_module, 'NO_PROGRESS_SECONDS', 3)
+    silent = _claude_script(_INIT, _TOOL_START, _TOOL_RESULT, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([silent, resumed, _claude_script(_INIT, _RESULT)])
+
+    class ReportingLoop(ScriptedLoop):
+        """Scripted loop recording each launch's countdown and armed deadline."""
+
+        def __init__(self: ReportingLoop, node: Node, agent: ScriptedClaude) -> None:
+            """Initialize ``ReportingLoop``."""
+            super().__init__(node, agent)
+            self.seen: list[tuple[Optional[float], int]] = []
+
+        def _launch(
+            self: ReportingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the step's time remaining and armed limit, then launch."""
+            remaining = self.node.time.remaining(scope='step')
+            self.seen.append((remaining, self._step_limit_seconds))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = ReportingLoop(loop_node, agent)
+    loop.run()
+    # the stuck PLAN launch, its steered relaunch, then EXECUTE
+    assert len(agent.argvs) == 3
+    remaining, armed = loop.seen[1]
+    assert remaining is not None
+    # both carry the stuck launch's span (the armed deadline in whole
+    # seconds); a countdown missing it reads the whole span over
+    assert armed - 2 <= remaining <= armed + 1
 
 
 def test_launch_stamps_the_effort_on_the_step_row(

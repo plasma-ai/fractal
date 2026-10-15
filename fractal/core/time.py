@@ -7,6 +7,7 @@ import typing
 from typing import Optional
 
 import fractal.util
+from fractal.constants import STEER_REASON_PREFIX
 
 if typing.TYPE_CHECKING:
     from collections.abc import Iterable
@@ -356,7 +357,7 @@ def _steer_charge(row: dict, rows: Iterable[dict]) -> float:
     if not prior:
         return 0.0
     stuck = max(prior, key=lambda other: other['step_id'])
-    if not stuck['metadata'].startswith('steered: '):
+    if not stuck['metadata'].startswith(STEER_REASON_PREFIX):
         return 0.0
     started = fractal.util.time.elapsed(stuck['started_at'])
     return started - fractal.util.time.elapsed(stuck['ended_at'])

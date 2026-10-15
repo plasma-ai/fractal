@@ -23,6 +23,7 @@ from fractal.constants import (
     PAUSE_ABORT_FILE,
     PGID_FILE,
     SOCKET_FILE,
+    STEER_REASON_PREFIX,
     STEP_PGID_FILE,
 )
 from fractal.exceptions import AgentStreamError, _Abort, _ThinkingCap
@@ -2071,7 +2072,7 @@ class Loop:
                         )
                     else:
                         if self._step_id is not None:
-                            steer_reason = f'steered: {trigger}'
+                            steer_reason = f'{STEER_REASON_PREFIX}{trigger}'
                             if paused:
                                 steer_reason = f'{trigger}; paused before the steer'
                             if attempt > 0:

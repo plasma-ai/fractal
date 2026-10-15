@@ -18,6 +18,7 @@ import pytest
 
 import fractal.core.agent
 from fractal.cli.utils import resolve_node
+from fractal.constants import STEER_REASON_PREFIX
 from fractal.core.node import Node
 from fractal.impl.claude import ClaudeAgent
 from fractal.tui.data import TuiData, display_name_of
@@ -522,7 +523,7 @@ def test_step_cap_reads_a_database_it_cannot_lift(pair_tree: pathlib.Path) -> No
 @pytest.mark.parametrize(
     argnames=('status', 'metadata', 'charged'),
     argvalues=[
-        ('stopped', 'steered: no progress for 1800s', 600.0),
+        ('stopped', f'{STEER_REASON_PREFIX}no action for 30 minutes', 600.0),
         ('failed', 'agent error (exit 1)', 0.0),
     ],
     ids=['steer', 'retry'],
