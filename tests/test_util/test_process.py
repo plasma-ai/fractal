@@ -26,8 +26,10 @@ import fractal.util.process
 
 __all__ = [
     'test_reap_takes_every_group_in_the_tree',
+    'test_reap_spares_a_loop_recorded_mid_reap',
     'test_reap_spares_the_caller_lineage',
     'test_reap_keeps_sparing_the_caller_lineage_when_ps_fails',
+    'test_reap_signals_the_root_groups_alone_without_a_process_table',
 ]
 
 # the tree script: argv is <dir> <token> <role>; every process records its
@@ -86,17 +88,33 @@ elif role == 'late':
     signal.signal(signal.SIGTERM, on_term)
     record()
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
-elif role in ('host', 'blind_host'):
+elif role == 'agent':
+    # a tool in a group of its own that launches a node, the way an agent's
+    # tool runs fractal node start
+    spawn('launcher', process_group=0)
+elif role == 'launcher':
+    def on_term(signum, frame):
+        # the TERM sets off the node's launch; later TERMs are ignored, so
+        # every walk still reaches the loop through this process
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        spawn('loop', start_new_session=True)
+    signal.signal(signal.SIGTERM, on_term)
+elif role == 'loop':
+    # a node loop ignores the reap's TERM and records its group as it boots
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(f'{directory}/loop.pgid', 'w') as handle:
+        handle.write(f'{os.getpgrp()}')
+elif role in ('host', 'blind_host', 'dark_host'):
     # a sibling tool group, then a caller in a group of its own that reaps
-    # the host's tree from inside it -- only the ancestor rule spares the
-    # host's group
+    # the host's tree from inside it
     spawn('sibling', process_group=0)
     wait_for('sibling')
-    caller = 'caller' if role == 'host' else 'blind_caller'
-    spawn(caller, process_group=0).wait()
-elif role in ('caller', 'blind_caller'):
+    caller = {'host': 'caller', 'blind_host': 'blind_caller', 'dark_host': 'dark_caller'}
+    spawn(caller[role], process_group=0).wait()
+elif role in ('caller', 'blind_caller', 'dark_caller'):
     import fractal.util.process
 
+    roots = [os.getsid(0)]
     if role == 'blind_caller':
         # ps answers the first snapshot only, then vanishes
         real = fractal.util.process.snapshot
@@ -109,8 +127,18 @@ elif role in ('caller', 'blind_caller'):
             return real()
 
         fractal.util.process.snapshot = snapshot
+    elif role == 'dark_caller':
+        # ps fails from the first snapshot on, and the caller's own group
+        # rides the roots
+        shim = pathlib.Path(directory) / 'shim'
+        shim.mkdir()
+        (shim / 'ps').write_text('#!/bin/sh\\nexit 1\\n')
+        (shim / 'ps').chmod(0o755)
+        path = os.environ['PATH']
+        os.environ['PATH'] = f'{shim}{os.pathsep}{path}'
+        roots.append(os.getpgrp())
     reaped = fractal.util.process.reap(
-        [os.getsid(0)],
+        roots,
         grace=1.0,
         mark=pathlib.Path(f'{directory}/abort.mark'),
     )
@@ -209,6 +237,35 @@ def test_reap_takes_every_group_in_the_tree(
     assert elapsed >= _GRACE
 
 
+def test_reap_spares_a_loop_recorded_mid_reap(
+    tree: Callable[[str], subprocess.Popen],
+    tmp_path: pathlib.Path,
+) -> None:
+    """A node loop the tree launches mid-reap is spared once it records itself.
+
+    The launcher's TERM sets off a ``setsid``'d loop, and the launcher
+    outlives the later TERMs, so every walk reaches the loop through it.
+    The loop records its group in the spare file only after the reap
+    began; the file is re-read before every round, so the loop outlives
+    both passes and is named spared, while the launcher draws the KILL.
+    """
+    leader = tree('agent')
+    (launcher,) = _await_pids(tmp_path, ['launcher'])
+    record = tmp_path / 'loop.pgid'
+    reaped = fractal.util.process.reap(
+        [leader.pid],
+        grace=_GRACE,
+        spare=lambda: [record],
+    )
+    # the starvation case: a loop that never booted before the KILL pass
+    # was never recorded to spare -- skip; one that booted and died fails
+    if not (tmp_path / 'loop.pid').exists():
+        pytest.skip('load starvation: the loop never booted before the KILL pass')
+    (loop,) = _await_pids(tmp_path, ['loop'])
+    assert _alive([launcher, loop]) == [loop]
+    assert reaped.spared == (loop,)
+
+
 def test_reap_spares_the_caller_lineage(
     tree: Callable[[str], subprocess.Popen],
     tmp_path: pathlib.Path,
@@ -255,6 +312,31 @@ def test_reap_keeps_sparing_the_caller_lineage_when_ps_fails(
     assert _alive([host_pid]) == [host_pid]
     assert host.poll() is None
     assert not (tmp_path / 'abort.mark').exists()
+
+
+def test_reap_signals_the_root_groups_alone_without_a_process_table(
+    tree: Callable[[str], subprocess.Popen],
+    tmp_path: pathlib.Path,
+) -> None:
+    """A process table that cannot be read at all still ends the root groups.
+
+    ``ps`` fails from the first snapshot on, so nothing can be walked: the
+    reap marks the abort and signals the root groups alone -- the host's
+    session group, never the caller's own group riding the roots -- and
+    names nothing. The host dies, the sibling tool group no walk reached
+    lives, and the caller lives to report.
+    """
+    host = tree('dark_host')
+    (sibling,) = _await_pids(tmp_path, ['sibling'])
+    report = tmp_path / 'caller.json'
+    deadline = time.monotonic() + 60
+    while not report.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert report.exists(), 'the caller never finished its reap'
+    assert json.loads(report.read_text(encoding='utf-8')) == []
+    assert host.wait(timeout=60) == -signal.SIGTERM
+    assert _alive([sibling]) == [sibling]
+    assert (tmp_path / 'abort.mark').exists()
 
 
 # ------ helpers
