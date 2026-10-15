@@ -620,7 +620,8 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    content allowlist: ``NODE.md`` and ``config.json`` at the node-directory
    root, and under ``memory/``, ``plans/``, ``scripts/``, ``skills/``, and
    ``steps/`` files with a text suffix (``.md``, ``.json``, ``.py``, ``.sh``,
-   ``.toml``, ``.yaml``/``.yml``, ``.csv``/``.tsv``, ``.txt``) plus, inside
+   ``.toml``, ``.yaml``/``.yml``, ``.csv``/``.tsv``, ``.txt``,
+   ``.diff``/``.patch``) plus, inside
    those directories, the tool state ``.wiki/`` and ``.gitkeep``. Anything
    else a node parks there — a key, a ``.env`` file, an archive, a
    dot-directory, any other file at the root — is withheld by name and
@@ -636,7 +637,12 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    same law, so a refused untracked file under the node directory never
    counts as uncommitted.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
-   rules and staged files of 10 MB or more.
+   rules and staged files of 10 MB or more. The ignore warning names the first
+   ten eaten paths, each with the rule that ate it as ``git check-ignore -v``
+   reports it (source file, line, and pattern), and counts the rest
+   (``Warning: N path(s) skipped by ignore rules (repository or host rules,
+   not node-record refusals): eaten.log (.gitignore:3:*.log), ...``); it is
+   separate from step 3's estate refusal.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
    caller's run/iteration/step lineage. "Nothing staged" is a tolerated
    no-op.

@@ -739,6 +739,32 @@ def test_commit_hints_when_ignore_rules_skip_files(tmp_path: pathlib.Path) -> No
     assert result.returncode == 0, result.stderr
     assert 'skipped by ignore rules' in result.stdout + result.stderr
     assert 'evidence.log' not in _git(task, 'ls-files').stdout
+    # the warning names each eaten path with the rule that ate it, and keeps
+    # apart from the estate refusal a non-record in the node directory draws
+    (task / 'notes.txt').write_text('kept, revised\n', encoding='utf-8')
+    plans = task / '.fractal' / 'main.task' / 'plans'
+    plans.mkdir(parents=True, exist_ok=True)
+    (plans / 'shot.png').write_bytes(b'\x89PNG')
+    named = _run(task, 'commit', 'named work')
+    assert named.returncode == 0, named.stderr
+    lines = (named.stdout + named.stderr).splitlines()
+    skip_line = next(line for line in lines if 'skipped by ignore rules' in line)
+    estate_line = next(line for line in lines if 'not node records' in line)
+    assert 'evidence.log (.gitignore:1:*.log)' in skip_line
+    assert 'not node-record refusals' in skip_line
+    assert 'shot.png' not in skip_line
+    assert 'shot.png' in estate_line
+    # past the listing cap, the rest is counted rather than listed
+    for index in range(11):
+        (task / f'zz_{index:02d}.log').write_text('eaten\n', encoding='utf-8')
+    (task / 'notes.txt').write_text('kept, revised again\n', encoding='utf-8')
+    capped = _run(task, 'commit', 'capped work')
+    assert capped.returncode == 0, capped.stderr
+    capped_output = capped.stdout + capped.stderr
+    assert 'Warning: 12 path(s) skipped by ignore rules' in capped_output
+    assert 'zz_08.log' in capped_output
+    assert 'zz_09.log' not in capped_output
+    assert '... and 2 more' in capped_output
 
 
 def test_commit_warns_on_large_staged_files(tmp_path: pathlib.Path) -> None:

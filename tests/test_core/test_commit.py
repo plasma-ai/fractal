@@ -559,6 +559,9 @@ def test_skip_alarm_covers_foreign_info_exclude_lines(
     (src / 'other.txt').write_text('more work\n', encoding='utf-8')
     result = node.commit('foreign line hold')
     assert 'skipped by ignore rules' in result
+    # the rule is named by its repo-relative source, never a machine path
+    assert 'src/generated.txt (.git/info/exclude:' in result
+    assert f'{repo}' not in result
 
 
 def test_record_force_add_refuses_non_record_files(
@@ -645,17 +648,30 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
     (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
     (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
     (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
+    # a plan's text patches are records; its screenshots and run output are not
+    plans = node.node_dir / 'plans'
+    plans.mkdir(parents=True, exist_ok=True)
+    (plans / 'fix.diff').write_text('--- a\n+++ b\n', encoding='utf-8')
+    (plans / 'fix.patch').write_text('--- a\n+++ b\n', encoding='utf-8')
+    (plans / 'shot.png').write_bytes(b'\x89PNG')
+    (plans / 'run.log').write_text('ran\n', encoding='utf-8')
+    (plans / 'run.err').write_text('failed\n', encoding='utf-8')
     result = node.commit('plain add path')
 
     tracked = _git(project_dir, 'ls-files').stdout
-    # the record landed; nothing secret-shaped or binary did
+    # the records landed; nothing secret-shaped, binary, or run output did
     assert 'memory/state.md' in tracked
     assert 'memory/evidence/main.py' in tracked
+    assert 'plans/fix.diff' in tracked
+    assert 'plans/fix.patch' in tracked
     for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
         assert parked not in tracked, parked
     # the refusal is named, not inferred from an absent file
     assert 'are not node records' in result
     for parked in ('id_rsa', 'creds.pem', 'dump.tar'):
+        assert parked in result, parked
+    for parked in ('shot.png', 'run.log', 'run.err'):
+        assert parked not in tracked, parked
         assert parked in result, parked
     # a record edited after it is tracked still commits -- the allowlist
     # gates what the estate adds new, never the upkeep of its own history
@@ -1127,6 +1143,8 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     assert '.env' in body
     assert f'{project_dir}' not in body
     assert 'skipped by ignore rules' in body
+    assert '.fractal/main.task/.env (.git/info/exclude:' in body
+    assert f'{repo}' not in body
     assert 'blob.bin (11MB)' in body
     assert 'work.txt' in body
 

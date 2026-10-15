@@ -83,11 +83,17 @@ config (`.obsidian/`) never ride a work commit -- the baseline's force-add
 included. A cache a baseline once force-tracked is dropped from the index by the
 next work commit; the on-disk copy stays, and the cache's own ignore holds from
 there. Two advisory guards warn without blocking: workspace files silently eaten
-by host ignore rules are counted and reported (fractal's own runtime ignores --
-the managed `info/exclude` block by its line span, so a user line sharing the
-file still alarms -- and self-managing ignored directories stay silent), and any
-staged file at or over 10MB is listed by name -- an oversized file is usually an
-accident, but large commits are also legitimate.
+by host ignore rules are counted and named (fractal's own runtime ignores -- the
+managed `info/exclude` block by its line span, so a user line sharing the file
+still alarms -- and self-managing ignored directories stay silent). The warning
+lists the first ten paths, each with the rule that ate it as `check-ignore -v`
+reports it (source file, line, and pattern; the shared `info/exclude` named
+repo-relative, since a force commit folds the warning into its body), then
+counts the rest, and labels them repository or host rules, not node-record
+refusals -- the estate law's refusal warning prints beside it and the two must
+not read as one count. The other guard lists any staged file at or over 10MB by
+name -- an oversized file is usually an accident, but large commits are also
+legitimate.
 
 ## The estate content law
 

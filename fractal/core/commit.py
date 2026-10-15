@@ -67,6 +67,9 @@ _LARGE_FILE_WARN_BYTES = 10 * 1024 * 1024
 # line cap for the staged diffstat a force commit folds into its body
 _DIFFSTAT_CAP_LINES = 20
 
+# listing cap for the paths the ignore-skip warning names
+_SKIP_LIST_CAP = 10
+
 
 def commit(
     node: Node,
@@ -238,13 +241,14 @@ def commit(
 
     _stage_changes()
     output.extend(record_notices)
-    # count workspace files the staging expansion dropped solely because ignore
-    # rules match them -- a tracked host ignore pattern can silently eat node
-    # artifacts; fractal's own runtime ignores stay silent (the info/exclude
-    # block and the stage's pathspec excludes are intentional), and so do
-    # self-ignoring dirs (a dir whose ignore rule lives inside it, like a wiki
-    # .cache/, manages itself -- its collapsed dir line and the content lines
-    # it also emits are one managed entity, not eaten files)
+    # count and name the workspace files the staging expansion dropped solely
+    # because ignore rules match them -- a tracked host ignore pattern can
+    # silently eat node artifacts; fractal's own runtime ignores stay silent
+    # (the info/exclude block and the stage's pathspec excludes are
+    # intentional), and so do self-ignoring dirs (a dir whose ignore rule lives
+    # inside it, like a wiki .cache/, manages itself -- its collapsed dir line
+    # and the content lines it also emits are one managed entity, not eaten
+    # files)
     cmd = [
         'ls-files',
         '--others',
@@ -259,7 +263,7 @@ def commit(
     # path's leading whitespace
     raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
     ignored = os.fsdecode(raw)
-    skipped = 0
+    skipped: list[str] = []
     if ignored:
         # raw git call bypassing util.git.run -- the helper feeds no stdin,
         # and check-ignore's batch form reads its paths from --stdin; -z on
@@ -278,7 +282,8 @@ def commit(
         # -v -z emits <source> <linenum> <pattern> <pathname> quadruples,
         # the source already bare (no :line:pattern suffix to strip)
         fields = result.stdout.split('\0')
-        for source, line, path in zip(fields[::4], fields[1::4], fields[3::4]):
+        quads = zip(fields[::4], fields[1::4], fields[2::4], fields[3::4])
+        for source, line, pattern, path in quads:
             in_exclude = source == '.git/info/exclude' or source.endswith(
                 '/.git/info/exclude'
             )
@@ -290,11 +295,19 @@ def commit(
                 continue
             if any(path.startswith(f'{prefix}/') for prefix in managed):
                 continue
-            skipped += 1
+            # name the shared exclude repo-relative -- a force commit folds
+            # this warning into its body, where machine paths do not belong
+            if in_exclude:
+                source = '.git/info/exclude'
+            skipped.append(f'{path} ({source}:{line}:{pattern})')
     skip_warning = None
-    if skipped > 0:
+    if skipped:
+        listing = ', '.join(skipped[:_SKIP_LIST_CAP])
+        if len(skipped) > _SKIP_LIST_CAP:
+            listing += f', ... and {len(skipped) - _SKIP_LIST_CAP} more'
         skip_warning = (
-            f'Warning: {skipped} path(s) skipped by ignore rules (see git check-ignore)'
+            f'Warning: {len(skipped)} path(s) skipped by ignore rules (repository'
+            f' or host rules, not node-record refusals): {listing}'
         )
         output.append(skip_warning)
     # an oversized staged file is usually an artifact staged by accident, but a
@@ -828,8 +841,10 @@ _RECORD_FILES = ('NODE.md', '_template.toml', 'config.json')
 #: force pass can never stage a key, a certificate, an archive, or a binary
 _RECORD_SUFFIXES = (
     '.csv',
+    '.diff',
     '.json',
     '.md',
+    '.patch',
     '.py',
     '.sh',
     '.toml',

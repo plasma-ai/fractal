@@ -75,6 +75,15 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
+- A node's record directories admit `.diff` and `.patch` files — plain text,
+  like `.py` — so a patch kept under `plans/` commits instead of being withheld
+  as not a node record. Images and run output (`.png`, `.log`, `.err`) stay
+  refused.
+- `fractal commit`'s ignore-rule warning names the paths it counts: the first
+  ten, each with its rule as `git check-ignore -v` reports it (source file,
+  line, and pattern), then `... and N more`. It says the paths are held by
+  repository or host ignore rules and are not node-record refusals, so it is not
+  mistaken for a recount of the estate warning above it.
 - A node's record directories admit `.py` files — plain text like the seeded
   `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
   instead of being withheld as not a node record. Keys, archives, and binaries
