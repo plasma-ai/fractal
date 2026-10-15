@@ -60,6 +60,10 @@ _Default = typing.TypeVar('_Default')
 # grace between the deadline's TERM and the follow-up KILL on the step tree
 _KILL_GRACE_SECONDS = 10.0
 
+# bound on the wait for a reap still running when its launch ends: the grace,
+# the KILL's settle, and slack for the process-table walks between signals
+_REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS + 5.0
+
 #: Seconds of the agent's own idle time -- counted while it holds control
 #: (from its launch, a tool result, visible text, or a wake-up), paused while
 #: a tool runs or its turn has ended -- after which the loop ends the launch
@@ -3029,8 +3033,10 @@ class Loop:
                     _deadline(idle)
                     return
 
+        watchdog: Optional[threading.Thread] = None
         if watch_cap and agent.reports_progress:
-            threading.Thread(target=_watchdog, daemon=True).start()
+            watchdog = threading.Thread(target=_watchdog, daemon=True)
+            watchdog.start()
 
         # drive the stream in-process: recording (session, per-frame cost
         # flush) and the pane rendering ride the seam's driver
@@ -3084,6 +3090,12 @@ class Loop:
         agent_status = process.wait()
         if timer is not None:
             timer.cancel()
+        # a reap the deadline or the watchdog started runs on its own thread:
+        # wait out its grace and KILL, so a tool that ignores TERM never
+        # outlives the launch into the next one; an unfired thread ends at once
+        for thread in (timer, watchdog):
+            if thread is not None:
+                thread.join(_REAP_WAIT_SECONDS)
 
         # a launch that ended without its authoritative cost (killed, or its
         # stream dead before the closing figure) is priced from the

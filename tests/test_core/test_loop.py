@@ -63,6 +63,7 @@ __all__ = [
     'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_idle_clock_holds_while_the_agent_waits',
     'test_idle_clock_fires_on_a_silent_agent',
+    'test_a_reaped_tool_is_gone_before_the_next_launch',
     'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
@@ -1529,6 +1530,85 @@ def test_idle_clock_fires_on_a_silent_agent(
         'PLAN/completed/steer',
         'EXECUTE/completed/',
     ]
+
+
+@pytest.mark.parametrize(
+    argnames=('trigger', 'rows'),
+    argvalues=[
+        # the step deadline times the launch out; the next iteration relaunches
+        pytest.param(
+            'deadline',
+            ['PLAN/exited/timed out; unpriced', 'PLAN/completed/'],
+            id='deadline',
+        ),
+        # the watchdog ends the silent launch; the steer relaunches
+        pytest.param(
+            'watchdog',
+            [
+                'PLAN/stopped/steered: no action for 1s; unpriced',
+                'PLAN/completed/steer',
+            ],
+            id='watchdog',
+        ),
+    ],
+)
+def test_a_reaped_tool_is_gone_before_the_next_launch(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    trigger: str,
+    rows: list[str],
+) -> None:
+    """A launch the loop ended is booked only once its reap has finished.
+
+    The deadline and the watchdog reap the tree on threads of their own,
+    and a tool that ignores TERM lives out the reap's grace: the next
+    launch must find it KILLed, never still running beside it.
+    """
+    monkeypatch.setattr(loop_module, '_KILL_GRACE_SECONDS', 5.0)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    if trigger == 'deadline':
+        _configure(loop_node, max_iters=2, step_timeout='3s')
+    # a tool in a session of its own that ignores TERM, ready once its pid lands
+    tool = tmp_path / 'tool.py'
+    tool.write_text(
+        'import os, pathlib, signal, sys, time\n'
+        'os.setsid()\n'
+        'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+        'pathlib.Path(sys.argv[1]).write_text(f"{os.getpid()}\\n")\n'
+        'time.sleep(60)\n',
+        encoding='utf-8',
+    )
+    pid_file = tmp_path / 'tool.pid'
+    check_file = tmp_path / 'check'
+    start = (
+        f'{sys.executable} {tool} {pid_file} >/dev/null 2>&1 &'
+        f' while [ ! -s {pid_file} ]; do sleep 0.05; done'
+    )
+    # the open call holds the idle clock until the tool is ready; the deadline
+    # then ends the call, the watchdog the silence after its result
+    if trigger == 'deadline':
+        stuck = _claude_script(_INIT, _TOOL_START, start, 'exec sleep 30')
+    else:
+        stuck = _claude_script(_INIT, _TOOL_START, start, _TOOL_RESULT, 'exec sleep 30')
+    probe = _claude_script(
+        f'if ps -o stat= -p "$(cat {pid_file})" | grep -qv Z;'
+        f' then echo alive; else echo dead; fi > {check_file}',
+        _INIT,
+        _RESULT,
+    )
+    agent = scripted_claude([stuck, probe])
+    try:
+        ScriptedLoop(loop_node, agent).run()
+    finally:
+        # the tool left the stand-in's group, so the fixture's sweep misses it
+        try:
+            os.kill(int(pid_file.read_text(encoding='utf-8')), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+    assert _step_rows(loop_node) == rows
+    assert check_file.read_text(encoding='utf-8') == 'dead\n'
 
 
 def test_launch_stamps_the_effort_on_the_step_row(
