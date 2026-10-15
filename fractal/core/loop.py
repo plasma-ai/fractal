@@ -199,6 +199,31 @@ class Step:
         """Return the raw ``detached:`` frontmatter value, if any."""
         return self.frontmatter.get('detached')
 
+    def limit(self: Step, default: Optional[float]) -> Optional[float]:
+        """Return the step's effective ceiling in seconds.
+
+        The one rule every reader of a step's ceiling shares: the
+        ``timeout:`` override substitutes for the node-global
+        ``step_timeout`` in either direction (a slow step raises its own
+        ceiling rather than min-ing with the global).
+
+        Args:
+            default: The node's ``step_timeout`` seconds, in the caller's
+                unset convention (``-1`` or ``None``).
+
+        Returns:
+            The override's seconds, or ``default`` when there is none.
+
+        Raises:
+            ValueError: If the override is malformed -- step files are
+                live-edited steering surfaces, so callers fall back to
+                ``default`` instead of failing.
+
+        """
+        if self.timeout is None:
+            return default
+        return _parse_duration(self.timeout, 'timeout')
+
 
 @dataclasses.dataclass(frozen=True)
 class StepResult:
@@ -1228,10 +1253,12 @@ class Loop:
             iter_timeout_label = self._iter_timeout
         else:
             iter_timeout_label = 'none'
+        # the node's step_timeout is only the default: a step file's own
+        # timeout: substitutes for it at that step's launch
         if self._step_timeout_seconds > 0:
-            step_timeout_label = self._step_timeout
+            step_timeout_label = f'{self._step_timeout} (default)'
         else:
-            step_timeout_label = 'none'
+            step_timeout_label = 'none (default)'
         interval_label = self._interval if self._interval_seconds > 0 else 'none'
         sleep_label = self._sleep if self._sleep_seconds > 0 else 'none'
         if self._max_cost is not None:
@@ -1336,9 +1363,9 @@ class Loop:
             else:
                 self._iter_end_epoch = 0
 
-            # re-read the retunable pacing knobs -- ahead of the time-budget
-            # label build so a mid-run wait/step_timeout retune (config edit
-            # or node update) reaches this iteration's label, launches, and
+            # re-read the retunable pacing knobs -- ahead of the iteration's
+            # steps so a mid-run wait/step_timeout retune (config edit or
+            # node update) reaches this iteration's labels, launches, and
             # drains; iteration 1 skips it like the cap re-read below -- run
             # start read the same config moments earlier; a malformed edit
             # warns and keeps the prior value (mirrors the frontmatter
@@ -1367,21 +1394,6 @@ class Loop:
                     )
                 if self._wait_seconds <= 0:
                     self._wait_seconds = 60
-
-            # build the time-budget label from whichever of the
-            # run/iter/step timeouts are set
-            time_budget = ''
-            if self._timeout:
-                time_budget = f'{self._timeout} total'
-            if self._iter_timeout:
-                if time_budget:
-                    time_budget += ', '
-                time_budget += f'{self._iter_timeout}/iter'
-            if self._step_timeout:
-                if time_budget:
-                    time_budget += ', '
-                time_budget += f'{self._step_timeout}/step'
-            self._time_budget = time_budget or 'no limit'
 
             # refresh the budget caps and heal registry drift: the boundary
             # checks take their own fresh reads, so this read feeds the
@@ -2449,6 +2461,25 @@ class Loop:
                 StepResult(status='failed', exit_code=1, reason=_one_line(msg))
             )
 
+        # the step's own ceiling: timeout: frontmatter substitutes for the
+        # node-global step_timeout; step files are live-edited steering
+        # surfaces, so a malformed scalar warns and falls back to the global
+        # instead of crashing the loop; resolved ahead of the prompt build,
+        # whose $TIME_BUDGET names this ceiling
+        step_timeout = self._step_timeout
+        try:
+            self._step_timeout_effective = step.limit(self._step_timeout_seconds)
+            if step.timeout is not None:
+                step_timeout = step.timeout
+        except ValueError as error:
+            self._step_timeout_effective = self._step_timeout_seconds
+            print(
+                f'Warning: {error} (timeout: in {step.path.name});'
+                f' falling back to the node step_timeout',
+                file=sys.stderr,
+            )
+        self._build_time_budget(step_timeout)
+
         # a failed build (builder error, missing charter/step file) must fail
         # the step -- launching the agent on an empty prompt would burn
         # a full turn
@@ -2459,21 +2490,6 @@ class Loop:
             return close(
                 StepResult(status='failed', exit_code=1, reason=_one_line(f'{error}'))
             )
-
-        # the step's own ceiling: timeout: frontmatter substitutes for the
-        # node-global step_timeout; step files are live-edited steering
-        # surfaces, so a malformed scalar warns and falls back to the global
-        # instead of crashing the loop
-        self._step_timeout_effective = self._step_timeout_seconds
-        if step.timeout is not None:
-            try:
-                self._step_timeout_effective = _parse_duration(step.timeout, 'timeout')
-            except ValueError as error:
-                print(
-                    f'Warning: {error} (timeout: in {step.path.name});'
-                    f' falling back to the node step_timeout',
-                    file=sys.stderr,
-                )
 
         # compute step time limit: min(run remaining, iteration
         # remaining, step timeout)
@@ -2621,6 +2637,32 @@ class Loop:
             ' plan: `fractal radio read --channel=inbox --unread`.',
         ]
         return '\n'.join(lines)
+
+    def _build_time_budget(self: Loop, step_timeout: str) -> None:
+        """Refresh the time-budget label for the step about to launch.
+
+        Built per step, never once per iteration: the step part names the
+        launching step's own ceiling (its ``timeout:`` override, else the
+        node's ``step_timeout``), so a step that carries one budgets
+        against what its launch enforces.
+
+        Args:
+            step_timeout: The step's effective timeout as written (``''``
+                when it has none).
+
+        """
+        time_budget = ''
+        if self._timeout:
+            time_budget = f'{self._timeout} total'
+        if self._iter_timeout:
+            if time_budget:
+                time_budget += ', '
+            time_budget += f'{self._iter_timeout}/iter'
+        if step_timeout:
+            if time_budget:
+                time_budget += ', '
+            time_budget += f'{step_timeout}/step'
+        self._time_budget = time_budget or 'no limit'
 
     def _build_cost_budget(self: Loop) -> None:
         """Refresh the cost-budget label from the CURRENT remaining.
@@ -3977,9 +4019,10 @@ class Loop:
         """Scream once per loop process when armed caps have no in-step brake.
 
         A non-enforcing agent takes no per-step budget flag, so its cap
-        is checked only between steps -- with no run/iter/step timeout
-        either, one runaway step can overshoot every cap unbounded while
-        the loop waits on the process. Advisory only; the remedy it
+        is checked only between steps -- with no timeout bounding every
+        step either (a run/iter/step timeout, or each step file's own
+        ``timeout:``), one runaway step can overshoot every cap unbounded
+        while the loop waits on the process. Advisory only; the remedy it
         names (``--step-timeout``) is the existing in-step brake.
         """
         if self._soft_cap_warned:
@@ -3994,10 +4037,28 @@ class Loop:
         )
         if any(seconds > 0 for seconds in timeouts):
             return
+        # a step file's own timeout: brakes its launch, so the exposure
+        # stands only while some launch has no ceiling -- SYNC runs on the
+        # unset node value, and an unreadable or malformed file falls back
+        # to it
+        launches = sorted((self.node.node_dir / 'steps').glob('*.md'))
+        if self._sync_mode and self._sync_file.is_file():
+            launches.append(self._sync_file)
+        unbraked = False
+        for path in launches:
+            try:
+                seconds = Step.load(path).limit(self._step_timeout_seconds)
+            except (OSError, ValueError):
+                seconds = self._step_timeout_seconds
+            if seconds is None or seconds <= 0:
+                unbraked = True
+                break
+        if not unbraked:
+            return
         self._soft_cap_warned = True
         print(
             f'WARNING: cost caps are set but {self._agent.name} does not'
-            ' enforce a per-step budget and no timeout is configured; one'
+            ' enforce a per-step budget and no timeout bounds every step; one'
             ' runaway step can overshoot the caps unbounded — set'
             ' --step-timeout to bound it.'
         )

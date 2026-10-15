@@ -75,8 +75,9 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # quiet-time floor for the listing's staleness flag: an active loop writes
-# activity at least once per step, so silence past max(step_timeout, 5m)
-# earns the '!' suffix on the rendered age
+# activity at least once per step, so silence past max(step limit, 5m) --
+# the active step's effective ceiling -- earns the '!' suffix on the
+# rendered age
 _STALE_AGE_FLOOR_SECONDS = 300.0
 
 # the listing's spend column is a steering read, not an invoice, so it
@@ -5422,7 +5423,9 @@ class Node:
         token (:meth:`end_reason`), ``None`` when nothing is recorded. The
         ``last`` column renders each
         row's newest activity instant as a compact age, flagged (``12m!``)
-        when an active node has sat quiet past ``max(step_timeout, 5m)``.
+        when an active node has sat quiet past ``max(step limit, 5m)`` (the
+        active step's effective ceiling: its ``timeout:`` line, else
+        ``step_timeout``).
 
         Args:
             all_nodes: Include retired nodes in output.
@@ -5533,21 +5536,20 @@ class Node:
             if node is not None and not node.exists():
                 node = None
             # render the newest activity instant as the 'last' age; an
-            # active node quiet past max(step_timeout, 5m) is flagged stale
-            # ('12m!'), step_timeout from the child's live config (a gone
-            # worktree falls back to the floor alone)
+            # active node quiet past max(step limit, 5m) is flagged stale
+            # ('12m!'), the step limit being the child's active step's
+            # effective ceiling (a gone worktree falls back to the floor
+            # alone)
             last = None
             timestamp = recent.get(row['node'])
             if timestamp is not None:
                 age = fractal.util.time.elapsed(timestamp)
                 last = fractal.util.format_age(age)
                 if _base_status(row.get('status')) == 'active':
-                    step_timeout = None
+                    step_limit = None
                     if node is not None:
-                        step_timeout = fractal.util.parse_duration_seconds(
-                            node.config.get('step_timeout') or ''
-                        )
-                    if age > max(step_timeout or 0.0, _STALE_AGE_FLOOR_SECONDS):
+                        step_limit = node.time.limit('step')
+                    if age > max(step_limit or 0.0, _STALE_AGE_FLOOR_SECONDS):
                         last += '!'
             # a gone worktree keeps its registry caps -- the only surviving
             # source -- and yields no spend: the live config and the ledger

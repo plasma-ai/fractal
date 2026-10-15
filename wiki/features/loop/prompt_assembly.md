@@ -55,13 +55,13 @@ wiki paths nest under the project prefix for a sub-project node.
 Run-scoped variables have no static derivation -- the caller supplies them as
 overrides, and overrides always win over the derived map. The loop passes its
 live state: `STEP_LABEL`, `ITER_LABEL`, `ITER_TIMESTAMP`, `ITER_REF`,
-`TIME_BUDGET`, `COST_BUDGET`, and the run-scoped mode flags (`CONTINUE_MODE`,
-`RESUME_MODE`, `RESERVE_MODE`, and `DRAIN_MODE`, which is `true` for a drain
-run, launched with `--drain` or carrying the drain signal across a resume). A
-chat renders the same templates with an explicit `N/A (chat)` sentinel for the
-label and budget fields -- a clear marker rather than a blank or stale value --
-and `false` for the run-scoped mode flags, so no run-only mode document ever
-joins a chat prompt.
+`TIME_BUDGET` (rebuilt per step, its step part naming that step's own ceiling),
+`COST_BUDGET`, and the run-scoped mode flags (`CONTINUE_MODE`, `RESUME_MODE`,
+`RESERVE_MODE`, and `DRAIN_MODE`, which is `true` for a drain run, launched with
+`--drain` or carrying the drain signal across a resume). A chat renders the same
+templates with an explicit `N/A (chat)` sentinel for the label and budget fields
+-- a clear marker rather than a blank or stale value -- and `false` for the
+run-scoped mode flags, so no run-only mode document ever joins a chat prompt.
 
 ## Modes
 

@@ -239,6 +239,15 @@ may include breaking changes, each listed under a Breaking heading.
   caller's session against the recorded agent group, so a command the agent CLI
   runs in its own process group still refuses spawns and re-arms after scrubbing
   `_DRAIN` and leaving its worktree.
+- A step file's `timeout:` frontmatter now reaches every report of that step's
+  limit, not only its enforcement. `$TIME_BUDGET` is rebuilt for each step and
+  names that step's own ceiling (a 6h step on a 2h node reads `6h/step`).
+  `fractal node time remaining` and `Time.limit('step')` count down the active
+  step's ceiling, and the node's own seat reads the exact value its launch
+  exported. The `node list` stale flag waits out the active step's ceiling. The
+  soft-cap warning stays quiet when every launch has a timeout, counting each
+  step file's own. The boot banner labels the node value
+  `step-timeout: 2h (default)`.
 
 ## [1.3.0] - 2026-09-17
 

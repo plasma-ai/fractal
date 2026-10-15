@@ -228,7 +228,8 @@ Run-scoped variables are refreshed for every step:
      - The iteration's UTC start timestamp.
    * - ``TIME_BUDGET``
      - The configured walls, e.g. ``24h total, 1h/iter, 10m/step``, or
-       ``no limit``.
+       ``no limit``. Rebuilt for every step: the step part is that step's
+       own ceiling (its ``timeout:`` frontmatter, else ``step_timeout``).
    * - ``COST_BUDGET``
      - Live remaining budget, recomputed before *every* step, e.g.
        ``$87.6543 remaining of $100 (max $10/iter) (warn $1/step)``, or
@@ -543,8 +544,10 @@ stops itself at that budget records a *clean completed* step — a budget stop
 is neither a failure nor a goal-met completion. For non-enforcing agents the
 cap is advisory: the loop warns after the fact when a step's recorded cost
 exceeded ``max_step_cost``, and warns once per loop process when caps are
-armed with no timeout at all (one runaway step could then overshoot without
-bound — the warning names ``step_timeout`` as the remedy).
+armed and some step has no timeout — no run or iteration wall, no
+``step_timeout``, and no ``timeout:`` frontmatter on that step file (SYNC
+runs on ``step_timeout``). One runaway step could then overshoot without
+bound; the warning names ``step_timeout`` as the remedy.
 
 Reserve mode and how a budget ends a run
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

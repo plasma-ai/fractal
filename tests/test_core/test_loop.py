@@ -43,6 +43,7 @@ __all__ = [
     'test_step_load_parses_strict_flat_scalar_frontmatter',
     'test_duration_validation_mirrors_the_launch_contract',
     'test_step_timeout_frontmatter_substitutes_at_launch',
+    'test_time_budget_renders_each_steps_effective_timeout',
     'test_malformed_midrun_retune_warns_and_keeps_the_previous_value',
     'test_provider_frontmatter_rebinds_the_boot_agent',
     'test_agent_env_publishes_node_branch',
@@ -79,6 +80,7 @@ __all__ = [
     'test_budget_skipped_steps_record_knowable_zero',
     'test_run_remaining_floors_at_zero_without_a_last_reading',
     'test_soft_cap_warning_fires_once_for_unbraked_caps',
+    'test_soft_cap_warning_counts_step_timeouts',
     'test_step_budget_reserve_window_floors_at_remaining',
     'test_boundary_checks_read_live_caps',
     'test_unpriced_spend_under_caps_warns_once',
@@ -599,6 +601,49 @@ def test_step_timeout_frontmatter_substitutes_at_launch(
     err = capsys.readouterr().err
     assert 'Warning:' in err
     assert '02-EXECUTE.md' in err
+
+
+def test_time_budget_renders_each_steps_effective_timeout(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``$TIME_BUDGET`` names the ceiling each step's launch enforces.
+
+    A step's ``timeout:`` line substitutes for the node's ``step_timeout``
+    at launch, so that step's prompt and env budget against it; the next
+    step, carrying none, budgets against the node value again.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _configure(loop_node, max_iters=1, step_timeout='2h', sync=False)
+    (loop_node.node_dir / 'NODE.md').write_text(
+        '# Charter\n\nTime budget: $TIME_BUDGET\n',
+        encoding='utf-8',
+    )
+    _seed_steps(loop_node, ['01-PLAN.md', '02-EXECUTE.md'])
+    (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+        '---\ntimeout: 6h\n---\n# PLAN\n\nWork.\n', encoding='utf-8'
+    )
+
+    class RecordingLoop(MockLoop):
+        """Mock loop recording each launch's env and prompt."""
+
+        def __init__(self: RecordingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``RecordingLoop``."""
+            super().__init__(node, **kwargs)
+            self.seen: list[tuple[dict[str, str], str]] = []
+
+        def _launch(
+            self: RecordingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the launch env and prompt."""
+            self.seen.append((self._agent_env(self._step_label), prompt))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = RecordingLoop(loop_node)
+    assert loop.run() == 0
+    for (env, prompt), budget in zip(loop.seen, ['6h/step', '2h/step'], strict=True):
+        assert f'Time budget: {budget}' in prompt
+        assert env['TIME_BUDGET'] == budget
 
 
 @pytest.mark.parametrize(
@@ -2270,6 +2315,45 @@ def test_soft_cap_warning_fires_once_for_unbraked_caps(
     _configure(node, max_cost=10.0, step_timeout='30s')
     MockLoop(node)
     assert 'overshoot' not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    argnames=('timeouts', 'sync', 'warns'),
+    argvalues=[
+        (('6h', '4h'), False, False),
+        (('6h', None), False, True),
+        (('6h', '4h'), True, True),
+    ],
+    ids=['every-step-bounded', 'one-step-unbounded', 'sync-unbounded'],
+)
+def test_soft_cap_warning_counts_step_timeouts(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    timeouts: tuple[Optional[str], ...],
+    sync: bool,
+    warns: bool,
+) -> None:
+    """A step's own ``timeout:`` brakes that step; the warning needs every launch braked.
+
+    With no run/iter timeout and no node ``step_timeout``, each step file's
+    ``timeout:`` line still bounds its own launch, so steps that all carry
+    one leave no runaway exposure; a step without one, or the SYNC step
+    (which runs on the node value), still does.
+    """
+    node = loop_node
+    monkeypatch.setattr(MockLoop, '_preflight', lambda self: None)
+    monkeypatch.setattr(ClaudeAgent, 'enforces_budget', False)
+    _configure(node, max_cost=10.0, sync=sync)
+    names = [f'{index:02d}-STEP{index}.md' for index in range(1, len(timeouts) + 1)]
+    _seed_steps(node, names)
+    for name, timeout in zip(names, timeouts, strict=True):
+        if timeout is not None:
+            (node.node_dir / 'steps' / name).write_text(
+                f'---\ntimeout: {timeout}\n---\n# {name}\n', encoding='utf-8'
+            )
+    MockLoop(node)
+    assert ('overshoot' in capsys.readouterr().out) is warns
 
 
 def test_step_budget_reserve_window_floors_at_remaining(loop_node: Node) -> None:

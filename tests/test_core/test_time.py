@@ -13,8 +13,12 @@ The time matrix's semantics:
 - ``--iter-timeout`` is a **per-iteration** budget.
   ``Time.remaining(scope='iter')`` reports ``iter_timeout`` minus elapsed
   since the active iteration's ``started_at``, clamped at ``0``.
+- ``--step-timeout`` is the **per-step** default. ``Time.remaining(scope='step')``
+  reports the active step's effective ceiling -- its step file's ``timeout:``
+  line when it carries one, else ``step_timeout`` -- minus elapsed since the
+  active step's ``started_at``.
 - With no ``scope`` the method returns the **soonest** of the configured
-  run/iter deadlines -- the time until the next timeout fires.
+  run/iter/step deadlines -- the time until the next timeout fires.
 
 The discriminating test is ``test_run_scope_anchors_on_run_iter_scope_on_iter``:
 aging only the iteration must not shrink the run budget (a per-iteration
@@ -26,8 +30,10 @@ back-dating ``started_at`` (deterministic, no sleeps).
 
 from __future__ import annotations
 
+import pytest
+
 from fractal.core.node import Node
-from tests._helpers import _age_iter, _age_run, _past_timestamp
+from tests._helpers import _age_iter, _age_run, _age_step, _past_timestamp
 
 __all__ = [
     'test_time_remaining_none_without_any_timeout',
@@ -40,12 +46,18 @@ __all__ = [
     'test_interval_defaults_the_iteration_limit_to_the_slot',
     'test_run_scope_anchors_on_run_iter_scope_on_iter',
     'test_default_reports_soonest_of_run_and_iter',
+    'test_step_limit_follows_the_active_steps_timeout',
+    'test_step_limit_prefers_the_seats_exported_ceiling',
     'test_time_remaining_credits_paused_spans',
 ]
 
 # a 10-minute budget, in the suffix form the loop validates
 TIMEOUT = '10m'
 TIMEOUT_SECONDS = 600.0
+
+# a node step_timeout below the step file's own timeout: line
+NODE_STEP_TIMEOUT = '2h'
+NODE_STEP_TIMEOUT_SECONDS = 7200.0
 
 
 # ------ deadlines
@@ -62,11 +74,11 @@ def test_time_remaining_none_without_any_timeout(node_with_db: Node) -> None:
 
 
 def test_time_limit_reads_configured_scopes(node_with_db: Node) -> None:
-    """``Time.limit`` answers from config alone (``run`` maps to ``timeout``).
+    """``Time.limit`` reads config for an idle node (``run`` maps to ``timeout``).
 
-    Pure config -- no row reads -- so it distinguishes "no limit" from "not
-    running" for an idle node; with no scope the soonest configured limit
-    (the smallest) answers.
+    Nothing active, so it reads config alone and distinguishes "no limit"
+    from "not running" for an idle node; with no scope the soonest
+    configured limit (the smallest) answers.
     """
     node = node_with_db
     # nothing configured -> None for every scope and the default
@@ -207,6 +219,70 @@ def test_default_reports_soonest_of_run_and_iter(node_with_db: Node) -> None:
     assert default < run_remaining
 
 
+@pytest.mark.parametrize(
+    argnames=('frontmatter', 'limit'),
+    argvalues=[
+        ('---\ntimeout: 6h\n---\n', 21600.0),
+        ('', NODE_STEP_TIMEOUT_SECONDS),
+        ('---\ntimeout: soon\n---\n', NODE_STEP_TIMEOUT_SECONDS),
+    ],
+    ids=['own-timeout', 'node-step-timeout', 'malformed-timeout'],
+)
+def test_step_limit_follows_the_active_steps_timeout(
+    node_with_db: Node,
+    frontmatter: str,
+    limit: float,
+) -> None:
+    """The step scope counts down the active step's effective ceiling.
+
+    The loop bounds a step by its file's ``timeout:`` line when it parses,
+    else by the node's ``step_timeout``, so ``limit``, ``remaining``, and
+    the soonest default must answer with the same ceiling -- a reader on
+    the node value would tell a seat in a 6h step that its 2h are nearly
+    gone.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    step_id = _active_step(node, frontmatter)
+    _age_step(node, step_id, 100.0)
+    assert node.time.limit('step') == limit
+    remaining = node.time.remaining(scope='step')
+    assert remaining is not None
+    assert limit - 105.0 < remaining <= limit - 100.0
+    # the step deadline is the only one, so the soonest default tracks it
+    default = node.time.remaining()
+    assert default is not None
+    assert abs(default - remaining) < 5.0
+
+
+@pytest.mark.parametrize(
+    argnames=('seat', 'limit'),
+    argvalues=[(True, 14400.0), (False, 21600.0)],
+    ids=['own-seat', 'other-caller'],
+)
+def test_step_limit_prefers_the_seats_exported_ceiling(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    seat: bool,
+    limit: float,
+) -> None:
+    """The node's own seat reads the ceiling its launch exported.
+
+    The loop reads step files once per iteration, so an edit landing
+    mid-iteration changes the file but not the enforced ceiling; the
+    seat's ``STEP_TIMEOUT_SECONDS`` is that ceiling. Any caller whose
+    ``STEP_ID`` is not the active step's (another node's seat, an
+    operator) reads the step file.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    step_id = _active_step(node, '---\ntimeout: 6h\n---\n')
+    # the launch exported 4h; the file was edited to 6h since
+    monkeypatch.setenv('STEP_ID', f'{step_id if seat else step_id + 1}')
+    monkeypatch.setenv('STEP_TIMEOUT_SECONDS', '14400')
+    assert node.time.limit('step') == limit
+
+
 # ------ pause credit
 
 
@@ -261,3 +337,28 @@ def test_time_remaining_credits_paused_spans(node_with_db: Node) -> None:
     run_remaining = node.time.remaining(scope='run', run_id=run_id)
     assert run_remaining is not None
     assert 500.0 < run_remaining <= 511.0
+
+
+# ------ helpers
+
+
+def _active_step(node: Node, frontmatter: str) -> int:
+    """Open a run, an iteration, and step 1 of a one-file ``steps/`` dir.
+
+    The step file carries ``frontmatter`` ahead of its body; returns the
+    active step row's id.
+    """
+    steps_dir = node.node_dir / 'steps'
+    steps_dir.mkdir(exist_ok=True)
+    (steps_dir / '01-EXECUTE.md').write_text(
+        f'{frontmatter}# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
+    run_id = node.record.run_start()
+    iter_id = node.record.iter_start(run_id=run_id, iter=1)
+    return node.record.step_start(
+        iter_id=iter_id,
+        run_id=run_id,
+        step=1,
+        step_name='EXECUTE',
+    )

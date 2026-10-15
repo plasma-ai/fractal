@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import typing
 from typing import Optional
 
@@ -49,10 +50,10 @@ class Time:
         persisted state), so it works for any node, not only the running
         one. The ``run`` scope (``--timeout``) is anchored on the active
         run's ``started_at``; the ``iter`` scope (``--iter-timeout``) on
-        its active iteration's; the ``step`` scope (``--step-timeout``)
-        on its active step's. With no ``scope`` the soonest of the
-        configured deadlines is returned -- the time until the next
-        timeout fires.
+        its active iteration's; the ``step`` scope on its active step's,
+        against that step's effective ceiling (see :meth:`limit`). With
+        no ``scope`` the soonest of the configured deadlines is returned
+        -- the time until the next timeout fires.
 
         Args:
             scope: ``'run'``, ``'iter'``, or ``'step'`` to query one
@@ -119,12 +120,14 @@ class Time:
     def limit(self: Time, scope: Optional[str] = None) -> Optional[float]:
         """Return the configured limit seconds for a scope (``run`` is ``timeout``).
 
-        Pure config -- no row reads -- so it answers for an idle node too:
-        the ``run`` scope reads the whole-run ``timeout`` key, ``iter``/
-        ``step`` their per-level timeouts; an unset ``iter_timeout`` falls
-        back to ``interval`` (the loop bounds an interval iteration by its
-        slot). With no ``scope`` the soonest applicable limit (the smallest
-        configured) is returned.
+        Answers for an idle node too: the ``run`` scope reads the
+        whole-run ``timeout`` key, ``iter`` the ``iter_timeout`` key, with
+        an unset one falling back to ``interval`` (the loop bounds an
+        interval iteration by its slot). The ``step`` scope is the active
+        step's effective ceiling -- its step file's ``timeout:`` override,
+        else ``step_timeout`` (see :meth:`_step_limit`). With no ``scope``
+        the soonest applicable limit (the smallest configured) is
+        returned.
 
         Args:
             scope: ``'run'``, ``'iter'``, or ``'step'`` to query one
@@ -150,12 +153,65 @@ class Time:
             if not timeout:
                 timeout = self._node.config.get('interval')
         elif scope == 'step':
-            timeout = self._node.config.get('step_timeout')
+            return self._step_limit()
         else:
             raise ValueError(f"scope must be 'run', 'iter', or 'step', got {scope!r}.")
         if not timeout:
             return None
         return fractal.util.parse_duration_seconds(timeout)
+
+    def _step_limit(self: Time) -> Optional[float]:
+        """Return the active step's effective ceiling seconds.
+
+        Follows the loop's launch rule (``Step.limit``): the active step
+        file's ``timeout:`` override when it parses, else the node's
+        ``step_timeout``, which also answers when no step is active. The
+        node's own seat -- its exported ``STEP_ID`` naming the active step
+        -- reads its exported ``STEP_TIMEOUT_SECONDS``, the exact ceiling
+        its launch enforces. Every other caller reads the step file, which
+        the loop reads once per iteration: an edit landing mid-iteration
+        shows here before the loop enforces it at the next iteration.
+        """
+        from .loop import Step
+
+        # the node default
+        timeout = self._node.config.get('step_timeout')
+        default = fractal.util.parse_duration_seconds(timeout) if timeout else None
+        step_id, _, _ = self._node.record.resolve_context(active=True)
+        if step_id is None:
+            return default
+        # the node's own seat: its launch exported the enforced ceiling
+        # (``-1`` when none); seat-editable, so garbage reads the file
+        if os.environ.get('STEP_ID') == f'{step_id}':
+            try:
+                seconds = int(os.environ.get('STEP_TIMEOUT_SECONDS', ''))
+            except ValueError:
+                pass
+            else:
+                return float(seconds) if seconds > 0 else None
+        # locate the step file: the loop numbers steps by sorted position,
+        # so the position wins when its name still matches, else the first
+        # file of that name (one inserted or removed since); the SYNC
+        # pseudo-step runs from the package's mode doc
+        row = self.db.read('steps', where={'step_id': step_id}, limit=1)[0]
+        number, name = row['step'], row['step_name']
+        if name == 'SYNC':
+            path = self._node._package_dir / '_node' / 'modes' / 'SYNC.md'
+        else:
+            paths = sorted((self._node.node_dir / 'steps').glob('*.md'))
+            named = [path for path in paths if Step(path).name == name]
+            if 0 < number <= len(paths) and paths[number - 1] in named:
+                path = paths[number - 1]
+            elif named:
+                path = named[0]
+            else:
+                return default
+        # a malformed override falls back to the node value, as at launch
+        try:
+            seconds = Step.load(path).limit(default)
+        except (OSError, ValueError):
+            seconds = default
+        return float(seconds) if seconds is not None and seconds > 0 else None
 
     def _pause_credit(
         self: Time,

@@ -842,7 +842,8 @@ never landed) and on every other status. ``spend``
 is the current run's subtree cost at the scope ``max_cost`` is enforced at,
 blank for a node that has never run. Blank limit columns mean unlimited.
 ``last`` is the age of each node's newest activity, with a ``!`` suffix
-flagging an active node quiet past ``max(step_timeout, 5m)``. On a TTY,
+flagging an active node quiet past ``max(step limit, 5m)``, the step limit
+being its active step's ``timeout:`` frontmatter, else ``step_timeout``. On a TTY,
 statuses render bracketed (``[active]``); machine output stays unbracketed.
 
 ``--all``
@@ -1092,9 +1093,13 @@ Time budgets: ``fractal node time``
 Print the seconds left before the next timeout fires, e.g. ``600s``. By
 default the soonest of the configured run, iteration, and step deadlines
 answers; ``--scope`` narrows to one: ``run`` reads ``timeout``, ``iter``
-reads ``iter_timeout`` (falling back to ``interval``), ``step`` reads
-``step_timeout``. Paused spans are credited back to run and iteration
-deadlines. Two non-numeric answers are distinct: ``no limit`` means no
+reads ``iter_timeout`` (falling back to ``interval``), ``step`` reads the
+active step's ``timeout:`` frontmatter, else ``step_timeout`` — the ceiling
+the loop enforces for that step. Inside a step, the node's own seat reads the
+exact ceiling its launch exported (``$STEP_TIMEOUT_SECONDS``); any other
+caller reads the step file, which the loop reads only once per iteration, so
+an edit made mid-iteration shows here before the loop enforces it at the next
+iteration. Paused spans are credited back to run and iteration deadlines. Two non-numeric answers are distinct: ``no limit`` means no
 timeout is configured for the queried scope; ``not running`` means a limit
 exists but no run, iteration, or step is currently active.
 

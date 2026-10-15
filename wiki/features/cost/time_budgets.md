@@ -32,7 +32,11 @@ no deadline.
   interval is rejected at the config boundary rather than silently loosened.
 - **Step** — `step_timeout` caps each step. A step definition can carry its own
   `timeout:` frontmatter override, so one long step (a slow test suite) can
-  exceed the node-wide per-step limit without loosening it for the rest.
+  exceed the node-wide per-step limit without loosening it for the rest. Every
+  report of a step's limit follows that step's effective ceiling — the override
+  when it parses, else `step_timeout`: the step part of `$TIME_BUDGET` (rebuilt
+  for each step), the `step` scope of `fractal node time remaining`, and the
+  `node list` stale flag.
 
 `interval` and `sleep` pacing are mutually exclusive; only `interval` doubles as
 an iteration deadline.
@@ -50,6 +54,16 @@ sentinel outputs replace the countdown: `no limit` when the queried scope(s)
 have no timeout configured, and `not running` when a limit exists but no run,
 iteration, or step is currently active to anchor it. The countdown clamps at
 zero — an overrun deadline reads `0s`, never negative.
+
+The step limit resolves from the active step row: its step number and name
+locate the step file in the node's `steps/` (the SYNC pseudo-step reads the
+package's mode doc), whose `timeout:` line substitutes for `step_timeout` by the
+same rule the loop applies at launch. The node's own seat skips that lookup:
+when its exported `STEP_ID` names the active step, its exported
+`STEP_TIMEOUT_SECONDS` is the exact ceiling the launch enforces. The lookup can
+run ahead of the loop, which reads step files once per iteration: an edit made
+mid-iteration shows to every other reader before the loop enforces it at the
+next iteration.
 
 ## Pause credit-back
 
