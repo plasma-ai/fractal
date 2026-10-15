@@ -72,6 +72,7 @@ __all__ = [
     'test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
     'test_the_steer_runs_on_what_the_stuck_launch_left',
+    'test_a_capped_or_idle_sync_runs_to_its_result',
     'test_idle_clock_holds_while_the_agent_waits',
     'test_idle_clock_fires_on_a_silent_agent',
     'test_a_reaped_tool_is_gone_before_the_next_launch',
@@ -1800,6 +1801,34 @@ def test_the_steer_runs_on_what_the_stuck_launch_left(
     #   ~3s the stuck launch left, a fresh one 8s; 6s splits them with 2x
     #   margin over the remainder
     assert span < 6
+
+
+def test_a_capped_or_idle_sync_runs_to_its_result(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A SYNC is never ended at a thinking cap or by the watchdog.
+
+    SYNC runs as its own unsteered step, and a stuck SYNC has no booking
+    of its own: ended early, it would read completed while its call never
+    finished. A capped reply that then idles past the clock still runs to
+    its result, priced by it.
+    """
+    _configure(loop_node, sync=True)
+    sync = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'sleep 2', _RESULT)
+    work = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([sync, work, sync, work])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 4
+    assert _step_rows(loop_node) == [
+        'SYNC/completed/',
+        'PLAN/completed/',
+        'SYNC/completed/',
+        'EXECUTE/completed/',
+    ]
+    # a SYNC the loop ended would book no cost of its own
+    rows = loop_node.db.read('steps', where={'step_name': 'SYNC'})
+    assert [row['cost'] for row in rows] == [_RESULT['total_cost_usd']] * 2
 
 
 @pytest.mark.parametrize(
