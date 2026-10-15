@@ -458,7 +458,8 @@ class SnapshotBuilder:
             return
         self._ensure_brief(scope)
         brief = self._brief[scope]
-        if self._data.node_dir(scope) is None:
+        node_dir = self._data.node_dir(scope)
+        if node_dir is None:
             self._stale.discard(scope)
             self._shaped[scope] = dict(
                 _EMPTY_SHAPE,
@@ -518,7 +519,7 @@ class SnapshotBuilder:
             it=it,
             step=step,
             spends=spends,
-            node_dir=self._data.node_dir(scope),
+            node_dir=node_dir,
         )
         history = _history(runs, iters, steps, runcost, config)
         log = _log(log_raw, [run['run_id'] for run in runs], scope, config)
@@ -562,7 +563,7 @@ class SnapshotBuilder:
         it: Optional[dict],
         step: Optional[dict],
         spends: dict[int, float],
-        node_dir: Optional[pathlib.Path],
+        node_dir: pathlib.Path,
     ) -> Optional[dict]:
         """Shape the run/iter/step x time/cost matrix with every configured cap.
 
@@ -1066,7 +1067,7 @@ def _step_cap(
     default: Optional[float],
     step: Optional[dict],
     it_steps: list[dict],
-    node_dir: Optional[pathlib.Path],
+    node_dir: pathlib.Path,
 ) -> Optional[float]:
     """Return the displayed step's effective time cap.
 
@@ -1078,7 +1079,7 @@ def _step_cap(
     vanished, unreadable, or malformed one falls back to ``default``, as
     at launch -- never a crashed cockpit build.
     """
-    if step is None or node_dir is None:
+    if step is None:
         return default
     # read the ceiling the launch recorded on the row ('-1' when none);
     # the column is absent where a write-denied reader cannot lift it
