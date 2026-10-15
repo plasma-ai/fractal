@@ -410,10 +410,11 @@ class ScriptedClaude(ClaudeAgent):
 
     Each launch runs the next script in place of ``claude`` (``SID`` in it
     becomes the launch's session), in the production spawn shape: its own
-    process group, a text stdout pipe. With ``transcripts``, each launch
-    first appends its next batch of entries to the session's transcript,
-    stamped at the spawn unless an entry carries its own stamp. Every
-    settled cost flush is kept with its finality.
+    process group, a text stdout pipe; its argv and the env it was handed
+    are kept. With ``transcripts``, each launch first appends its next
+    batch of entries to the session's transcript, stamped at the spawn
+    unless an entry carries its own stamp. Every settled cost flush is
+    kept with its finality.
     """
 
     def __init__(
@@ -427,6 +428,7 @@ class ScriptedClaude(ClaudeAgent):
         self.scripts = list(scripts)
         self.transcripts = list(transcripts or [])
         self.argvs: list[tuple[str, ...]] = []
+        self.envs: list[dict[str, Optional[str]]] = []
         self.spawned: list[subprocess.Popen] = []
         self.flushed: list[tuple[float, bool]] = []
 
@@ -439,8 +441,9 @@ class ScriptedClaude(ClaudeAgent):
         invocation: Any,
         **kwargs: Any,
     ) -> subprocess.Popen:
-        """Run the next script, recording the launch's argv."""
+        """Run the next script, recording the launch's argv and env."""
         self.argvs.append(invocation.argv)
+        self.envs.append(dict(invocation.env or {}))
         if self.transcripts:
             path = self._transcript(f'{invocation.session}')
             assert path is not None
@@ -929,65 +932,80 @@ def test_agent_env_inherits_headless_launches(
 )
 def test_midrun_limit_edits_reach_the_next_step_env(
     loop_node: Node,
-    monkeypatch: pytest.MonkeyPatch,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
     detached: bool,
 ) -> None:
-    """A mid-run limit edit reaches the next step's env; mode flags stay pinned.
+    """A mid-run limit edit reaches the next launch's env; mode flags stay pinned.
 
-    One env builder serves every launch, whether the step mints a fresh
-    session (detached) or resumes the iteration's continuous one, so both
-    see the edited limits -- matching the freshly rendered prompt -- while
-    ``DETACHED_MODE``/``META_MODE``/``META_TARGET`` keep their boot values.
+    The real launch hands each agent the env its own prompt rendered,
+    whether the step mints a fresh session (detached) or resumes the
+    iteration's continuous one, so every edited limit reaches the agent's
+    environment and prompt alike, while ``DETACHED_MODE``/``META_MODE``/
+    ``META_TARGET`` keep their boot values.
     """
-    monkeypatch.setenv('_NODE', '')
+    names = (
+        'MAX_DEPTH',
+        'MAX_CHILDREN',
+        'MAX_DESCENDANTS',
+        'TIME_BUDGET',
+        'COST_BUDGET',
+    )
+    charter = ''.join(f'{name}=${name}\n' for name in names)
     (loop_node.node_dir / 'NODE.md').write_text(
-        '# Charter\n\nSpawn at most $MAX_CHILDREN; meta [$META_TARGET].\n',
+        f'# Charter\n\n{charter}meta [$META_TARGET]\n',
         encoding='utf-8',
     )
-    _configure(loop_node, max_children=4, max_descendants=4, detached=detached)
+    _configure(
+        loop_node,
+        max_depth=2,
+        max_children=4,
+        max_descendants=4,
+        detached=detached,
+    )
+    agent = scripted_claude([_claude_script(_INIT, _RESULT)] * 2)
 
-    class EditingLoop(MockLoop):
-        """Mock loop editing the config after the first launch."""
-
-        def __init__(self: EditingLoop, node: Node, **kwargs: Any) -> None:
-            """Initialize ``EditingLoop``."""
-            super().__init__(node, **kwargs)
-            self.seen: list[tuple[dict[str, str], str, Optional[str]]] = []
+    class EditingLoop(ScriptedLoop):
+        """Scripted loop the operator retunes once its first launch ends."""
 
         def _launch(
             self: EditingLoop, step: Step, prompt: str, **kwargs: Any
         ) -> StepResult:
-            """Record the launch env, prompt, and resumed session; then edit."""
-            name = kwargs['agent'].name
-            session = None if self._step_detached else self.node.sessions.get(name)
-            self.seen.append((self._agent_env(self._step_label), prompt, session))
-            if len(self.seen) == 1:
-                # the first launch minted a session; the operator retunes
-                self.node.sessions.set(name, 'session-1')
+            """Launch, then retune the limits and the mode keys after the first."""
+            result = super()._launch(step, prompt, **kwargs)
+            if len(agent.envs) == 1:
                 _configure(
                     self.node,
+                    max_depth=3,
                     max_children=8,
                     max_descendants=8,
                     detached=not detached,
                     meta='edited-target',
                 )
-            return super()._launch(step, prompt, **kwargs)
+            return result
 
-    loop = EditingLoop(loop_node)
-    assert loop.run() == 0
-    (first, _, _), (env, prompt, session) = loop.seen
-    # the boot step carried the boot limits
-    assert first['MAX_CHILDREN'] == '4'
-    # the later step resumed the session only in continuous mode
-    assert session == (None if detached else 'session-1')
-    # the edited limits reached the env and the prompt alike
-    assert env['MAX_CHILDREN'] == '8'
-    assert env['MAX_DESCENDANTS'] == '8'
-    assert 'Spawn at most 8; meta [].' in prompt
+    EditingLoop(loop_node, agent).run()
+    first, argv = agent.argvs
+    boot, env = agent.envs
+    prompt = argv[-1]
+    # the boot launch carried the boot limits
+    assert boot['MAX_DEPTH'] == '2'
+    # the later launch resumed the first one's session only in continuous mode
+    session = first[first.index('--session-id') + 1]
+    if detached:
+        assert argv[argv.index('--session-id') + 1] != session
+    else:
+        assert argv[argv.index('--resume') + 1] == session
+    # every edited limit reached the env, and every variable the prompt
+    # rendered reached it with the same value
+    edited = (env['MAX_DEPTH'], env['MAX_CHILDREN'], env['MAX_DESCENDANTS'])
+    assert edited == ('3', '8', '8')
+    for name in names:
+        assert f'{name}={env[name]}\n' in prompt
     # the mode flags kept their boot values
     assert env['DETACHED_MODE'] == ('true' if detached else 'false')
     assert env['META_MODE'] == 'false'
     assert env['META_TARGET'] == ''
+    assert 'meta []' in prompt
 
 
 @pytest.mark.parametrize(
