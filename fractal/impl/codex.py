@@ -237,6 +237,12 @@ class CodexAgent(Agent):
         https://github.com/openai/codex/issues/11750 and
         https://github.com/openai/codex/issues/17568.
 
+        Report the agent's control (``reports_progress``) from the exec
+        stream, so the no-progress watchdog arms for codex steps.
+
+        Price a killed launch from its rollout window (``_settle_cost``),
+        so an interrupted step records its spend.
+
     """
 
     name = 'codex'
