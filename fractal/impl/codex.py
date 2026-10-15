@@ -67,8 +67,9 @@ _UNEXPLAINED = 'Rollout window saw a rollout it cannot explain: {name!r}'
 # codex's provider-outage shapes, as its error frames name them: the give-up
 # after its own reconnects (the last `Reconnecting... N/N`, then a bare
 # `stream disconnected before completion`), a 429 or 5xx status, or the
-# overloaded/unavailable wording -- an earlier reconnect, which carries the
-# disconnect in parentheses, is a retry codex may still recover from
+# overloaded/unavailable/at-capacity wording -- an earlier reconnect, which
+# carries the disconnect in parentheses, is a retry codex may still recover
+# from
 _UNAVAILABLE = re.compile(
     r'(?<!\()stream disconnected before completion'
     r'|reconnecting(?:\.{3}|\u2026)\s*(\d+)/\1\b'
@@ -77,6 +78,7 @@ _UNAVAILABLE = re.compile(
     r'|service unavailable|gateway timeout)\b'
     r'|\bservice unavailable\b'
     r'|\boverloaded\b'
+    r'|\bat capacity\b'
     r'|experiencing high demand',
     re.IGNORECASE,
 )

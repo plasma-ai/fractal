@@ -396,8 +396,9 @@ the stderr capture.
   unavailable".
 - **Codex**: its give-up after its own reconnects (the last ``Reconnecting...
   N/N``, or ``stream disconnected before completion``), a 429 or 5xx status,
-  or the words "overloaded", "service unavailable", or "experiencing high
-  demand". An earlier reconnect that codex recovers from never fails the step.
+  or the words "overloaded", "service unavailable", "at capacity" (the
+  selected model is at capacity), or "experiencing high demand". An earlier
+  reconnect that codex recovers from never fails the step.
 
 Other backends name no outages and keep the fixed backoff. The first retry
 after such a failure waits ``step_retry_backoff``; each consecutive one doubles

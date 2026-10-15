@@ -1724,6 +1724,12 @@ def test_rates_falls_back_through_the_openrouter_chain_codex(
             True,
             id='high-demand',
         ),
+        # the capacity refusal alone, with no status code beside it
+        pytest.param(
+            'Selected model is at capacity. Please try a different model.',
+            True,
+            id='model-at-capacity',
+        ),
         # a reconnect codex still had attempts left for, beside a fatal error
         pytest.param(
             'Reconnecting... 2/5 (stream disconnected before completion: idle'
