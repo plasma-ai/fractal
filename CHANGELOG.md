@@ -86,8 +86,8 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
-- A failed step whose agent names its provider as unavailable waits out the
-  outage: Claude's `API Error:` with a 429 or 5xx status (529 overloaded
+- A failed step whose agent names its provider as unavailable retries on a
+  doubling wait: Claude's `API Error:` with a 429 or 5xx status (529 overloaded
   included) or an overloaded, server, or rate-limit error, and codex's give-up
   after its reconnects, a 429 or 5xx status, or a model-at-capacity refusal. The
   first retry waits `step_retry_backoff`, each consecutive one doubles it to a

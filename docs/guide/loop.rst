@@ -327,9 +327,11 @@ model re-dispatches once — see below). These config keys control it:
      - Extra attempts a failed launch gets; ``0`` disables retries.
    * - ``step_retry_backoff``
      - ``10s``
-     - Delay before each retry. Slept in one-second increments, polling
-       pause (parks the run), stop, finish, and the subtree cost ceiling —
-       a failed step never buys another attempt once the budget is spent.
+     - Delay before each retry, and the base a provider outage's wait
+       doubles from (see `Provider outages`_). Slept in one-second
+       increments, polling pause (parks the run), stop, finish, and the
+       subtree cost ceiling — a failed step never buys another attempt once
+       the budget is spent.
 
 Every attempt books its own step row, so cost and duration are attributed
 accurately per attempt; retry rows carry a ``retry`` marker in their
@@ -389,8 +391,8 @@ them. While an active node's newest launches carry this signature,
 Provider outages
 ~~~~~~~~~~~~~~~~
 
-A failed launch whose agent names its provider as unavailable waits out the
-outage instead of retrying on the fixed backoff. Each agent backend reads its
+A failed launch whose agent names its provider as unavailable retries on a
+doubling wait instead of the fixed backoff. Each agent backend reads its
 own CLI's error text: the failed result frame, the stream's error frames, and
 the stderr capture.
 

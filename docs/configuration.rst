@@ -435,7 +435,8 @@ loop-side default is noted.
        Re-read each iteration, so retunes land mid-run.
    * - ``step_retry_backoff``
      - ``null`` → ``10s``
-     - Delay before each retry of a failed step launch.
+     - Delay before each retry of a failed step launch, and the base a
+       provider outage's retry wait doubles from.
    * - ``interval``
      - ``null``
      - Fixed iteration cadence (an iteration starts every ``interval``).
