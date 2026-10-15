@@ -364,10 +364,10 @@ seed; once done, merge it and launch the target.
   `fractal node resume <branch>` relaunches it exactly there -- same budgets,
   same iteration count. A paused child still holds its spawn slot and blocks
   your finish-drain, so resume or kill it before finishing. Only `resume`,
-  `kill`, and `chat` act on a paused node; `start --continue` is for
-  stopped/exited nodes (fresh run, restored worktree -- uncommitted project
-  files need `--clean`, and a budget-ended run needs an explicit `--max-cost`),
-  never for paused ones.
+  `kill`, `chat`, and `merge` (committed work only; the child stays paused) act
+  on a paused node; `start --continue` is for stopped/exited nodes (fresh run,
+  restored worktree -- uncommitted project files need `--clean`, and a
+  budget-ended run needs an explicit `--max-cost`), never for paused ones.
 - **Clean up:** `fractal node merge <branch>`. The merge judges the squash's
   paths outside `.fractal/` by the child's scope roots and its project wiki (the
   root `.gitattributes` passes only as init's own `merge=wiki` edit; an unscoped
