@@ -27,6 +27,7 @@ __all__ = [
     'test_user_node_commit_init_commits_baseline',
     'test_commit_pushes_unless_local',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_child_baseline_refuses_a_file_moved_into_its_seed',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
     'test_commit_excludes_project_registry_sidecars',
@@ -49,6 +50,7 @@ __all__ = [
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
     'test_multi_scope_commit_boundary',
     'test_dot_scope_root_bounds_the_whole_project',
+    'test_scoped_commit_refuses_a_file_moved_into_scope',
     'test_sub_project_commit_boundary',
     'test_wiki_setting_moves_the_scope_exemption',
     'test_commit_refuses_an_invalid_stored_wiki',
@@ -223,6 +225,36 @@ def test_user_init_baseline_survives_a_hostile_external_ignore(
     # runtime state still never rides the baseline
     assert '.status' not in tracked
     assert '.db' not in tracked
+
+
+def test_child_baseline_refuses_a_file_moved_into_its_seed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A project file moved into the seed refuses the baseline by its source.
+
+    git's rename detection names only a rename's destination, so a project
+    file moved into the node's data dir would read as seed content alone,
+    and the baseline would land the file's deletion without the lint. The
+    refusal names the moved file's source, with nothing committed.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    head = _head(project_dir)
+    _git(project_dir, 'mv', 'README.md', '.fractal/main.task/README.md')
+
+    with pytest.raises(RuntimeError, match='commits only the node seed') as refused:
+        node.commit('configure', init=True)
+
+    # the refusal lists the source alone (the destination
+    # is seed content), and nothing was committed
+    listing = str(refused.value).splitlines()[1:]
+    assert listing == ['README.md']
+    assert _head(project_dir) == head
 
 
 # ------ events, staging, and subjects
@@ -1297,6 +1329,43 @@ def test_dot_scope_root_bounds_the_whole_project(tmp_path: pathlib.Path) -> None
     tracked = result.stdout
     assert 'nested/work.txt' in tracked
     assert 'root.txt' in tracked
+
+
+def test_scoped_commit_refuses_a_file_moved_into_scope(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A file moved into a scope root from outside it refuses by its source.
+
+    git's rename detection names only a rename's destination, so a tracked
+    file moved into a scope root would read as in-scope work, and the commit
+    would land the deletion outside the scope that the merge's footprint
+    check refuses. The scope check names the moved file's source.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True, scope=['src'])
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # baseline cleans the tree (sweeping init's root .gitattributes); stub the
+    # lint gate (not under test) so the boundary check alone decides
+    node.commit('baseline', init=True)
+    branch = _resolve_branch(project_dir)
+    lint = project_dir / '.fractal' / branch / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+    head = _head(project_dir)
+    (project_dir / 'src').mkdir()
+    _git(project_dir, 'mv', 'README.md', 'src/README.md')
+
+    with pytest.raises(RuntimeError, match='Changes outside node scope') as refused:
+        node.commit('move readme')
+
+    # the refusal lists the source alone, and nothing was committed
+    listing = str(refused.value).splitlines()[1:]
+    assert listing == ['README.md']
+    assert _head(project_dir) == head
 
 
 @pytest.mark.parametrize(

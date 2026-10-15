@@ -744,9 +744,11 @@ def _changed_paths(node: Node) -> set[str]:
     # starts with '"' and fails every prefix check); raw bytes so a first
     # path's leading whitespace survives (run() strips)
     changed: set[str] = set()
+    # --no-renames: rename detection lists only a rename's destination,
+    # hiding the source's deletion from the scope and baseline checks
     for cmd in (
-        ['diff', '--name-only', '-z', 'HEAD'],
-        ['diff', '--cached', '--name-only', '-z', 'HEAD'],
+        ['diff', '--name-only', '--no-renames', '-z', 'HEAD'],
+        ['diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD'],
         ['ls-files', '--others', '--exclude-standard', '-z'],
     ):
         raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''

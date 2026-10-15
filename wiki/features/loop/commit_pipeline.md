@@ -34,7 +34,8 @@ qualifier. An optional body paragraph lands below the subject.
 ## Scope, refresh, and lint
 
 With a scope configured, the pipeline checks the working tree, index, and
-untracked files for out-of-scope changes and refuses to commit them; the shared
+untracked files for out-of-scope changes and refuses to commit them -- a rename
+counts as both its paths, as `merge.sh`'s footprint listing reads it; the shared
 project wiki (`wiki/` unless the project's `.fractal/.settings.json` names
 another folder; see [[features/wiki_system/knowledge_stores]]) and the node's
 `.fractal/` prefix are always committable. The boundaries are one record

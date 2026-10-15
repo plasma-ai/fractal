@@ -289,6 +289,10 @@ may include breaking changes, each listed under a Breaking heading.
   the stuck launch's span; the cockpit's step clock carries the same charge. An
   idle node whose step files carry their own `timeout:` reads `not running` for
   the step scope, not `no limit`.
+- A scoped node's `fractal commit` refuses a tracked file moved (`git mv`) into
+  its scope from outside it, naming the old path, as the merge's footprint check
+  does. The scope check read git's rename-detecting diff, which names only a
+  rename's new path, so the deletion outside the scope committed unchecked.
 
 ## [1.3.0] - 2026-09-17
 
