@@ -189,10 +189,12 @@ may include breaking changes, each listed under a Breaking heading.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives `$MAX_CHILDREN` and the other config-derived variables from
-  live config, matching the prompt, instead of exporting their boot values for
-  the whole run. Only the mode flags (`$DETACHED_MODE`, `$META_MODE`,
-  `$META_TARGET`) and `$FRACTAL_HEADLESS` stay pinned to their boot values, and
-  the prompt now takes `$META_TARGET` from the same pinned set.
+  live config once, for its prompt and its environment alike, instead of
+  exporting their boot values for the whole run. A config read that fails at
+  that point fails the step, never the run. Only the mode flags
+  (`$DETACHED_MODE`, `$META_MODE`, `$META_TARGET`) and `$FRACTAL_HEADLESS` stay
+  pinned to their boot values, and the prompt now takes `$META_TARGET` from the
+  same pinned set.
 - `node merge`'s refresh of the other wiki roots judges an index merged when its
   staged bytes match neither side's, so a criss-cross merge base no longer hides
   one; matches every folder literally, so a glob character in a folder name

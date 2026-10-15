@@ -51,6 +51,7 @@ __all__ = [
     'test_agent_env_publishes_node_branch',
     'test_agent_env_inherits_headless_launches',
     'test_midrun_limit_edits_reach_the_next_step_env',
+    'test_step_env_and_prompt_share_one_config_read',
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
     'test_boot_gate_vets_the_recorded_group',
     'test_continue_restore_lands_config_all_or_nothing',
@@ -930,6 +931,68 @@ def test_midrun_limit_edits_reach_the_next_step_env(
     assert env['DETACHED_MODE'] == ('true' if detached else 'false')
     assert env['META_MODE'] == 'false'
     assert env['META_TARGET'] == ''
+
+
+@pytest.mark.parametrize(
+    argnames='edit',
+    argvalues=['retune', 'torn'],
+)
+def test_step_env_and_prompt_share_one_config_read(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: str,
+) -> None:
+    """A step's env carries the variables its own prompt rendered.
+
+    The step reads the config once, inside the prompt build's guard: an
+    edit landing between the prompt build and the spawn cannot split the
+    env from the prompt, and a torn ``config.json`` at that moment never
+    reaches the spawn, where a failed read would take the whole run down.
+    """
+    monkeypatch.setenv('_NODE', '')
+    (loop_node.node_dir / 'NODE.md').write_text(
+        '# Charter\n\nSpawn at most $MAX_CHILDREN.\n',
+        encoding='utf-8',
+    )
+    _configure(loop_node, max_children=4)
+    config = loop_node.node_dir / 'config.json'
+    intact = config.read_text(encoding='utf-8')
+
+    class EditingLoop(MockLoop):
+        """Mock loop editing the config between EXECUTE's prompt build and spawn."""
+
+        def __init__(self: EditingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``EditingLoop``."""
+            super().__init__(node, **kwargs)
+            self.seen: list[tuple[dict[str, str], str]] = []
+
+        def _build_step_prompt(self: EditingLoop, step: Step) -> str:
+            """Build the prompt, then retune or tear the config under it."""
+            prompt = super()._build_step_prompt(step)
+            if step.name == 'EXECUTE':
+                if edit == 'retune':
+                    _configure(self.node, max_children=8)
+                else:
+                    config.write_text('{"max_children": ', encoding='utf-8')
+            return prompt
+
+        def _launch(
+            self: EditingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the launch env and prompt, mending a torn config after."""
+            try:
+                self.seen.append((self._agent_env(self._step_label), prompt))
+            finally:
+                if edit == 'torn':
+                    config.write_text(intact, encoding='utf-8')
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = EditingLoop(loop_node)
+    assert loop.run() == 0
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+    # each env names the limit its own prompt rendered
+    for env, prompt in loop.seen:
+        assert f'Spawn at most {env["MAX_CHILDREN"]}.' in prompt
 
 
 @pytest.mark.parametrize(

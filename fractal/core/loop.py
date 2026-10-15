@@ -428,6 +428,10 @@ class Loop:
         # the boot-pinned mode flags, the one source the step env and the
         # step prompt both read (every other variable is derived per step)
         self._boot_modes = _boot_modes(node, detached=self._detached, meta=meta)
+        # the static variables a step's prompt and env share, re-read per step
+        # under the prompt build's guard (the render parameter shadows the
+        # module here, hence the dotted path)
+        self._step_vars = fractal.core.render.variables(node)
         # run/iteration lifecycle state
         self._iter = 0
         self._iter_timestamp = ''
@@ -2545,7 +2549,10 @@ class Loop:
         # a failed build (builder error, missing charter/step file) must fail
         # the step -- launching the agent on an empty prompt would burn
         # a full turn
+        # (the static variables are read once here, inside the guard: the
+        # prompt and the env share them, and the spawn reads no config)
         try:
+            self._step_vars = render.variables(self.node)
             prompt = self._build_step_prompt(step)
         except Exception as error:
             print(f'Error: {error}', file=sys.stderr)
@@ -2629,11 +2636,12 @@ class Loop:
 
         The charter, the step (frontmatter stripped), and any active
         modes (SYNC.md runs as its own step, so it is skipped there):
-        static vars (paths, limits) come from the node's config/git, and
-        the run-scoped vars pass through as overrides -- the boot-pinned
-        DETACHED/META flags and meta target included, so a mid-run config
-        edit cannot flip a run's mode composition. A steer renders
-        ``STALL.md`` alone: its resumed session already holds the step.
+        static vars (paths, limits) come from the step's one config/git
+        read, the one its env exports, and the run-scoped vars pass
+        through as overrides -- the boot-pinned DETACHED/META flags and
+        meta target included, so a mid-run config edit cannot flip a run's
+        mode composition. A steer renders ``STALL.md`` alone: its resumed
+        session already holds the step.
         """
         # refresh the cost budget so each step's context reflects spend so far
         self._build_cost_budget()
@@ -2653,10 +2661,11 @@ class Loop:
             'META_TARGET': self._boot_modes['META_TARGET'],
             'DRAIN_MODE': 'true' if self._drain else 'false',
         }
+        variables = {**self._step_vars, **overrides}
         if self._steer_session is not None:
             text = self._stall_file.read_text(encoding='utf-8')
-            return render.render(text, render.variables(self.node, overrides))
-        prompt = self.node.build_prompt(f'{step.path}', overrides=overrides)
+            return render.render(text, variables)
+        prompt = self.node.build_prompt(f'{step.path}', overrides=variables)
         # a resumed iteration replays a frozen plan -- the harness re-reads
         # the inbox at every attached seat, so directives that arrived after
         # the plan froze are in context before any replayed decision executes
@@ -2765,9 +2774,9 @@ class Loop:
         """Build the per-launch agent environment.
 
         Rebuilt at every step/SYNC launch, never boot-static: the static
-        vocabulary derived fresh from config (paths, spawn limits) under
-        the boot-pinned mode flags, plus the run parameters (cost caps,
-        ``AGENT_COMMAND``, timeouts --
+        vocabulary the step's prompt rendered (paths, spawn limits, read
+        once per step) under the boot-pinned mode flags, plus the run
+        parameters (cost caps, ``AGENT_COMMAND``, timeouts --
         ``STEP_TIMEOUT_SECONDS`` carrying the step's own effective
         ceiling, ``_NODE``, ``NODE_BRANCH``) plus live lineage
         (``RUN_ID``, ``ITER_ID``, ``STEP_ID``, ``STEP_MODEL``), the
@@ -2782,7 +2791,7 @@ class Loop:
         step_budget = ''
         if self._step_budget_value is not None:
             step_budget = f'{self._step_budget_value:.6g}'
-        env = {**render.variables(self.node), **self._boot_modes}
+        env = {**self._step_vars, **self._boot_modes}
         overlay = {
             'MAX_COST': self._max_cost_label,
             'MAX_ITER_COST': self._max_iter_cost_label,

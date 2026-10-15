@@ -42,15 +42,17 @@ the path set (`REPO_DIR`, `PROJECT_DIR`, `SCOPE_DIR`, `WORKTREE_DIR`,
 limits (`MAX_DEPTH`, `MAX_CHILDREN`, `MAX_DESCENDANTS`; `-1` when unset, which
 the spawn gate treats as unlimited), and the config-derived mode flags
 (`DETACHED_MODE`, `META_MODE` with `META_TARGET`). The loop re-derives the map
-from live config for every step, both for the prompt and for the environment it
-exports into the seat, so a mid-run limit edit reaches the next step. Only the
-mode flags stay pinned to their boot values, so a mid-run config edit cannot
-flip the run's mode composition; the exported environment also pins
-`FRACTAL_HEADLESS`, the run's launch backend (`true`/`false`), so a seat's
-`fractal node start` inherits the backend: the CLI's backend resolution reads
-the seat-exported `FRACTAL_HEADLESS` when the flag is absent. `SCOPE_DIR`
-space-joins the scope roots when several are configured, and the project and
-wiki paths nest under the project prefix for a sub-project node.
+from live config once per step, inside the prompt build's guard, and both the
+prompt and the environment it exports into the seat take that one reading: a
+mid-run limit edit reaches the next step, the two never disagree, and a torn
+config fails the step instead of crashing the loop at the spawn. Only the mode
+flags stay pinned to their boot values, so a mid-run config edit cannot flip the
+run's mode composition; the exported environment also pins `FRACTAL_HEADLESS`,
+the run's launch backend (`true`/`false`), so a seat's `fractal node start`
+inherits the backend: the CLI's backend resolution reads the seat-exported
+`FRACTAL_HEADLESS` when the flag is absent. `SCOPE_DIR` space-joins the scope
+roots when several are configured, and the project and wiki paths nest under the
+project prefix for a sub-project node.
 
 Run-scoped variables have no static derivation -- the caller supplies them as
 overrides, and overrides always win over the derived map. The loop passes its
