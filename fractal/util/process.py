@@ -125,13 +125,16 @@ def reap(
     the caller's ancestors -- an agent pausing its own node keeps the
     groups it runs in. Never signals a group recorded in a ``spare`` file,
     nor walks through one: everything in it, in a session one of its
-    processes leads, or below one of its processes is left alone. The file
-    list and the files are re-read before every signal round, so a record
-    written mid-reap (a node launch the tree spawned) is honored. When the
-    first snapshot fails, signals the root groups alone (minus the
-    caller's) with the same grace and names nothing; when a later one
-    fails, keeps signaling the groups already known, minus the protected
-    and spared ones, probing them by signal instead of re-walking.
+    processes leads, or below one of its processes is left alone. A root
+    is never spared: it is the group being reaped, so a record naming one
+    (a crashed node's stale record whose pid now leads the invocation)
+    spares nothing. The file list and the files are re-read before every
+    signal round, so a record written mid-reap (a node launch the tree
+    spawned) is honored. When the first snapshot fails, signals the root
+    groups alone (minus the caller's) with the same grace and names
+    nothing; when a later one fails, keeps signaling the groups already
+    known, minus the protected and spared ones, probing them by signal
+    instead of re-walking.
 
     One process escapes: an orphan from an earlier tool call whose own
     session's leader has exited (``validate.sh &`` under a ``setsid``
@@ -148,7 +151,7 @@ def reap(
             spare (a missing or unreadable file spares nothing); called
             before every signal round.
         mark: File to touch just before the first signal to a root group;
-            left alone when every root group is protected or spared.
+            left alone when every root group is protected.
 
     Returns:
         The tree's survivors, the spared groups it reached, and, with
@@ -209,7 +212,7 @@ class _Tree:
         self.roots = roots
         self.spare = spare
         self.mark = mark
-        self.spared = _read_groups(spare())
+        self.spared = self.read_spared()
         self.stopped: set[int] = set()
         # a later snapshot failure blinds the tree: no re-walks, liveness by
         # signal probe
@@ -233,6 +236,10 @@ class _Tree:
             if pgid in roots:
                 self.owners.update(_lineage(self.table[pid].ppid, self.table))
 
+    def read_spared(self: _Tree) -> frozenset[int]:
+        """Return the groups the spare records name, never a root."""
+        return _read_groups(self.spare()) - self.roots
+
     def walk(self: _Tree) -> None:
         """Re-walk the current snapshot from the known members."""
         self.members, stopped = _walk(
@@ -245,7 +252,7 @@ class _Tree:
 
     def refresh(self: _Tree) -> None:
         """Take a fresh snapshot and re-walk the tree from the known members."""
-        self.spared = _read_groups(self.spare())
+        self.spared = self.read_spared()
         if self.blind:
             return
         try:
@@ -258,7 +265,7 @@ class _Tree:
 
     def respare(self: _Tree) -> None:
         """Re-read the spared groups, re-walking when the set changed."""
-        spared = _read_groups(self.spare())
+        spared = self.read_spared()
         if spared != self.spared:
             self.spared = spared
             self.walk()

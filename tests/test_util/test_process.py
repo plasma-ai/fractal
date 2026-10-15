@@ -164,9 +164,15 @@ def tree(tmp_path: pathlib.Path) -> Iterator[Callable[[str], subprocess.Popen]]:
 # ------ reap
 
 
+@pytest.mark.parametrize(
+    argnames='recorded',
+    argvalues=[False, True],
+    ids=['unrecorded', 'root-recorded'],
+)
 def test_reap_takes_every_group_in_the_tree(
     tree: Callable[[str], subprocess.Popen],
     tmp_path: pathlib.Path,
+    recorded: bool,
 ) -> None:
     """Every group the tree holds dies, however its member left the leader.
 
@@ -175,13 +181,22 @@ def test_reap_takes_every_group_in_the_tree(
     by parentage (walked before any signal kills its parent), a group forked
     after the first TERM by the re-walk -- which TERMs it, so it gets a
     graceful shutdown -- and a TERM-ignoring group draws the KILL once
-    the grace runs out. Nothing survives to be named.
+    the grace runs out. Nothing survives to be named. A spare record naming
+    the root group itself -- a crashed node's stale record whose pid now
+    leads the invocation -- spares nothing: the root is the group reaped.
     """
     leader = tree('leader')
     roles = ['leader', 'group', 'session', 'stubborn', 'forker', 'orphan']
     pids = _await_pids(tmp_path, roles)
+    record = tmp_path / 'stale.pgid'
+    if recorded:
+        record.write_text(f'{leader.pid}\n', encoding='utf-8')
     start = time.monotonic()
-    reaped = fractal.util.process.reap([leader.pid], grace=_GRACE)
+    reaped = fractal.util.process.reap(
+        [leader.pid],
+        grace=_GRACE,
+        spare=lambda: [record],
+    )
     elapsed = time.monotonic() - start
     assert _alive(pids) == []
     # the late group drew the re-walk's TERM, not just the KILL
@@ -189,6 +204,7 @@ def test_reap_takes_every_group_in_the_tree(
     assert _alive(late) == []
     assert (tmp_path / 'late.term').exists()
     assert reaped.survivors == ()
+    assert reaped.spared == ()
     # the TERM-ignoring group held the reap open for the whole grace
     assert elapsed >= _GRACE
 
