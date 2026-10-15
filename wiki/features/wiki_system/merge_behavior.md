@@ -63,7 +63,10 @@ root for the root's own index), so indexes outside those folders keep their
 bytes. The bytes, not the merge base, mark a merged index, so a criss-cross
 history, where git names one of two bases, hides none. An index belongs to the
 deepest declared root above it, every folder is matched literally, and an index
-in a folder its wiki excludes is skipped, as the wiki's own walk skips it.
+in a folder its wiki excludes is skipped, as the wiki's own walk skips it. An
+index whose folder encloses another declared wiki is skipped too, with a warning
+naming both: the wiki refuses to sweep across a nested root, so that index lands
+as the driver merged it.
 
 The update reads the disk, so the merge refuses an untracked file under the
 project wiki or in a folder it refreshes, naming it: indexed into the squash

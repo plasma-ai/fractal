@@ -208,9 +208,10 @@ may include breaking changes, each listed under a Breaking heading.
   staged bytes match neither side's, so a criss-cross merge base no longer hides
   one; matches every folder literally, so a glob character in a folder name
   never refuses or stages a sibling's files; and skips an index in a folder its
-  wiki excludes instead of failing the merge. A wiki declared at the worktree
-  root refuses the merge by name, since every refresh would walk the whole
-  worktree and leave the target dirty.
+  wiki excludes instead of failing the merge, as it does, with a warning, an
+  index whose folder encloses another declared wiki, which the wiki refuses to
+  sweep. A wiki declared at the worktree root refuses the merge by name, since
+  every refresh would walk the whole worktree and leave the target dirty.
 - `node merge` regenerates the indexes the merge driver merged in every wiki
   root, not only the project wiki: in each folder declaring a tracked
   `.wiki/settings.json`, an `_index.md` changed on both sides since the merge

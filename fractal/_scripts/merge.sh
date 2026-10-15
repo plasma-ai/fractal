@@ -1293,6 +1293,22 @@ if command -v wiki &>/dev/null; then
         OURS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "HEAD:$INDEX" 2>/dev/null || true)
         THEIRS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "$SQUASH_TIP:$INDEX" 2>/dev/null || true)
         [[ "$STAGED" != "$OURS" && "$STAGED" != "$THEIRS" ]] || continue
+        # the wiki refuses to sweep a folder that encloses another declared
+        # wiki (plasma-wiki's Wiki.update), so such a folder is never
+        # refreshed and its index lands as the driver merged it
+        NESTED=""
+        # safe under set -u even on bash 3.2: an empty array reads as unset
+        for ROOT in ${ROOTS[@]+"${ROOTS[@]}"}; do
+            if [[ "$ROOT" == "$FOLDER"/* ]]; then
+                NESTED=$ROOT
+                break
+            fi
+        done
+        if [[ -n "$NESTED" ]]; then
+            echo "Warning: $INDEX lands as merged, not refreshed: $FOLDER encloses the" \
+                "declared wiki $NESTED, which a wiki update cannot sweep" >&2
+            continue
+        fi
         SUBTREE=${FOLDER#"$OWNER"}
         SUBTREE=${SUBTREE#/}
         # the strays by the wiki's own ignore rules, as under the project wiki

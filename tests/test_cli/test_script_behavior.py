@@ -194,6 +194,8 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   unadvanced. Untracked files are judged by the wiki's own rules: a file only
   a personal ignore hides refuses the merge, since the wiki would index it,
   and one under a dot-prefixed folder neither refuses it nor rides the squash.
+  A merged index whose folder encloses another declared wiki, which the wiki
+  refuses to sweep, lands as the driver merged it, with a warning.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
   a conflicted merge with the merge's own tail -- ``.fractal/`` restore and
   seed strip, footprint check, commit, merge-base advance -- and refuses when
@@ -283,6 +285,7 @@ __all__ = [
     'test_merge_refuses_a_wiki_declared_at_the_worktree_root',
     'test_merge_skips_an_index_in_a_folder_its_wiki_excludes',
     'test_merge_judges_untracked_files_by_the_wikis_own_rules',
+    'test_merge_lands_a_merged_index_whose_folder_encloses_another_wiki',
     'test_merge_restores_the_target_when_a_corpus_refresh_fails',
     'test_failed_merge_restore_removes_the_staged_child_additions',
     'test_merge_leaves_the_target_clean_when_scratch_creation_fails',
@@ -1624,6 +1627,54 @@ def test_merge_judges_untracked_files_by_the_wikis_own_rules(
         status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
         assert status.splitlines() == [f'?? {relative}'], status
     assert (repo / relative).read_text(encoding='utf-8') == 'a stray\n'
+
+
+def test_merge_lands_a_merged_index_whose_folder_encloses_another_wiki(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An index whose folder encloses another declared wiki lands as merged.
+
+    The wiki refuses to refresh a folder that encloses a nested declared
+    root, so the merge skips that refresh with a warning naming both, and
+    the index lands as the merge driver left it -- both siblings' edits to
+    its authored body included -- with the target clean.
+    """
+    repo = _init_tree(tmp_path / 'nestedrepo')
+    library = repo / 'library'
+    _declare_wiki(library)
+    index = library / '_index.md'
+    body = 'first line\n' + 'filler line\n' * 6 + 'last line\n'
+    index.write_text(index.read_text(encoding='utf-8') + '\n' + body, encoding='utf-8')
+    _declare_wiki(library / 'inner')
+    _git(repo, 'add', '-A', '--', 'library')
+    _git(repo, 'commit', '-m', 'declare the nested corpus')
+    worktrees = {}
+    for name in ('one', 'two'):
+        init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
+        assert init.returncode == 0, init.stderr
+        worktrees[name] = repo / '.worktrees' / f'main.{name}'
+    # the siblings edit opposite ends of the outer root's authored body
+    for name, old in (('one', 'first line'), ('two', 'last line')):
+        edited = worktrees[name] / 'library' / '_index.md'
+        edited.write_text(
+            edited.read_text(encoding='utf-8').replace(old, f'{old}, edited by {name}'),
+            encoding='utf-8',
+        )
+        _git(worktrees[name], 'add', '-A')
+        _git(worktrees[name], 'commit', '-m', f'{name} edits the library index')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+
+    second = _script('merge.sh', repo, f'{worktrees["two"]}')
+
+    # the refresh was skipped by name, and both edits landed as merged
+    assert second.returncode == 0, (second.stdout, second.stderr)
+    assert 'library/_index.md lands as merged' in second.stderr, second.stderr
+    assert 'declared wiki library/inner' in second.stderr, second.stderr
+    merged = _git(repo, 'show', 'main:library/_index.md').stdout
+    assert 'first line, edited by one' in merged, merged
+    assert 'last line, edited by two' in merged, merged
+    assert _git(repo, 'status', '--porcelain').stdout == ''
 
 
 def test_merge_restores_the_target_when_a_corpus_refresh_fails(
