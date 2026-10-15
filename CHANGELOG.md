@@ -7,6 +7,17 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Breaking
+
+- A child node's `fractal commit --init` baseline carries only the node's own
+  seed (its data dir under `.fractal/`) and init's `.gitattributes` edit, and
+  refuses any other change by name before staging. A child init commit that
+  carries material copied into the child's tree, as the 1.3.0 node skill taught,
+  now fails: commit that material with an ordinary `fractal commit` from the
+  child's worktree after the init commit, which runs the lint the baseline
+  skips. The user node's baseline still commits the project wiki and, when the
+  project has one, its `.fractal/.settings.json`.
+
 ### Added
 
 - A no-progress watchdog for Claude steps: 30 minutes of the agent's own idle
@@ -99,11 +110,6 @@ may include breaking changes, each listed under a Breaking heading.
   `Held out: N estate file(s) not staged; N path(s) ignored` line (non-zero
   parts only) whenever either warning fired, after any hook or gate output and
   on a no-op commit too.
-- A node's `fractal commit --init` baseline carries only the node's own seed
-  (its data dir under `.fractal/`) and init's `.gitattributes` edit, and refuses
-  any other change by name before staging. The baseline skips the wiki refresh
-  and the lint, so project content — material copied into a child's tree
-  included — goes in an ordinary `fractal commit`, which the lint gates.
 - A node's instructions say it names its own files through `$MEMORY_DIR`,
   `$PLANS_DIR`, and `$NODE_DIR`, with scratch in `$NODE_DIR/tmp/` — a path at
   the worktree root is the project, not the node, since file tools resolve

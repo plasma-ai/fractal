@@ -226,11 +226,11 @@ pool a cheaper token rate buys more steps, not a lower bill.
    fractal commit "configure <name>" --init
    ```
 
-   The init commit carries the seed alone and refuses anything else. Commit
-   material you copy into a child's tree with an ordinary
-   `fractal commit "add <material>"` from its worktree, which runs the lint.
-   That commit passes the material through the repo's commit hooks (if any)
-   (CRLF->LF, formatter reflow) -- so a byte-frozen store and its delivered
+   The init commit carries the seed alone (and init's `.gitattributes` edit) and
+   refuses anything else. Commit material you copy into a child's tree with an
+   ordinary `fractal commit "add <material>"` from its worktree, which runs the
+   lint. That commit passes the material through the repo's commit hooks (if
+   any) (CRLF->LF, formatter reflow) -- so a byte-frozen store and its delivered
    copies diverge *by construction* on the first hooked commit; do not read that
    divergence as tamper. If you freeze reference bytes for audit, freeze the
    post-hook form (commit once, then re-pin) or compare normalized (line
@@ -317,11 +317,12 @@ direct decomposition.
   domain-specific capabilities beyond the defaults.
 
 The seed lives in the node data directory (`.fractal/`), which is **tracked by
-git** and captured by your `fractal commit --init`; the same goes for the
-project wiki (`wiki/` unless `.fractal/.settings.json` names another folder).
-Neither belongs in `.gitignore`. Fractal ignores its own runtime artifacts
-(worktrees, the central database, status, agent logs) via the repo-local
-`.git/info/exclude`, which it writes automatically.
+git** and captured by the child's `fractal commit --init`. Project-wiki edits
+(`wiki/` unless `.fractal/.settings.json` names another folder) take an ordinary
+`fractal commit`, since a child's baseline refuses them. Neither belongs in
+`.gitignore`. Fractal ignores its own runtime artifacts (worktrees, the central
+database, status, agent logs) via the repo-local `.git/info/exclude`, which it
+writes automatically.
 
 ### Meta nodes
 
