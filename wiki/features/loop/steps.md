@@ -139,19 +139,21 @@ owns when the agent holds control and reports it as neutral `acting` and
 `waiting` stream events; the loop's clock only follows them (running from the
 launch and each `acting`, paused at `waiting`, pushed back by a `waiting` that
 carries a `duration`). For Claude, top-level frames only: a new reply, a text
-block, a result answering the last pending call, a non-result user turn, or a
-`system` `init` / `task_notification` wake-up is acting; a tool call (its id
-claimed from the raw block start or the assistant frame, whichever comes first)
-or an `end_turn` stop or `result` frame is waiting, because Claude Code stays
-alive after a turn's end while background work runs and wakes the agent with a
-notice; an `api_retry` frame pauses for its `retry_delay_ms`. The pending call
-ids clear at each new reply, so a call that never got its result cannot hold the
-clock paused. The reader blocks on stdout, so the watchdog polls the clock and,
-at the threshold, ends the group through the deadline's own routine under a flag
-of its own; it stops when the stream ends, however it ends. It arms only for an
-agent whose stream reports control (`Agent.reports_progress`): Claude. Codex's
-stream marks command starts but not their completion, and its other tool items
-are not mapped, so it stays unwatched.
+block, a result answering the last pending call, a non-result user turn while no
+call is pending, or a `system` `init` / `task_notification` wake-up once the
+turn has ended (a notice mid-turn lands while the agent's own tool still runs)
+is acting; a tool call (its id claimed from the raw block start or the assistant
+frame, whichever comes first) or an `end_turn` stop or `result` frame is
+waiting, because Claude Code stays alive after a turn's end while background
+work runs and wakes the agent with a notice; an `api_retry` frame pauses for its
+`retry_delay_ms`. The pending call ids clear at each new reply, so a call that
+never got its result cannot hold the clock paused. The reader blocks on stdout,
+so the watchdog polls the clock and, at the threshold, ends the group through
+the deadline's own routine under a flag of its own; it stops when the stream
+ends, however it ends. It arms only for an agent whose stream reports control
+(`Agent.reports_progress`): Claude. Codex's stream marks command starts but not
+their completion, and its other tool items are not mapped, so it stays
+unwatched.
 
 For a work step (never SYNC) the first stuck launch per attempt is steered: the
 thinking cap ends the invocation on the stream-error path (the render callback

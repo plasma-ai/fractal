@@ -67,6 +67,9 @@ class ClaudeParser(StreamParser):
         # the top-level tool calls still awaiting their results, by id -- a
         # call can arrive on a raw block start, an assistant frame, or both
         self._pending: set[Optional[str]] = set()
+        # the agent ended its turn (an end_turn stop or a result) and no new
+        # reply has started -- only then is a wake-up its own
+        self._turn_ended = False
 
     def feed(self: ClaudeParser, line: str) -> list[StreamEvent]:
         """Parse one claude stream line into normalized events."""
@@ -109,6 +112,7 @@ class ClaudeParser(StreamParser):
             if top_level:
                 if event_type == 'message_start':
                     self._track_reply((event.get('message') or {}).get('id'))
+                    self._turn_ended = False
                     events.append(StreamEvent(kind='acting'))
                 elif event_type == 'content_block_start':
                     block = event.get('content_block') or {}
@@ -119,6 +123,7 @@ class ClaudeParser(StreamParser):
                     if delta.get('stop_reason') == 'max_tokens':
                         events += self._thinking_cap()
                     elif delta.get('stop_reason') == 'end_turn':
+                        self._turn_ended = True
                         events.append(StreamEvent(kind='waiting'))
             if event_type == 'content_block_start':
                 block = event.get('content_block') or {}
@@ -141,13 +146,11 @@ class ClaudeParser(StreamParser):
             if top_level and _is_continuation(message):
                 events += self._thinking_cap()
             # a result answering the last pending call, or any other turn
-            # (claude's own wake-ups included), hands the agent control
-            answered = False
+            # while no call is pending, hands the agent control
             for item in content:
                 if isinstance(item, dict) and item.get('type') == 'tool_result':
-                    answered = True
                     self._pending.discard(item.get('tool_use_id'))
-            if top_level and not (answered and self._pending):
+            if top_level and not self._pending:
                 events.append(StreamEvent(kind='acting'))
             for item in content:
                 if isinstance(item, dict) and item.get('type') == 'tool_result':
@@ -250,13 +253,15 @@ class ClaudeParser(StreamParser):
                 )
             )
             # the process can outlive a result, waiting on background work
+            self._turn_ended = True
             events.append(StreamEvent(kind='waiting'))
         # claude's own wake-ups after a turn's end (a background task's
-        # notice, a fresh init) hand the agent control; an API retry's
-        # backoff is no time of the agent's
+        # notice, a fresh init) hand the agent control -- mid-turn, a notice
+        # lands while the agent's own tool still runs; an API retry's backoff
+        # is no time of the agent's
         elif message_type == 'system':
             subtype = message.get('subtype')
-            if subtype in ('init', 'task_notification'):
+            if subtype in ('init', 'task_notification') and self._turn_ended:
                 events.append(StreamEvent(kind='acting'))
             elif subtype == 'api_retry':
                 delay = message.get('retry_delay_ms')

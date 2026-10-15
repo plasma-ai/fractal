@@ -279,6 +279,13 @@ _MESSAGE_START = {
     'parent_tool_use_id': None,
     'session_id': 'SID',
 }
+_TASK_NOTICE = {
+    'type': 'system',
+    'subtype': 'task_notification',
+    'task_id': 'bbmyfxbaq',
+    'status': 'completed',
+    'session_id': 'SID',
+}
 _API_RETRY = {
     'type': 'system',
     'subtype': 'api_retry',
@@ -1361,6 +1368,14 @@ def test_thinking_cap_then_no_progress_stalls_the_step(
         pytest.param(
             _claude_script(_INIT, _API_RETRY, 'sleep 2', _TEXT, _RESULT),
             id='api-retry',
+        ),
+        # a background task's notice landing while the agent's own tool runs
+        # is no wake-up: the agent never ended its turn
+        pytest.param(
+            _claude_script(
+                _INIT, _TOOL_START, _TASK_NOTICE, 'sleep 3', _TOOL_RESULT, _RESULT
+            ),
+            id='notice-mid-tool',
         ),
     ],
 )
