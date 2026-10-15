@@ -62,10 +62,12 @@ Memory starts empty; the node lays it out as topical pages as it learns.
 The commit pipeline (`fractal/core/commit.py`) treats both stores as wikis: at
 every `fractal commit` it runs `wiki update` over the project wiki and over the
 node's memory before linting and staging, and a failed update fails the commit —
-a broken wiki must never land. Backstop saves (`--force`) and the baseline
-commit (`--init`) skip the refresh, since a fail-safe save must never block. The
-project wiki is always committable regardless of the node's scope: scoped
-commits admit the project wiki alongside the scope directories.
+a broken wiki must never land. Backstop saves (`--force`) and baseline commits
+(`--init`) skip the refresh, since it may block neither a fail-safe save nor the
+setup save a node starts from, which carries only fractal's own setup; project
+content takes an ordinary commit, which refreshes and lints. The project wiki is
+always committable regardless of the node's scope: scoped commits admit the
+project wiki alongside the scope directories.
 
 ## The project wiki folder
 
