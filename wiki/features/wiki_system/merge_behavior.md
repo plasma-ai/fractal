@@ -34,22 +34,25 @@ block resolves to the union of both sides' rows, less each row the base had that
 one side deleted while the other left it alone, so a merge never drops one
 side's additions and never brings back one side's deletions. A deletion stands
 only when the deleting side's rows carry no formatter escape damage (`\[\[`),
-since rows the driver cannot read say nothing about what that side deleted. On
-add/add merges (both sides created the page) `created` joins the take-ours set,
-since both stamps come from independent update runs. A side whose frontmatter is
-undetectable is treated as unchanged from base, never as a deletion; a side that
-dropped the `***` separator its base carried cannot be split into regions, so it
-surfaces a whole-file conflict with a repair hint. Everything below `***` is
-authored content and merges three-way, with a hint comment planted above add/add
-body conflicts.
+since rows the driver cannot read say nothing about what that side deleted. When
+the base carries no `created:` stamp (an add/add merge, where both sides created
+the page, or a hand-written or imported index), `created` joins the take-ours
+set, since both stamps come from independent update runs. A side whose
+frontmatter is undetectable is treated as unchanged from base, never as a
+deletion; a side that dropped the `***` separator its base carried cannot be
+split into regions, so it surfaces a whole-file conflict with a repair hint.
+Everything below `***` is authored content and merges three-way, with a hint
+comment planted above add/add body conflicts.
 
 When the whole file merges cleanly, the driver then rewrites the H1 from the
 merged `title` (else `name`) and puts the rows in the order `wiki update` writes
-them, so a clean merge of two current indexes is current as merged. It does so
-only when the wiki's own class (a trusted `.wiki/wiki.py` hook's category order
-included) leaves the current branch's index as written; an index another class
-ordered, or one whose hook cannot load or run, stays as merged, with theirs' new
-rows below ours'. A conflicted merge, or one left as merged, settles at the next
+them, so a clean merge in which each side only added, deleted, or retitled
+entries is current as merged; a row one side changed and the other deleted, or a
+row both sides changed, waits for the next `wiki update`. It does so only when
+the wiki's own class (a trusted `.wiki/wiki.py` hook's category order included)
+leaves the current branch's index as written; an index another class ordered, or
+one whose hook cannot load or run, stays as merged, with theirs' new rows below
+ours'. A conflicted merge, or one left as merged, settles at the next
 `wiki update` (which the fractal commit pipeline runs; see
 [[features/wiki_system/index_regeneration]]), which re-sorts the block from the
 merged filesystem and prunes stale rows.
