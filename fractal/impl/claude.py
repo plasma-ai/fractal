@@ -33,11 +33,11 @@ _ROUTING_KEYS = (
     'ANTHROPIC_MODEL',
 )
 
-#: Opening of the user turn claude injects to auto-continue a reply cut off at
-#: the output cap (its wording past these words varies by version).
+# the opening of the user turn claude injects to auto-continue a reply cut
+# off at the output cap (its wording past these words varies by version)
 _CONTINUATION_PREFIX = 'Output token limit hit'
 
-#: Content block types of a reply that is still thinking.
+# the content block types of a reply that is still thinking
 _THINKING_BLOCKS = frozenset({'thinking', 'redacted_thinking'})
 
 # Claude Code's provider-outage shapes, as its failed result frame names them
