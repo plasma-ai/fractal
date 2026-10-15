@@ -26,7 +26,12 @@ from typing import Any, Optional
 import pytest
 
 import fractal.util
-from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
+from fractal.constants import (
+    PAUSE_ABORT_FILE,
+    PGID_FILE,
+    SOCKET_FILE,
+    STEP_PGID_FILE,
+)
 from fractal.core import loop as loop_module, pricing, worktree
 from fractal.core.agent import Agent, StreamEvent, StreamResult
 from fractal.core.event import Event
@@ -65,6 +70,7 @@ __all__ = [
     'test_thinking_never_resets_the_no_progress_clock',
     'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session',
+    'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
     'test_idle_clock_holds_while_the_agent_waits',
     'test_idle_clock_fires_on_a_silent_agent',
     'test_a_reaped_tool_is_gone_before_the_next_launch',
@@ -1722,6 +1728,43 @@ def test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session(
     session = first[first.index('--session-id') + 1]
     assert steer[steer.index('--resume') + 1] == session
     assert 'ran out of room while still thinking' in steer[-1]
+
+
+@pytest.mark.parametrize(
+    argnames='trigger',
+    argvalues=['no progress', 'thinking cap'],
+)
+def test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    trigger: str,
+) -> None:
+    """A pause marker landing as the loop ends a stuck launch parks the step.
+
+    The durable marker is the pause a racing resume can no longer
+    withdraw: with no signal left for the steer to poll, only the stuck
+    outcome's own check of the marker keeps the steer from relaunching
+    over the pause, whichever trigger ended the launch.
+    """
+    marker = loop_node.node_dir / PAUSE_ABORT_FILE
+    if trigger == 'no progress':
+        stuck = _claude_script(_INIT, f'touch {marker}', 'exec sleep 30')
+    else:
+        # the agent exits 0 on the cap's TERM, so the check every failed
+        # launch makes never sees the marker
+        stuck = _claude_script(
+            _INIT,
+            _THINKING_REPLY,
+            f'touch {marker}',
+            "trap 'exit 0' TERM",
+            _CONTINUATION,
+            'sleep 30 & wait',
+        )
+    agent = scripted_claude([stuck, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 1
+    assert _step_rows(loop_node) == ['PLAN/paused/unpriced']
+    assert loop_node.status() == 'paused'
 
 
 @pytest.mark.parametrize(
