@@ -81,6 +81,7 @@ from tests._helpers import _git
 from .conftest import (
     _await_progress,
     _cli_env,
+    _fractal_bin,
     _loop_cmd,
     _reap_group,
     _require_tmux,
@@ -108,6 +109,7 @@ __all__ = [
     'test_pause_reaps_past_a_broken_sibling',
     'test_self_pause_finishes_the_step_unmarked',
     'test_pause_abort_marker_alone_parks_the_step',
+    'test_abort_falls_back_when_the_reap_helper_fails',
     'test_tree_latch_parks_a_booting_loop',
     'test_finish_drain_blocks_on_paused_child',
     'test_per_step_agent_override_runs_in_detached',
@@ -1456,6 +1458,69 @@ def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
     assert alive == [], (alive, tools)
     assert steps_rows == ['1,paused'], (steps_rows, result.stdout)
     assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize('script', ['pause.sh', 'kill.sh'])
+def test_abort_falls_back_when_the_reap_helper_fails(repo: dict, script: str) -> None:
+    """Pause and kill still end the step when ``fractal node _reap`` cannot run.
+
+    A shim fails ``node _reap`` with the CLI's error exit. ``pause.sh`` then
+    marks the abort and ends the step group itself, so with no pause signal
+    set the loop records the step paused on the mark alone and parks;
+    ``kill.sh``'s own teardown ends both recorded groups and drops their
+    records.
+    """
+    verb = script.removesuffix('.sh')
+    name = f'fallback{verb}'
+    node = _make_node(repo, name, detached=False, sync=False, steps=_GATE_STEPS)
+    worktree = node['worktree']
+    node_dir = node['node_dir']
+    # a fractal whose reap helper breaks and whose every other call runs
+    shim = repo['root'] / f'shim_{verb}'
+    shim.mkdir()
+    fractal_shim = shim / 'fractal'
+    fractal_shim.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ "${1:-} ${2:-}" == "node _reap" ]]; then exit 2; fi\n'
+        f'exec "{_fractal_bin()}" "$@"\n',
+        encoding='utf-8',
+    )
+    fractal_shim.chmod(0o755)
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name=name)
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        step_pgid = int((node_dir / '.step_pgid').read_text(encoding='utf-8'))
+        loop_pgid = int((node_dir / '.pgid').read_text(encoding='utf-8'))
+        abort = _run_script(script, worktree, bindir=shim)
+        proc.wait(timeout=60)
+    finally:
+        _, result = _finish_wait_result(proc, capture, log)
+
+    assert abort.returncode == 0, abort.stderr
+    if script == 'pause.sh':
+        # the loop outlives the abort and parks the step on the mark alone
+        assert 'Aborted in-flight agent' in abort.stdout, abort.stdout
+        steps_rows = _query_column(
+            worktree,
+            "SELECT step || ',' || status FROM steps"
+            f" WHERE node = 'main.{name}' ORDER BY step_id",
+        )
+        assert steps_rows == ['1,paused'], (steps_rows, result.stdout)
+        assert result.returncode == 0, result.stdout
+        groups = [step_pgid]
+    else:
+        assert 'Killed node' in abort.stdout, abort.stdout
+        assert not (node_dir / '.pgid').exists()
+        assert not (node_dir / '.step_pgid').exists()
+        groups = [step_pgid, loop_pgid]
+    # kill delivery is asynchronous: wait for the signaled groups to empty
+    gone = _await_progress(
+        check=lambda: not any(_group_alive(group) for group in groups),
+        progress=lambda: None,
+        deadline=time.monotonic() + 15,
+    )
+    assert gone, [group for group in groups if _group_alive(group)]
 
 
 def test_tree_latch_parks_a_booting_loop(repo: dict) -> None:
@@ -4066,6 +4131,15 @@ def _alive_pids(pids: list[int]) -> list[int]:
     return alive
 
 
+def _group_alive(pgid: int) -> bool:
+    """Whether process group ``pgid`` still answers a null signal."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _tool_pids(capture: pathlib.Path) -> list[int]:
     """The pids the stub's tool modes recorded, in role order."""
     return [
@@ -4318,6 +4392,31 @@ def _resume_loop(
     cmd = _loop_cmd(worktree, '--resume')
     result = _run_reaped(cmd, cwd=f'{worktree}', env=env, timeout=180)
     return _collect_calls(capture), result
+
+
+def _run_script(
+    script: str,
+    worktree: pathlib.Path,
+    *,
+    bindir: Optional[pathlib.Path] = None,
+) -> subprocess.CompletedProcess:
+    """Run this checkout's ``_scripts/<script>`` on ``worktree``, bounded.
+
+    The scripts shell back into ``fractal``, so the hermetic env resolves it
+    to this checkout; ``bindir`` goes first on ``PATH`` to shadow a command.
+    """
+    script_path = _worktree_root() / 'fractal' / '_scripts' / script
+    env = _cli_env()
+    if bindir is not None:
+        path = env['PATH']
+        env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    return subprocess.run(
+        ['bash', f'{script_path}', f'{worktree}'],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
 
 
 def _path_without_timeout(bindir: pathlib.Path, tmp: pathlib.Path) -> str:
