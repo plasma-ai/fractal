@@ -90,14 +90,18 @@ may include breaking changes, each listed under a Breaking heading.
 - `fractal commit`'s ignore-rule warning names the paths it counts: the first
   ten, each with its rule as `git check-ignore -v` reports it (source file,
   line, and pattern), then `... and N more`. It says the paths are held by
-  repository or host ignore rules and are not node-record refusals, so it is not
-  mistaken for a recount of the estate warning above it. Rule sources outside
-  the repository carry no machine path: the shared exclude reads
-  `.git/info/exclude` and the host's global ignore file `core.excludesFile`.
+  repository or host ignore rules and are not node-record refusals, and it
+  leaves out every estate file the estate warnings name, an ignored one the
+  force-add refused included, so it is not mistaken for a recount of the estate
+  warning above it. Rule sources outside the repository carry no machine path:
+  the shared exclude reads `.git/info/exclude` and the host's global ignore file
+  `core.excludesFile`.
 - `fractal commit` ends on a
   `Held out: N estate file(s) not staged; N path(s) ignored` line (non-zero
   parts only) whenever either warning fired, after any hook or gate output and
-  on a no-op commit too.
+  on a no-op commit too. The estate count covers every estate file left
+  unstaged: refused on either staging path, or a record the force-add could not
+  stage.
 - A node's record directories admit `.py` files — plain text like the seeded
   `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
   instead of being withheld as not a node record. Keys, archives, and binaries

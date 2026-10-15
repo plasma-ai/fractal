@@ -553,6 +553,13 @@ def test_stage_records_survives_an_unreadable_held_file(
     assert 'plans/0099-doomed.md' not in tracked
     assert 'could not be staged' in result
     assert 'plans/0099-doomed.md' in result
+    # that warning alone names it -- never an ignore-rule skip -- and the last
+    # line counts it as an estate file
+    lines = result.splitlines()
+    skip_lines = [line for line in lines if 'skipped by ignore rules' in line]
+    for line in skip_lines:
+        assert 'plans/0099-doomed.md' not in line, line
+    assert lines[-1].startswith('Held out: 1 estate file(s) not staged'), result
 
 
 def test_skip_alarm_covers_foreign_info_exclude_lines(
@@ -621,7 +628,9 @@ def test_record_force_add_refuses_non_record_files(
     would silently commit a dotenv or a key a node parked in its estate.
     Only the canon-required record surfaces at text suffixes qualify; a
     non-record file is refused by name, and every force-add is reported
-    on the commit output.
+    on the commit output. A refused file is the refusal's to report: the
+    ignore-rule warning, which names repository and host holds, leaves it
+    out, and the held-out counts take it as an estate file.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
@@ -634,7 +643,8 @@ def test_record_force_add_refuses_non_record_files(
     exclude = repo / '.git' / 'info' / 'exclude'
     with exclude.open('a', encoding='utf-8') as handle:
         handle.write('/.fractal/\n')
-    # a record, plus secret-shaped files a node parked beside it
+    # a record, plus secret-shaped files a node parked beside it -- one in
+    # a new directory, which the ignore listing collapses to one entry
     memory = node.node_dir / 'memory' / 'state.md'
     memory.parent.mkdir(parents=True, exist_ok=True)
     memory.write_text('finding of record\n', encoding='utf-8')
@@ -642,18 +652,32 @@ def test_record_force_add_refuses_non_record_files(
     (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
     (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
     (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
+    (node.node_dir / 'data').mkdir()
+    (node.node_dir / 'data' / 'blob.bin').write_bytes(b'binary')
+    parked = ('.env', 'id_rsa', 'creds.pem', 'memory/dump.tar', 'data/blob.bin')
     result = node.commit('record custody', force=True)
 
     tracked = _git(project_dir, 'ls-files').stdout
     # the record landed; nothing secret-shaped or binary did
     assert 'memory/state.md' in tracked
-    for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
-        assert parked not in tracked, parked
+    for path in parked:
+        assert path not in tracked, path
     # the pass reports both halves rather than leaving them to be inferred
     assert 'Force-staged' in result
     assert 'memory/state.md' in result
-    assert 'not node records and were NOT force-staged' in result
-    assert 'id_rsa' in result
+    lines = result.splitlines()
+    refused_line = next(line for line in lines if 'NOT force-staged' in line)
+    assert 'not node records and were NOT force-staged' in refused_line
+    for path in parked:
+        assert f'.fractal/main.task/{path}' in refused_line, path
+    # the ignore warning names neither a refused file nor the collapsed
+    # directory holding one, and the last line counts them as estate files
+    skip_lines = [line for line in lines if 'skipped by ignore rules' in line]
+    for line in skip_lines:
+        assert 'id_rsa' not in line, line
+        assert '.fractal/main.task/data' not in line, line
+    held = f'Held out: {len(parked)} estate file(s) not staged'
+    assert lines[-1].startswith(held), result
     # both halves name worktree-relative paths -- a force commit folds these
     # bytes into git history, where machine-local paths do not belong
     forced_line = next(
@@ -1190,7 +1214,8 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     assert '.env' in body
     assert f'{project_dir}' not in body
     assert 'skipped by ignore rules' in body
-    assert '.fractal/main.task/.env (.git/info/exclude:' in body
+    # the refused .env is the refusal's to name, never an ignore-rule skip
+    assert '.fractal/main.task/.env (.git/info/exclude:' not in body
     assert f'{repo}' not in body
     assert 'blob.bin (11MB)' in body
     assert 'work.txt' in body

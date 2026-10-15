@@ -228,10 +228,10 @@ def commit(
     # loud rather than inferred from the diff; the hook retry re-stages through
     # this same closure, so the latest pass's notices are the ones reported
     record_notices: list[str] = []
-    denied: list[str] = []
+    unstaged: list[str] = []
 
     def _stage_changes() -> None:
-        record_notices[:], denied[:] = _stage(
+        record_notices[:], unstaged[:] = _stage(
             node,
             scoped=scoped,
             commit_scopes=commit_scopes,
@@ -295,6 +295,14 @@ def commit(
                 managed.add(path)
                 continue
             if any(path.startswith(f'{prefix}/') for prefix in managed):
+                continue
+            # an estate file the commit left unstaged is the estate warnings'
+            # to name, so this warning never counts it a second time
+            if path in unstaged:
+                continue
+            # nor a collapsed directory entry holding one (--directory lists a
+            # wholly ignored new directory, not the files the pass refused)
+            if any(item.startswith(f'{path}/') for item in unstaged):
                 continue
             # name the rule sources outside the repo without their machine
             # paths -- a force commit folds this warning into its body, where
@@ -451,8 +459,8 @@ def commit(
     # repeat the held-out counts as the final line -- a hook's or gate's long
     # output can bury the warnings above, and a no-op commit reads as clean
     held: list[str] = []
-    if denied:
-        held.append(f'{len(denied)} estate file(s) not staged')
+    if unstaged:
+        held.append(f'{len(unstaged)} estate file(s) not staged')
     if skipped:
         held.append(f'{len(skipped)} path(s) ignored')
     if held:
@@ -964,7 +972,9 @@ def _stage(
 
     Returns:
         The estate pass's notices (what it force-staged, what it refused),
-        and the estate files the content law withheld from the adds.
+        and every estate file left unstaged: those the content law withheld
+        from the adds, and the ignored ones the record pass refused or
+        could not stage.
 
     """
     worktree = node.worktree
@@ -1018,7 +1028,8 @@ def _stage(
     else:
         cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
         fractal.util.git.run(cmd, cwd=worktree)
-    return _stage_records(node, fractal_prefix, denied), denied
+    notices, unstaged = _stage_records(node, fractal_prefix, denied)
+    return notices, denied + unstaged
 
 
 def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
@@ -1073,7 +1084,11 @@ def _estate_denied(node: Node, fractal_prefix: str) -> list[str]:
     return [path for path in fresh if _is_refused_estate(path, fractal_prefix)]
 
 
-def _stage_records(node: Node, fractal_prefix: str, denied: list[str]) -> list[str]:
+def _stage_records(
+    node: Node,
+    fractal_prefix: str,
+    denied: list[str],
+) -> tuple[list[str], list[str]]:
     """Force-stage estate records an external ignore rule held out.
 
     fractal owns its staging: the plain adds honor every ignore layer, so
@@ -1102,7 +1117,9 @@ def _stage_records(node: Node, fractal_prefix: str, denied: list[str]) -> list[s
             adds, reported here so both refusals read together.
 
     Returns:
-        Notices naming what was force-staged and what was refused.
+        Notices naming what was force-staged and what was refused, and the
+        held files left unstaged: those refused, and the records the add
+        could not stage.
 
     """
     estates = _estate_roots(node, fractal_prefix)
@@ -1192,7 +1209,7 @@ def _stage_records(node: Node, fractal_prefix: str, denied: list[str]) -> list[s
             f'Warning: {len(denied)} estate file(s) are not node records and'
             f' were NOT staged: {listing}'
         )
-    return notices
+    return notices, refused + failed
 
 
 def _hook_retry(
