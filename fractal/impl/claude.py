@@ -682,7 +682,7 @@ def _rates(model: str) -> Optional[dict[str, Any]]:
     return None
 
 
-def _is_continuation(message: dict[str, Any]) -> bool:
+def _is_continuation(message: dict[str, Any], /) -> bool:
     """Return whether a user frame is claude's output-cap continuation.
 
     Matched on the text alone: the flag claude stamps on its injected turns
@@ -695,7 +695,8 @@ def _is_continuation(message: dict[str, Any]) -> bool:
         return content.startswith(_CONTINUATION_PREFIX)
     for block in content or []:
         if isinstance(block, dict) and block.get('type') == 'text':
-            return (block.get('text') or '').startswith(_CONTINUATION_PREFIX)
+            text = block.get('text') or ''
+            return text.startswith(_CONTINUATION_PREFIX)
     return False
 
 
