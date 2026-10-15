@@ -410,8 +410,9 @@ class ScriptedClaude(ClaudeAgent):
     becomes the launch's session), in the production spawn shape: its own
     process group, a text stdout pipe. With ``transcripts``, each launch
     first appends its next batch of entries to the session's transcript,
-    stamped at the spawn unless an entry carries its own stamp. Every
-    settled cost flush is kept with its finality.
+    or to a sub-agent's own transcript beside it for an entry naming one
+    (``subagent``), stamped at the spawn unless an entry carries its own
+    stamp. Every settled cost flush is kept with its finality.
     """
 
     def __init__(
@@ -442,11 +443,18 @@ class ScriptedClaude(ClaudeAgent):
         if self.transcripts:
             path = self._transcript(f'{invocation.session}')
             assert path is not None
-            path.parent.mkdir(parents=True, exist_ok=True)
             now = fractal.util.time.utc_now()
-            with path.open('a', encoding='utf-8') as handle:
-                for entry in self.transcripts.pop(0):
-                    handle.write(json.dumps({'timestamp': now, **entry}) + '\n')
+            for entry in self.transcripts.pop(0):
+                line = {'timestamp': now, **entry}
+                # claude keeps each sub-agent's replies in a file of its own
+                subagent = line.pop('subagent', None)
+                target = path
+                if subagent is not None:
+                    side = path.with_suffix('') / 'subagents'
+                    target = side / f'agent-{subagent}.jsonl'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open('a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(line) + '\n')
         script = self.scripts.pop(0).replace('SID', f'{invocation.session}')
         process = subprocess.Popen(
             ['bash', '-c', script],
@@ -1754,15 +1762,16 @@ def test_killed_claude_launch_prices_from_its_transcript(
     scripted_claude: Callable[..., ScriptedClaude],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A launch killed before its result frame books its transcript's usage.
+    """A launch killed before its result frame books its transcripts' usage.
 
     The stalled PLAN launch's stream priced each reply from its first
-    frame; claude's transcript holds each reply's final usage -- split
-    across lines that grow -- plus a sub-agent reply at its own model, so
-    the step books their sum as an estimate. Entries stamped outside the
-    launch window and an unpriced model stay out of the sum. The steered
-    relaunch, whose result frame names its cost, keeps that figure over
-    its own transcript entries.
+    frame; claude's session transcript holds each reply's final usage --
+    split across lines that grow -- and a sub-agent's own transcript
+    beside it holds that agent's reply at its own model, so the step books
+    their sum as an estimate. Entries stamped outside the launch window
+    and an unpriced model stay out of the sum. The steered relaunch, whose
+    result frame names its cost, keeps that figure over its own transcript
+    entries.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
     # the reply's first frame on the stream, then the transcript's lines
@@ -1784,7 +1793,11 @@ def test_killed_claude_launch_prices_from_its_transcript(
         _assistant_entry('msg_b', second),
         _assistant_entry('msg_b', second),
         _assistant_entry(
-            'msg_side', sidechain, model='claude-haiku-5', isSidechain=True
+            'msg_side',
+            sidechain,
+            model='claude-haiku-5',
+            isSidechain=True,
+            subagent='x',
         ),
         _assistant_entry('msg_mystery', outside, model='mystery-model'),
         _assistant_entry('msg_late', outside, timestamp='2999-01-01T00:00:00.000Z'),

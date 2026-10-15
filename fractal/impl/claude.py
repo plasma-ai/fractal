@@ -581,13 +581,16 @@ class ClaudeAgent(Agent):
         started: str,
         ended: str,
     ) -> Optional[float]:
-        """Price the launch's window from claude's own session transcript.
+        """Price the launch's window from claude's own session transcripts.
 
         Claude writes each reply to the transcript as it streams, so a
         launch killed before its result frame still left each reply's
         final usage on disk, where the stream priced only each reply's
-        first frame. An absent or unreadable transcript, or a window with
-        no priced usage, logs the reason and returns ``None``.
+        first frame. A sub-agent's replies sit in a transcript of their own
+        in the session's ``subagents`` folder, read beside the session's;
+        one that cannot be read is skipped with the reason logged. An
+        absent or unreadable session transcript, or a window with no
+        priced usage, logs the reason and returns ``None``.
         """
         try:
             found = self.transcript(session)
@@ -600,7 +603,21 @@ class ClaudeAgent(Agent):
                 logging.WARNING,
             )
             return None
-        cost = _transcript_cost(found['content'], started=started, ended=ended)
+        # read each sub-agent's transcript beside the session's -- one pass
+        # over them all keeps a reply counted once across files, and a
+        # newline between files keeps a torn tail off the next file's record
+        contents = [found['content']]
+        subagents = pathlib.Path(found['path']).with_suffix('') / 'subagents'
+        for path in sorted(subagents.glob('agent-*.jsonl')):
+            try:
+                contents.append(path.read_text(encoding='utf-8', errors='replace'))
+            except OSError as e:
+                self.log(
+                    f'launch partly unpriced: sub-agent transcript unreadable: {e}',
+                    logging.WARNING,
+                )
+        content = '\n'.join(contents)
+        cost = _transcript_cost(content, started=started, ended=ended)
         if cost is None:
             self.log(
                 f'launch unpriced: no priced usage in session {session}'
@@ -681,14 +698,14 @@ def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[floa
 
     Claude splits a reply across lines, one per content block under the
     reply's message id, each carrying the reply's usage as it stood when
-    written; the last line of an id is its final usage. Sidechain
-    (sub-agent) replies written into the same transcript count at their
-    own model. Each id is priced at its own model, and an unpriced model
-    drops out of the sum, never the rest; ``None`` when nothing in the
-    window priced.
+    written; the last line of an id is its final usage. The content joins
+    the session's transcript with its sub-agents' (sidechain replies, at
+    their own model), and an id seen in more than one file counts once.
+    Each id is priced at its own model, and an unpriced model drops out of
+    the sum, never the rest; ``None`` when nothing in the window priced.
 
     Args:
-        content: The transcript's raw JSONL text.
+        content: The transcripts' raw JSONL text, joined by newlines.
         started: The window's opening instant (ISO 8601 UTC).
         ended: The window's closing instant (ISO 8601 UTC).
 

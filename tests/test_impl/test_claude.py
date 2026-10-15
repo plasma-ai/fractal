@@ -10,6 +10,7 @@ the config-home transcript layout. Stream-level cases drive the base
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import re
@@ -64,6 +65,7 @@ __all__ = [
     'test_config_model_walks_the_settings_chain',
     'test_seed_config_disables_fast_mode_claude',
     'test_transcript_resolves_the_config_home_slug',
+    'test_settle_cost_adds_each_readable_sub_agent_transcript',
 ]
 
 # claude pricing with all four Anthropic bucket rates distinct, so a bucket
@@ -91,6 +93,11 @@ _USAGE_SECOND = {
     'output_tokens': 100,
 }
 _USAGE_SECOND_COST = 50 * 3e-6 + 100 * 1.5e-5
+
+# a killed launch's window and a transcript stamp inside it
+_OPENED = '2026-01-01T00:00:00.000Z'
+_WRITTEN = '2026-01-01T00:00:01.000Z'
+_CLOSED = '2026-01-01T00:00:02.000Z'
 
 # claude's give-up after its last continuation: a synthetic error reply, then
 # an is_error result whose subtype still reads success
@@ -1495,6 +1502,49 @@ def test_transcript_resolves_the_config_home_slug(
     assert relocated['content'] == '{"type": "relocated"}\n'
 
 
+def test_settle_cost_adds_each_readable_sub_agent_transcript(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A killed launch's settle prices its session's and its sub-agents' replies.
+
+    Claude keeps each sub-agent's replies in a transcript of its own beside
+    the session's. A record cut off mid-write never swallows the next
+    file's first one, and a file the read cannot open is skipped with a
+    warning while the rest still price.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    caplog.set_level(logging.WARNING)
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude')
+    session = str(uuid.uuid4())
+    (step_id,) = _steps(node, 1)
+    node.record.step_session('claude', step_id=step_id, model=None, session=session)
+    transcript = pathlib.Path(backend.transcript(session)['path'])
+    subagents = transcript.with_suffix('') / 'subagents'
+    subagents.mkdir(parents=True)
+    # the session's reply, then a record the kill cut off mid-write
+    torn = _transcript_line('msg_main', _USAGE_FIRST) + '{"type": "assist'
+    transcript.write_text(torn, encoding='utf-8')
+    side = _transcript_line('msg_side', _USAGE_SECOND)
+    (subagents / 'agent-a.jsonl').write_text(side, encoding='utf-8')
+    # a sub-agent transcript the read cannot open (a directory in its place)
+    (subagents / 'agent-b.jsonl').mkdir()
+    backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED)
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
+    (warning,) = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert warning.startswith('launch partly unpriced: sub-agent transcript')
+    assert 'agent-b.jsonl' in warning
+
+
 # ------ helpers
 
 
@@ -1623,6 +1673,22 @@ def _continuation_frame(*, parent: Optional[str] = None) -> dict[str, Any]:
         'session_id': 'sess-1',
         'isSynthetic': True,
     }
+
+
+def _transcript_line(message_id: str, usage: dict[str, int]) -> str:
+    """Return one claude transcript line of a reply, stamped inside the window."""
+    entry = {
+        'type': 'assistant',
+        'timestamp': _WRITTEN,
+        'message': {
+            'model': 'claude-fable-5',
+            'id': message_id,
+            'role': 'assistant',
+            'content': [{'type': 'text', 'text': ''}],
+            'usage': usage,
+        },
+    }
+    return json.dumps(entry) + '\n'
 
 
 def _feed(parser: ClaudeParser, line: str) -> list[Any]:

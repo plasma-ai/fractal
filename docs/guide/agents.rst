@@ -300,9 +300,10 @@ backends flush each figure as it arrives — a killed or timed-out step
 keeps the last figure recorded — while ``codex`` prices the whole
 invocation once its process exits cleanly, so an interrupted ``codex``
 step records no cost. A ``claude`` step that ends without its result frame
-is priced again from Claude Code's own session transcript: each reply
-written during the launch counts at its final token usage and its own
-model, and the sum replaces the streamed figure when it is higher. The
+is priced again from Claude Code's own session transcript and the
+transcripts it keeps for the session's sub-agents: each reply written
+during the launch counts at its final token usage and its own model, and
+the sum replaces the streamed figure when it is higher. The
 figure is priced from recorded usage rather than Claude's own bill; with no
 readable transcript the step keeps the streamed figure (or none) and the
 agent logs why. Read spend with the cost commands (full surfaces in
