@@ -716,7 +716,9 @@ def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[floa
     closed = dt.datetime.fromisoformat(ended)
     # keep the final usage per message id (later lines overwrite earlier)
     replies: dict[str, tuple[dict[str, Any], Optional[str]]] = {}
-    for line in content.splitlines():
+    # a newline alone ends a record -- splitlines would also split at the
+    # U+2028 and U+0085 claude leaves raw inside a record's strings
+    for line in content.split('\n'):
         # tolerate malformed lines and a torn tail (the file may be mid-write)
         try:
             entry = json.loads(line)

@@ -68,6 +68,7 @@ __all__ = [
     'test_seed_config_disables_fast_mode_claude',
     'test_transcript_resolves_the_config_home_slug',
     'test_settle_cost_adds_each_readable_sub_agent_transcript',
+    'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
 ]
 
 # claude pricing with all four Anthropic bucket rates distinct, so a bucket
@@ -1585,6 +1586,25 @@ def test_settle_cost_adds_each_readable_sub_agent_transcript(
     assert 'agent-b.jsonl' in warning
 
 
+def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply's final line prices whole though its text holds line separators.
+
+    Claude leaves U+2028 and U+0085 raw inside a record's strings, so only a
+    newline ends a record.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    early = _transcript_line('msg_a', {'output_tokens': 10})
+    final = _transcript_line(
+        'msg_a',
+        {'output_tokens': 900},
+        text='one\u2028two\u0085three',
+    )
+    cost = claude._transcript_cost(early + final, started=_OPENED, ended=_CLOSED)
+    assert cost == pytest.approx(900 * 1.5e-5)
+
+
 # ------ helpers
 
 
@@ -1715,8 +1735,11 @@ def _continuation_frame(*, parent: Optional[str] = None) -> dict[str, Any]:
     }
 
 
-def _transcript_line(message_id: str, usage: dict[str, int]) -> str:
-    """Return one claude transcript line of a reply, stamped inside the window."""
+def _transcript_line(message_id: str, usage: dict[str, int], *, text: str = '') -> str:
+    """Return one claude transcript line of a reply, stamped inside the window.
+
+    Written the way claude writes it: non-ASCII text raw, never escaped.
+    """
     entry = {
         'type': 'assistant',
         'timestamp': _WRITTEN,
@@ -1724,11 +1747,11 @@ def _transcript_line(message_id: str, usage: dict[str, int]) -> str:
             'model': 'claude-fable-5',
             'id': message_id,
             'role': 'assistant',
-            'content': [{'type': 'text', 'text': ''}],
+            'content': [{'type': 'text', 'text': text}],
             'usage': usage,
         },
     }
-    return json.dumps(entry) + '\n'
+    return json.dumps(entry, ensure_ascii=False) + '\n'
 
 
 def _feed(parser: ClaudeParser, line: str) -> list[Any]:
