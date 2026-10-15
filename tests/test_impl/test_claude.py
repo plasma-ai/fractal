@@ -34,6 +34,7 @@ __all__ = [
     'test_parser_null_duration',
     'test_parser_marks_a_budget_stop',
     'test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply',
+    'test_parser_holds_the_idle_clock_through_a_top_level_think',
     'test_parser_tolerates_garbage_claude',
     'test_parser_tolerates_present_null_payloads_claude',
     'test_parser_ignores_a_non_numeric_result_cost',
@@ -516,6 +517,84 @@ def test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply(
     assert result.kind == 'result'
     assert result.failed
     assert 'output token maximum' in (result.message or '')
+
+
+@pytest.mark.parametrize(
+    argnames=('frames', 'clock'),
+    argvalues=[
+        # claude 2.1.300 writes the block's frame, then forwards its stop
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', None),
+                ('thinking', 'msg_1', None),
+                ('thinking_stop', 'msg_1', None),
+            ],
+            [['waiting'], ['acting'], []],
+            id='frame-first',
+        ),
+        # the stop ends the think when it lands first
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', None),
+                ('thinking_stop', 'msg_1', None),
+                ('thinking', 'msg_1', None),
+            ],
+            [['waiting'], ['acting'], []],
+            id='stop-first',
+        ),
+        # a new reply, or the reply's own end, closes a think left open
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', None),
+                ('start', 'msg_2', None),
+                ('thinking_stop', 'msg_2', None),
+            ],
+            [['waiting'], ['acting'], []],
+            id='new-reply',
+        ),
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', None),
+                ('stop', 'msg_1', None),
+                ('thinking_stop', 'msg_1', None),
+            ],
+            [['waiting'], [], []],
+            id='reply-end',
+        ),
+        # a sub-agent's think never touches the clock
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', 'toolu_1'),
+                ('thinking', 'msg_1', 'toolu_1'),
+                ('thinking_stop', 'msg_1', 'toolu_1'),
+            ],
+            [[], [], []],
+            id='sidechain',
+        ),
+    ],
+)
+def test_parser_holds_the_idle_clock_through_a_top_level_think(
+    frames: list[tuple[str, Optional[str], Optional[str]]],
+    clock: list[list[str]],
+) -> None:
+    """A top-level think waits from its block's start until the block completes.
+
+    The stream shows nothing of a think in progress, so its block start
+    pauses the idle clock and its completion -- the block's assistant
+    frame or its raw stop, whichever lands first -- restarts it.
+    """
+    parser = ClaudeParser()
+    # each entry is (frame kind, message id, parent tool-use id)
+    lines = _lines([_reply_frame(*entry) for entry in frames])
+    events = [
+        [
+            event.kind
+            for event in parser.feed(line)
+            if event.kind in ('acting', 'waiting')
+        ]
+        for line in lines
+    ]
+    assert events == clock
 
 
 def test_parser_tolerates_garbage_claude() -> None:
@@ -1452,7 +1531,8 @@ def _reply_frame(
     ``kind`` names an assistant frame's content block (``thinking``/
     ``text``/``tool_use``; ``stop_reason`` always null), a raw API event
     (``start`` for ``message_start``, ``<block>_start`` for a
-    ``content_block_start``, ``stop`` for a ``max_tokens``
+    ``content_block_start`` and ``<block>_stop`` for its
+    ``content_block_stop``, ``stop`` for a ``max_tokens``
     ``message_delta``), or ``continuation`` for claude's injected turn
     (``unflagged_continuation`` without its ``isSynthetic`` flag,
     ``reasoning_continuation`` in another version's wording,
@@ -1481,6 +1561,9 @@ def _reply_frame(
     if kind == 'stop':
         delta = {'stop_reason': 'max_tokens', 'stop_sequence': None}
         return _stream_event({'type': 'message_delta', 'delta': delta}, parent=parent)
+    if kind.endswith('_stop'):
+        event = {'type': 'content_block_stop', 'index': 0}
+        return _stream_event(event, parent=parent)
     if kind.endswith('_start'):
         block = {'type': kind.removesuffix('_start')}
         event = {'type': 'content_block_start', 'index': 0, 'content_block': block}

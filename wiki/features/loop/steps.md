@@ -161,13 +161,20 @@ frame, whichever comes first) or an `end_turn` stop or `result` frame is
 waiting, because Claude Code stays alive after a turn's end while background
 work runs and wakes the agent with a notice; an `api_retry` frame pauses for its
 `retry_delay_ms`. The pending call ids clear at each new reply, so a call that
-never got its result cannot hold the clock paused. The reader blocks on stdout,
-so the watchdog polls the clock and, at the threshold, ends the group through
-the deadline's own routine under a flag of its own; it stops when the stream
-ends, however it ends. It arms only for an agent whose stream reports control
-(`Agent.reports_progress`): Claude. Codex's stream marks command starts but not
-their completion, and its other tool items are not mapped, so it stays
-unwatched.
+never got its result cannot hold the clock paused. A thinking block's raw start
+is waiting and its end -- its assistant frame or its raw `content_block_stop`,
+whichever lands first -- is acting: the stream shows nothing of a think in
+progress, and a full-cap think can take most of the threshold, so a think on the
+clock would end a reply that was about to act. A new reply or the reply's
+`message_delta` closes a think left open silently, so a stray block stop cannot
+restart the clock later. A think that hangs is left to Claude Code's own stream
+timeout and the step deadline, and bare thinking deltas never touch the clock.
+The reader blocks on stdout, so the watchdog polls the clock and, at the
+threshold, ends the group through the deadline's own routine under a flag of its
+own; it stops when the stream ends, however it ends. It arms only for an agent
+whose stream reports control (`Agent.reports_progress`): Claude. Codex's stream
+marks command starts but not their completion, and its other tool items are not
+mapped, so it stays unwatched.
 
 For a work step (never SYNC) the first stuck launch per attempt is steered: the
 thinking cap ends the invocation on the stream-error path (the render callback

@@ -84,6 +84,9 @@ class ClaudeParser(StreamParser):
         # the agent ended its turn (an end_turn stop or a result) and no new
         # reply has started -- only then is a wake-up its own
         self._turn_ended = False
+        # a top-level thinking block is open -- the stream shows nothing of a
+        # think in progress, so it holds the idle clock until it completes
+        self._thinking = False
 
     def feed(self: ClaudeParser, line: str) -> list[StreamEvent]:
         """Parse one claude stream line into normalized events."""
@@ -118,21 +121,29 @@ class ClaudeParser(StreamParser):
         if message_type == 'stream_event':
             event = message.get('event') or {}
             event_type = event.get('type')
-            # the raw API events track the top-level reply's id, its blocks,
-            # and its stop: a max_tokens stop is the cap's primary signal,
-            # landing before claude requests the continuation
-            # ... and the idle clock: a new reply has the agent acting, a tool
-            # call or a turn's end has it waiting, a text block has it acting
+            # the raw API events track the top-level reply for the thinking
+            # cap (its id, blocks and stop: a max_tokens stop is the primary
+            # signal, landing before claude requests the continuation) and
+            # for the idle clock (a new reply, a text block or a think's end
+            # acts; a tool call, a think's start or a turn's end waits)
             if top_level:
                 if event_type == 'message_start':
                     self._track_reply((event.get('message') or {}).get('id'))
                     self._turn_ended = False
+                    self._thinking = False
                     events.append(StreamEvent(kind='acting'))
                 elif event_type == 'content_block_start':
                     block = event.get('content_block') or {}
                     self._reply_blocks.add(block.get('type'))
+                    if block.get('type') in _THINKING_BLOCKS:
+                        self._thinking = True
+                        events.append(StreamEvent(kind='waiting'))
                     events += self._block_progress(block)
+                elif event_type == 'content_block_stop' and self._thinking:
+                    self._thinking = False
+                    events.append(StreamEvent(kind='acting'))
                 elif event_type == 'message_delta':
+                    self._thinking = False
                     delta = event.get('delta') or {}
                     if delta.get('stop_reason') == 'max_tokens':
                         events += self._thinking_cap()
@@ -216,6 +227,11 @@ class ClaudeParser(StreamParser):
                         )
                 # one reply spans a frame per content block under one id
                 self._track_reply(inner.get('id'))
+                # claude writes a block's frame as the block completes, so a
+                # frame landing while a think is open ends that think
+                if self._thinking:
+                    self._thinking = False
+                    events.append(StreamEvent(kind='acting'))
                 for block in inner.get('content') or []:
                     if isinstance(block, dict):
                         self._reply_blocks.add(block.get('type'))

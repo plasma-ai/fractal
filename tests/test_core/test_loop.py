@@ -60,6 +60,7 @@ __all__ = [
     'test_no_progress_steers_then_stalls_without_retry',
     'test_no_progress_clock_pauses_while_a_tool_runs',
     'test_thinking_never_resets_the_no_progress_clock',
+    'test_long_think_that_ends_in_an_action_is_not_stuck',
     'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_idle_clock_holds_while_the_agent_waits',
     'test_idle_clock_fires_on_a_silent_agent',
@@ -253,8 +254,9 @@ _BACKGROUND_WAIT = (
     pathlib.Path(__file__).parent / 'streams' / 'claude_background_wait.jsonl'
 )
 
-# claude stream-json frames for the scripted stand-in (SID: the launch's
-# session); thinking streams as raw partial-message deltas, never an action
+# claude stream-json frames for the scripted stand-in (SID: the
+# launch's session); a thinking block's start holds the clock until
+# the block completes, while thinking deltas alone are never an action
 _INIT = {'type': 'system', 'subtype': 'init', 'session_id': 'SID'}
 _TOOL_START = {
     'type': 'stream_event',
@@ -310,6 +312,22 @@ _THINKING = {
         'type': 'content_block_delta',
         'delta': {'type': 'thinking_delta', 'thinking': 'hmm'},
     },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_START = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_start',
+        'index': 0,
+        'content_block': {'type': 'thinking', 'thinking': '', 'signature': ''},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_STOP = {
+    'type': 'stream_event',
+    'event': {'type': 'content_block_stop', 'index': 0},
     'parent_tool_use_id': None,
     'session_id': 'SID',
 }
@@ -1442,6 +1460,35 @@ def test_thinking_never_resets_the_no_progress_clock(
         'PLAN/completed/steer',
         'EXECUTE/completed/',
     ]
+
+
+def test_long_think_that_ends_in_an_action_is_not_stuck(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A thinking block open past the clock holds it until the block completes.
+
+    The stream shows nothing of a think in progress, so the clock restarts
+    from the block's own frame, and the reply goes on to act.
+    """
+    thought = json.loads(json.dumps(_THINKING_REPLY))
+    thought['message']['id'] = _MESSAGE_START['event']['message']['id']
+    script = _claude_script(
+        _INIT,
+        _MESSAGE_START,
+        _THINKING_START,
+        'sleep 3',
+        thought,
+        _THINKING_STOP,
+        _TOOL_START,
+        _TOOL_RESULT,
+        _TEXT,
+        _RESULT,
+    )
+    agent = scripted_claude([script, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
 
 
 def test_thinking_cap_then_no_progress_stalls_the_step(
