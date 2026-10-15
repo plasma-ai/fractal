@@ -1664,6 +1664,14 @@ def test_rates_falls_back_through_the_openrouter_chain_codex(
 @pytest.mark.parametrize(
     argnames=('detail', 'unavailable'),
     argvalues=[
+        # captured from a live outage: codex exited mid-reconnect, turn unfinished
+        pytest.param(
+            'codex reported an error: Reconnecting... 2/5 (unexpected status 503'
+            ' Service Unavailable: An error occurred while processing your request.'
+            ' You can retry your request, or contact us through our help center',
+            True,
+            id='captured-503-mid-reconnect',
+        ),
         pytest.param(
             'Reconnecting... 5/5 (stream disconnected before completion: error'
             ' sending request for url (https://chatgpt.com/backend-api/codex/responses))',
@@ -1704,6 +1712,15 @@ def test_rates_falls_back_through_the_openrouter_chain_codex(
             ' timeout waiting for SSE); boom',
             False,
             id='mid-reconnect',
+        ),
+        # the same outage's stderr noise, which alone names no outage
+        pytest.param(
+            'ERROR codex_core::session: failed to record rollout items: thread'
+            ' 019a2c4e not found\n'
+            'ERROR codex_core::tools::router: error=write_stdin failed: Unknown'
+            ' process id 1042',
+            False,
+            id='captured-codex-core-errors',
         ),
         pytest.param('model not supported', False, id='model'),
         pytest.param(
