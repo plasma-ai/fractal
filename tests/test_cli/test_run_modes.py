@@ -1348,15 +1348,19 @@ def test_pause_reaps_past_a_broken_sibling(repo: dict) -> None:
 
 
 def test_self_pause_finishes_the_step_unmarked(repo: dict) -> None:
-    """A pause run from inside the step's own tree spares the step, unmarked.
+    """A pause run from inside the step's own tree leaves that tree whole, unmarked.
 
-    The reap never signals its caller's lineage, so the agent that pauses
-    its own node is not aborted: no abort marker may land (it would
-    classify a later, unrelated failure as paused), the step finishes, and
-    the loop parks at the next checkpoint.
+    The agent that pauses its own node is not aborted, and neither is any
+    tool it started: both tool sleepers keep running, no abort marker may
+    land (it would classify a later, unrelated failure as paused), the
+    confirmation claims no abort of the caller's own agent, the step
+    finishes, and the loop parks at the next checkpoint.
     """
     steps = {
-        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_SELF_PAUSE_MARKER}\n',
+        '01-gate.md': (
+            f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}'
+            f' {_SELF_PAUSE_MARKER}\n'
+        ),
         '02-commit.md': '# Commit\n\nCommit step.\n',
     }
     node = _make_node(repo, 'selfpause', detached=False, sync=False, steps=steps)
@@ -1368,12 +1372,18 @@ def test_self_pause_finishes_the_step_unmarked(repo: dict) -> None:
         assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
         output = (capture / 'self_pause.out').read_text(encoding='utf-8')
         assert (capture / 'self_pause.rc').read_text().strip() == '0', output
+        tools = _tool_pids(capture)
+        alive = _alive_pids(tools)
         marked = (node_dir / '.pause_abort').exists()
         (capture / 'gate_release').touch()
         proc.wait(timeout=60)
     finally:
         _, result = _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
 
+    assert len(tools) == 2, tools
+    assert sorted(alive) == sorted(tools), (alive, tools, output)
+    assert "except the caller's own" in output, output
     assert not marked, output
     assert result.returncode == 0, result.stdout
     assert _run(worktree, 'node', 'status').stdout.strip() == 'paused', result.stdout

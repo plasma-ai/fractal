@@ -47,12 +47,15 @@ class Reaped:
     ``survivors`` are the tree's members still alive after the KILL;
     ``strays`` are processes outside the tree whose working directory lies
     in the swept worktree -- reported, never signaled; ``spared`` are the
-    spared groups the walk reached and stopped at.
+    spared groups the walk reached and stopped at; ``inside`` says an
+    ``outside_only`` reap found its caller inside the tree and signaled
+    nothing.
     """
 
     survivors: tuple[Process, ...] = ()
     strays: tuple[Process, ...] = ()
     spared: tuple[int, ...] = ()
+    inside: bool = False
 
 
 def snapshot() -> dict[int, Process]:
@@ -106,6 +109,7 @@ def reap(
     owner: Optional[pathlib.Path] = None,
     spare: Callable[[], Collection[pathlib.Path]] = tuple,
     mark: Optional[pathlib.Path] = None,
+    outside_only: bool = False,
 ) -> Reaped:
     """TERM, then KILL, every process group an invocation's tree holds.
 
@@ -123,8 +127,10 @@ def reap(
     (still signaling late groups) before the KILL pass; zero KILLs at once.
 
     Never signals pid 0 or 1, the caller's group, or the group of any of
-    the caller's ancestors -- an agent pausing its own node keeps the
-    groups it runs in. Never signals a group recorded in a ``spare`` file,
+    the caller's ancestors, so a reap run from inside the tree lives to
+    finish; with ``outside_only``, such a caller (a root group is its own
+    or an ancestor's, as for an agent pausing its own node) signals
+    nothing at all. Never signals a group recorded in a ``spare`` file,
     nor walks through one: everything in it, in a session one of its
     processes leads, or below one of its processes is left alone. A root
     is never spared: it is the group being reaped, so a record naming one
@@ -159,6 +165,8 @@ def reap(
             before every signal round.
         mark: File to touch just before the first signal to a root group;
             left alone when every root group is protected.
+        outside_only: Signal nothing when the caller runs inside the tree,
+            reporting it as ``inside``.
 
     Returns:
         The tree's survivors, the spared groups it reached, and, with
@@ -173,6 +181,8 @@ def reap(
     except (OSError, subprocess.SubprocessError):
         _reap_groups(roots, grace=grace, mark=mark)
         return Reaped()
+    if outside_only and roots & tree.protected:
+        return Reaped(inside=True)
     return _reap(tree, grace=grace, worktree=worktree, owned=owned)
 
 

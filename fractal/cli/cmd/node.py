@@ -1637,6 +1637,9 @@ def node_reap(app: typer.Typer) -> typer.Typer:
     # grace option
     grace_help = 'Seconds between the TERM and KILL passes.'
     grace = typer.Option(fractal.util.process.GRACE_SECONDS, '--grace', help=grace_help)
+    # outside-only flag
+    outside_only_help = 'Signal nothing when this command runs inside the tree.'
+    outside_only = typer.Option(False, '--outside-only', help=outside_only_help)
 
     @command(app, '_reap')
     def _reap(
@@ -1644,6 +1647,7 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         worktree: Optional[str] = worktree,
         abort_marker: Optional[str] = abort_marker,
         grace: float = grace,
+        outside_only: bool = outside_only,
     ) -> None:
         """Reap process groups with their trees (invoked by pause.sh and kill.sh).
 
@@ -1651,6 +1655,9 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         with ``--worktree``, each spared loop group the walk reached and
         each process outside the tree whose working directory lies in that
         directory, other than a node's loop -- reported, never signaled.
+        Exit 1 when ``--outside-only`` finds this command inside the tree
+        (nothing signaled), 0 after a reap, 2 on a command error -- pause.sh
+        branches on the exit code.
         """
         worktree_dir = pathlib.Path(worktree) if worktree else None
         node = resolve_node(worktree) if worktree else None
@@ -1664,7 +1671,10 @@ def node_reap(app: typer.Typer) -> typer.Typer:
             owner=owner,
             spare=spare,
             mark=mark,
+            outside_only=outside_only,
         )
+        if reaped.inside:
+            raise SystemExit(1)
         for group in reaped.spared:
             typer.echo(
                 f"Note: spared process group {group} (another node's loop)",

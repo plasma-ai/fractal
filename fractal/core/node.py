@@ -112,6 +112,10 @@ _CLAIM_IN_FLIGHT = 'claim in flight'
 # groups and their trees
 _ORPHAN_GRACE_SECONDS = 2.0
 
+# pause.sh's outcome for an in-flight agent that runs the pause itself: the
+# reap leaves its whole tree alone, so no abort can be claimed for it
+_PAUSE_KEPT = 'Kept in-flight agent'
+
 # argv shapes a launch pane carries at every exec stage (env/start.sh, then
 # the exec'd loop): a pane command bearing one while naming another worktree
 # is provably another tree's launch, while a command bearing neither -- an
@@ -3816,14 +3820,16 @@ class Node:
         (``pause.sh`` reaps the recorded step process group), so every loop
         reclassifies the abort and parks: it exits with status ``paused``,
         leaving its run and iteration rows open for :meth:`resume` to adopt.
-        Fans out parent-first -- the inverse of every other signal -- so a
-        parent parked before its children can never drain-complete over
-        them, and re-enumerates until the subtree is fully signaled,
-        catching children spawned mid-fan-out (``init``/``start`` refuse
-        new work under the pause latch). On the user (root) node, which has
-        no loop of its own, the fan-out covers the whole tree with no self
-        signal -- the tree-wide brake -- and latches the root first, so
-        even a depth-1 start racing the sweep refuses until resume.
+        An agent that runs the pause itself is never aborted: its step
+        finishes and its loop parks at the next checkpoint. Fans out
+        parent-first -- the inverse of every other signal -- so a parent
+        parked before its children can never drain-complete over them, and
+        re-enumerates until the subtree is fully signaled, catching children
+        spawned mid-fan-out (``init``/``start`` refuse new work under the
+        pause latch). On the user (root) node, which has no loop of its own,
+        the fan-out covers the whole tree with no self signal -- the
+        tree-wide brake -- and latches the root first, so even a depth-1
+        start racing the sweep refuses until resume.
 
         Args:
             reason: Optional reason for pausing.
@@ -3842,10 +3848,9 @@ class Node:
         # every active one carries a pause signal -- the re-enumeration
         # catches children spawned mid-fan-out; best-effort per node
         # (mirrors kill), each attempted exactly once
-        paused_count = 0
-        if not self.is_user:
-            self._pause(reason)
-            paused_count += 1
+        outcomes: list[str] = []
+        if not self.is_user and (outcome := self._pause(reason)) is not None:
+            outcomes.append(outcome)
         attempted = set()
         while True:
             pending = [
@@ -3860,20 +3865,26 @@ class Node:
             for branch, descendant in pending:
                 attempted.add(branch)
                 try:
-                    if descendant._pause(propagated, fan_out=True):
-                        paused_count += 1
+                    outcome = descendant._pause(propagated, fan_out=True)
                 except Exception:
                     self.log(
                         message=f'Warning: failed to pause {descendant._root}',
                         level=logging.WARNING,
                     )
+                    continue
+                if outcome is not None:
+                    outcomes.append(outcome)
         # build confirmation
-        if paused_count == 0:
+        if not outcomes:
             return 'No active nodes to pause (tree latched until resume).'
-        suffix = 's' if paused_count != 1 else ''
+        suffix = 's' if len(outcomes) != 1 else ''
+        # an agent that runs the pause itself is kept to finish its step
+        aborted = 'in-flight agents aborted'
+        if any(outcome.startswith(_PAUSE_KEPT) for outcome in outcomes):
+            aborted = "in-flight agents aborted except the caller's own"
         result = (
-            f'Pause signal sent to {paused_count} node{suffix}'
-            ' (in-flight agents aborted; loops park paused)'
+            f'Pause signal sent to {len(outcomes)} node{suffix}'
+            f' ({aborted}; loops park paused)'
         )
         if reason:
             result += f': {reason}'
@@ -3884,20 +3895,22 @@ class Node:
         reason: Optional[str] = None,
         *,
         fan_out: bool = False,
-    ) -> bool:
+    ) -> Optional[str]:
         """Signal ``pause`` and abort this node's in-flight agent invocation.
 
         The guard re-read and the event/signal writes stay atomic under the
-        ``.worktrees`` flock; ``pause.sh`` runs outside the lock. Reports
-        whether the signal landed, so the sweep's count skips a refused
-        descendant.
+        ``.worktrees`` flock; ``pause.sh`` runs outside the lock. Returns
+        ``pause.sh``'s outcome line, or ``None`` when the signal was
+        refused, so the sweep's count skips a refused descendant and the
+        confirmation can tell an abort from an agent the pause left running
+        because the agent runs the pause itself.
         """
         with worktree.lock(self.repo_dir):
             # re-read under the lock -- a rival verb or the settling loop
             # may have moved this node since the caller enumerated it
             guard = self._signal_guard('pause', 'pause', fan_out=fan_out, locked=True)
             if guard is None:
-                return False
+                return None
             # the signal lands before the abort so the loop reclassifies
             # the killed step as paused, never as a failed step (a failure
             # would force-commit and open a fresh session)
@@ -3914,7 +3927,7 @@ class Node:
         for line in result.stderr.splitlines():
             self.log(message=line, level=logging.WARNING)
         self.record.event_end(event_id=event_id, status='completed')
-        return True
+        return result.stdout.strip()
 
     def resume(self: Node) -> str:
         """Resume the node and its paused descendants (leaf-first).

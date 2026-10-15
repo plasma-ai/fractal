@@ -83,8 +83,19 @@ ABORT_MARKER="${STEP_PGID_FILE%.step_pgid}.pause_abort"
 # reap the agent's whole tree -- its tool commands run in groups (or sessions)
 # of their own; the loop lives above the tree and survives to record the park;
 # survivors and worktree strays are named on stderr
-if ! fractal node _reap --pgid="$STEP_PGID" --worktree="$WORKTREE_DIR" \
-    --abort-marker="$ABORT_MARKER"; then
+REAP_STATUS=0
+fractal node _reap --pgid="$STEP_PGID" --worktree="$WORKTREE_DIR" \
+    --abort-marker="$ABORT_MARKER" --outside-only || REAP_STATUS=$?
+
+# exit 1: the pause runs inside the agent's own tree (an agent pausing its
+# own node), so nothing was signaled -- the step finishes and the loop parks
+if ((REAP_STATUS == 1)); then
+    echo "Kept in-flight agent (pgid $STEP_PGID): the pause runs inside it," \
+        "so the loop parks at its next checkpoint"
+    exit 0
+fi
+
+if ((REAP_STATUS != 0)); then
     # the helper could not run: TERM the agent group alone; when timeout(1)
     # leads the group it forwards the TERM to the agent
     touch "$ABORT_MARKER"
