@@ -316,15 +316,14 @@ def _step_occurrence(row: dict, rows: Iterable[dict]) -> int:
         The occurrence, for ``Step.find``.
 
     """
-    return len(
-        {
-            other['step']
-            for other in rows
-            if other['iter_id'] == row['iter_id']
-            and other['step_name'] == row['step_name']
-            and other['step'] < row['step']
-        }
-    )
+    numbers = {
+        other['step']
+        for other in rows
+        if other['iter_id'] == row['iter_id']
+        and other['step_name'] == row['step_name']
+        and other['step'] < row['step']
+    }
+    return len(numbers)
 
 
 def _steer_charge(row: dict, rows: Iterable[dict]) -> float:
