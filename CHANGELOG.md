@@ -83,10 +83,11 @@ may include breaking changes, each listed under a Breaking heading.
   one-hour cap (`retrying in 20s (provider unavailable)`), and a completed
   launch resets the streak. `step_retries` still bounds the attempts; other
   failures keep the fixed backoff.
-- A node's record directories admit `.diff` and `.patch` files — plain text,
-  like `.py` — so a patch kept under `plans/` commits instead of being withheld
-  as not a node record. Images and run output (`.png`, `.log`, `.err`) stay
-  refused.
+- A node's record directories admit `.py`, `.diff`, and `.patch` files — plain
+  text like the seeded `.sh` scripts — so a Python checker under `memory/` or
+  `scripts/`, or a patch kept under `plans/`, commits instead of being withheld
+  as not a node record. Keys, archives, binaries, images, and run output
+  (`.png`, `.log`, `.err`) stay refused.
 - `fractal commit`'s ignore-rule warning names the paths it counts: the first
   ten, each with its rule as `git check-ignore -v` reports it (source file,
   line, and pattern), then `... and N more`. It says the paths are held by
@@ -98,10 +99,6 @@ may include breaking changes, each listed under a Breaking heading.
   `Held out: N estate file(s) not staged; N path(s) ignored` line (non-zero
   parts only) whenever either warning fired, after any hook or gate output and
   on a no-op commit too.
-- A node's record directories admit `.py` files — plain text like the seeded
-  `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
-  instead of being withheld as not a node record. Keys, archives, and binaries
-  stay refused.
 - A node's `fractal commit --init` baseline carries only the node's own seed
   (its data dir under `.fractal/`) and init's `.gitattributes` edit, and refuses
   any other change by name before staging. The baseline skips the wiki refresh
@@ -169,9 +166,11 @@ may include breaking changes, each listed under a Breaking heading.
   thought and capped again. The loop now ends the agent at the first such cap
   and resumes the same session once with `modes/STALL.md`, which tells the agent
   to write down what it has and take the next concrete action, on a `steer` row
-  that uses no `step_retries`. A second stuck launch after the steer ends the
-  step `exited` as stalled, never retried, fails the iteration as a timeout
-  does, and posts a `step stalled` notice to the node's outbox for the parent.
+  that uses no `step_retries`. The steered launch's deadline runs from the stuck
+  launch's start, and `fractal node time remaining` and the cockpit's step clock
+  count it the same way. A second stuck launch after the steer ends the step
+  `exited` as stalled, never retried, fails the iteration as a timeout does, and
+  posts a `step stalled` notice to the node's outbox for the parent.
 - `fractal node pause`, `fractal node kill`, a step deadline, a stream failure,
   the crashed-node heal, and a timed-out `codex` preflight probe end the agent's
   whole process tree instead of only its process group. Agent CLIs run tool
@@ -191,23 +190,21 @@ may include breaking changes, each listed under a Breaking heading.
   (`$DETACHED_MODE`, `$META_MODE`, `$META_TARGET`) stay pinned to their boot
   values, as does `$FRACTAL_HEADLESS`, and the prompt now takes `$META_TARGET`
   from the same pinned set.
-- `node merge`'s refresh of the other wiki roots judges an index merged when its
-  staged bytes match neither side's, so a criss-cross merge base no longer hides
-  one; matches every folder literally, so a glob character in a folder name
-  never refuses or stages a sibling's files; and skips an index in a folder its
-  wiki excludes instead of failing the merge. A wiki declared at the worktree
-  root refuses the merge by name, since every refresh would walk the whole
-  worktree and leave the target dirty.
-- `node merge` regenerates the indexes the merge driver merged in every wiki
-  root, not only the project wiki: in each folder declaring a tracked
-  `.wiki/settings.json`, an `_index.md` changed on both sides since the merge
-  base gets a `wiki update` scoped to its folder before validation and rides the
-  squash commit. Two siblings that add pages to one folder of a corpus wiki no
-  longer land its index out of order, failing a whole-root
-  `wiki update --check`; an index outside those folders keeps its bytes. The
-  refresh reads the disk, so the merge refuses an untracked file under the
-  project wiki or in a refreshed folder, naming it, instead of indexing it into
-  the squash commit, where its row would dangle in every clean checkout.
+- `node merge` regenerates every `_index.md` the merge driver merged — one whose
+  staged bytes match neither side's — in each wiki root, not only the project
+  wiki: in every folder declaring a tracked `.wiki/settings.json`, it runs a
+  `wiki update` scoped to the index's folder (the whole root for the root's own
+  index) before validation, and the result rides the squash commit. Two siblings
+  that add pages to one folder of a corpus wiki land its index in the order
+  `wiki update` writes, so a whole-root `wiki update --check` stays clean; an
+  index outside those folders keeps its bytes. Folders are matched literally, so
+  a glob character in a folder name never refuses or stages a sibling's files,
+  and an index in a folder its wiki excludes is skipped. The refresh reads the
+  disk, so the merge refuses an untracked file under the project wiki or in a
+  refreshed folder, naming it, instead of indexing it into the squash commit,
+  where its row would dangle in every clean checkout. A wiki declared at the
+  worktree root refuses the merge by name, since every refresh would walk the
+  whole worktree and leave the target dirty.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The
@@ -277,18 +274,15 @@ may include breaking changes, each listed under a Breaking heading.
 - A step file's `timeout:` frontmatter now reaches every report of that step's
   limit, not only its enforcement. `$TIME_BUDGET` is rebuilt for each step and
   names that step's own ceiling (a 6h step on a 2h node reads `6h/step`).
-  `fractal node time remaining` and `Time.limit('step')` count down the active
-  step's ceiling, and the node's own seat reads the exact value its launch
-  exported. The `node list` stale flag waits out the active step's ceiling, and
-  the cockpit's step time ceiling shows it. The soft-cap warning stays quiet
-  when every launch has a timeout, counting each step file's own. The boot
-  banner labels the node value `step-timeout: 2h (default)`, and a timed-out
-  run's reason keeps naming the node's walls.
-- `fractal node time remaining` counts a steered step down from its stuck
-  launch, as the loop's deadline does, instead of overstating the time left by
-  the stuck launch's span; the cockpit's step clock carries the same charge. An
-  idle node whose step files carry their own `timeout:` reads `not running` for
-  the step scope, not `no limit`.
+  `fractal node time remaining` counts down, and `Time.limit('step')` returns,
+  the active step's ceiling, and the node's own seat reads the exact value its
+  launch exported; an idle node whose step files carry their own `timeout:`
+  reads `not running` for the step scope, not `no limit`. The `node list` stale
+  flag waits out the active step's ceiling, and the cockpit's step time ceiling
+  shows it. The soft-cap warning stays quiet when every launch has a timeout,
+  counting each step file's own. The boot banner labels the node value
+  `step-timeout: 2h (default)`, and a timed-out run's reason keeps naming the
+  node's walls.
 
 ## [1.3.0] - 2026-09-17
 
