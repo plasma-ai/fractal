@@ -24,8 +24,9 @@ nothing in `core/`, `cli/`, or `tui/` changes.
 Backends override only `_`-prefixed hooks and capability attributes; the public
 verbs own validation, event emission, and the settle invariants. The
 public/private pairing is uniform: the public verb (invocation, spawn,
-preflight, seeding, session and cost recording) validates and emits, then
-delegates to its private hook, which the subclass implements:
+preflight, seeding, session and cost recording, the outage verdict, and a killed
+launch's settle) validates and emits, then delegates to its private hook, which
+the subclass implements:
 
 - the invocation hook builds the provider argv for a fresh, resumed, or forked
   session, spelling the model, effort, and budget overrides in the provider's
@@ -47,9 +48,16 @@ delegates to its private hook, which the subclass implements:
   parser's recorded errors here once the exit status is known — codex clears the
   in-turn error frames a completed turn recovered from (see
   [[features/agents/providers]]);
+- the outage hook (behind `Agent.unavailable`) reads a failed launch's detail —
+  failed result frames, stream errors, and the stderr capture — and says whether
+  it names a provider outage, which paces the loop's retry exponentially; it
+  defaults to no outage;
 - the configured-model and rates hooks back cost accounting: the former resolves
   the model the provider's own config defaults to, the latter maps a model to
   its pricing;
+- the settle hook (behind `Agent.settle_cost`) prices a killed launch's window,
+  from spawn to exit, from the provider's own per-message usage record, per
+  invocation; it defaults to none, leaving the stream's figure standing;
 - the transcript hook (with its fallback) locates a session's transcript file —
   the seam the project-files surface fronts (see
   [[features/files/transcripts]]);
@@ -63,9 +71,11 @@ delegates to its private hook, which the subclass implements:
   copy.
 
 Capability declarations — session forking, who mints session ids, cost scope,
-pricing needs, budget enforcement, result-frame cadence, and the provider route
-list — are class attributes read by the base class; see
-[[features/agents/providers]] for their meaning.
+pricing needs, budget enforcement, progress reporting (`reports_progress`:
+whether the stream marks acting and waiting, which arms the no-progress
+watchdog), result-frame cadence, and the provider route list — are class
+attributes read by the base class; see [[features/agents/providers]] for their
+meaning.
 
 Observability rides the `on_`-event hooks: a host application overrides them
 (calling super and returning the event) to ship telemetry. The package emits to

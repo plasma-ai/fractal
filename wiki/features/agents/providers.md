@@ -31,8 +31,10 @@ be forked; whether the agent mints its own session id (codex) or the caller
 mints and pre-stamps it (claude); whether cost figures are per-invocation or
 cumulative thread totals settled against prior sibling steps; whether the
 backend needs LiteLLM token pricing (fatal at run start if the fetch fails);
-whether it accepts a hard per-step budget flag; and whether it emits one result
-frame per step (opencode) rather than one terminal result per turn.
+whether it accepts a hard per-step budget flag; whether its stream marks when
+the agent takes and hands off control (`reports_progress`: claude), which arms
+the no-progress watchdog; and whether it emits one result frame per step
+(opencode) rather than one terminal result per turn.
 
 ## The registry
 
