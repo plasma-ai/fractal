@@ -123,10 +123,14 @@ A Claude reply that hits the output-token cap while still thinking (no text, no
 tool call) loops: Claude Code auto-continues with an injected user turn, but the
 continuation drops the cut-off thinking, so the agent restarts the thought and
 caps again until the step times out. The Claude parser reports a
-provider-neutral `thinking_cap` stream event when that continuation follows a
-thinking-only top-level reply; it reads the reply's content across its per-block
-frames because the stream's `stop_reason` is always null on assistant frames.
-Sub-agent replies never count.
+provider-neutral `thinking_cap` stream event, once per reply, for a top-level
+reply whose blocks were all thinking. Either of two signals triggers it: the raw
+API `message_delta` with a `max_tokens` stop (the loop always passes
+`--include-partial-messages`, and the stop lands before Claude Code requests the
+continuation), or, as a backstop, Claude Code's "Output token limit hit"
+continuation, matched on its text alone since its flag is undocumented.
+Assistant frames cannot serve: their `stop_reason` is always null. Sub-agent
+replies never count.
 
 For a work step (never SYNC) the loop ends the invocation on the stream-error
 path — the render callback raises, so the reader's death kills the agent's group

@@ -216,9 +216,9 @@ class StreamEvent:
 
     A ``'thinking_cap'`` (carrying ``session``) reports a top-level reply
     that hit the output-token cap while still thinking -- no text and no
-    tool call -- as the agent moves to continue past it: the continuation
-    loses the cut-off thought, so the agent restarts it and caps again.
-    Sub-agent replies never report one.
+    tool call -- once per reply: an agent that continues past it loses the
+    cut-off thought, so it restarts the thought and caps again. Sub-agent
+    replies never report one.
     """
 
     # NOTE: fields cluster by the event kind that populates them rather than

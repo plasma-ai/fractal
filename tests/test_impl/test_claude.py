@@ -386,29 +386,84 @@ def test_parser_marks_a_budget_stop(subtype: str, stopped: bool) -> None:
     assert parser.budget_stopped is stopped
 
 
+# a capped reply as the stream carries it: the raw message_start, a thinking
+# block's start and its assistant frame (stop_reason null), then the raw
+# message_delta carrying the API's max_tokens stop
+_CAPPED_THINKING = (
+    ('start', 'msg_1', None),
+    ('thinking_start', 'msg_1', None),
+    ('thinking', 'msg_1', None),
+)
+
+
 @pytest.mark.parametrize(
-    argnames=('reply', 'capped'),
+    argnames=('frames', 'capped'),
     argvalues=[
-        # the defect: the whole reply was thinking when the cap cut it
-        pytest.param([('thinking', 'msg_1', None)], True, id='thinking-only'),
-        # a reply that reached text or a tool call before the cap has work to
-        # continue from -- claude's own continuation is the right response
+        # the API's own stop alone reports the cap, before any continuation
+        pytest.param([*_CAPPED_THINKING, ('stop', 'msg_1', None)], True, id='stop'),
+        # claude's continuation alone backstops it (no partial-message events)
         pytest.param(
-            [('thinking', 'msg_1', None), ('text', 'msg_1', None)],
+            [('thinking', 'msg_1', None), ('continuation', None, None)],
+            True,
+            id='continuation',
+        ),
+        # the undocumented flag on claude's injected turn is never required
+        pytest.param(
+            [('thinking', 'msg_1', None), ('unflagged_continuation', None, None)],
+            True,
+            id='unflagged-continuation',
+        ),
+        # both signals for one reply report it once
+        pytest.param(
+            [
+                *_CAPPED_THINKING,
+                ('stop', 'msg_1', None),
+                ('continuation', None, None),
+            ],
+            True,
+            id='stop-and-continuation',
+        ),
+        # a reply that reached text or a tool call before the cap has work to
+        # continue from -- claude's own continuation is the right response;
+        # a block seen only on its raw start event still counts
+        pytest.param(
+            [
+                *_CAPPED_THINKING,
+                ('text', 'msg_1', None),
+                ('stop', 'msg_1', None),
+                ('continuation', None, None),
+            ],
             False,
             id='text',
         ),
         pytest.param(
-            [('thinking', 'msg_1', None), ('tool_use', 'msg_1', None)],
+            [
+                *_CAPPED_THINKING,
+                ('tool_use', 'msg_1', None),
+                ('stop', 'msg_1', None),
+                ('continuation', None, None),
+            ],
             False,
             id='tool-use',
         ),
-        # a sub-agent's thinking-only cap and continuation are its own
-        # business; the top-level reply before them launched the sub-agent
+        pytest.param(
+            [
+                *_CAPPED_THINKING,
+                ('text_start', 'msg_1', None),
+                ('stop', 'msg_1', None),
+            ],
+            False,
+            id='text-streamed',
+        ),
+        # a sub-agent's thinking-only cap is its own business; the top-level
+        # reply before it launched the sub-agent
         pytest.param(
             [
                 ('tool_use', 'msg_1', None),
+                ('start', 'msg_2', 'toolu_1'),
+                ('thinking_start', 'msg_2', 'toolu_1'),
                 ('thinking', 'msg_2', 'toolu_1'),
+                ('stop', 'msg_2', 'toolu_1'),
                 ('continuation', None, 'toolu_1'),
             ],
             False,
@@ -417,26 +472,27 @@ def test_parser_marks_a_budget_stop(subtype: str, stopped: bool) -> None:
     ],
 )
 def test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply(
-    reply: list[tuple[str, Optional[str], Optional[str]]],
+    frames: list[tuple[str, Optional[str], Optional[str]]],
     capped: bool,
 ) -> None:
-    """A continuation after a thinking-only top-level reply is a thinking cap.
+    """A thinking-only top-level reply cut at the output cap reports once.
 
-    Frames are trimmed from a real ``stream-json`` capture: claude emits one
-    assistant frame per content block (``stop_reason`` always null), then
-    injects a synthetic continuation when a reply hits the output cap; after
-    its last continuation it gives up with a synthetic error reply and an
+    Frames are trimmed from a real ``stream-json`` capture: the raw
+    ``message_delta`` stop is the primary signal, claude's injected
+    continuation the backstop, and either reports the cap. After its last
+    continuation claude gives up with a synthetic error reply and an
     ``is_error`` result, which parse as a plain failed result.
     """
     parser = ClaudeParser()
-    # each reply entry is (block type, message id, parent tool-use id)
-    frames = [
-        {'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'},
-        *(_reply_frame(*entry) for entry in reply),
-        _continuation_frame(),
-        *_GIVE_UP_FRAMES,
-    ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    # each entry is (frame kind, message id, parent tool-use id)
+    lines = _lines(
+        [
+            {'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'},
+            *(_reply_frame(*entry) for entry in frames),
+            *_GIVE_UP_FRAMES,
+        ]
+    )
+    events = [event for line in lines for event in parser.feed(line)]
     caps = [event for event in events if event.kind == 'thinking_cap']
     assert len(caps) == (1 if capped else 0)
     if capped:
@@ -1321,20 +1377,47 @@ def _reply_frame(
     message_id: Optional[str],
     parent: Optional[str],
 ) -> dict[str, Any]:
-    """Return one claude frame of a reply: a content block or a continuation.
+    """Return one claude frame of a reply.
 
-    Claude emits an assistant frame per content block, ``stop_reason``
-    always null; ``kind`` names the block (``thinking``/``text``/
-    ``tool_use``) or ``continuation`` for its synthetic output-cap turn.
+    ``kind`` names an assistant frame's content block (``thinking``/
+    ``text``/``tool_use``; ``stop_reason`` always null), a raw API event
+    (``start`` for ``message_start``, ``<block>_start`` for a
+    ``content_block_start``, ``stop`` for a ``max_tokens``
+    ``message_delta``), or ``continuation`` for claude's injected turn
+    (``unflagged_continuation`` without its ``isSynthetic`` flag).
     """
     if kind == 'continuation':
         return _continuation_frame(parent=parent)
+    if kind == 'unflagged_continuation':
+        frame = _continuation_frame(parent=parent)
+        del frame['isSynthetic']
+        return frame
+    if kind == 'start':
+        event = {'type': 'message_start', 'message': {'id': message_id, 'content': []}}
+        return _stream_event(event, parent=parent)
+    if kind == 'stop':
+        delta = {'stop_reason': 'max_tokens', 'stop_sequence': None}
+        return _stream_event({'type': 'message_delta', 'delta': delta}, parent=parent)
+    if kind.endswith('_start'):
+        block = {'type': kind.removesuffix('_start')}
+        event = {'type': 'content_block_start', 'index': 0, 'content_block': block}
+        return _stream_event(event, parent=parent)
     blocks = {
         'thinking': {'type': 'thinking', 'thinking': '', 'signature': 'CAQS'},
         'text': {'type': 'text', 'text': 'Rivers are'},
         'tool_use': {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Agent', 'input': {}},
     }
     return _assistant_frame(f'{message_id}', blocks[kind], parent=parent)
+
+
+def _stream_event(event: dict[str, Any], *, parent: Optional[str]) -> dict[str, Any]:
+    """Return a ``--include-partial-messages`` frame wrapping a raw API event."""
+    return {
+        'type': 'stream_event',
+        'event': event,
+        'session_id': 'sess-1',
+        'parent_tool_use_id': parent,
+    }
 
 
 def _assistant_frame(

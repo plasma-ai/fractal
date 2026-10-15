@@ -32,7 +32,7 @@ _ROUTING_KEYS = (
 )
 
 #: Opening of the user turn claude injects to auto-continue a reply cut off at
-#: the output cap (flagged ``isSynthetic`` on the stream).
+#: the output cap.
 _CONTINUATION_PREFIX = 'Output token limit hit.'
 
 #: Content block types of a reply that is still thinking.
@@ -58,11 +58,12 @@ class ClaudeParser(StreamParser):
         # claude emits one assistant frame per content block, each repeating
         # the message-level usage, so a message id is priced only once
         self._priced_id: Optional[str] = None
-        # the newest top-level reply and the content block types across its
-        # per-block frames -- a continuation after a thinking-only reply is a
-        # thinking cap
+        # the newest top-level reply, the content block types across its
+        # frames, and whether its thinking cap was reported -- the cap's two
+        # signals (the API's own stop and claude's continuation) report once
         self._reply_id: Optional[str] = None
         self._reply_blocks: set[Optional[str]] = set()
+        self._reply_capped = False
 
     def feed(self: ClaudeParser, line: str) -> list[StreamEvent]:
         """Parse one claude stream line into normalized events."""
@@ -92,10 +93,24 @@ class ClaudeParser(StreamParser):
                     StreamEvent(kind='session', session=session, model=self.model)
                 )
         message_type = message.get('type')
+        top_level = message.get('parent_tool_use_id') is None
         # assistant text deltas and tool-use headers
         if message_type == 'stream_event':
             event = message.get('event') or {}
             event_type = event.get('type')
+            # the raw API events track the top-level reply's id, its blocks,
+            # and its stop: a max_tokens stop is the cap's primary signal,
+            # landing before claude requests the continuation
+            if top_level:
+                if event_type == 'message_start':
+                    self._track_reply((event.get('message') or {}).get('id'))
+                elif event_type == 'content_block_start':
+                    block = event.get('content_block') or {}
+                    self._reply_blocks.add(block.get('type'))
+                elif event_type == 'message_delta':
+                    delta = event.get('delta') or {}
+                    if delta.get('stop_reason') == 'max_tokens':
+                        events += self._thinking_cap()
             if event_type == 'content_block_start':
                 block = event.get('content_block') or {}
                 if block.get('type') == 'tool_use':
@@ -112,12 +127,10 @@ class ClaudeParser(StreamParser):
         # tool results
         elif message_type == 'user':
             content = (message.get('message') or {}).get('content') or []
-            # claude's auto-continuation drops the cut-off thinking, so a
-            # thinking-only reply restarts from scratch and caps again; the
-            # stream's stop_reason stays null, so the continuation is the signal
-            thinking = self._reply_blocks and self._reply_blocks <= _THINKING_BLOCKS
-            if thinking and _is_continuation(message):
-                events.append(StreamEvent(kind='thinking_cap', session=self.session))
+            # claude's own continuation backstops the API stop (assistant
+            # frames carry a null stop_reason, so it is the only other sign)
+            if top_level and _is_continuation(message):
+                events += self._thinking_cap()
             for item in content:
                 if isinstance(item, dict) and item.get('type') == 'tool_result':
                     # extract text from tool result
@@ -151,7 +164,7 @@ class ClaudeParser(StreamParser):
             # `models` keeps every distinct one so a mid-stream recovery
             # stays visible; sidechain rows run their own model and synthetic
             # rows name none -- neither feeds the record
-            if message.get('parent_tool_use_id') is None:
+            if top_level:
                 model = inner.get('model')
                 real = isinstance(model, str) and model and model != '<synthetic>'
                 if real and self.session is not None:
@@ -167,10 +180,7 @@ class ClaudeParser(StreamParser):
                             )
                         )
                 # one reply spans a frame per content block under one id
-                reply_id = inner.get('id')
-                if reply_id != self._reply_id:
-                    self._reply_id = reply_id
-                    self._reply_blocks = set()
+                self._track_reply(inner.get('id'))
                 for block in inner.get('content') or []:
                     if isinstance(block, dict):
                         self._reply_blocks.add(block.get('type'))
@@ -221,6 +231,25 @@ class ClaudeParser(StreamParser):
                 )
             )
         return events
+
+    def _track_reply(self: ClaudeParser, reply_id: Optional[str]) -> None:
+        """Start tracking a new top-level reply when ``reply_id`` changes."""
+        if reply_id != self._reply_id:
+            self._reply_id = reply_id
+            self._reply_blocks = set()
+            self._reply_capped = False
+
+    def _thinking_cap(self: ClaudeParser) -> list[StreamEvent]:
+        """Report the tracked reply's thinking cap, once, if it only thought.
+
+        Claude's continuation drops the cut-off thinking, so a reply with no
+        text and no tool call restarts from scratch and caps again.
+        """
+        blocks = self._reply_blocks
+        if self._reply_capped or not blocks or not blocks <= _THINKING_BLOCKS:
+            return []
+        self._reply_capped = True
+        return [StreamEvent(kind='thinking_cap', session=self.session)]
 
     def _message_cost(self: ClaudeParser, usage: dict[str, Any]) -> Optional[float]:
         """Hook for an assistant frame's running cost estimate."""
@@ -499,14 +528,12 @@ def _rates(model: str) -> Optional[dict[str, Any]]:
 
 
 def _is_continuation(message: dict[str, Any]) -> bool:
-    """Return whether a user frame is claude's top-level output-cap continuation.
+    """Return whether a user frame is claude's output-cap continuation.
 
-    Claude flags the turns it injects ``isSynthetic``; the text tells the
-    output-cap continuation apart from its other synthetic turns, and a
-    sub-agent's continuation carries its ``parent_tool_use_id``.
+    Matched on the text alone: the flag claude stamps on its injected turns
+    is undocumented (``isSynthetic`` on the stream, ``isMeta`` in the
+    transcript), so a missing flag never disarms the match.
     """
-    if not message.get('isSynthetic') or message.get('parent_tool_use_id') is not None:
-        return False
     content = (message.get('message') or {}).get('content')
     # the stream carries text blocks; a bare string is the same turn's other shape
     if isinstance(content, str):

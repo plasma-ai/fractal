@@ -388,9 +388,9 @@ A Claude reply can hit the 128,000-token output cap while still thinking,
 with no text and no tool call. Claude Code then continues on its own, but the
 continuation drops the cut-off thinking, so the agent starts the thought over
 and hits the cap again, until the step times out. The loop watches for this
-case — a thinking-only top-level reply followed by Claude Code's own
-"Output token limit hit" continuation — and ends the agent before it
-continues. Sub-agent replies, and replies that reached text or a tool call,
+case — a thinking-only top-level reply that the API stops at
+``max_tokens``, or that Claude Code follows with its own "Output token limit
+hit" continuation — and ends the agent before it continues. Sub-agent replies, and replies that reached text or a tool call,
 are left alone.
 
 The first cap in an attempt **steers** the step: the capped row closes
