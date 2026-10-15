@@ -23,9 +23,9 @@ from typing import Any, Optional
 from rich.text import Text
 
 import fractal.core.cost
+import fractal.core.time
 import fractal.util
 from fractal.core.loop import Step
-from fractal.core.time import _steer_charge, _step_occurrence
 
 from . import fmt, theme
 from .data import TuiData, display_name_of, leaf_of, parse_ts, span, user_tag
@@ -591,7 +591,7 @@ class SnapshotBuilder:
         elapsed_step = self._elapsed(step) if step else None
         started_step = _open_epoch(step)
         if step is not None:
-            charge = _steer_charge(step, it_steps)
+            charge = fractal.core.time._steer_charge(step, it_steps)
             if elapsed_step is not None:
                 elapsed_step += charge
             if started_step is not None:
@@ -1090,7 +1090,7 @@ def _step_cap(
         found = Step.find(
             node_dir / 'steps',
             name=step['step_name'],
-            occurrence=_step_occurrence(step, it_steps),
+            occurrence=fractal.core.time._step_occurrence(step, it_steps),
         )
         seconds = default if found is None else found.limit(default)
     except (OSError, ValueError):
