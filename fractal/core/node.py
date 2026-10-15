@@ -4137,7 +4137,11 @@ class Node:
         the advance carries the frozen step's uncommitted state the way
         ``git checkout`` moves a branch, refusing the whole merge when it
         would touch a dirty path or an untracked or ignored file, and rolling
-        the target and the node back when anything fails after the commit.
+        the target and the node back when anything fails after the commit. A
+        frozen step stopped inside a git operation -- a merge, squash merge,
+        cherry-pick, revert, or rebase, or a git command still running or
+        killed with its ``index.lock`` held -- refuses the merge before
+        anything changes.
 
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
@@ -4216,6 +4220,21 @@ class Node:
         # one squash at a time per repo: two sibling merges racing into the
         # same target interleave their index writes and leave it half-merged
         with worktree.merge_lock(self.repo_dir):
+            # a frozen step can stop inside a git operation, which the carried
+            # advance would move the branch under (git itself refuses to
+            # switch branches mid-merge); a probe that cannot answer raises
+            if current == 'paused':
+                if operations := fractal.util.git.in_progress(self.worktree):
+                    named = ', '.join(
+                        f'{operation} ({marker})' for operation, marker in operations
+                    )
+                    raise RuntimeError(
+                        f'Cannot merge paused node {self.branch}: its worktree has'
+                        f' {named}. Resume the node and let it finish or abort'
+                        ' the operation, or finish or abort it by hand in the'
+                        ' worktree, then merge again; remove a stale index.lock'
+                        ' only once no git process runs there.'
+                    )
             result = self._run_script('merge.sh', *args)
         # success-path warnings ride stderr (e.g. a skipped merge-base
         # advance predicting spurious re-merge diffs) and would vanish with

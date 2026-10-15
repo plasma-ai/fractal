@@ -27,9 +27,15 @@ interleaving their index writes.
 
 A paused node merges without leaving `paused`: it runs no loop and no agent, so
 its branch is quiescent, and its run, iteration, and step rows stay open for
-`fractal resume` to adopt. Only committed work lands. `Node.merge` passes
-`merge.sh --carry-dirty`, and the merge-base advance then carries the frozen
-step's uncommitted state the way `git checkout` moves a branch instead of
+`fractal resume` to adopt. Only committed work lands. A frozen step that stopped
+inside a git operation — a merge, squash merge, cherry-pick, or revert stopped
+on a conflict, a rebase stopped part-way, or the `index.lock` of a git command
+still running or killed — refuses the merge before anything changes, naming the
+operation and its marker: resume the node and let it finish or abort the
+operation, or finish or abort it by hand in the worktree, then merge again
+(remove a stale `index.lock` only once no git process runs there). `Node.merge`
+passes `merge.sh --carry-dirty`, and the merge-base advance then carries the
+frozen step's uncommitted state the way `git checkout` moves a branch instead of
 skipping on a dirty worktree (a skipped advance would make the next landing
 re-diff from the fork point). Before the target commits, the advance tree is
 built from the staged target tree, and a dry-run two-tree `read-tree` against a

@@ -417,11 +417,16 @@ Landing a paused node
 ``fractal node merge <node>`` on a paused node lands its *committed* work in
 its merge target and leaves it ``paused``: its run, iteration, and step rows
 are untouched, so ``fractal resume`` adopts the same run afterwards. The
-frozen step's uncommitted work stays in the node's worktree. The merge-base
-advance carries that state the way ``git checkout`` moves a branch; if the
-advance would change a path the node holds dirty or staged, or write over an
-untracked or ignored file, the whole merge refuses and names the paths, and a
-failure after the squash commit rolls back both the target and the node. The
+frozen step's uncommitted work stays in the node's worktree. A step frozen
+inside a git operation — a merge, squash merge, cherry-pick, or revert
+stopped on a conflict, a rebase stopped part-way, or the ``index.lock`` of a
+git command still running or killed — refuses the merge before anything
+changes: finish or abort the operation, by resuming the node or by hand in
+its worktree, and merge again. The merge-base advance carries the frozen state
+the way ``git checkout`` moves a branch; if the advance would change a path
+the node holds dirty or staged, or write over an untracked or ignored file,
+the whole merge refuses and names the paths, and a failure after the squash
+commit rolls back both the target and the node. The
 target must still be settled (a depth-1 node lands into its user branch even
 during a tree-wide pause); a live node, or a child landing into a live or
 paused parent, still refuses. ``--message`` sets the squash commit's text, so

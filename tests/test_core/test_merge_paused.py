@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 
@@ -15,6 +16,7 @@ __all__ = [
     'test_paused_merge_lands_twice_and_carries_the_frozen_step',
     'test_paused_merge_validation_refusal_changes_nothing',
     'test_paused_merge_refuses_an_advance_over_dirty_paths',
+    'test_paused_merge_refuses_an_unfinished_git_operation',
 ]
 
 FROZEN_EDIT = 'frozen mid-step edit\n'
@@ -99,6 +101,64 @@ def test_paused_merge_refuses_an_advance_over_dirty_paths(
     before = _snapshot(git_repo, node)
 
     with pytest.raises(RuntimeError, match=r'README\.md'):
+        node.merge()
+
+    assert _snapshot(git_repo, node) == before
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+
+
+@pytest.mark.parametrize(
+    argnames=('marker', 'operation'),
+    argvalues=[
+        # a merge, squash, cherry-pick, or revert stopped on a conflict
+        ('MERGE_HEAD', 'a merge in progress'),
+        ('SQUASH_MSG', 'a squash merge in progress'),
+        ('CHERRY_PICK_HEAD', 'a cherry-pick in progress'),
+        ('REVERT_HEAD', 'a revert in progress'),
+        # a rebase stopped part-way, by either backend
+        ('rebase-merge', 'a rebase in progress'),
+        ('rebase-apply', 'a rebase in progress'),
+        # a git command still running, or killed holding its lock
+        ('index.lock', 'a running git process or a stale index.lock'),
+    ],
+    ids=[
+        'merge',
+        'squash',
+        'cherry-pick',
+        'revert',
+        'rebase-merge',
+        'rebase-apply',
+        'index-lock',
+    ],
+)
+def test_paused_merge_refuses_an_unfinished_git_operation(
+    git_repo: pathlib.Path,
+    marker: str,
+    operation: str,
+) -> None:
+    """A frozen step stopped inside a git operation refuses the merge untouched.
+
+    The carried advance would move the node's branch under the operation, so
+    the merge refuses before anything changes, naming the operation and its
+    marker: the target, the node, and its pause stay as they were.
+    """
+    _, node = _paused_child(git_repo)
+    # plant the marker where git keeps it for the node's worktree
+    resolved = _git(node.worktree, 'rev-parse', '--git-path', marker).stdout.strip()
+    path = node.worktree / resolved
+    if marker.startswith('rebase-'):
+        path.mkdir()
+    elif marker == 'index.lock':
+        path.touch()
+    elif marker == 'SQUASH_MSG':
+        path.write_text('Squashed commit of the following:\n', encoding='utf-8')
+    else:
+        head = _git(node.worktree, 'rev-parse', 'HEAD').stdout
+        path.write_text(head, encoding='utf-8')
+    before = _snapshot(git_repo, node)
+
+    with pytest.raises(RuntimeError, match=re.escape(f'{operation} ({path})')):
         node.merge()
 
     assert _snapshot(git_repo, node) == before
