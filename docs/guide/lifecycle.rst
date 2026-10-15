@@ -398,7 +398,9 @@ agent CLIs run tool commands in groups (or sessions) of their own, and those
 die with the agent. ``kill`` and a step deadline reap the same way. Anything
 still alive after the forced kill is named in the command's output, and so is
 any other process working in the node's worktree, which is reported but left
-running.
+running. If the first read of the process table fails, the abort falls back to
+TERMing every recorded group except the caller's own, so a self-pause run from a
+tool shell in a group of its own can still abort its own step.
 
 While parked, a node:
 

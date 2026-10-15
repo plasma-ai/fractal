@@ -62,9 +62,9 @@ _KILL_GRACE_SECONDS = 10.0
 #: own tools run -- after which the loop ends the launch as stuck.
 NO_PROGRESS_SECONDS = 1800
 
-#: Grace between the TERM and KILL when the stream reader dies -- short, but
-#: long enough for a tool's ``git commit`` to drop ``.git/index.lock``, which
-#: would otherwise block the force-commit backstop.
+# grace between the TERM and KILL when the stream reader dies -- short, but
+# long enough for a tool's ``git commit`` to drop ``.git/index.lock``, which
+# would otherwise block the force-commit backstop
 _STREAM_ERROR_GRACE_SECONDS = 2.0
 
 # cap consecutive setup failures so a deterministically broken setup.sh ends
@@ -2831,8 +2831,13 @@ class Loop:
                     grace=_KILL_GRACE_SECONDS,
                     spare=node.loop_records,
                 )
-            except Exception:
+            except Exception as error:
                 # the reap broke: the deadline must still land on the group
+                print(
+                    f'Warning: process-tree reap failed ({error});'
+                    ' killing the step group only',
+                    file=sys.stderr,
+                )
                 _killpg(process.pid, signal.SIGKILL)
                 return
             for group in reaped.spared:
@@ -2920,7 +2925,12 @@ class Loop:
                         grace=_STREAM_ERROR_GRACE_SECONDS,
                         spare=node.loop_records,
                     )
-                except Exception:
+                except Exception as reap_error:
+                    print(
+                        f'Warning: process-tree reap failed ({reap_error});'
+                        ' killing the step group only',
+                        file=sys.stderr,
+                    )
                     _killpg(process.pid, signal.SIGKILL)
                 else:
                     for group in reaped.spared:
