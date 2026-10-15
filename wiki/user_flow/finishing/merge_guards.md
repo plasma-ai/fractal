@@ -52,8 +52,10 @@ or write over an untracked or ignored file refuses the whole merge, restoring
 the target and naming the paths. After the commit a two-tree `read-tree -m -u`
 moves the node's index and worktree, keeping its local changes, and a
 compare-and-swap `update-ref` moves its branch; any failure or interrupt there
-reverses the `read-tree`, resets the target to its pre-merge HEAD, and closes
-the merge event `failed`. A `--message` sets the squash commit's text, so a
+reverses the `read-tree`, moves the target back to its pre-merge HEAD, and
+closes the merge event `failed` — a fresh merge's target is reset whole, while a
+`--continue` keeps the operator's resolution staged and its squash message in
+place, so it can be re-run. A `--message` sets the squash commit's text, so a
 descriptive message never needs an amend that would orphan the advance.
 
 ## Untracked files on the target
@@ -99,10 +101,12 @@ during the advance finishes the node's worktree update or rolls it back, and
 warns only when an advance was underway; one during a no-op merge's bookkeeping
 prints that arm's own summary (`Nothing to merge: ...`) with no advance warning.
 An interrupted `--continue` leaves the staged squash in place to re-run, unless
-its commit had already landed — then it is finished the same way. Every
-"restored" verdict is judged by the target's state — clean and out of the squash
-— not by git's exit code; when the target is not restored, the error names the
-`git -C <target worktree> reset --hard HEAD` to run before merging again.
+its commit had already landed — then it is finished the same way, or, for a
+paused node whose carried advance was cut short, rolled back with the resolution
+still staged. Every "restored" verdict is judged by the target's state — clean
+and out of the squash — not by git's exit code; when the target is not restored,
+the error names the `git -C <target worktree> reset --hard HEAD` to run before
+merging again.
 
 ## Footprint
 
@@ -140,13 +144,15 @@ merge — refuses it, naming the redo:
 then runs the merge's own tail — `.fractal/` restore and seed strip, footprint
 check, index refresh, commit, merge-base advance — so a manual resolution never
 hand-rolls those steps or strands seed files in the target working tree. Its
-failure paths leave the staged resolution in place (never `reset --hard`); fix
-and re-run. The hand squash runs without the fresh merge's untracked-file check,
-so a `--continue` cannot prevent the overwrite of a file that exists untracked
-on the target's disk: git's own squash refuses over a plain untracked file but
-writes over an ignored one (git treats it as expendable) — a file the fresh
-merge would have refused over — and the hand squash has already done it, so move
-private files aside before redoing the squash by hand.
+failure paths leave the staged resolution in place (never `reset --hard`; a
+paused node's rollback after the commit moves the target's HEAD back with a soft
+reset and restores the squash message); fix and re-run. The hand squash runs
+without the fresh merge's untracked-file check, so a `--continue` cannot prevent
+the overwrite of a file that exists untracked on the target's disk: git's own
+squash refuses over a plain untracked file but writes over an ignored one (git
+treats it as expendable) — a file the fresh merge would have refused over — and
+the hand squash has already done it, so move private files aside before redoing
+the squash by hand.
 
 ## Destination validation
 

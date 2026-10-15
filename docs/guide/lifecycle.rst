@@ -426,7 +426,8 @@ its worktree, and merge again. The merge-base advance carries the frozen state
 the way ``git checkout`` moves a branch; if the advance would change a path
 the node holds dirty or staged, or write over an untracked or ignored file,
 the whole merge refuses and names the paths, and a failure after the squash
-commit rolls back both the target and the node. The
+commit rolls back both the target and the node (a ``--continue`` keeps the
+operator's resolution staged for the re-run). The
 target must still be settled (a depth-1 node lands into its user branch even
 during a tree-wide pause); a live node, or a child landing into a live or
 paused parent, still refuses. ``--message`` sets the squash commit's text, so

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -24,6 +26,8 @@ __all__ = [
     'test_paused_merge_refuses_an_unfinished_git_operation',
     'test_paused_merge_refuses_a_branch_that_moved_mid_merge',
     'test_resume_waits_for_a_running_merge',
+    'test_paused_continue_rollback_keeps_the_staged_resolution',
+    'test_paused_no_op_continue_refusal_keeps_the_squash_message',
 ]
 
 FROZEN_EDIT = 'frozen mid-step edit\n'
@@ -263,6 +267,117 @@ def test_resume_waits_for_a_running_merge(
             resumer.join(timeout=60)
 
 
+def test_paused_continue_rollback_keeps_the_staged_resolution(
+    git_repo: pathlib.Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A ``--continue`` rolled back after its commit keeps the resolution staged.
+
+    After a conflicted merge the operator redoes the squash by hand and
+    resolves it; a failure after the commit moves the target's HEAD back but
+    leaves the resolution staged and the squash message in place, the node's
+    frozen step intact, so the re-run lands the resolution.
+    """
+    _, node = _paused_child(git_repo)
+    # the target commits its own work.txt, so the squash conflicts
+    (git_repo / 'work.txt').write_text('target\n', encoding='utf-8')
+    _git(git_repo, 'add', 'work.txt')
+    _git(git_repo, 'commit', '-m', 'target work')
+    with pytest.raises(RuntimeError, match='produced conflicts'):
+        node.merge()
+    # the operator redoes the squash by hand and stages a resolution of both
+    redo = subprocess.run(
+        ['git', 'merge', '--squash', node.branch],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert redo.returncode != 0, (redo.stdout, redo.stderr)
+    resolved = 'A\ntarget\n'
+    (git_repo / 'work.txt').write_text(resolved, encoding='utf-8')
+    _git(git_repo, 'add', 'work.txt')
+    blob = _git(git_repo, 'rev-parse', ':work.txt').stdout
+    head = _git(git_repo, 'rev-parse', 'HEAD').stdout
+    marker = _git(git_repo, 'rev-parse', '--git-path', 'SQUASH_MSG').stdout.strip()
+    squash_msg = git_repo / marker
+    message = squash_msg.read_bytes()
+    child = _state(node.worktree)
+
+    # the node's branch refuses to move once the target has committed
+    with pytest.MonkeyPatch().context() as mp:
+        _shim(
+            mp,
+            tmp_path_factory,
+            'git',
+            f'[[ " $* " == *" update-ref "*" refs/heads/{node.branch} "* ]] && exit 1\n',
+        )
+        with pytest.raises(RuntimeError, match='staged squash is left in place'):
+            node.merge(continue_merge=True)
+
+    # the target's HEAD is back with the resolution still staged and the
+    # squash message there for the re-run, and the node is as it was
+    assert _git(git_repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(git_repo, 'rev-parse', ':work.txt').stdout == blob
+    assert squash_msg.read_bytes() == message
+    assert _state(node.worktree) == child
+    _assert_frozen(node)
+
+    # the re-run lands the resolution, the node still paused
+    output, _ = node.merge(continue_merge=True)
+
+    assert 'Squash-merged' in output
+    assert _git(git_repo, 'show', 'main:work.txt').stdout == resolved
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+
+
+def test_paused_no_op_continue_refusal_keeps_the_squash_message(
+    git_repo: pathlib.Path,
+) -> None:
+    """A no-op ``--continue`` whose carried advance refuses can still be re-run.
+
+    A resolution that keeps the target's content for every change commits
+    nothing, and the no-op arm clears the squash markers before its advance
+    runs; when the advance would rewrite a frozen dirty file, the refusal
+    restores the squash message, so the operator can move the file aside
+    and re-run.
+    """
+    _, node = _paused_child(git_repo)
+    # the target commits its own work.txt, so the squash conflicts, and edits
+    # the README the frozen step holds dirty, so the advance cannot carry it
+    (git_repo / 'work.txt').write_text('target\n', encoding='utf-8')
+    (git_repo / 'README.md').write_text('target edit\n', encoding='utf-8')
+    _git(git_repo, 'add', 'work.txt', 'README.md')
+    _git(git_repo, 'commit', '-m', 'target work')
+    with pytest.raises(RuntimeError, match='produced conflicts'):
+        node.merge()
+    # the operator redoes the squash and keeps the target's own work.txt
+    redo = subprocess.run(
+        ['git', 'merge', '--squash', node.branch],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert redo.returncode != 0, (redo.stdout, redo.stderr)
+    _git(git_repo, 'checkout', '--ours', '--', 'work.txt')
+    _git(git_repo, 'add', 'work.txt')
+    head = _git(git_repo, 'rev-parse', 'HEAD').stdout
+    marker = _git(git_repo, 'rev-parse', '--git-path', 'SQUASH_MSG').stdout.strip()
+    squash_msg = git_repo / marker
+    message = squash_msg.read_bytes()
+    child = _state(node.worktree)
+
+    with pytest.raises(RuntimeError, match='staged squash is left in place'):
+        node.merge(continue_merge=True)
+
+    # nothing moved, and the squash message is back for the re-run
+    assert _git(git_repo, 'rev-parse', 'HEAD').stdout == head
+    assert squash_msg.read_bytes() == message
+    assert _state(node.worktree) == child
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+
+
 # ------ helpers
 
 
@@ -307,11 +422,40 @@ def _await_ready(
         time.sleep(0.02)
 
 
+def _shim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    name: str,
+    body: str,
+) -> None:
+    """Put a pass-through ``name`` that runs ``body`` first at the head of ``PATH``.
+
+    ``body`` is a bash block over the call's arguments that fails a chosen
+    call or acts at it; the shim then execs the real binary. The bindir lives
+    outside the repo, so it never shows up as untracked residue on the target.
+    """
+    real = shutil.which(name)
+    assert real is not None, f'{name} must be on PATH'
+    bindir = tmp_path_factory.mktemp('shim')
+    shim = bindir / name
+    shim.write_text(
+        f'#!/usr/bin/env bash\n{body}exec "{real}" "$@"\n',
+        encoding='utf-8',
+    )
+    shim.chmod(0o755)
+    path = os.environ['PATH']
+    monkeypatch.setenv('PATH', f'{bindir}{os.pathsep}{path}')
+
+
 def _snapshot(repo: pathlib.Path, node: Node) -> tuple[str, ...]:
     """Capture both sides' HEAD, index, and worktree state."""
+    return _state(repo) + _state(node.worktree)
+
+
+def _state(worktree: pathlib.Path) -> tuple[str, ...]:
+    """Capture one worktree's HEAD, index, and worktree state."""
     return tuple(
         _git(worktree, *args).stdout
-        for worktree in (repo, node.worktree)
         for args in (
             ('rev-parse', 'HEAD'),
             ('ls-files', '-s'),

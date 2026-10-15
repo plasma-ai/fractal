@@ -362,6 +362,11 @@ fi
 # here leaves nothing to clean up
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
+# a --continue's squash message goes with its commit, so keep a copy: a
+# carried merge rolled back after the commit restores it for the re-run
+if [[ "$CONTINUE" == true ]]; then
+    cp "$SQUASH_MSG_FILE" "$TMP_DIR/squash-msg"
+fi
 
 # ------ squash-merge
 
@@ -630,10 +635,25 @@ carry_advance() {
     fi
     ADVANCING=false
 }
+# restored means the child back at CHILD_OLD and the target at its pre-merge
+# HEAD: clean and out of the squash after a fresh merge, and after a
+# --continue holding the squash message the re-run reads
+carry_restored() {
+    [[ "$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$CHILD_OLD" ]] || return 1
+    [[ "$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$TARGET_BEFORE" ]] || return 1
+    if [[ "$CONTINUE" == true ]]; then
+        [[ -f "$SQUASH_MSG_FILE" ]]
+    else
+        target_restored
+    fi
+}
 # undo a carried merge after the target committed: the reverse two-tree update
 # returns the child's index and worktree to CHILD_OLD with its dirt intact (a
-# no-op when the forward update never ran), and the target -- clean before the
-# merge, with no loop of its own running -- goes back to its pre-merge HEAD
+# no-op when the forward update never ran); a fresh merge's target was clean
+# before it, with no loop of its own running, so it goes back to its pre-merge
+# HEAD whole, while a --continue's commit holds the operator's resolution, so a
+# soft reset moves HEAD back with the resolution still staged, and the saved
+# squash message lets the operator re-run
 carry_rollback() {
     trap - INT TERM
     end_merge_event failed
@@ -641,16 +661,22 @@ carry_rollback() {
         git -C "$WORKTREE_DIR" update-index -q --refresh >/dev/null || true
         git -C "$WORKTREE_DIR" read-tree -m -u "$ADVANCE_HEAD" "$CHILD_OLD" 2>/dev/null || true
     fi
-    git -C "$PARENT_WORKTREE_DIR" reset -q --hard "$TARGET_BEFORE" || true
-    clear_squash_markers
-    if [[ "$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$CHILD_OLD" ]] \
-        && [[ "$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$TARGET_BEFORE" ]] \
-        && target_restored; then
-        echo "Error: $*; the merge was rolled back and both worktrees restored" >&2
+    if [[ "$CONTINUE" != true ]]; then
+        git -C "$PARENT_WORKTREE_DIR" reset -q --hard "$TARGET_BEFORE" || true
+        clear_squash_markers
     else
+        git -C "$PARENT_WORKTREE_DIR" reset --soft "$TARGET_BEFORE" || true
+        cp "$TMP_DIR/squash-msg" "$SQUASH_MSG_FILE" || true
+    fi
+    if ! carry_restored; then
         echo "Error: $*; the merge could NOT be fully rolled back -- check that" \
             "$PARENT_BRANCH is at $TARGET_BEFORE and $BRANCH at $CHILD_OLD with its" \
             "uncommitted work intact before merging again" >&2
+    elif [[ "$CONTINUE" == true ]]; then
+        echo "Error: $*; the merge was rolled back and $BRANCH's worktree restored;" \
+            "the staged squash is left in place -- fix and re-run with --continue" >&2
+    else
+        echo "Error: $*; the merge was rolled back and both worktrees restored" >&2
     fi
     exit 1
 }
