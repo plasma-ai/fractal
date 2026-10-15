@@ -46,6 +46,7 @@ from fractal.core.node import Node
 from fractal.exceptions import AgentStreamError
 from fractal.impl import codex
 from fractal.impl.codex import CodexAgent, CodexParser
+from tests._helpers import _alive, _kill_tagged
 
 from .rollouts import resumed_thread, spawned_thread, spawning_thread
 
@@ -2165,9 +2166,7 @@ def test_preflight_timeout_reaps_the_probes_tool_groups(
         ]
         alive = _alive(pids)
     finally:
-        for path in pid_files:
-            if path.exists():
-                _kill_tagged(int(path.read_text(encoding='utf-8')), token)
+        _kill_tagged(token)
 
     # under full-suite load the probe's timeout can lapse before both tools
     # start; a tool that never recorded says nothing about the reap -- skip
@@ -2468,23 +2467,3 @@ def _drive(
         process.stdout.close()
         process.stderr.close()
     return result, events
-
-
-def _alive(pids: list[int]) -> list[int]:
-    """The subset of ``pids`` still running (zombies count as dead)."""
-    table = fractal.util.process.snapshot()
-    return [pid for pid in pids if pid in table and not table[pid].zombie]
-
-
-def _kill_tagged(pid: int, token: str) -> None:
-    """SIGKILL ``pid`` only while its command line carries ``token``."""
-    result = subprocess.run(
-        ['ps', '-o', 'command=', '-p', f'{pid}'],
-        capture_output=True,
-        text=True,
-    )
-    if token in result.stdout:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass

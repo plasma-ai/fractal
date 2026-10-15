@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import pathlib
+import signal
 import subprocess
 
 import pytest
 
+import fractal.util.process
 from fractal.core.node import Node
 
 __all__ = [
@@ -19,6 +22,8 @@ __all__ = [
     '_age_run',
     '_age_step',
     '_stub_run_script',
+    '_alive',
+    '_kill_tagged',
 ]
 
 
@@ -129,3 +134,24 @@ def _stub_run_script(
     stub = run_script_method if isinstance(target, type) else run_script
     monkeypatch.setattr(target, '_run_script', stub)
     return calls
+
+
+def _alive(pids: list[int]) -> list[int]:
+    """Return the subset of ``pids`` still running (zombies count as dead)."""
+    table = fractal.util.process.snapshot()
+    return [pid for pid in pids if pid in table and not table[pid].zombie]
+
+
+def _kill_tagged(tag: str) -> None:
+    """SIGKILL every process whose command line carries ``tag``.
+
+    One process-table pass, so a teardown ends every process its test
+    started, recorded or not, while a pid recycled to an unrelated process
+    -- whose command lacks the tag -- is never signaled.
+    """
+    for pid, process in fractal.util.process.snapshot().items():
+        if tag in process.command:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

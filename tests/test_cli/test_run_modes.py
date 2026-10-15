@@ -76,7 +76,7 @@ import pytest
 
 from fractal.core.loop import _SETUP_FAIL_CAP
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _git, _kill_tagged
 
 from .conftest import (
     _await_progress,
@@ -4139,22 +4139,13 @@ def _tool_pids(capture: pathlib.Path) -> list[int]:
 
 
 def _kill_tools(capture: pathlib.Path) -> None:
-    """SIGKILL each recorded tool pid still carrying the capture dir in its argv.
+    """SIGKILL every process still carrying the capture dir in its argv.
 
-    The tool argv names its capture dir (unique per launch), so a pid
-    recycled to an unrelated process is never signaled.
+    The tool argv names its capture dir (unique per launch), so a tool that
+    never recorded its pid is found too, and a pid recycled to an unrelated
+    process is never signaled.
     """
-    for pid in _tool_pids(capture) if capture.exists() else []:
-        result = subprocess.run(
-            ['ps', '-o', 'command=', '-p', f'{pid}'],
-            capture_output=True,
-            text=True,
-        )
-        if f'{capture}' in result.stdout:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+    _kill_tagged(f'{capture}')
 
 
 def test_gate_teardown_reaps_full_process_group(repo: dict) -> None:

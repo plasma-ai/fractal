@@ -3,12 +3,13 @@
 Every test drives a real process tree started here: a leader in its own
 session (the shape of an agent launch) whose children take the shapes
 agent tool commands take. Each process carries the test's unique token in
-its argv, and teardown kills only token-bearing pids, so a pid recycled to
-an unrelated process is never signaled.
+its argv, and teardown kills every process that carries it, recorded or
+not, so a pid recycled to an unrelated process is never signaled.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import pathlib
@@ -23,6 +24,7 @@ import pytest
 
 import fractal
 import fractal.util.process
+from tests._helpers import _alive, _kill_tagged
 
 __all__ = [
     'test_reap_takes_every_group_in_the_tree',
@@ -30,6 +32,7 @@ __all__ = [
     'test_reap_spares_the_caller_lineage',
     'test_reap_keeps_sparing_the_caller_lineage_when_ps_fails',
     'test_reap_signals_the_root_groups_alone_without_a_process_table',
+    'test_tree_teardown_leaves_no_process_behind',
 ]
 
 # the tree script: argv is <dir> <token> <role>; every process records its
@@ -105,6 +108,11 @@ elif role == 'loop':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     with open(f'{directory}/loop.pgid', 'w') as handle:
         handle.write(f'{os.getpgrp()}')
+elif role == 'hung_host':
+    # a caller hung in its reap: it records no pid and leads no tree
+    spawn('hung_caller', process_group=0).wait()
+elif role == 'hung_caller':
+    time.sleep(600)
 elif role in ('host', 'blind_host', 'dark_host'):
     # a sibling tool group, then a caller in a group of its own that reaps
     # the host's tree from inside it
@@ -159,35 +167,9 @@ _GRACE = 3.0
 
 @pytest.fixture
 def tree(tmp_path: pathlib.Path) -> Iterator[Callable[[str], subprocess.Popen]]:
-    """Return a starter for tree leaders; kill everything they spawned after.
-
-    Each leader runs ``_TREE`` in a session of its own. Teardown kills every
-    recorded pid still carrying this test's token, then the leaders.
-    """
-    token = f'fractal-reap-test-{uuid.uuid4().hex}'
-    script = tmp_path / 'tree.py'
-    script.write_text(_TREE, encoding='utf-8')
-    # the callers import this checkout's package
-    package_root = pathlib.Path(fractal.__file__).resolve().parents[1]
-    env = {**os.environ, 'PYTHONPATH': f'{package_root}'}
-    leaders: list[subprocess.Popen] = []
-
-    def start(role: str) -> subprocess.Popen:
-        argv = [sys.executable, f'{script}', f'{tmp_path}', token, role]
-        leader = subprocess.Popen(argv, env=env, start_new_session=True)
-        leaders.append(leader)
-        return leader
-
-    try:
+    """Yield a starter for tree leaders; kill everything they spawned after."""
+    with _trees(tmp_path) as start:
         yield start
-    finally:
-        for pid_file in tmp_path.glob('*.pid'):
-            _kill_tagged(int(pid_file.read_text(encoding='utf-8')), token)
-        for leader in leaders:
-            # an unreaped leader is still this test's child
-            if leader.poll() is None:
-                leader.kill()
-            leader.wait()
 
 
 # ------ reap
@@ -345,6 +327,30 @@ def test_reap_signals_the_root_groups_alone_without_a_process_table(
     assert (tmp_path / 'abort.mark').exists()
 
 
+# ------ teardown process hygiene
+
+
+def test_tree_teardown_leaves_no_process_behind(tmp_path: pathlib.Path) -> None:
+    """The tree teardown ends every process its run started, recorded or not.
+
+    A caller hung in its reap records no pid and leads no tree, yet it
+    carries the run's token, so the teardown's token sweep still ends it
+    and a red run leaks nothing.
+    """
+    with _trees(tmp_path) as start:
+        start('hung_host')
+        hung = _await_role(tmp_path, 'hung_caller')
+    # kill delivery is asynchronous: idle-wait on the survivor
+    deadline = time.monotonic() + 15
+    while _alive([hung]) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    survivors = _alive([hung])
+    # a red run must not itself leak the process it just proved leaked
+    for pid in survivors:
+        os.kill(pid, signal.SIGKILL)
+    assert survivors == []
+
+
 # ------ helpers
 
 
@@ -358,21 +364,54 @@ def _await_pids(directory: pathlib.Path, roles: list[str]) -> list[int]:
     return [int(path.read_text(encoding='utf-8')) for path in paths]
 
 
-def _alive(pids: list[int]) -> list[int]:
-    """The subset of ``pids`` still running (zombies count as dead)."""
-    table = fractal.util.process.snapshot()
-    return [pid for pid in pids if pid in table and not table[pid].zombie]
+def _await_role(directory: pathlib.Path, role: str) -> int:
+    """Block until a tree process runs ``role``; return its pid.
+
+    Finds a role that never records its pid by its argv, which ends with
+    the role.
+    """
+    deadline = time.monotonic() + 60
+    while True:
+        for pid, process in fractal.util.process.snapshot().items():
+            command = process.command
+            if f'{directory}' in command and command.endswith(f' {role}'):
+                return pid
+        assert time.monotonic() < deadline, role
+        time.sleep(0.05)
 
 
-def _kill_tagged(pid: int, token: str) -> None:
-    """SIGKILL ``pid`` only while its command line carries ``token``."""
-    result = subprocess.run(
-        ['ps', '-o', 'command=', '-p', f'{pid}'],
-        capture_output=True,
-        text=True,
-    )
-    if token in result.stdout:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+@contextlib.contextmanager
+def _trees(directory: pathlib.Path) -> Iterator[Callable[[str], subprocess.Popen]]:
+    """Yield a starter for tree leaders; kill everything they spawned after.
+
+    Each leader runs ``_TREE`` in a session of its own. Teardown kills every
+    process still carrying this run's token, recorded or not, then each
+    leader's group.
+    """
+    token = f'fractal-reap-test-{uuid.uuid4().hex}'
+    script = directory / 'tree.py'
+    script.write_text(_TREE, encoding='utf-8')
+    # the callers import this checkout's package
+    package_root = pathlib.Path(fractal.__file__).resolve().parents[1]
+    env = {**os.environ, 'PYTHONPATH': f'{package_root}'}
+    leaders: list[subprocess.Popen] = []
+
+    def start(role: str) -> subprocess.Popen:
+        argv = [sys.executable, f'{script}', f'{directory}', token, role]
+        leader = subprocess.Popen(argv, env=env, start_new_session=True)
+        leaders.append(leader)
+        return leader
+
+    try:
+        yield start
+    finally:
+        _kill_tagged(token)
+        for leader in leaders:
+            # a leader not yet waited on still holds its pid, so its group id cannot
+            # have been reissued; a group of zombies alone refuses the signal
+            if leader.returncode is None:
+                try:
+                    os.killpg(leader.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            leader.wait()
