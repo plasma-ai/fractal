@@ -110,10 +110,11 @@ may include breaking changes, each listed under a Breaking heading.
   `Held out: N estate file(s) not staged; N path(s) ignored` line (non-zero
   parts only) whenever either warning fired, after any hook or gate output and
   on a no-op commit too.
-- A node's instructions say it names its own files through `$MEMORY_DIR`,
-  `$PLANS_DIR`, and `$NODE_DIR`, with scratch in `$NODE_DIR/tmp/` — a path at
-  the worktree root is the project, not the node, since file tools resolve
-  relative paths against the worktree root.
+- The packaged node charter and memory skill tell a node to name its own files
+  through `$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR`, with scratch in
+  `$NODE_DIR/tmp/` — a path at the worktree root is the project, not the node,
+  since file tools resolve relative paths against the worktree root. A template
+  that ships both its own charter and its own skills must carry the rule itself.
 - A crash healed by reconciliation — a later read over a dead loop, or the boot
   that finds the previous loop's rows still open — stamps the run row
   `crashed: loop runtime gone, healed by reconcile`, so `node list` renders

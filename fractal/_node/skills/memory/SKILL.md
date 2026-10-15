@@ -15,6 +15,10 @@ Run `wiki --help` and `wiki <command> --help` for the CLI.
 
 ## Conventions
 
+- **Name node files by their variables.** Write memory, plans, and scratch
+  through `$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR/tmp/`, never a bare
+  `memory/` or `plans/` path: file tools resolve relative paths against the
+  worktree root, which is the project, not your node.
 - **Write knowledge, not history.** Never reference iteration numbers,
   timestamps, or chronological markers -- a reader shouldn't be able to tell how
   many iterations have run. Before COMMIT, scan memory and any page you promote

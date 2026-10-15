@@ -33,6 +33,10 @@ Run `fractal node --help` and `fractal node <command> --help` for the CLI.
 | `$MAX_CHILDREN`    | Maximum direct children of this node. `-1` unlimited, `0` leaf.             |
 | `$MAX_DESCENDANTS` | Maximum total descendants in this node's subtree. `-1` unlimited, `0` leaf. |
 
+`-1` is how an unset cap displays; no setter accepts it. Leave a child uncapped
+by omitting the flag at init, or lift a cap with
+`fractal node config set <key>=null --path=<child worktree>`.
+
 - **Width (`--max-children`).** Caps **direct** children only (not
   grandchildren). Enforced locally on the spawning node. A child may set a
   larger `--max-children` than its parent.
