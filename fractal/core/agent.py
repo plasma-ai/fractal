@@ -210,10 +210,9 @@ class StreamEvent:
 
     ``kind`` is one of: ``'session' | 'text' | 'tool' | 'tool_result' |
     'cost' | 'result' | 'error' | 'thinking_cap' | 'acting' | 'waiting'``.
-    Fields are populated
-    per kind; absent facts stay ``None`` (a result with no cost fact reads
-    ``$?``). Consumers (renderer, TUI bubbles, record verbs) branch on
-    ``kind`` only -- never on the provider.
+    Fields are populated per kind; absent facts stay ``None`` (a result
+    with no cost fact reads ``$?``). Consumers (renderer, TUI bubbles,
+    record verbs) branch on ``kind`` only -- never on the provider.
 
     A ``'thinking_cap'`` (carrying ``session``) reports a top-level reply
     that hit the output-token cap while still thinking -- no text and no
@@ -288,7 +287,7 @@ def _sanitize_event(event: StreamEvent) -> StreamEvent:
 class StreamResult:
     """Outcome of one streamed invocation."""
 
-    # NOTE: field order mirrors StreamEvent's session/model/cost/budget_stopped
+    # NOTE: field order mirrors StreamEvent's session/model/cost/final/budget_stopped
     #   run, so both sides of the parser boundary read the same top to bottom
     session: Optional[str]
     model: Optional[str]

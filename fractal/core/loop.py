@@ -71,7 +71,7 @@ _REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS +
 NO_PROGRESS_SECONDS = 1_800
 
 # grace between the TERM and KILL when the stream reader dies -- short, but
-# long enough for a tool's ``git commit`` to drop ``.git/index.lock``, which
+# long enough for a tool's `git commit` to drop `.git/index.lock`, which
 # would otherwise block the force-commit backstop
 _STREAM_ERROR_GRACE_SECONDS = 2.0
 
@@ -2029,9 +2029,8 @@ class Loop:
             # re-dispatches once, outside the failure-retry allowance
             attempt = 0
             drop_retried = False
-            # a stuck launch (a thinking cap, or no action for too long) buys
-            # one steered relaunch per attempt, on a row of its own (never a
-            # retry)
+            # a stuck launch (a thinking cap, or no action for too long) buys one
+            # steered relaunch per attempt, on a row of its own, never a retry
             steered = False
             # the newest step name rides every backstop commit's context
             self._last_step_name = step_name
@@ -2372,11 +2371,10 @@ class Loop:
                         if self._paused:
                             return True
 
-                # only a failed launch buys a retry, and only
-                # while attempts remain; a billing-shaped failure waits the
-                # breaker's exponential clock instead of the hot default, and
-                # a provider-unavailable one doubles the default per
-                # consecutive failure
+                # only a failed launch buys a retry, and only while attempts
+                # remain; a billing-shaped failure waits the breaker's exponential
+                # clock instead of the hot default, and a provider-unavailable one
+                # doubles the default per consecutive failure
                 if result.status != 'failed' or attempt >= self._step_retries:
                     break
                 retry_wait: Optional[int] = None
@@ -2793,16 +2791,15 @@ class Loop:
         vocabulary the step's prompt rendered (paths, spawn limits, read
         once per step) under the boot-pinned mode flags, plus the run
         parameters (cost caps, ``AGENT_COMMAND``, timeouts --
-        ``STEP_TIMEOUT_SECONDS`` carrying the step's own effective
-        ceiling, ``_NODE``, ``NODE_BRANCH``) plus live lineage
-        (``RUN_ID``, ``ITER_ID``, ``STEP_ID``, ``STEP_MODEL``), the
-        per-iteration quartet
-        (``ITER``, ``ITER_TIMESTAMP``, ``ITER_REF``, ``ITER_LABEL``),
-        and the current ``STEP_LABEL``; ``$ITER_REF`` feeds
-        ``fractal plan init``'s envvar fallback. Passed to the seam as
-        ``invocation(env=...)``'s caller overlay (merge order ruled at
-        the seam: ``os.environ``, then this overlay, then provider keys
-        -- provider wins).
+        ``STEP_TIMEOUT_SECONDS`` carrying the step's own effective ceiling,
+        ``_NODE``, ``NODE_BRANCH``) plus live lineage (``RUN_ID``,
+        ``ITER_ID``, ``STEP_ID``, ``STEP_MODEL``), the per-iteration
+        quartet (``ITER``, ``ITER_TIMESTAMP``, ``ITER_REF``,
+        ``ITER_LABEL``), and the current ``STEP_LABEL``; ``$ITER_REF``
+        feeds ``fractal plan init``'s envvar fallback. Passed to the seam
+        as ``invocation(env=...)``'s caller overlay (merge order ruled at
+        the seam: ``os.environ``, then this overlay, then provider keys --
+        provider wins).
         """
         step_budget = ''
         if self._step_budget_value is not None:
@@ -3138,9 +3135,8 @@ class Loop:
         (node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
 
         # a launch that ended without its authoritative cost (killed, or its
-        # stream dead before the closing figure) is priced from the
-        # provider's own usage record, read once the process has exited and
-        # flushed it
+        # stream dead before the closing figure) is priced from the provider's
+        # own usage record, read once the process has exited and flushed it
         if self._step_id is not None and (result is None or not result.final):
             try:
                 agent.settle_cost(
@@ -3312,8 +3308,7 @@ class Loop:
                 cost=cost_out,
             )
         if isinstance(stream_error, _ThinkingCap):
-            # the loop ended the invocation itself -- a pause racing the cap
-            # still parks
+            # the loop ended the invocation itself; a pause racing the cap still parks
             if self._consume_pause_abort():
                 return StepResult(status='paused', session=session_out, cost=cost_out)
             # the caller-minted session stands in when the stream never
@@ -4294,10 +4289,9 @@ class Loop:
         )
         if any(seconds > 0 for seconds in timeouts):
             return
-        # a step file's own timeout: brakes its launch, so the exposure
-        # stands only while some launch has no ceiling -- SYNC runs on the
-        # unset node value, and an unreadable or malformed file falls back
-        # to it
+        # a step file's own timeout: brakes its launch, so the exposure stands
+        # only while some launch has no ceiling -- SYNC runs on the unset node
+        # value, and an unreadable or malformed file falls back to it
         launches = sorted((self.node.node_dir / 'steps').glob('*.md'))
         if self._sync_mode and self._sync_file.is_file():
             launches.append(self._sync_file)
