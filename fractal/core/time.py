@@ -188,7 +188,7 @@ class Time:
         """
         from .loop import Step
 
-        # the node default
+        # read the node default
         timeout = self._node.config.get('step_timeout')
         default = fractal.util.parse_duration_seconds(f'{timeout}') if timeout else None
         steps_dir = self._node.node_dir / 'steps'
@@ -205,7 +205,7 @@ class Time:
                 if seconds is not None and seconds > 0:
                     limits.append(float(seconds))
             return min(limits, default=None)
-        # the node's own seat: its launch exported the enforced ceiling
+        # trust the seat's exported ceiling, the one its launch enforces
         # ('-1' when none); seat-editable, so garbage falls through
         if os.environ.get('STEP_ID') == f'{step_id}':
             try:
@@ -220,10 +220,10 @@ class Time:
         recorded = row.get('timeout')
         if recorded is not None:
             return float(recorded) if recorded > 0 else None
-        # an unrecorded row's step file; the built-in sync pass (a SYNC row
-        # at step 0 or under sync mode, as the loop reads it) runs from the
-        # package's mode doc, and a vanished, unreadable, or malformed file
-        # falls back to the node value, as at launch
+        # resolve an unrecorded row's step file; the built-in sync pass
+        # (a SYNC row at step 0 or under sync mode, as the loop reads it)
+        # runs from the package's mode doc, and a vanished, unreadable,
+        # or malformed file falls back to the node value, as at launch
         sync = self._node.config.get('sync')
         sync_mode = True if sync is None else bool(sync)
         try:
