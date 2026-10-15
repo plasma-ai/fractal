@@ -57,18 +57,29 @@ class Reaped:
     spared: tuple[int, ...] = ()
     inside: bool = False
 
-    def lines(self: Reaped) -> list[str]:
-        """Return the ``Note:`` and ``Warning:`` lines naming what the reap left."""
+    def lines(self: Reaped, *, branch: Optional[str] = None) -> list[str]:
+        """Return the ``Note:`` and ``Warning:`` lines naming what the reap left.
+
+        ``branch`` names the node whose tree was reaped, so the lines of
+        several nodes' reaps sharing one output (a tree-wide pause) can be
+        told apart.
+        """
+        # name the reaped node in each line when one is given
+        of = ''
+        spared_in = ''
+        if branch:
+            of = f' of {branch}'
+            spared_in = f' in the reap of {branch}'
         result = [
-            f"Note: spared process group {group} (another node's loop)"
+            f"Note: spared process group {group} (another node's loop){spared_in}"
             for group in self.spared
         ]
         result.extend(
-            f'Warning: pid {process.pid} survived the reap: {process.command}'
+            f'Warning: pid {process.pid} survived the reap{of}: {process.command}'
             for process in self.survivors
         )
         result.extend(
-            f'Warning: pid {process.pid} works in the worktree outside the'
+            f'Warning: pid {process.pid} works in the worktree{of} outside the'
             f' reaped tree (left running): {process.command}'
             for process in self.strays
         )
@@ -207,6 +218,7 @@ def reap_or_kill(
     roots: Collection[int],
     *,
     grace: float = GRACE_SECONDS,
+    branch: Optional[str] = None,
     spare: Callable[[], Collection[pathlib.Path]] = tuple,
 ) -> list[str]:
     """Reap ``roots`` with their trees, or KILL the root groups if the reap breaks.
@@ -218,6 +230,7 @@ def reap_or_kill(
     Args:
         roots: Recorded process group ids (each its leader's pid).
         grace: Seconds between the TERM and KILL passes.
+        branch: The reaped node, named in the report's lines.
         spare: Returns the files each recording a process group id to
             spare, as for :func:`reap`.
 
@@ -234,7 +247,7 @@ def reap_or_kill(
         return [
             f'Warning: process-tree reap failed ({e}); killing the recorded groups only'
         ]
-    return reaped.lines()
+    return reaped.lines(branch=branch)
 
 
 # ------ helper functions

@@ -1654,10 +1654,11 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         Names on stderr each tree member still alive after the KILL and,
         with ``--worktree``, each spared loop group the walk reached and
         each process outside the tree whose working directory lies in that
-        directory, other than a node's loop -- reported, never signaled.
-        Exit 1 when ``--outside-only`` finds this command inside the tree
-        (nothing signaled), 0 after a reap, 2 on a command error -- pause.sh
-        branches on the exit code.
+        directory, other than a node's loop -- reported, never signaled --
+        and in each line the node the worktree belongs to. Exit 1 when
+        ``--outside-only`` finds this command inside the tree (nothing
+        signaled), 0 after a reap, 2 on a command error -- pause.sh branches
+        on the exit code.
         """
         worktree_dir = pathlib.Path(worktree) if worktree else None
         node = resolve_node(worktree) if worktree else None
@@ -1675,7 +1676,8 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         )
         if reaped.inside:
             raise SystemExit(1)
-        lines = reaped.lines()
+        branch = node.branch if node else None
+        lines = reaped.lines(branch=branch)
         for line in lines:
             typer.echo(line, err=True)
 

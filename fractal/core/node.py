@@ -654,6 +654,7 @@ class Node:
             lines = fractal.util.process.reap_or_kill(
                 groups,
                 grace=_ORPHAN_GRACE_SECONDS,
+                branch=self.branch,
                 spare=self.loop_records,
             )
             for line in lines:

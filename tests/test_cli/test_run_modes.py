@@ -1235,9 +1235,10 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
 
     A double-forked daemon leaves the agent's session and loses its parent
     before the pause, so no walk can tie it to the invocation; the pause's
-    working-directory sweep names it in the output and leaves it alive. The
-    node's own loop group is no stray: the launch backgrounds a sleeper in
-    it, working in the worktree too, and the sweep names the daemon alone.
+    working-directory sweep names it in the output, with the node whose
+    reap left it, and leaves it alive. The node's own loop group is no
+    stray: the launch backgrounds a sleeper in it, working in the worktree
+    too, and the sweep names the daemon alone.
     """
     steps = {
         '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_DAEMON_MARKER}\n',
@@ -1265,6 +1266,9 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
 
     strays = {int(pid) for pid in re.findall(r'pid (\d+) works in', pause.stderr)}
     assert strays == {daemon}, pause.stderr
+    # the line names the node whose reap left the daemon running
+    named = f'pid {daemon} works in the worktree of main.reapstray'
+    assert named in pause.stderr, pause.stderr
     assert 'left running' in pause.stderr, pause.stderr
     assert alive == [daemon]
 
