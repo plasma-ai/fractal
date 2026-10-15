@@ -397,10 +397,15 @@ The abort takes the agent's whole process tree, not just its process group:
 agent CLIs run tool commands in groups (or sessions) of their own, and those
 die with the agent. ``kill`` and a step deadline reap the same way. Anything
 still alive after the forced kill is named in the command's output, and so is
-any other process working in the node's worktree, which is reported but left
-running. If the first read of the process table fails, the abort falls back to
-TERMing every recorded group except the caller's own, so a self-pause run from a
-tool shell in a group of its own can still abort its own step.
+any other process working in the node's worktree that is not a node's loop,
+which is reported but left running; each line names its node. A git operation
+the abort left unfinished in the worktree — a merge, a rebase, an
+``index.lock`` — is named too, so it is finished or aborted before the node is
+merged. An agent that pauses its own node aborts nothing: its step finishes
+with every tool it started, and the loop parks at its next checkpoint. If the
+first read of the process table fails, the abort falls back to TERMing every
+recorded group except the caller's own, so a self-pause run from a tool shell in
+a group of its own can still abort its own step.
 
 While parked, a node:
 

@@ -179,13 +179,21 @@ may include breaking changes, each listed under a Breaking heading.
   holding a build lock had to be found and killed by hand. The reap finds every
   process in the agent's session or below it before the first signal, re-walks
   after each round of TERMs, and KILLs what remains after the grace; it spares
-  any other node's loop the agent launched. Pause and kill name any survivor,
-  and any other process working in the node's worktree, which they report but
-  leave running.
+  any other node's loop the agent launched, but never the agent's own group,
+  even when another node's stale record names it. Pause and kill name any
+  survivor, and any other process working in the node's worktree that is not a
+  node's loop, which they report but leave running; each line names the node, so
+  a tree-wide pause's lines can be told apart. They also name any git operation
+  left unfinished in the node's worktree (a merge, squash, cherry-pick, revert,
+  or rebase, or an `index.lock`), to finish or abort before the node is merged.
+  A pause the agent runs from inside its own tree ends nothing: the step
+  finishes with every tool it started, the loop parks at its next checkpoint,
+  and the confirmation says the caller's own agent was not aborted.
 - The crashed-node heal and a timed-out `codex` preflight probe end the agent's
   whole process tree instead of only its process group, so tools the agent
   started in groups or sessions of their own no longer outlive a loop that died
-  or a probe that hung. Both spare any other node's loop and name survivors.
+  or a probe that hung. Both spare any other node's loop and name survivors, the
+  heal in warnings naming the node.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives `$MAX_CHILDREN` and the other config-derived variables from

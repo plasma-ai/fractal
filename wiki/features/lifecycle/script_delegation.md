@@ -117,14 +117,16 @@ when the stream reader dies — enough for a tool's `git commit` to drop
 `.git/index.lock` before the force-commit backstop needs it — two seconds for
 the crash heal, and the probe's own grace for a codex preflight timeout) while
 still signaling late groups, then KILLs every group with a live member the same
-way. Members still alive after that are named on stderr, which `Node` relays as
-warnings — the survivors on the pause or kill output, and a `Warning:` line on
-stderr for the in-process paths.
+way. Members still alive after that are named in a `Warning:` line: on stderr,
+which `Node` relays as warnings, for pause and kill; on stderr for a deadline, a
+dead stream reader and a codex probe timeout; and as a node warning for the
+crash heal. The lines from pause, kill and the crash heal name the reaped node,
+so those of a tree-wide pause can be told apart.
 
 `pause.sh` hands the reap its `.pause_abort` marker, which the reap touches just
 before its first signal to the step group: the loop still finds the marker
-before the agent dies, and a step the reap spares (a self-pause) is never
-marked, so a later unrelated failure is never read as a park.
+before the agent dies, and a step a self-pause leaves running is never marked,
+so a later unrelated failure is never read as a park.
 
 `kill.sh` passes the loop's recorded group beside the step group, so the loop
 dies in the same round as its agent and cannot launch the next step while the
@@ -142,32 +144,48 @@ leader has exited (`validate.sh &` under a `setsid` shell that already returned)
 sits in no member's session and under no member, so the sweep names it and
 leaves it running. The sweep reads `lsof` on macOS and `/proc/<pid>/cwd` on
 Linux, and it skips the caller and its ancestors (an operator may run
-`fractal pause` from a shell in the worktree) and the processes the tree hangs
-from (the loop and its parents).
+`fractal pause` from a shell in the worktree), the processes the tree hangs from
+(the loop and its parents), every process in the node's own loop group (its
+`.pgid`, read before the first signal, since an abort parks the loop and the
+park drops the record), and every other node's loop with everything at or below
+it, since a child's loop works in the worktree of the tool that started it.
+
+After the script returns, pause and kill check the worktree for a git operation
+the abort may have cut short — an unfinished merge, squash, cherry-pick, revert
+or rebase, or the `index.lock` a killed git command leaves — and log one warning
+per leftover, naming it, so nobody merges the node over a half-done operation.
+The check runs in `Node` through `fractal.util.git.in_progress`, whichever way
+the script went.
 
 Four rails bound the reap. It never signals pid 0 or 1, the caller's own group,
-or the group of any of the caller's ancestors — so an agent that pauses its own
-node keeps the groups it runs in, its step finishes, and the loop parks at the
-next checkpoint. It never signals another node's loop group, nor walks through
-one: a node the agent launches (`fractal node start` runs the child's loop in a
-new session) stays a child of the agent's tool until its launcher returns, so
-the reap spares every group recorded in another registered node's `.pgid`,
-everything in a session one of its processes leads, and everything below it, and
-names each spared group it reached. The record list comes from the registry by
-path alone (no git, so a sibling whose worktree no longer resolves is skipped,
-never fatal), and both the list and the records are rebuilt before every signal
-round, so a launch that lands mid-reap is honored. It signals only groups found
-through the recorded group's session or tree. And when the first process table
-cannot be read, it falls back to signaling the recorded groups alone (minus the
-caller's own group, not its ancestors', which no table names -- so a self-pause
-from a tool shell in a group of its own can hit the step group, as `pause.sh`'s
-own fallback does); when a later read fails, it keeps signaling the groups it
-already knows, minus the protected and spared ones, probing them by signal
-instead of re-walking; the loop, the crash heal, and codex's preflight warn and
-fall back to a plain group KILL if the reap itself breaks; when
-`fractal node _reap` itself cannot run, `pause.sh` and `kill.sh` fall back to
-their own group-only teardown, so a helper failure never fails the pause or
-kill.
+or the group of any of the caller's ancestors, so a reap run from inside the
+tree lives to finish. A pause goes further: run from inside the agent's own tree
+(an agent pausing its own node, or running a tree-wide pause), it signals
+nothing at all — `fractal node _reap --outside-only` exits 1 when a root group
+is the caller's own or an ancestor's, `pause.sh` reports the agent kept, the
+step finishes with every tool it started, the loop parks at the next checkpoint,
+and the pause confirmation says the caller's own agent was not aborted. The reap
+never signals another node's loop group, nor walks through one: a node the agent
+launches (`fractal node start` runs the child's loop in a new session) stays a
+child of the agent's tool until its launcher returns, so the reap spares every
+group recorded in another registered node's `.pgid`, everything in a session one
+of its processes leads, and everything below it, and names each spared group it
+reached — but never a root group, the group being reaped, so a crashed node's
+stale record whose pid now leads the step's group spares nothing. The record
+list comes from the registry by path alone (no git, so a sibling whose worktree
+no longer resolves is skipped, never fatal), and both the list and the records
+are rebuilt before every signal round, so a launch that lands mid-reap is
+honored. It signals only groups found through the recorded group's session or
+tree. And when the first process table cannot be read, it falls back to
+signaling the recorded groups alone (minus the caller's own group, not its
+ancestors', which no table names -- so a self-pause from a tool shell in a group
+of its own can hit the step group, as `pause.sh`'s own fallback does); when a
+later read fails, it keeps signaling the groups it already knows, minus the
+protected and spared ones, probing them by signal instead of re-walking; the
+loop, the crash heal, and codex's preflight warn and fall back to a plain group
+KILL if the reap itself breaks; when `fractal node _reap` itself cannot run (any
+status but the self-pause's exit 1), `pause.sh` and `kill.sh` fall back to their
+own group-only teardown, so a helper failure never fails the pause or kill.
 
 ## Launch environment
 
