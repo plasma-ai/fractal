@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Union
 
 __all__ = [
     'AbstractMethodError',
@@ -65,12 +65,4 @@ class _Abort(Exception):
 
 
 class _ThinkingCap(Exception):
-    """Raised by the loop through the stream driver to end a thinking-capped launch.
-
-    Carries the capped launch's session, which the steer resumes.
-    """
-
-    def __init__(self: _ThinkingCap, session: Optional[str]) -> None:
-        """Initialize ``_ThinkingCap``."""
-        super().__init__('thinking cap')
-        self.session = session
+    """Raised by the loop through the stream driver to end a thinking-capped launch."""

@@ -3032,15 +3032,20 @@ class Loop:
         # failed result frames' detail -- a backend that reports its failure
         # there (claude) names the provider error nowhere else
         failures: list[str] = []
+        # the session the stream names, which a capped launch's steer
+        # resumes (the reader dies at the cap, so no result carries it)
+        stream_session: Optional[str] = None
 
         def _render(event: StreamEvent) -> None:
-            nonlocal idle_since
+            nonlocal idle_since, stream_session
             if self._render is not None:
                 self._render(event)
+            if event.session is not None:
+                stream_session = event.session
             if event.kind == 'result' and event.failed and event.message:
                 failures.append(event.message)
             if watch_cap and event.kind == 'thinking_cap':
-                raise _ThinkingCap(event.session)
+                raise _ThinkingCap()
             if event.kind == 'acting':
                 idle_since = time.monotonic()
             elif event.kind == 'waiting':
@@ -3309,11 +3314,11 @@ class Loop:
                 return StepResult(status='paused', session=session_out, cost=cost_out)
             # the caller-minted session stands in when the stream never
             # named one, as for the watchdog's stuck launch
-            stuck_session = stream_error.session or invocation.session
+            stuck_session = stream_session or invocation.session
             return StepResult(
                 status='stuck',
                 exit_code=1,
-                reason=f'{stream_error}',
+                reason='thinking cap',
                 session=stuck_session,
             )
         if stream_error is not None:
