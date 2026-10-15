@@ -834,12 +834,7 @@ def test_pause_mid_step_parks_and_resume_adopts_run(repo: dict) -> None:
         # pause: signal first (the loop reclassifies the abort by it), then
         # the real pause.sh reaps the gated agent's group
         Node(worktree).record.signal_set('pause', 'take five')
-        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
-        abort = subprocess.run(
-            ['bash', f'{pause_sh}', f'{worktree}'],
-            capture_output=True,
-            text=True,
-        )
+        abort = _run_script('pause.sh', worktree)
         assert abort.returncode == 0, abort.stderr
         assert 'Aborted in-flight agent' in abort.stdout, abort.stdout
         proc.wait(timeout=60)
@@ -1112,12 +1107,7 @@ def test_pause_with_pending_finish_still_finishes_the_iteration(repo: dict) -> N
         # finish lands first, then the pause aborts the gated step mid-flight
         Node(worktree).record.signal_set('finish', 'wrap up')
         Node(worktree).record.signal_set('pause', 'brake')
-        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
-        abort = subprocess.run(
-            ['bash', f'{pause_sh}', f'{worktree}'],
-            capture_output=True,
-            text=True,
-        )
+        abort = _run_script('pause.sh', worktree)
         assert abort.returncode == 0, abort.stderr
         proc.wait(timeout=60)
     finally:
@@ -1427,12 +1417,7 @@ def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
     proc, capture, log = _launch_finish_wait(repo, node, capture_name='mark_pause')
     try:
         assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
-        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
-        abort = subprocess.run(
-            ['bash', f'{pause_sh}', f'{worktree}'],
-            capture_output=True,
-            text=True,
-        )
+        abort = _run_script('pause.sh', worktree)
         assert abort.returncode == 0, abort.stderr
         tools = _tool_pids(capture)
         alive = _alive_pids(tools)
