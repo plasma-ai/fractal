@@ -135,6 +135,7 @@ __all__ = [
     'test_provider_unavailable_retries_back_off_exponentially_to_the_cap',
     'test_a_success_resets_the_provider_unavailable_backoff',
     'test_non_provider_failures_keep_the_fixed_backoff',
+    'test_a_fast_outage_never_arms_the_billing_breaker',
     'test_an_outage_past_the_retries_holds_the_next_launch',
     'test_an_interrupted_outage_hold_books_the_consumed_steps',
     'test_retry_waits_end_at_the_run_deadline',
@@ -4844,6 +4845,35 @@ def test_non_provider_failures_keep_the_fixed_backoff(
         '1s',
         '1s',
     ]
+
+
+def test_a_fast_outage_never_arms_the_billing_breaker(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A named outage paces as an outage, however instant and unpriced.
+
+    An outage refusal can die in seconds at no cost -- the billing
+    breaker's dead-credits signature -- but it is the provider's weather,
+    not the account's credits: the outage streak paces it and names it,
+    and no ``PAUSED: billing`` sends the operator to check credits.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=3, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    # nothing spends, so every failure is instant and zero-cost
+    loop = MockLoop(loop_node, results=[outage] * 4)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [
+        '1s (provider unavailable)',
+        '2s (provider unavailable)',
+        '4s (provider unavailable)',
+    ]
+    assert 'PAUSED: billing' not in out
 
 
 def test_an_outage_past_the_retries_holds_the_next_launch(

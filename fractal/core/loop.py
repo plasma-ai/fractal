@@ -3896,10 +3896,14 @@ class Loop:
         (a cost cap over an unpriced model, a per-step agent that cannot
         run) bought nothing and proves nothing about credits; a
         cannot-exec launch (127) is a different class and never arms the
-        breaker; an unknowable (``None``) cost on an instant failure
-        reads as zero, since a launch that paid reports its frames.
+        breaker, and neither does a failure the agent names as its
+        provider being unavailable, which the outage streak paces; an
+        unknowable (``None``) cost on an instant failure reads as zero,
+        since a launch that paid reports its frames.
         """
         if not self._step_launched:
+            return False
+        if result.unavailable:
             return False
         if result.exit_code == 127 or duration >= _BILLING_INSTANT_SECONDS:
             return False

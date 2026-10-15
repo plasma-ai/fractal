@@ -360,9 +360,10 @@ A launch that fails in under 10 seconds with zero recorded cost never
 reached paid inference — the signature of an API billing or credit refusal.
 Three such failures in a row trip the loop's billing breaker. Every agent
 launch counts toward the streak, the before-step SYNC included; a
-cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, or
-one that spent real money is not billing-shaped and resets the streak to
-zero (which also disarms an armed breaker), and so is a step refused before
+cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, one
+that spent real money, or one its agent names as a provider outage (see
+below) is not billing-shaped and resets the streak to zero (which also
+disarms an armed breaker), and so is a step refused before
 its launch — a cost cap over a model the price table cannot price, or a
 per-step agent or provider that cannot run — since it bought no inference.
 Paused and budget-skipped steps bought no launch and leave the streak
@@ -410,9 +411,11 @@ holds), announced as ``retrying in 20s (provider unavailable)``. The streak
 counts every launch, the before-step SYNC included, and spans steps and
 iterations. Any completed launch resets it; any other failed or timed-out
 launch breaks it. Only the wait changes: ``step_retries`` still bounds the
-attempts, the wait polls the same signals as a retry backoff, and an armed
-billing breaker's clock takes precedence. No config key tunes the doubling or
-the cap.
+attempts, and the wait polls the same signals as a retry backoff. A named
+outage is never billing-shaped, however fast and unpriced its failure: it is
+the provider's weather, not the account's credits, so it paces on this streak
+and never arms the billing breaker. No config key tunes the doubling or the
+cap.
 
 An outage that outlasts the retries (or meets ``step_retries: 0``) fails the
 iteration as usual, but the streak stands: the next step's first launch waits

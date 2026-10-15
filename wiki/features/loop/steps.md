@@ -131,15 +131,16 @@ frame. The first retry waits the configured backoff, and each consecutive outage
 failure doubles it up to the billing breaker's one-hour cap. The streak counts
 every launch, SYNC included, and spans steps and iterations, because an outage
 belongs to the provider, not to one step. A completed launch resets it, and any
-other failure breaks it. The retry count still bounds the attempts, and an armed
-billing breaker's clock wins. Once the retries run out the iteration fails, but
-the streak stands: like the billing breaker's gate, an outage gate holds the
-next step's first launch on the same doubling clock, and holds the work step
-again after a SYNC that met the outage, so an outage paces the iterations after
-it too (with no retries at all, this hold is its only pacing). The gate never
-repeats its hold when no SYNC ran, since nothing launched to extend the streak,
-and an interrupted hold books the consumed steps `stopped` as the billing gate
-does.
+other failure breaks it. The retry count still bounds the attempts. A named
+outage never counts toward the billing breaker, however instant and unpriced its
+failure, since it is the provider's weather rather than the account's credits.
+Once the retries run out the iteration fails, but the streak stands: like the
+billing breaker's gate, an outage gate holds the next step's first launch on the
+same doubling clock, and holds the work step again after a SYNC that met the
+outage, so an outage paces the iterations after it too (with no retries at all,
+this hold is its only pacing). The gate never repeats its hold when no SYNC ran,
+since nothing launched to extend the streak, and an interrupted hold books the
+consumed steps `stopped` as the billing gate does.
 
 ## Stuck steps
 
