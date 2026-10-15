@@ -29,6 +29,7 @@ __all__ = [
     'test_paused_continue_rollback_keeps_the_staged_resolution',
     'test_paused_no_op_continue_refusal_keeps_the_squash_message',
     'test_paused_merge_rolls_back_both_sides_after_the_commit',
+    'test_paused_merge_lands_when_interrupted_after_the_branch_moved',
     'test_paused_merge_refuses_when_a_carry_check_fails',
     'test_paused_no_op_merge_advances_past_a_restored_path',
 ]
@@ -128,31 +129,35 @@ def test_paused_merge_validation_refusal_changes_nothing(
 
 
 @pytest.mark.parametrize(
-    argnames=('landed', 'ignored', 'named'),
+    argnames=('landed', 'content', 'ignored', 'named'),
     argvalues=[
         # an edit to the file the frozen step holds dirty
-        ('README.md', False, 'README.md'),
+        ('README.md', 'landed\n', False, 'README.md'),
         # a file where the frozen step keeps an untracked one
-        ('scratch.txt', False, 'scratch.txt'),
+        ('scratch.txt', 'landed\n', False, 'scratch.txt'),
         # a file where the node keeps an ignored one
-        ('ignored.txt', True, 'ignored.txt'),
+        ('ignored.txt', 'landed\n', True, 'ignored.txt'),
         # a directory where the frozen step keeps an untracked file
-        ('scratch.txt/note.md', False, 'scratch.txt'),
+        ('scratch.txt/note.md', 'landed\n', False, 'scratch.txt'),
+        # the very file and bytes the frozen step staged
+        ('staged.txt', FROZEN_STAGED, False, 'staged.txt'),
     ],
-    ids=['dirty', 'untracked', 'ignored', 'file-for-dir'],
+    ids=['dirty', 'untracked', 'ignored', 'file-for-dir', 'staged'],
 )
 def test_paused_merge_refuses_an_advance_over_the_frozen_state(
     git_repo: pathlib.Path,
     landed: str,
+    content: str,
     ignored: bool,
     named: str,
 ) -> None:
     """An advance that would rewrite the frozen state refuses the whole merge.
 
     The target lands a path the frozen worktree holds dirty, untracked, or
-    ignored, or a directory where it keeps a file: the merge refuses before
-    its commit, naming the path, and leaves the target, the node, and its
-    pause as they were.
+    ignored, a directory where it keeps a file, or the file it staged with
+    those same bytes, which the advance would absorb as committed: the merge
+    refuses before its commit, naming the path, and leaves the target, the
+    node, and its pause as they were.
     """
     _, node = _paused_child(git_repo)
     # the node keeps a private file the repo's exclude file ignores
@@ -163,7 +168,7 @@ def test_paused_merge_refuses_an_advance_over_the_frozen_state(
         (node.worktree / landed).write_text('private\n', encoding='utf-8')
     # the target lands the path, force-added past the same ignore
     (git_repo / landed).parent.mkdir(parents=True, exist_ok=True)
-    (git_repo / landed).write_text('landed\n', encoding='utf-8')
+    (git_repo / landed).write_text(content, encoding='utf-8')
     _git(git_repo, 'add', '-f', landed)
     _git(git_repo, 'commit', '-m', f'land {landed}')
     before = _snapshot(git_repo, node)
@@ -426,8 +431,8 @@ def test_paused_no_op_continue_refusal_keeps_the_squash_message(
 
 @pytest.mark.parametrize(
     argnames='failure',
-    argvalues=['update-ref', 'read-tree'],
-    ids=['update-ref', 'read-tree'],
+    argvalues=['update-ref', 'read-tree', 'read-tree-cut-short'],
+    ids=['update-ref', 'read-tree', 'read-tree-cut-short'],
 )
 def test_paused_merge_rolls_back_both_sides_after_the_commit(
     git_repo: pathlib.Path,
@@ -438,25 +443,31 @@ def test_paused_merge_rolls_back_both_sides_after_the_commit(
     """A failure after the squash commit rolls the target and the node back whole.
 
     A sibling's landing gives the advance files to move into the frozen
-    worktree; when the node's branch move or its worktree update fails, the
-    merge reverses the update and resets the target, so both sides match
-    their pre-merge state, the node stays paused, and the target's merge
-    event closes failed.
+    worktree; when the node's branch move or its worktree update fails --
+    the update cut short too, after it wrote some of those files -- the
+    merge returns the node's paths and resets the target, so both sides
+    match their pre-merge state, the node stays paused, and the target's
+    merge event closes failed.
     """
     _, node = _paused_child(git_repo)
     _land_sibling(git_repo)
     before = _snapshot(git_repo, node)
+    # the forward update alone: the reverse that follows runs for real
+    fired = tmp_path_factory.mktemp('fired') / 'forward'
+    forward = f'[[ " $* " == *" read-tree -m -u "[0-9a-f]* && ! -e "{fired}" ]]'
     if failure == 'update-ref':
         body = (
             f'[[ " $* " == *" update-ref "*" refs/heads/{node.branch} "* ]] && exit 1\n'
         )
+    elif failure == 'read-tree':
+        body = f'if {forward}; then\n    touch "{fired}"\n    exit 1\nfi\n'
     else:
-        # fail the forward update alone; the reverse that follows runs for real
-        fired = tmp_path_factory.mktemp('fired') / 'forward'
+        # cut short once the sibling's new file and its shared edit are written
         body = (
-            f'if [[ " $* " == *" read-tree -m -u "[0-9a-f]* && ! -e "{fired}" ]]; then\n'
+            f'if {forward}; then\n'
             f'    touch "{fired}"\n'
-            '    exit 1\n'
+            f'    cp "{git_repo}/sib.txt" "{git_repo}/shared.txt" "{node.worktree}/"\n'
+            '    exit 130\n'
             'fi\n'
         )
     _shim(monkeypatch, tmp_path_factory, 'git', body)
@@ -469,6 +480,51 @@ def test_paused_merge_rolls_back_both_sides_after_the_commit(
     _assert_frozen(node)
     merges = node.db.read('events', where={'event': 'merge'})
     assert [event['status'] for event in merges] == ['failed']
+
+
+def test_paused_merge_lands_when_interrupted_after_the_branch_moved(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """An interrupt after the node's branch moved finishes the carried merge.
+
+    The branch moves only once the worktree update succeeded, so the carry
+    has landed whole: the merge completes instead of reversing the update
+    under the moved branch, the node sits on its post-squash commit with the
+    sibling's landing and its frozen state in place, and the target's merge
+    event closes completed.
+    """
+    _, node = _paused_child(git_repo)
+    _land_sibling(git_repo)
+    real_git = shutil.which('git')
+    # the TERM reaches the script while update-ref runs; bash takes it once
+    # git returns, the branch already moved
+    _shim(
+        monkeypatch,
+        tmp_path_factory,
+        'git',
+        f'if [[ " $* " == *" update-ref "*" refs/heads/{node.branch} "* ]]; then\n'
+        f'    "{real_git}" "$@"\n'
+        '    STATUS=$?\n'
+        '    kill -TERM "$PPID"\n'
+        '    exit "$STATUS"\n'
+        'fi\n',
+    )
+
+    output, _ = node.merge()
+
+    assert 'Squash-merged' in output
+    subject = _git(node.worktree, 'log', '-1', '--format=%s').stdout.strip()
+    assert subject == 'merge main (post-squash)'
+    # the index holds the post-squash commit's tree plus the staged file alone
+    staged = _git(node.worktree, 'diff', '--cached', '--name-only', 'HEAD').stdout
+    assert staged.split() == ['staged.txt']
+    assert (node.worktree / 'sib.txt').read_text(encoding='utf-8') == SIBLING
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+    merges = node.db.read('events', where={'event': 'merge'})
+    assert [event['status'] for event in merges] == ['completed']
 
 
 @pytest.mark.parametrize(

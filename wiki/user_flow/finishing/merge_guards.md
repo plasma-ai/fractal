@@ -48,15 +48,23 @@ next landing re-diff from the fork point). Before the target commits, the
 advance tree is built from the staged target tree, and a dry-run two-tree
 `read-tree` against a copy of the node's index plus the untracked-and-ignored
 clobber guard judge the move: an advance that would touch a dirty or staged path
-or write over an untracked or ignored file refuses the whole merge, restoring
-the target and naming the paths. After the commit a two-tree `read-tree -m -u`
-moves the node's index and worktree, keeping its local changes, and a
-compare-and-swap `update-ref` moves its branch; any failure or interrupt there
-reverses the `read-tree`, moves the target back to its pre-merge HEAD, and
-closes the merge event `failed` — a fresh merge's target is reset whole, while a
-`--continue` keeps the operator's resolution staged and its squash message in
-place, so it can be re-run. A `--message` sets the squash commit's text, so a
-descriptive message never needs an amend that would orphan the advance.
+(a path staged at exactly the content the advance brings included, which the
+advance would absorb) or write over an untracked or ignored file refuses the
+whole merge, restoring the target and naming the paths. After the commit a
+two-tree `read-tree -m -u` moves the node's index and worktree, keeping its
+local changes, and a compare-and-swap `update-ref` moves its branch; any failure
+or interrupt before the branch moves reverses the `read-tree`, returns every
+path the advance changes to the node's old commit (an update cut short leaves
+some of them written, which the reverse `read-tree` keeps), moves the target
+back to its pre-merge HEAD, and closes the merge event `failed` — a fresh
+merge's target is reset whole, while a `--continue` keeps the operator's
+resolution staged and its squash message in place, so it can be re-run. The
+rollback is judged by both sides' state, and when it falls short the error names
+the paths still changed and the `git -C <target worktree> reset` to run. An
+interrupt once the branch has moved finishes the merge instead: the move comes
+only after the worktree update succeeded, so the carry has landed whole. A
+`--message` sets the squash commit's text, so a descriptive message never needs
+an amend that would orphan the advance.
 
 ## Untracked files on the target
 

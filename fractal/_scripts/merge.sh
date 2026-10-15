@@ -472,9 +472,16 @@ CHILD_OLD=""
 NEW_HEAD=""
 SUMMARY=""
 advance_trap() {
-    # a carried advance is part of the merge: cut short, it rolls back whole
+    # a carried advance is part of the merge: cut short, it rolls back whole --
+    # unless the node's branch already moved, which update-ref does only after
+    # the worktree update succeeded, so the carry has landed whole
     if [[ "$CARRY_DIRTY" == true && "$ADVANCING" == true ]]; then
-        carry_rollback "merge of $BRANCH was interrupted"
+        if [[ -n "$ADVANCE_HEAD" ]] \
+            && [[ "$(git -C "$WORKTREE_DIR" rev-parse -q --verify "refs/heads/$BRANCH" 2>/dev/null)" == "$ADVANCE_HEAD" ]]; then
+            ADVANCING=false
+        else
+            carry_rollback "merge of $BRANCH was interrupted"
+        fi
     fi
     if [[ "$ADVANCING" == true ]]; then
         # -q: drop reset's HEAD-is-now line so the
@@ -542,9 +549,11 @@ find_clobbered() {
 # commits, carry_advance makes it after the commit, and carry_rollback undoes
 # both sides, so the merge lands whole or not at all
 ADVANCE_TREE=""
+ADVANCE_HEAD=""
 TARGET_TREE=""
 CARRY_ERROR=""
 CHILD_MOVED=false
+UNRESTORED=""
 carry_prepare() {
     if ! CHILD_HEAD=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null) \
         || ! CHILD_TIP=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
@@ -601,6 +610,28 @@ carry_prepare() {
         CARRY_ERROR+="-- commit, move aside, or resume and finish that work before merging"
         return 1
     fi
+    # the dry run passes a path the child staged at exactly the content the
+    # advance brings, which the advance would absorb and a rollback's reverse
+    # update would revert, so a staged path the advance changes refuses too:
+    # every path it changes is then clean at CHILD_OLD, or absent
+    if ! GIT_INDEX_FILE="$CARRY_INDEX" git -C "$WORKTREE_DIR" diff-index --cached --name-only -z \
+        "$CHILD_OLD" >"$TMP_DIR/carry-staged"; then
+        CARRY_ERROR="listing $BRANCH's staged paths failed"
+        return 1
+    fi
+    ABSORBED=""
+    # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
+    # name is never C-quoted by core.quotePath into a path that exists nowhere
+    while IFS= read -r -d '' STAGED_PATH; do
+        git -C "$WORKTREE_DIR" diff --quiet "$CHILD_OLD" "$ADVANCE_TREE" -- ":(literal)$STAGED_PATH" \
+            || ABSORBED+="$STAGED_PATH, "
+    done <"$TMP_DIR/carry-staged"
+    if [[ -n "$ABSORBED" ]]; then
+        CARRY_ERROR="advancing $BRANCH's merge-base would change its uncommitted state:"
+        CARRY_ERROR+=" ${ABSORBED%, } staged at the content the advance brings"
+        CARRY_ERROR+=" -- commit, move aside, or resume and finish that work before merging"
+        return 1
+    fi
     # git's dry run treats an ignored file as expendable; the clobber guard
     # does not
     find_clobbered "$ADVANCE_TREE"
@@ -635,11 +666,15 @@ carry_advance() {
     fi
     ADVANCING=false
 }
-# restored means the child back at CHILD_OLD and the target at its pre-merge
-# HEAD: clean and out of the squash after a fresh merge, and after a
-# --continue holding the squash message the re-run reads
+# restored means a moved child back at CHILD_OLD with every path the advance
+# changes as it was, and the target at its pre-merge HEAD: clean and out of
+# the squash after a fresh merge, and after a --continue holding the squash
+# message the re-run reads
 carry_restored() {
-    [[ "$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$CHILD_OLD" ]] || return 1
+    if [[ "$CHILD_MOVED" == true ]]; then
+        [[ -z "$UNRESTORED" ]] || return 1
+        [[ "$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$CHILD_OLD" ]] || return 1
+    fi
     [[ "$(git -C "$PARENT_WORKTREE_DIR" rev-parse HEAD 2>/dev/null)" == "$TARGET_BEFORE" ]] || return 1
     if [[ "$CONTINUE" == true ]]; then
         [[ -f "$SQUASH_MSG_FILE" ]]
@@ -659,19 +694,66 @@ carry_rollback() {
     end_merge_event failed
     if [[ "$CHILD_MOVED" == true ]]; then
         git -C "$WORKTREE_DIR" update-index -q --refresh >/dev/null || true
-        git -C "$WORKTREE_DIR" read-tree -m -u "$ADVANCE_HEAD" "$CHILD_OLD" 2>/dev/null || true
+        git -C "$WORKTREE_DIR" read-tree -m -u "$ADVANCE_HEAD" "$CHILD_OLD" \
+            2>"$TMP_DIR/carry-reverse-err" || true
+        # a forward update cut short leaves advance content the reverse update
+        # keeps, since its index entries still match CHILD_OLD, so each path
+        # the advance changes is judged by its state and returned to CHILD_OLD
+        # -- carry_prepare proved every one clean there, or absent; the paths
+        # it adds go first, so a file can come back where a directory stood
+        if ! git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=A \
+            "$CHILD_OLD" "$ADVANCE_HEAD" >"$TMP_DIR/carry-added" \
+            || ! git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=a \
+                "$CHILD_OLD" "$ADVANCE_HEAD" >"$TMP_DIR/carry-changed"; then
+            UNRESTORED="the paths the advance changes (listing them failed), "
+        fi
+        # read NUL-delimited so a path with spaces stays one entry and a
+        # non-ASCII name is never C-quoted by core.quotePath into a path that
+        # exists nowhere
+        while IFS= read -r -d '' CARRY_PATH; do
+            git -C "$WORKTREE_DIR" update-index --force-remove -- "$CARRY_PATH" || true
+            # 2>/dev/null: a path rm cannot remove is named by the check below
+            rm -f -- "$WORKTREE_DIR/$CARRY_PATH" 2>/dev/null || true
+            if [[ -e "$WORKTREE_DIR/$CARRY_PATH" || -L "$WORKTREE_DIR/$CARRY_PATH" ]] \
+                || [[ -n "$(git -C "$WORKTREE_DIR" ls-files -- ":(literal)$CARRY_PATH")" ]]; then
+                UNRESTORED+="$CARRY_PATH, "
+            fi
+        done <"$TMP_DIR/carry-added"
+        # read NUL-delimited so a path with spaces stays one entry and a
+        # non-ASCII name is never C-quoted by core.quotePath into a path that
+        # exists nowhere
+        while IFS= read -r -d '' CARRY_PATH; do
+            if git -C "$WORKTREE_DIR" diff --cached --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH" \
+                && git -C "$WORKTREE_DIR" diff --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH"; then
+                continue
+            fi
+            git -C "$WORKTREE_DIR" checkout -q "$CHILD_OLD" -- ":(literal)$CARRY_PATH" || true
+            if ! git -C "$WORKTREE_DIR" diff --cached --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH" \
+                || ! git -C "$WORKTREE_DIR" diff --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH"; then
+                UNRESTORED+="$CARRY_PATH, "
+            fi
+        done <"$TMP_DIR/carry-changed"
     fi
     if [[ "$CONTINUE" != true ]]; then
+        TARGET_RESET=--hard
         git -C "$PARENT_WORKTREE_DIR" reset -q --hard "$TARGET_BEFORE" || true
         clear_squash_markers
     else
+        TARGET_RESET=--soft
         git -C "$PARENT_WORKTREE_DIR" reset --soft "$TARGET_BEFORE" || true
         cp "$TMP_DIR/squash-msg" "$SQUASH_MSG_FILE" || true
     fi
     if ! carry_restored; then
-        echo "Error: $*; the merge could NOT be fully rolled back -- check that" \
-            "$PARENT_BRANCH is at $TARGET_BEFORE and $BRANCH at $CHILD_OLD with its" \
-            "uncommitted work intact before merging again" >&2
+        # the reverse update's own refusal says why the child did not move back
+        [[ ! -s "$TMP_DIR/carry-reverse-err" ]] || cat "$TMP_DIR/carry-reverse-err" >&2
+        CHILD_CHECK=""
+        if [[ "$CHILD_MOVED" == true ]]; then
+            CHILD_CHECK=", and check that $BRANCH is at $CHILD_OLD with its uncommitted work intact"
+            [[ -z "$UNRESTORED" ]] || CHILD_CHECK+=" (still changed: ${UNRESTORED%, })"
+        fi
+        echo "Error: $*; the merge could NOT be fully rolled back -- run" \
+            "'git -C $PARENT_Q reset $TARGET_RESET $TARGET_BEFORE' to restore" \
+            "$PARENT_BRANCH$CHILD_CHECK, before merging again" >&2
     elif [[ "$CONTINUE" == true ]]; then
         echo "Error: $*; the merge was rolled back and $BRANCH's worktree restored;" \
             "the staged squash is left in place -- fix and re-run with --continue" >&2
