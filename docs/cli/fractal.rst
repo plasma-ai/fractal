@@ -143,9 +143,10 @@ Refuses when:
   ``wiki init --path=<folder>``; the refusal lands after the data directory is
   written, and the re-run completes the partial init;
 - the command runs from a draining seat (an agent invocation of a
-  ``fractal node start --continue --drain`` run, or any process in its
-  process group — see ``--drain`` in :doc:`/cli/node`): a drain forbids
-  every spawn, a whole new tree included;
+  ``fractal node start --continue --drain`` run, detected by the ``_DRAIN``
+  export, the run's durable ``drain`` signal, or the agent's recorded
+  session — see ``--drain`` in :doc:`/cli/node`): a drain forbids every
+  spawn, a whole new tree included;
 - another live fractal on the machine shares this repository's directory
   basename: tmux session names carry the basename, so two fractals under
   one basename would collide. Rename one repository directory.

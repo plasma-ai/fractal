@@ -270,10 +270,12 @@ may include breaking changes, each listed under a Breaking heading.
   met at launch stays a step failure with the same words. Three such launch
   refusals in a row read as the `PAUSED: billing` backoff, which the preflight
   check forestalls.
-- A drain run's lineage guard recognizes its seat's commands: it matches the
-  caller's session against the recorded agent group, so a command the agent CLI
-  runs in its own process group still refuses spawns and re-arms after scrubbing
-  `_DRAIN` and leaving its worktree.
+- A drain run's lineage guard matches the caller's session against the recorded
+  agent session instead of its process group, so a process the agent starts in a
+  process group of its own still refuses spawns and re-arms after scrubbing
+  `_DRAIN` and leaving its worktree. A tool command the agent CLI runs in a
+  session of its own, as Claude Code runs every tool command, is outside that
+  session and goes unmatched.
 - A step file's `timeout:` frontmatter now reaches every report of that step's
   limit, not only its enforcement. `$TIME_BUDGET` is rebuilt for each step and
   names that step's own ceiling (a 6h step on a 2h node reads `6h/step`).

@@ -747,12 +747,13 @@ class Node:
         never the last word for a guard. A seat that unsets ``_NODE`` and
         steps into a *sibling* worktree resolves to a real but wrong
         node; one that steps outside every worktree resolves to no actor
-        and would fail open. Each guard closes that from its own side
+        and would fail open. Each guard answers that from its own side
         rather than here: the drain adds process-lineage attribution
         (:meth:`drain_lineage` -- the recorded agent's session, which
-        moving cannot rewrite), and the mailbox seal sits on the
-        owner-only channel rule, which asks what a caller may read rather
-        than who it claims to be.
+        moving cannot rewrite, though a tool command the agent CLI runs in
+        a session of its own is outside it), and the mailbox seal sits on
+        the owner-only channel rule, which asks what a caller may read
+        rather than who it claims to be.
 
         Returns:
             The acting node, or ``None`` outside any node context.
@@ -803,14 +804,16 @@ class Node:
         the environment and steps into a sibling worktree resolves to a
         real but WRONG node the drain never binds; one that steps outside
         every worktree resolves to no node and fails open. Neither is a
-        lie the seat can tell about its *session*: the loop spawns each
+        lie a process can tell about its *session*: the loop spawns each
         agent invocation as its own session leader and records the id
-        (``.step_pgid``), and every command that seat runs stays in that
-        session, even one the agent CLI starts in its own process group
-        (only a deliberate ``setsid`` leaves it). Ask the tree which of
-        its open runs drain, then whether this process sits in one of
-        their seats -- attribution by lineage, which no ``env -u`` or
-        ``cd`` rewrites.
+        (``.step_pgid``). Ask the tree which of its open runs drain, then
+        whether this process sits in one of their seats' sessions --
+        attribution by lineage, which no ``env -u`` or ``cd`` rewrites.
+        The session holds the agent and whatever it starts in a process
+        group of its own, but not a tool command the agent CLI runs in a
+        session of its own (Claude Code runs every one so): such a command
+        never matches here, and one that scrubs ``_DRAIN`` and ``_NODE``
+        and leaves its worktree escapes every drain source.
 
         Identity-checked like the reap's (:func:`_recorded_group`), so a
         stale handle naming a recycled id never refuses an unrelated
@@ -6967,7 +6970,8 @@ def _draining(node: Node) -> bool:
     of those still ask the seat who it is, and a seat that moves can
     answer wrongly -- so the last source asks the operating system
     instead: whether this process sits in a draining seat's recorded
-    session (:meth:`Node.drain_lineage`).
+    session (:meth:`Node.drain_lineage`), which a tool command the agent
+    CLI runs in a session of its own is outside.
 
     Args:
         node: Any node of the tree the verb acts on -- the drain that
