@@ -187,16 +187,16 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   base too -- scoped to its folder: a root's own index refreshes that root
   whole, and an index belongs to the deepest root above it. A wiki declared
   at the worktree root refuses the merge, since every refresh would walk the
-  whole worktree; an
-  untracked file in a refreshed folder refuses the merge by name, while one in
-  a sibling a glob would match does not; an index in a folder its wiki
-  excludes is skipped; and a failed refresh restores the target with the child
-  unadvanced, as does a failed declaration read, listing, or staging step
-  around it. Untracked files are judged by the wiki's own rules: a file only
-  a personal ignore hides refuses the merge, since the wiki would index it,
-  and one under a dot-prefixed folder neither refuses it nor rides the squash.
-  A merged index whose folder encloses another declared wiki, which the wiki
-  refuses to sweep, lands as the driver merged it, with a warning.
+  whole worktree; an untracked file in a refreshed folder refuses the merge
+  by name, while one in a sibling a glob would match does not; an index in a
+  folder its wiki excludes is skipped; and a failed refresh restores the
+  target with the child unadvanced, as does a failed declaration read,
+  listing, or staging step around it. Untracked files are judged by the
+  wiki's own rules: a file only a personal ignore hides refuses the merge,
+  since the wiki would index it, and one under a dot-prefixed folder neither
+  refuses it nor rides the squash. A merged index whose folder encloses
+  another declared wiki, which the wiki refuses to sweep, lands as the
+  driver merged it, with a warning.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
   a conflicted merge with the merge's own tail -- ``.fractal/`` restore and
   seed strip, footprint check, commit, merge-base advance -- and refuses when
@@ -1343,7 +1343,7 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
     draft.write_text('a bare draft\n', encoding='utf-8')
     head = _git(repo, 'rev-parse', 'HEAD').stdout
     refused = _script('merge.sh', repo, f'{worktrees["two"]}')
-    assert refused.returncode != 0
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
     assert 'library/cards/draft.md' in refused.stderr, refused.stderr
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     assert draft.read_text(encoding='utf-8') == 'a bare draft\n'
@@ -1368,8 +1368,8 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
 
 
 @pytest.mark.parametrize(
-    ('roots', 'root', 'folder', 'stray'),
-    [
+    argnames=('roots', 'root', 'folder', 'stray'),
+    argvalues=[
         (('library',), 'library', '.', None),
         (('library', 'library/inner'), 'library/inner', 'cards', None),
         (('library',), 'library', '[x]', 'library/x/sub/_index.md'),
@@ -1536,7 +1536,7 @@ def test_merge_refuses_a_wiki_declared_at_the_worktree_root(
 
     refused = _script('merge.sh', repo, f'{worktree}')
 
-    assert refused.returncode != 0
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
     assert 'the worktree root declares a wiki' in refused.stderr, refused.stderr
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     assert _git(repo, 'status', '--porcelain').stdout == ''
@@ -1744,7 +1744,7 @@ def test_merge_restores_the_target_when_a_corpus_refresh_fails(
 
     refused = _script('merge.sh', repo, f'{worktrees["two"]}', env=env)
 
-    assert refused.returncode != 0
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
     assert 'refreshing the wiki indexes under' in refused.stderr, refused.stderr
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     assert _git(repo, 'status', '--porcelain').stdout == ''
