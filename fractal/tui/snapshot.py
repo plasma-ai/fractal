@@ -595,6 +595,13 @@ class SnapshotBuilder:
                 elapsed_step += charge
             if started_step is not None:
                 started_step -= charge
+        # config.json is agent-editable, so a duration may arrive as a
+        # bare number (e.g. timeout: 3600) -- coerce to str before parsing
+        # (matching Config.validate) so a mistyped value reads as no cap,
+        # never an AttributeError that crashes the whole cockpit build
+        step_default = fractal.util.parse_duration_seconds(
+            str(config.get('step_timeout') or '')
+        )
         return {
             'run': len(runs),
             'iter': it['iter'] if it else None,
@@ -614,14 +621,8 @@ class SnapshotBuilder:
             'cost_step': step['cost'] if step else None,
             'cost_iter': sum(s['cost'] or 0 for s in it_steps) if it else None,
             'cost_run': spends[run['run_id']],
-            # config.json is agent-editable, so a duration may arrive as a
-            # bare number (e.g. timeout: 3600) -- coerce to str before parsing
-            # (matching Config.validate) so a mistyped value reads as no cap,
-            # never an AttributeError that crashes the whole cockpit build
             'cap_step_s': _step_cap(
-                default=fractal.util.parse_duration_seconds(
-                    str(config.get('step_timeout') or '')
-                ),
+                default=step_default,
                 step=step,
                 it_steps=it_steps,
                 node_dir=node_dir,
