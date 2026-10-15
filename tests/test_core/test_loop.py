@@ -46,6 +46,7 @@ __all__ = [
     'test_duration_validation_mirrors_the_launch_contract',
     'test_step_timeout_frontmatter_substitutes_at_launch',
     'test_time_budget_renders_each_steps_effective_timeout',
+    'test_step_limit_reports_the_ceiling_its_launch_enforces',
     'test_malformed_midrun_retune_warns_and_keeps_the_previous_value',
     'test_provider_frontmatter_rebinds_the_boot_agent',
     'test_agent_env_publishes_node_branch',
@@ -708,6 +709,53 @@ def test_time_budget_renders_each_steps_effective_timeout(
     for (env, prompt), budget in zip(loop.seen, ['6h/step', '2h/step'], strict=True):
         assert f'Time budget: {budget}' in prompt
         assert env['TIME_BUDGET'] == budget
+
+
+def test_step_limit_reports_the_ceiling_its_launch_enforces(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step file edited mid-iteration leaves the step's reported ceiling.
+
+    The loop reads step files once per iteration, so an edit landing
+    mid-iteration changes the file but not the ceiling the step runs
+    under. Each launch records that ceiling on its row, so a reader
+    outside the seat -- with no ``STEP_ID`` of its own -- reports the
+    enforced 6h, never the file's 1h.
+    """
+    monkeypatch.setenv('_NODE', '')
+    steps_dir = loop_node.node_dir / 'steps'
+    (steps_dir / '02-EXECUTE.md').write_text(
+        '---\ntimeout: 6h\n---\n# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
+
+    class EditingLoop(MockLoop):
+        """Mock loop whose PLAN launch shortens EXECUTE's timeout on disk."""
+
+        def __init__(self: EditingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``EditingLoop``."""
+            super().__init__(node, **kwargs)
+            self.reported: list[tuple[Optional[float], int]] = []
+
+        def _launch(
+            self: EditingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Edit EXECUTE's file during PLAN; record EXECUTE's reported limit."""
+            if step.name == 'PLAN':
+                (steps_dir / '02-EXECUTE.md').write_text(
+                    '---\ntimeout: 1h\n---\n# EXECUTE\n\nWork.\n',
+                    encoding='utf-8',
+                )
+            else:
+                limit = self.node.time.limit('step')
+                self.reported.append((limit, self._step_timeout_effective))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = EditingLoop(loop_node)
+    assert loop.run() == 0
+    # the reader outside the seat agrees with the ceiling the loop enforces
+    assert loop.reported == [(21600.0, 21600)]
 
 
 @pytest.mark.parametrize(

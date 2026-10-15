@@ -131,11 +131,11 @@ class Time:
         whole-run ``timeout`` key, ``iter`` the ``iter_timeout`` key, with
         an unset one falling back to ``interval`` (the loop bounds an
         interval iteration by its slot). The ``step`` scope is the active
-        step's effective ceiling -- its step file's ``timeout:`` override,
-        else ``step_timeout`` -- and with no active step the node's
-        ``step_timeout``, else the tightest step file's own (see
-        :meth:`_step_limit`). With no ``scope`` the soonest applicable
-        limit (the smallest configured) is returned.
+        step's effective ceiling as its launch recorded it -- its step
+        file's ``timeout:`` override, else ``step_timeout`` -- and with no
+        active step the node's ``step_timeout``, else the tightest step
+        file's own (see :meth:`_step_limit`). With no ``scope`` the
+        soonest applicable limit (the smallest configured) is returned.
 
         Args:
             scope: ``'run'``, ``'iter'``, or ``'step'`` to query one
@@ -171,17 +171,19 @@ class Time:
     def _step_limit(self: Time) -> Optional[float]:
         """Return the active step's effective ceiling seconds.
 
-        Follows the loop's launch rule (``Step.limit``): the active step
-        file's ``timeout:`` override when it parses, else the node's
-        ``step_timeout``. The node's own seat -- its exported ``STEP_ID``
-        naming the active step -- reads its exported
-        ``STEP_TIMEOUT_SECONDS``, the exact ceiling its launch enforces.
-        Every other caller reads the step file, which the loop reads once
-        per iteration: an edit landing mid-iteration shows here before the
-        loop enforces it at the next iteration. An idle node has no
-        current step, so it answers with the node's ``step_timeout``, else
-        the tightest step file's own ``timeout:`` -- a limit exists either
-        way, which the run and iteration scopes report as not running.
+        The ceiling the active step's launch enforces, by the loop's
+        launch rule (``Step.limit``): its step file's ``timeout:``
+        override when it parses, else the node's ``step_timeout``. The
+        launch records it on its step row, so a step file edited
+        mid-iteration -- the loop reads step files once per iteration --
+        never shows here; the node's own seat (its exported ``STEP_ID``
+        naming the active step) reads the same ceiling from its exported
+        ``STEP_TIMEOUT_SECONDS``. A row with no recorded ceiling (opened
+        before the column existed, or whose stamp failed) resolves its
+        step file instead. An idle node has no current step, so it
+        answers with the node's ``step_timeout``, else the tightest step
+        file's own ``timeout:`` -- a limit exists either way, which the
+        run and iteration scopes report as not running.
         """
         from .loop import Step
 
@@ -203,7 +205,7 @@ class Time:
                     limits.append(float(seconds))
             return min(limits, default=None)
         # the node's own seat: its launch exported the enforced ceiling
-        # (``-1`` when none); seat-editable, so garbage reads the file
+        # (``-1`` when none); seat-editable, so garbage falls through
         if os.environ.get('STEP_ID') == f'{step_id}':
             try:
                 seconds = int(os.environ.get('STEP_TIMEOUT_SECONDS', ''))
@@ -211,11 +213,16 @@ class Time:
                 pass
             else:
                 return float(seconds) if seconds > 0 else None
-        # the row's step file; the built-in sync pass (a SYNC row at step 0
-        # or under sync mode, as the loop reads it) runs from the package's
-        # mode doc, and a vanished, unreadable, or malformed file falls back
-        # to the node value, as at launch
+        # read the ceiling the launch recorded on the row ('-1' when none);
+        # the column is absent where a write-denied reader cannot lift it
         row = self.db.read('steps', where={'step_id': step_id}, limit=1)[0]
+        recorded = row.get('timeout')
+        if recorded is not None:
+            return float(recorded) if recorded > 0 else None
+        # an unrecorded row's step file; the built-in sync pass (a SYNC row
+        # at step 0 or under sync mode, as the loop reads it) runs from the
+        # package's mode doc, and a vanished, unreadable, or malformed file
+        # falls back to the node value, as at launch
         sync = self._node.config.get('sync')
         sync_mode = True if sync is None else bool(sync)
         try:

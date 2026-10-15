@@ -699,6 +699,28 @@ class Record:
         """
         self.db.update({'effort': effort}, 'steps', where={'step_id': step_id})
 
+    def step_timeout(
+        self: Record,
+        *,
+        step_id: int,
+        seconds: int,
+    ) -> None:
+        """Record the ceiling a step's launch enforces.
+
+        Stamped by the loop as each launch resolves it, so every reader of
+        the step's limit answers with the ceiling the loop enforces, even
+        after its step file is edited mid-iteration (the loop reads step
+        files once per iteration).
+
+        Args:
+            step_id: Step to update.
+            seconds: The launch's effective ceiling in whole seconds (the
+                step's own ``timeout:`` or the node's ``step_timeout``),
+                ``-1`` when it has none.
+
+        """
+        self.db.update({'timeout': seconds}, 'steps', where={'step_id': step_id})
+
     def step_end(
         self: Record,
         *,

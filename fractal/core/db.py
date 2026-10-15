@@ -14,7 +14,7 @@ __all__ = ['Database']
 
 #: the schema version a current database is stamped with; each step past
 #: a stamped older version is applied by connect (see Database._upgrade)
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 class Database:
@@ -203,6 +203,16 @@ class Database:
                         if 'effort' not in columns:
                             connection.execute(
                                 'ALTER TABLE steps ADD COLUMN effort TEXT'
+                            )
+                    # version 2 -> 3: the step row's timeout column
+                    if version == 2:
+                        columns = {
+                            row[1]
+                            for row in connection.execute('PRAGMA table_info(steps)')
+                        }
+                        if 'timeout' not in columns:
+                            connection.execute(
+                                'ALTER TABLE steps ADD COLUMN timeout INTEGER'
                             )
                     connection.execute(f'PRAGMA user_version = {version + 1}')
                     connection.execute('COMMIT')

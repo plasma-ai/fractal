@@ -568,8 +568,9 @@ class SnapshotBuilder:
 
         All six cap axes exist (``timeout`` is the per-RUN wall clock,
         ``iter_timeout`` the per-iteration one, and the step time cap the
-        displayed step's own ceiling: its step file's ``timeout:``, else
-        ``step_timeout``); ``None`` means uncapped and renders ``-``.
+        displayed step's own ceiling as its launch recorded it: its step
+        file's ``timeout:``, else ``step_timeout``); ``None`` means
+        uncapped and renders ``-``.
         """
         if run is None:
             return None
@@ -1068,13 +1069,21 @@ def _step_cap(
 ) -> Optional[float]:
     """Return the displayed step's effective time cap.
 
-    The loop's launch rule: the step file's ``timeout:`` substitutes for
-    the node's ``step_timeout`` (``default``). Step files are live-edited,
-    so a vanished, unreadable, or malformed one falls back to ``default``,
-    as at launch -- never a crashed cockpit build.
+    The ceiling its launch recorded on the row, which a step file edited
+    since leaves alone. A row with none (opened before the column
+    existed, or whose stamp failed) follows the loop's launch rule
+    instead: the step file's ``timeout:`` substitutes for the node's
+    ``step_timeout`` (``default``). Step files are live-edited, so a
+    vanished, unreadable, or malformed one falls back to ``default``, as
+    at launch -- never a crashed cockpit build.
     """
     if step is None or node_dir is None:
         return default
+    # read the ceiling the launch recorded on the row ('-1' when none);
+    # the column is absent where a write-denied reader cannot lift it
+    recorded = step.get('timeout')
+    if recorded is not None:
+        return float(recorded) if recorded > 0 else None
     try:
         found = Step.find(
             node_dir / 'steps',

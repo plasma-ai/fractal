@@ -15,8 +15,8 @@ The time matrix's semantics:
   since the active iteration's ``started_at``, clamped at ``0``.
 - ``--step-timeout`` is the **per-step** default. ``Time.remaining(scope='step')``
   reports the active step's effective ceiling -- its step file's ``timeout:``
-  line when it carries one, else ``step_timeout`` -- minus elapsed since the
-  active step's ``started_at``.
+  line when it carries one, else ``step_timeout``, as its launch recorded it
+  -- minus elapsed since the active step's ``started_at``.
 - With no ``scope`` the method returns the **soonest** of the configured
   run/iter/step deadlines -- the time until the next timeout fires.
 
@@ -31,6 +31,7 @@ back-dating ``started_at`` (deterministic, no sleeps).
 from __future__ import annotations
 
 import pathlib
+import sqlite3
 from collections.abc import Callable
 from typing import Optional
 
@@ -54,6 +55,8 @@ __all__ = [
     'test_step_limit_follows_the_active_steps_timeout',
     'test_step_limit_survives_an_unusable_step_file',
     'test_step_limit_prefers_the_seats_exported_ceiling',
+    'test_step_limit_reads_the_ceiling_its_launch_recorded',
+    'test_step_limit_reads_a_database_it_cannot_lift',
     'test_step_limit_tells_same_named_step_files_apart',
     'test_step_limit_tells_a_sync_pass_from_a_user_sync_step',
     'test_idle_step_limit_counts_step_file_timeouts',
@@ -342,8 +345,9 @@ def test_step_limit_prefers_the_seats_exported_ceiling(
     mid-iteration changes the file but not the enforced ceiling; the
     seat's ``STEP_TIMEOUT_SECONDS`` is that ceiling, ``-1`` for a launch
     with none. The seat can edit its own env, so an export that does not
-    parse reads the step file, as any caller whose ``STEP_ID`` is not the
-    active step's (another node's seat, an operator) does.
+    parse falls through to what any caller whose ``STEP_ID`` is not the
+    active step's (another node's seat, an operator) reads -- here the step
+    file, as the row carries no recorded ceiling.
     """
     node = node_with_db
     node.config.set('step_timeout', NODE_STEP_TIMEOUT)
@@ -352,6 +356,52 @@ def test_step_limit_prefers_the_seats_exported_ceiling(
     monkeypatch.setenv('STEP_ID', f'{step_id if seat else step_id + 1}')
     monkeypatch.setenv('STEP_TIMEOUT_SECONDS', exported)
     assert node.time.limit('step') == limit
+
+
+@pytest.mark.parametrize(
+    argnames=('recorded', 'limit'),
+    argvalues=[(14400, 14400.0), (-1, None)],
+    ids=['recorded', 'recorded-unbounded'],
+)
+def test_step_limit_reads_the_ceiling_its_launch_recorded(
+    node_with_db: Node,
+    recorded: int,
+    limit: Optional[float],
+) -> None:
+    """A step row's recorded ceiling answers every caller.
+
+    Each launch records the ceiling it enforces on its row (``-1`` for a
+    launch with none), and the loop reads step files once per iteration,
+    so neither the file's 6h nor the node's 2h overrides what the launch
+    recorded.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    step_id = _active_step(node, '---\ntimeout: 6h\n---\n')
+    node.record.step_timeout(step_id=step_id, seconds=recorded)
+    assert node.time.limit('step') == limit
+
+
+def test_step_limit_reads_a_database_it_cannot_lift(node_with_db: Node) -> None:
+    """A reader denied the lift to the recorded-ceiling column still answers.
+
+    A write-denied reader (a sandboxed seat) reads the schema it finds, so
+    on a database stamped before the step row's ``timeout`` column the
+    active row reads as unrecorded and its step file answers.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    _active_step(node, '---\ntimeout: 6h\n---\n')
+    # stamp the database before the column, then deny this reader writes
+    connection = sqlite3.connect(f'{node.db.path}')
+    try:
+        connection.execute('ALTER TABLE steps DROP COLUMN timeout')
+        connection.execute('PRAGMA user_version = 2')
+        connection.commit()
+    finally:
+        connection.close()
+    node.db.path.chmod(0o444)
+    assert node.time.limit('step') == 21600.0
 
 
 @pytest.mark.parametrize(
