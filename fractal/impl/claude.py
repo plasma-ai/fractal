@@ -31,6 +31,13 @@ _ROUTING_KEYS = (
     'ANTHROPIC_MODEL',
 )
 
+#: Opening of the user turn claude injects to auto-continue a reply cut off at
+#: the output cap (its wording past these words varies by version).
+_CONTINUATION_PREFIX = 'Output token limit hit'
+
+#: Content block types of a reply that is still thinking.
+_THINKING_BLOCKS = frozenset({'thinking', 'redacted_thinking'})
+
 # the openrouter route authenticates on the key alone
 _NO_KEY = (
     'OPENROUTER_API_KEY is not set\n'
@@ -51,6 +58,18 @@ class ClaudeParser(StreamParser):
         # claude emits one assistant frame per content block, each repeating
         # the message-level usage, so a message id is priced only once
         self._priced_id: Optional[str] = None
+        # the newest top-level reply, the content block types across its
+        # frames, and whether its thinking cap was reported -- the cap's two
+        # signals (the API's own stop and claude's continuation) report once
+        self._reply_id: Optional[str] = None
+        self._reply_blocks: set[Optional[str]] = set()
+        self._reply_capped = False
+        # the top-level tool calls still awaiting their results, by id -- a
+        # call can arrive on a raw block start, an assistant frame, or both
+        self._pending: set[Optional[str]] = set()
+        # the agent ended its turn (an end_turn stop or a result) and no new
+        # reply has started -- only then is a wake-up its own
+        self._turn_ended = False
 
     def feed(self: ClaudeParser, line: str) -> list[StreamEvent]:
         """Parse one claude stream line into normalized events."""
@@ -80,10 +99,32 @@ class ClaudeParser(StreamParser):
                     StreamEvent(kind='session', session=session, model=self.model)
                 )
         message_type = message.get('type')
+        top_level = message.get('parent_tool_use_id') is None
         # assistant text deltas and tool-use headers
         if message_type == 'stream_event':
             event = message.get('event') or {}
             event_type = event.get('type')
+            # the raw API events track the top-level reply's id, its blocks,
+            # and its stop: a max_tokens stop is the cap's primary signal,
+            # landing before claude requests the continuation
+            # ... and the idle clock: a new reply has the agent acting, a tool
+            # call or a turn's end has it waiting, a text block has it acting
+            if top_level:
+                if event_type == 'message_start':
+                    self._track_reply((event.get('message') or {}).get('id'))
+                    self._turn_ended = False
+                    events.append(StreamEvent(kind='acting'))
+                elif event_type == 'content_block_start':
+                    block = event.get('content_block') or {}
+                    self._reply_blocks.add(block.get('type'))
+                    events += self._block_progress(block)
+                elif event_type == 'message_delta':
+                    delta = event.get('delta') or {}
+                    if delta.get('stop_reason') == 'max_tokens':
+                        events += self._thinking_cap()
+                    elif delta.get('stop_reason') == 'end_turn':
+                        self._turn_ended = True
+                        events.append(StreamEvent(kind='waiting'))
             if event_type == 'content_block_start':
                 block = event.get('content_block') or {}
                 if block.get('type') == 'tool_use':
@@ -100,6 +141,17 @@ class ClaudeParser(StreamParser):
         # tool results
         elif message_type == 'user':
             content = (message.get('message') or {}).get('content') or []
+            # claude's own continuation backstops the API stop (assistant
+            # frames carry a null stop_reason, so it is the only other sign)
+            if top_level and _is_continuation(message):
+                events += self._thinking_cap()
+            # a result answering the last pending call, or any other turn
+            # while no call is pending, hands the agent control
+            for item in content:
+                if isinstance(item, dict) and item.get('type') == 'tool_result':
+                    self._pending.discard(item.get('tool_use_id'))
+            if top_level and not self._pending:
+                events.append(StreamEvent(kind='acting'))
             for item in content:
                 if isinstance(item, dict) and item.get('type') == 'tool_result':
                     # extract text from tool result
@@ -133,7 +185,7 @@ class ClaudeParser(StreamParser):
             # `models` keeps every distinct one so a mid-stream recovery
             # stays visible; sidechain rows run their own model and synthetic
             # rows name none -- neither feeds the record
-            if message.get('parent_tool_use_id') is None:
+            if top_level:
                 model = inner.get('model')
                 real = isinstance(model, str) and model and model != '<synthetic>'
                 if real and self.session is not None:
@@ -148,6 +200,12 @@ class ClaudeParser(StreamParser):
                                 model=model,
                             )
                         )
+                # one reply spans a frame per content block under one id
+                self._track_reply(inner.get('id'))
+                for block in inner.get('content') or []:
+                    if isinstance(block, dict):
+                        self._reply_blocks.add(block.get('type'))
+                        events += self._block_progress(block)
             usage = inner.get('usage')
             # a frame with no id cannot be deduped, so it prices as it arrives
             message_id = inner.get('id')
@@ -194,7 +252,66 @@ class ClaudeParser(StreamParser):
                     message=detail,
                 )
             )
+            # the process can outlive a result, waiting on background work
+            self._turn_ended = True
+            events.append(StreamEvent(kind='waiting'))
+        # claude's own wake-ups after a turn's end (a background task's
+        # notice, a fresh init) hand the agent control -- mid-turn, a notice
+        # lands while the agent's own tool still runs; an API retry's backoff
+        # is no time of the agent's
+        elif message_type == 'system':
+            subtype = message.get('subtype')
+            if subtype in ('init', 'task_notification') and self._turn_ended:
+                events.append(StreamEvent(kind='acting'))
+            elif subtype == 'api_retry':
+                delay = message.get('retry_delay_ms')
+                if isinstance(delay, (int, float)) and delay > 0:
+                    events.append(StreamEvent(kind='waiting', duration=0.001 * delay))
         return events
+
+    def _block_progress(
+        self: ClaudeParser,
+        block: dict[str, Any],
+    ) -> list[StreamEvent]:
+        """Return the idle-clock event of one top-level content block.
+
+        A tool call waits on its result (claimed once, from whichever of
+        its block start or assistant frame comes first); visible text is
+        the agent acting.
+        """
+        if block.get('type') == 'tool_use':
+            call = block.get('id')
+            if call in self._pending:
+                return []
+            self._pending.add(call)
+            return [StreamEvent(kind='waiting')]
+        if block.get('type') == 'text':
+            return [StreamEvent(kind='acting')]
+        return []
+
+    def _track_reply(self: ClaudeParser, reply_id: Optional[str]) -> None:
+        """Start tracking a new top-level reply when ``reply_id`` changes.
+
+        A new reply follows every result the last one will get, so its
+        unanswered calls are dropped.
+        """
+        if reply_id != self._reply_id:
+            self._reply_id = reply_id
+            self._reply_blocks = set()
+            self._reply_capped = False
+            self._pending.clear()
+
+    def _thinking_cap(self: ClaudeParser) -> list[StreamEvent]:
+        """Report the tracked reply's thinking cap, once, if it only thought.
+
+        Claude's continuation drops the cut-off thinking, so a reply with no
+        text and no tool call restarts from scratch and caps again.
+        """
+        blocks = self._reply_blocks
+        if self._reply_capped or not blocks or not blocks <= _THINKING_BLOCKS:
+            return []
+        self._reply_capped = True
+        return [StreamEvent(kind='thinking_cap', session=self.session)]
 
     def _message_cost(self: ClaudeParser, usage: dict[str, Any]) -> Optional[float]:
         """Hook for an assistant frame's running cost estimate."""
@@ -268,6 +385,7 @@ class ClaudeAgent(Agent):
     needs_pricing = False
     cost_scope = 'call'
     enforces_budget = True
+    reports_progress = True
     providers = ('openrouter',)
 
     __parser__ = ClaudeParser
@@ -470,6 +588,23 @@ def _rates(model: str) -> Optional[dict[str, Any]]:
         if entry is not None:
             return entry
     return None
+
+
+def _is_continuation(message: dict[str, Any]) -> bool:
+    """Return whether a user frame is claude's output-cap continuation.
+
+    Matched on the text alone: the flag claude stamps on its injected turns
+    is undocumented (``isSynthetic`` on the stream, ``isMeta`` in the
+    transcript), so a missing flag never disarms the match.
+    """
+    content = (message.get('message') or {}).get('content')
+    # the stream carries text blocks; a bare string is the same turn's other shape
+    if isinstance(content, str):
+        return content.startswith(_CONTINUATION_PREFIX)
+    for block in content or []:
+        if isinstance(block, dict) and block.get('type') == 'text':
+            return (block.get('text') or '').startswith(_CONTINUATION_PREFIX)
+    return False
 
 
 def _model_usage_tokens(entry: dict[str, Any]) -> dict[str, Any]:

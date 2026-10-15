@@ -381,6 +381,55 @@ them. While an active node's newest launches carry this signature,
 ``fractal node list`` shows ``PAUSED: billing`` in its ``detail`` column
 (see :doc:`/cli/node`).
 
+Stuck steps
+~~~~~~~~~~~
+
+Two triggers mark a Claude launch as **stuck**, and both take the same path:
+
+- **Thinking cap.** A reply can hit the model's output-token cap while still
+  thinking, with no text and no tool call. Claude Code then continues on its
+  own, but the continuation drops the cut-off thinking, so the agent starts
+  the thought over and hits the cap again, spending the step's time on
+  thoughts it never finishes. The
+  loop watches for a thinking-only top-level reply that the API stops at
+  ``max_tokens``, or that Claude Code follows with its own "Output token
+  limit hit" continuation. Sub-agent replies, and replies that reached text
+  or a tool call, are left alone.
+- **No action for 30 minutes.** A watchdog times the agent's own idle span,
+  counted only while the agent holds control. The clock runs from the
+  launch, from a result that answers the agent's last pending tool call,
+  from each visible text block, and from each wake-up after its turn ends
+  (Claude Code's background-task notice, a new reply). It pauses while a
+  tool call (a sub-agent included) awaits its result, and when the agent
+  ends its turn, since Claude Code then waits on background work such as a
+  long build. An API retry's backoff does not count. Thinking never counts
+  as an action, and sub-agent frames never touch the clock. At 30 minutes
+  the watchdog ends the agent the way the step deadline does.
+
+The first stuck launch in an attempt **steers** the step. The stuck row
+closes ``stopped`` with ``steered: thinking cap`` or ``steered: no action for
+30 minutes`` in its metadata. The step is then relaunched on a row of its
+own (marked ``steer``) as a resume of the same session, in detached mode
+too. The relaunch's whole prompt is the package's ``modes/STALL.md``: write
+what you have to your plan file now, then take the next concrete action. The
+steer is not a retry and does not use ``step_retries``, and the step's own
+timeout still counts from the attempt's first launch. Like a retry, the
+steer first polls the signals: a pause parks the step instead (the stuck row
+closes ``stopped``, and resume re-enters the step), and a stop, a finish, or
+a spent subtree ceiling abandons it, closing the row ``failed`` with
+``<trigger>; steer abandoned``.
+
+A second stuck launch after the steer, by either trigger, is a **stall**. The
+step closes ``exited`` with ``stalled: <trigger>, after a steer``, naming the
+second trigger, and like a timeout it never retries. The steps after it are
+booked ``stopped``, the work in progress is force-committed, the iteration
+fails with ``<step> stalled: ...``, and the loop moves on to the next
+iteration. The loop also posts a ``step stalled: <step>`` notice to the
+node's outbox, which the parent follows, naming the node, step, iteration,
+and trigger. The SYNC step is never steered. The watchdog runs only for
+Claude: the other agents' streams do not yet mark when each tool call
+completes.
+
 Time limits
 -----------
 

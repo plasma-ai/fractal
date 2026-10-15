@@ -156,12 +156,14 @@ never fatal), and both the list and the records are rebuilt before every signal
 round, so a launch that lands mid-reap is honored. It signals only groups found
 through the recorded group's session or tree. And when the first process table
 cannot be read, it falls back to signaling the recorded groups alone (minus the
-caller's own); when a later read fails, it keeps signaling the groups it already
-knows, minus the protected and spared ones, probing them by signal instead of
-re-walking; the loop falls back to a plain group KILL if the reap itself breaks;
-when `fractal node _reap` itself cannot run, `pause.sh` and `kill.sh` fall back
-to their own group-only teardown, so a helper failure never fails the pause or
-kill.
+caller's own group, not its ancestors', which no table names -- so a self-pause
+from a tool shell in a group of its own can hit the step group, as `pause.sh`'s
+own fallback does); when a later read fails, it keeps signaling the groups it
+already knows, minus the protected and spared ones, probing them by signal
+instead of re-walking; the loop warns and falls back to a plain group KILL if
+the reap itself breaks; when `fractal node _reap` itself cannot run, `pause.sh`
+and `kill.sh` fall back to their own group-only teardown, so a helper failure
+never fails the pause or kill.
 
 ## Launch environment
 

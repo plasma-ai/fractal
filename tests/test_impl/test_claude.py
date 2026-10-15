@@ -33,6 +33,7 @@ __all__ = [
     'test_parser_error_result',
     'test_parser_null_duration',
     'test_parser_marks_a_budget_stop',
+    'test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply',
     'test_parser_tolerates_garbage_claude',
     'test_parser_tolerates_present_null_payloads_claude',
     'test_parser_ignores_a_non_numeric_result_cost',
@@ -88,6 +89,44 @@ _USAGE_SECOND = {
     'output_tokens': 100,
 }
 _USAGE_SECOND_COST = 50 * 3e-6 + 100 * 1.5e-5
+
+# claude's give-up after its last continuation: a synthetic error reply, then
+# an is_error result whose subtype still reads success
+_GIVE_UP_FRAMES: list[dict[str, Any]] = [
+    {
+        'type': 'assistant',
+        'message': {
+            'model': '<synthetic>',
+            'id': '0bd9e489-14d4-4866-bfeb-6cdd65e78a68',
+            'role': 'assistant',
+            'stop_reason': 'stop_sequence',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': "API Error: Claude's response exceeded the 128000"
+                    ' output token maximum.',
+                },
+            ],
+        },
+        'parent_tool_use_id': None,
+        'session_id': 'sess-1',
+        'error': 'max_output_tokens',
+        'is_api_error_message': True,
+    },
+    {
+        'type': 'result',
+        'subtype': 'success',
+        'is_error': True,
+        'terminal_reason': 'api_error',
+        'api_error': 'max_output_tokens',
+        'result': "API Error: Claude's response exceeded the 128000 output token"
+        ' maximum.',
+        'num_turns': 4,
+        'duration_ms': 12253,
+        'total_cost_usd': 0.0015,
+        'session_id': 'sess-1',
+    },
+]
 
 
 def test_capability_flags_report_provider_facts_claude(node_with_db: Node) -> None:
@@ -162,7 +201,7 @@ def test_parser_maps_the_stream_protocol_claude() -> None:
             'total_cost_usd': 0.0432,
         },
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert [event.kind for event in events] == [
         'session',
         'tool',
@@ -213,14 +252,14 @@ def test_parser_captures_the_session_once_and_prefers_the_stream_model(
     init: dict[str, Any] = {'type': 'system', 'subtype': 'init', 'session_id': 'sess-m'}
     if init_model is not None:
         init['model'] = init_model
-    events = parser.feed(json.dumps(init))
+    events = _feed(parser, json.dumps(init))
     assert [(event.kind, event.session, event.model) for event in events] == [
         ('session', 'sess-m', recorded),
     ]
     assert parser.session == 'sess-m'
     assert parser.model == recorded
     # later frames carrying the id emit no second session event
-    assert parser.feed(json.dumps({'type': 'system', 'session_id': 'sess-m'})) == []
+    assert _feed(parser, json.dumps({'type': 'system', 'session_id': 'sess-m'})) == []
 
 
 def test_parser_restamps_the_served_model_from_assistant_rows() -> None:
@@ -273,7 +312,7 @@ def test_parser_restamps_the_served_model_from_assistant_rows() -> None:
             'message': {'id': 'msg_d', 'model': 'claude-fable-5'},
         },
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert [(event.kind, event.session, event.model) for event in events] == [
         ('session', 'sess-d', 'claude-fable-5'),
         ('session', 'sess-d', 'claude-opus-4-8'),
@@ -295,7 +334,7 @@ def test_parser_error_result() -> None:
         'duration_ms': 100,
         'result': 'boom',
     }
-    (event,) = parser.feed(json.dumps(frame))
+    (event,) = _feed(parser, json.dumps(frame))
     assert event.kind == 'result'
     assert event.failed
     assert event.message == 'boom'
@@ -319,7 +358,7 @@ def test_parser_null_duration() -> None:
         'duration_ms': None,
         'total_cost_usd': 0.01,
     }
-    (event,) = parser.feed(json.dumps(frame))
+    (event,) = _feed(parser, json.dumps(frame))
     assert event.duration == 0.0
     assert event.turns == 1
 
@@ -342,16 +381,147 @@ def test_parser_marks_a_budget_stop(subtype: str, stopped: bool) -> None:
         'num_turns': 1,
         'duration_ms': 1000,
     }
-    (event,) = parser.feed(json.dumps(frame))
+    (event,) = _feed(parser, json.dumps(frame))
     assert event.budget_stopped is stopped
     assert parser.budget_stopped is stopped
+
+
+# a capped reply as the stream carries it: the raw message_start, a thinking
+# block's start and its assistant frame (stop_reason null), then the raw
+# message_delta carrying the API's max_tokens stop
+_CAPPED_THINKING = (
+    ('start', 'msg_1', None),
+    ('thinking_start', 'msg_1', None),
+    ('thinking', 'msg_1', None),
+)
+
+
+@pytest.mark.parametrize(
+    argnames=('frames', 'capped'),
+    argvalues=[
+        # the API's own stop alone reports the cap, before any continuation
+        pytest.param([*_CAPPED_THINKING, ('stop', 'msg_1', None)], True, id='stop'),
+        # claude's continuation alone backstops it (no partial-message events)
+        pytest.param(
+            [('thinking', 'msg_1', None), ('continuation', None, None)],
+            True,
+            id='continuation',
+        ),
+        # the wording past the opening varies by version
+        pytest.param(
+            [('thinking', 'msg_1', None), ('reasoning_continuation', None, None)],
+            True,
+            id='continuation-wording',
+        ),
+        # the transcript's shape: plain-string content flagged isMeta
+        pytest.param(
+            [('thinking', 'msg_1', None), ('meta_continuation', None, None)],
+            True,
+            id='continuation-string',
+        ),
+        # the undocumented flag on claude's injected turn is never required
+        pytest.param(
+            [('thinking', 'msg_1', None), ('unflagged_continuation', None, None)],
+            True,
+            id='unflagged-continuation',
+        ),
+        # both signals for one reply report it once
+        pytest.param(
+            [
+                *_CAPPED_THINKING,
+                ('stop', 'msg_1', None),
+                ('continuation', None, None),
+            ],
+            True,
+            id='stop-and-continuation',
+        ),
+        # a reply that reached text or a tool call before the cap has work to
+        # continue from -- claude's own continuation is the right response;
+        # a block seen only on its raw start event still counts
+        pytest.param(
+            [
+                *_CAPPED_THINKING,
+                ('text', 'msg_1', None),
+                ('stop', 'msg_1', None),
+                ('continuation', None, None),
+            ],
+            False,
+            id='text',
+        ),
+        pytest.param(
+            [
+                *_CAPPED_THINKING,
+                ('tool_use', 'msg_1', None),
+                ('stop', 'msg_1', None),
+                ('continuation', None, None),
+            ],
+            False,
+            id='tool-use',
+        ),
+        pytest.param(
+            [
+                *_CAPPED_THINKING,
+                ('text_start', 'msg_1', None),
+                ('stop', 'msg_1', None),
+            ],
+            False,
+            id='text-streamed',
+        ),
+        # a sub-agent's thinking-only cap is its own business; the top-level
+        # reply before it launched the sub-agent
+        pytest.param(
+            [
+                ('tool_use', 'msg_1', None),
+                ('start', 'msg_2', 'toolu_1'),
+                ('thinking_start', 'msg_2', 'toolu_1'),
+                ('thinking', 'msg_2', 'toolu_1'),
+                ('stop', 'msg_2', 'toolu_1'),
+                ('continuation', None, 'toolu_1'),
+            ],
+            False,
+            id='sidechain',
+        ),
+    ],
+)
+def test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply(
+    frames: list[tuple[str, Optional[str], Optional[str]]],
+    capped: bool,
+) -> None:
+    """A thinking-only top-level reply cut at the output cap reports once.
+
+    Frames are trimmed from a real ``stream-json`` capture: the raw
+    ``message_delta`` stop is the primary signal, claude's injected
+    continuation the backstop, and either reports the cap. After its last
+    continuation claude gives up with a synthetic error reply and an
+    ``is_error`` result, which parse as a plain failed result.
+    """
+    parser = ClaudeParser()
+    # each entry is (frame kind, message id, parent tool-use id)
+    lines = _lines(
+        [
+            {'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'},
+            *(_reply_frame(*entry) for entry in frames),
+            *_GIVE_UP_FRAMES,
+        ]
+    )
+    events = [event for line in lines for event in _feed(parser, line)]
+    caps = [event for event in events if event.kind == 'thinking_cap']
+    assert len(caps) == (1 if capped else 0)
+    if capped:
+        (cap,) = caps
+        assert cap.session == 'sess-1'
+    # the give-up tail closes as a failed result carrying claude's message
+    result = events[-1]
+    assert result.kind == 'result'
+    assert result.failed
+    assert 'output token maximum' in (result.message or '')
 
 
 def test_parser_tolerates_garbage_claude() -> None:
     """Malformed, non-object, and unknown lines yield nothing, never raise."""
     parser = ClaudeParser()
     junk = ['', '   ', 'not json', '[1, 2]', '"text"', '{}', '{"type": "mystery"}']
-    assert [event for line in junk for event in parser.feed(line)] == []
+    assert [event for line in junk for event in _feed(parser, line)] == []
     assert parser.session is None
     assert parser.cost is None
 
@@ -373,7 +543,7 @@ def test_parser_tolerates_present_null_payloads_claude() -> None:
         '{"type": "stream_event", "event":'
         ' {"type": "content_block_delta", "delta": null}}',
     ]
-    assert [event for line in frames for event in parser.feed(line)] == []
+    assert [event for line in frames for event in _feed(parser, line)] == []
 
 
 def test_parser_ignores_a_non_numeric_result_cost() -> None:
@@ -393,7 +563,7 @@ def test_parser_ignores_a_non_numeric_result_cost() -> None:
             'total_cost_usd': '0.05',
         },
     ]
-    (result,) = [event for line in _lines(frames) for event in parser.feed(line)]
+    (result,) = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert result.kind == 'result'
     assert result.cost is None
     assert parser.cost is None
@@ -448,7 +618,7 @@ def test_events_render_through_the_production_renderer_claude(
         },
     ]
     for line in _lines(frames):
-        for event in parser.feed(line):
+        for event in _feed(parser, line):
             render(event)
     out = capsys.readouterr().out
     assert 'Hello world' in out
@@ -482,7 +652,7 @@ def test_renderer_closes_a_truncated_stream_on_a_fresh_line(
         },
     ]
     for line in _lines(frames):
-        for event in parser.feed(line):
+        for event in _feed(parser, line):
             render(event)
     # close is idempotent -- the run ends on exactly one fresh line and
     # exactly one placeholder summary
@@ -508,7 +678,7 @@ def test_parser_flushes_cost_per_assistant_event(
         {'type': 'assistant', 'message': {'usage': _USAGE_FIRST}},
         {'type': 'assistant', 'message': {'usage': _USAGE_SECOND}},
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert [event.kind for event in events] == ['cost', 'cost']
     assert [event.cost for event in events] == [
         pytest.approx(_USAGE_FIRST_COST),
@@ -534,7 +704,7 @@ def test_parser_prices_a_multi_block_message_once(
         {'type': 'assistant', 'message': {'id': 'msg_a', 'usage': _USAGE_FIRST}},
         {'type': 'assistant', 'message': {'id': 'msg_b', 'usage': _USAGE_SECOND}},
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     # two cost events (one per distinct id), not three
     assert [event.cost for event in events] == [
         pytest.approx(_USAGE_FIRST_COST),
@@ -563,7 +733,7 @@ def test_parser_result_overwrites_the_accumulated_estimate(
             'num_turns': 1,
         },
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     assert parser.cost == 0.9
     assert parser.final
     assert events[-1].cost == 0.9
@@ -582,7 +752,7 @@ def test_parser_unpriced_model_accumulates_no_cost(
     monkeypatch.setattr(pricing, '_load', lambda: {})
     parser = ClaudeParser(model='mystery')
     frames = [{'type': 'assistant', 'message': {'usage': _USAGE_FIRST}}]
-    assert [event for line in _lines(frames) for event in parser.feed(line)] == []
+    assert [event for line in _lines(frames) for event in _feed(parser, line)] == []
     assert parser.cost is None
 
 
@@ -904,7 +1074,7 @@ def test_routed_parser_prices_the_result_usage_through_the_chain(
             'duration_ms': 10,
         },
     ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     # no zero-dollar accrual event fires; the close carries the chain price
     assert [event.cost for event in events if event.kind == 'cost'] == []
     (result,) = [event for event in events if event.kind == 'result']
@@ -915,7 +1085,7 @@ def test_routed_parser_prices_the_result_usage_through_the_chain(
     # an unpriced slug closes with no figure rather than the gateway estimate
     monkeypatch.setattr(pricing, '_load', lambda: {})
     unpriced = _RoutedClaudeParser(model='mystery/model')
-    events = [event for line in _lines(frames) for event in unpriced.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(unpriced, line)]
     (result,) = [event for event in events if event.kind == 'result']
     assert result.cost is None
     assert unpriced.cost is None
@@ -961,7 +1131,7 @@ def test_routed_parser_sums_the_result_model_usage_per_model(
         },
     ]
     parser = _RoutedClaudeParser(model='anthropic/claude-haiku-4.5')
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     (result,) = [event for event in events if event.kind == 'result']
     rates = _PRICING['claude-fable-5']
     expected = sum(
@@ -981,7 +1151,7 @@ def test_routed_parser_sums_the_result_model_usage_per_model(
         lambda: {'openrouter/anthropic/claude-haiku-4.5': _PRICING['claude-fable-5']},
     )
     unpriced = _RoutedClaudeParser(model='anthropic/claude-haiku-4.5')
-    events = [event for line in _lines(frames) for event in unpriced.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(unpriced, line)]
     (result,) = [event for event in events if event.kind == 'result']
     assert result.cost is None
     assert unpriced.cost is None
@@ -1033,7 +1203,7 @@ def test_routed_parser_tolerates_gateway_null_usage(
         },
     ]
     # no TypeError; the priced close counts only the non-null buckets
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
+    events = [event for line in _lines(frames) for event in _feed(parser, line)]
     (result,) = [event for event in events if event.kind == 'result']
     rates = _PRICING['claude-fable-5']
     expected = 10 * rates['input_cost_per_token'] + 45 * rates['output_cost_per_token']
@@ -1212,6 +1382,113 @@ class _TrackingClaudeAgent(ClaudeAgent):
         event = super().on_record_cost(*args, **kwargs)
         self.flushed.append(event.cost)
         return event
+
+
+def _reply_frame(
+    kind: str,
+    message_id: Optional[str],
+    parent: Optional[str],
+) -> dict[str, Any]:
+    """Return one claude frame of a reply.
+
+    ``kind`` names an assistant frame's content block (``thinking``/
+    ``text``/``tool_use``; ``stop_reason`` always null), a raw API event
+    (``start`` for ``message_start``, ``<block>_start`` for a
+    ``content_block_start``, ``stop`` for a ``max_tokens``
+    ``message_delta``), or ``continuation`` for claude's injected turn
+    (``unflagged_continuation`` without its ``isSynthetic`` flag,
+    ``reasoning_continuation`` in another version's wording,
+    ``meta_continuation`` in the transcript's plain-string ``isMeta`` shape).
+    """
+    if kind == 'continuation':
+        return _continuation_frame(parent=parent)
+    if kind == 'reasoning_continuation':
+        frame = _continuation_frame(parent=parent)
+        text = 'Output token limit hit while you were still reasoning.'
+        frame['message']['content'][0]['text'] = text
+        return frame
+    if kind == 'meta_continuation':
+        frame = _continuation_frame(parent=parent)
+        del frame['isSynthetic']
+        frame['isMeta'] = True
+        frame['message']['content'] = frame['message']['content'][0]['text']
+        return frame
+    if kind == 'unflagged_continuation':
+        frame = _continuation_frame(parent=parent)
+        del frame['isSynthetic']
+        return frame
+    if kind == 'start':
+        event = {'type': 'message_start', 'message': {'id': message_id, 'content': []}}
+        return _stream_event(event, parent=parent)
+    if kind == 'stop':
+        delta = {'stop_reason': 'max_tokens', 'stop_sequence': None}
+        return _stream_event({'type': 'message_delta', 'delta': delta}, parent=parent)
+    if kind.endswith('_start'):
+        block = {'type': kind.removesuffix('_start')}
+        event = {'type': 'content_block_start', 'index': 0, 'content_block': block}
+        return _stream_event(event, parent=parent)
+    blocks = {
+        'thinking': {'type': 'thinking', 'thinking': '', 'signature': 'CAQS'},
+        'text': {'type': 'text', 'text': 'Rivers are'},
+        'tool_use': {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Agent', 'input': {}},
+    }
+    return _assistant_frame(f'{message_id}', blocks[kind], parent=parent)
+
+
+def _stream_event(event: dict[str, Any], *, parent: Optional[str]) -> dict[str, Any]:
+    """Return a ``--include-partial-messages`` frame wrapping a raw API event."""
+    return {
+        'type': 'stream_event',
+        'event': event,
+        'session_id': 'sess-1',
+        'parent_tool_use_id': parent,
+    }
+
+
+def _assistant_frame(
+    message_id: str,
+    block: dict[str, Any],
+    *,
+    parent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Return a claude assistant frame carrying one content block."""
+    return {
+        'type': 'assistant',
+        'message': {
+            'model': 'claude-fable-5',
+            'id': message_id,
+            'type': 'message',
+            'role': 'assistant',
+            'content': [block],
+            'stop_reason': None,
+            'usage': {'input_tokens': 2, 'output_tokens': 4},
+        },
+        'parent_tool_use_id': parent,
+        'session_id': 'sess-1',
+    }
+
+
+def _continuation_frame(*, parent: Optional[str] = None) -> dict[str, Any]:
+    """Return claude's synthetic user turn continuing a reply cut at the cap."""
+    text = (
+        'Output token limit hit. Resume directly \u2014 no apology, no recap of'
+        ' what you were doing. Pick up mid-thought if that is where the cut'
+        ' happened. Break remaining work into smaller pieces.'
+    )
+    return {
+        'type': 'user',
+        'message': {'role': 'user', 'content': [{'type': 'text', 'text': text}]},
+        'parent_tool_use_id': parent,
+        'session_id': 'sess-1',
+        'isSynthetic': True,
+    }
+
+
+def _feed(parser: ClaudeParser, line: str) -> list[Any]:
+    """Feed one line, dropping the idle-clock events the clock tests pin."""
+    return [
+        event for event in parser.feed(line) if event.kind not in ('acting', 'waiting')
+    ]
 
 
 def _lines(frames: list[dict[str, Any]]) -> list[str]:

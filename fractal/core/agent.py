@@ -209,10 +209,26 @@ class StreamEvent:
     """One semantic frame parsed from an agent's output stream.
 
     ``kind`` is one of: ``'session' | 'text' | 'tool' | 'tool_result' |
-    'cost' | 'result' | 'error'``. Fields are populated per kind; absent
-    facts stay ``None`` (a result with no cost fact reads ``$?``). Consumers
-    (renderer, TUI bubbles, record verbs) branch on ``kind`` only --
-    never on the provider.
+    'cost' | 'result' | 'error' | 'thinking_cap' | 'acting' | 'waiting'``.
+    Fields are populated
+    per kind; absent facts stay ``None`` (a result with no cost fact reads
+    ``$?``). Consumers (renderer, TUI bubbles, record verbs) branch on
+    ``kind`` only -- never on the provider.
+
+    A ``'thinking_cap'`` (carrying ``session``) reports a top-level reply
+    that hit the output-token cap while still thinking -- no text and no
+    tool call -- once per reply: an agent that continues past it loses the
+    cut-off thought, so it restarts the thought and caps again. Sub-agent
+    replies never report one.
+
+    ``'acting'`` and ``'waiting'`` mark the agent's own control, for an
+    agent that ``reports_progress``: acting when it takes control (its
+    launch's first reply, a result answering its last pending tool call,
+    visible text, a wake-up after a turn ends), waiting when it hands
+    control off (a tool call, a turn's end). A ``'waiting'`` carrying a
+    ``duration`` (seconds) is a pause of that length, such as an API
+    retry's backoff, not a hand-off. Thinking and sub-agent frames carry
+    neither.
     """
 
     # NOTE: fields cluster by the event kind that populates them rather than
@@ -226,7 +242,7 @@ class StreamEvent:
     cost: Optional[float] = None
     # cost: authoritative vs estimate
     final: bool = False
-    # seconds; claude duration_ms coalesced, codex wall-time close
+    # seconds; claude duration_ms coalesced, codex wall-time close, a pause's length
     duration: Optional[float] = None
     turns: Optional[int] = None
     # claude error_max_budget_usd subtype
@@ -349,6 +365,9 @@ class Agent:
     cost_scope: str = 'call'
     # accepts a hard per-step budget flag
     enforces_budget: bool = False
+    # the stream's acting/waiting events mark when the agent holds control
+    # and when it hands it off, so the loop can time the agent's idle spans
+    reports_progress: bool = False
     # emits a result frame per step (opencode's step_finish), not one per turn
     # -- so a non-final result is mid-turn and only a final one closes a chat
     # turn; every other backend emits one terminal result

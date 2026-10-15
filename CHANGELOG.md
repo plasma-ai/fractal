@@ -9,6 +9,12 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Added
 
+- A no-progress watchdog for Claude steps: 30 minutes of the agent's own idle
+  time, counted only while it holds control (paused while a tool runs, after its
+  turn ends while Claude Code waits on background work, and through an API
+  retry's backoff; thinking never counts as an action), marks the launch stuck
+  exactly like a thinking cap — the first steers the step, a second stalls it —
+  with the step row naming which trigger fired. Codex is not watched yet.
 - `fractal node merge` lands a paused node's committed work into its merge
   target without leaving `paused`: the run, iteration, and step rows stay open
   for `fractal resume`, and the frozen step's uncommitted state stays in the
@@ -126,6 +132,15 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- A Claude step whose reply hits the output-token cap while still thinking no
+  longer spends the step's time restarting one thought. Claude Code's
+  auto-continuation drops the cut-off thinking, so the agent restarted the
+  thought and capped again. The loop now ends the agent at the first such cap
+  and resumes the same session once with `modes/STALL.md` ("write what you have
+  to your plan file now"), on a `steer` row that uses no `step_retries`. A
+  second stuck launch after the steer ends the step `exited` as stalled, never
+  retried, fails the iteration as a timeout does, and posts a `step stalled`
+  notice to the node's outbox for the parent.
 - `fractal node pause`, `fractal node kill`, a step deadline, and a stream
   failure end the agent's whole process tree instead of only its process group.
   Agent CLIs run tool commands in groups or sessions of their own, so those kept
