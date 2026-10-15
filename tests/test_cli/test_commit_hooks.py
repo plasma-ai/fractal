@@ -760,23 +760,29 @@ def test_commit_hints_when_ignore_rules_skip_files(tmp_path: pathlib.Path) -> No
     assert 'shot.png' in estate_line
     held = 'Held out: 1 estate file(s) not staged; 1 path(s) ignored'
     assert named.stdout.splitlines()[-1] == held
-    # past the listing cap, the rest is counted rather than listed
-    for index in range(11):
-        (task / f'zz_{index:02d}.log').write_text('eaten\n', encoding='utf-8')
+    # past the listing cap, the rest is counted rather than listed (names
+    # padded to sort numerically, all after the eaten evidence.log)
+    cap = commit._SKIP_LIST_CAP
+    width = len(f'{cap}')
+    eaten = [f'zz_{index:0{width}d}.log' for index in range(cap + 1)]
+    for name in eaten:
+        (task / name).write_text('eaten\n', encoding='utf-8')
+    total = len(eaten) + 1
     (task / 'notes.txt').write_text('kept, revised again\n', encoding='utf-8')
     capped = _run(task, 'commit', 'capped work')
     assert capped.returncode == 0, capped.stderr
     capped_output = capped.stdout + capped.stderr
-    assert 'Warning: 12 path(s) skipped by ignore rules' in capped_output
-    assert 'zz_08.log' in capped_output
-    assert 'zz_09.log' not in capped_output
-    assert '... and 2 more' in capped_output
+    assert f'Warning: {total} path(s) skipped by ignore rules' in capped_output
+    # evidence.log takes the first slot, so the cap lists all but two zz files
+    assert eaten[cap - 2] in capped_output
+    assert eaten[cap - 1] not in capped_output
+    assert f'... and {total - cap} more' in capped_output
     # a no-op commit still ends on the counts -- exactly when a node would
     # read the tree as clean
     noop = _run(task, 'commit', 'no work')
     assert noop.returncode == 0, noop.stderr
     assert 'Nothing staged to commit' in noop.stdout
-    held = 'Held out: 1 estate file(s) not staged; 12 path(s) ignored'
+    held = f'Held out: 1 estate file(s) not staged; {total} path(s) ignored'
     assert noop.stdout.splitlines()[-1] == held
 
 
