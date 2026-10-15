@@ -670,9 +670,11 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    that only a machine-local ignore layer holds out (a foreign
    ``.git/info/exclude`` line, ``core.excludesFile``) are force-added by
    explicit path and reported (``Force-staged N node record(s) held out by
-   an ignore rule: ...``); fractal's own exclude block and repo
-   ``.gitignore`` files keep their hold, and records they hold surface
-   through step 4's ignore-rule warning instead. ``--check`` applies the
+   an ignore rule: ...``); repo ``.gitignore`` files keep their hold, and
+   records they hold surface through step 4's ignore-rule warning instead,
+   while records held by fractal's own exclude block (its ``tmp/`` and
+   ``__pycache__/`` lines among them) or by a self-ignoring directory stay
+   silent and are not counted in ``Held out``. ``--check`` applies the
    same law, so a refused untracked file under the node directory never
    counts as uncommitted.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
@@ -699,7 +701,14 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    pre-existing lint failure is surfaced as a notice and tolerated); other
    node-data pages keep byte-identity. A rewrite that breaks either gate is
    restored to its authored bytes and the commit fails with remediation
-   guidance.
+   guidance. Node records pass through the repository's hooks like any
+   staged file, so a hook that rewrites one — a formatter reflowing a ``.py``
+   record, or trailing-whitespace stripping a ``.patch`` record's
+   single-space context lines — fails each ordinary commit that stages it,
+   until the iteration's backstop commit, which bypasses hooks, lands the
+   record as written. A hooked repository should keep rewriting hooks off
+   ``.fractal/`` (for example ``exclude: ^\.fractal/`` in its pre-commit
+   config).
 7. **Pushes** ``origin <branch>`` unless the ``local`` config key is true. A
    missing ``origin`` remote is a skipped-push notice, not an error.
 
