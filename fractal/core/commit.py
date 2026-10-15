@@ -245,12 +245,11 @@ def commit(
     output.extend(record_notices)
     # count and name the workspace files the staging expansion dropped solely
     # because ignore rules match them -- a tracked host ignore pattern can
-    # silently eat node artifacts; fractal's own runtime ignores stay silent
-    # (the info/exclude block and the stage's pathspec excludes are
-    # intentional), and so do self-ignoring dirs (a dir whose ignore rule lives
-    # inside it, like a wiki .cache/, manages itself -- its collapsed dir line
-    # and the content lines it also emits are one managed entity, not eaten
-    # files)
+    # silently eat node artifacts; fractal's own runtime ignores stay silent (the
+    # info/exclude block and the stage's pathspec excludes are intentional), and
+    # so do self-ignoring dirs (a dir whose ignore rule lives inside it, like a
+    # wiki .cache/, manages itself -- its collapsed dir line and the content
+    # lines it also emits are one managed entity, not eaten files)
     cmd = [
         'ls-files',
         '--others',
