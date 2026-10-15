@@ -13,7 +13,6 @@ import os
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -616,7 +615,7 @@ class Node:
         keeps both its group and its record. Both judged groups are the
         roots of one process-tree reap, as in ``kill.sh``: every group the
         agent's tools started dies with them, other nodes' loop groups are
-        spared, and survivors are named on stderr. Logs an ``orphan`` event
+        spared, and survivors are named in warnings. Logs an ``orphan`` event
         naming each reaped pgid. Best-effort: a dead, recycled, or foreign
         group reads as already gone -- recycled meaning the OS re-issued a
         dead group's id to an unrelated same-user group, which answers a
@@ -652,36 +651,13 @@ class Node:
         # nodes' loops -- the agent's tools run in groups of their own
         groups = [pgid for pgid in judged if pgid > 0]
         if groups:
-            try:
-                reaped = fractal.util.process.reap(
-                    groups,
-                    grace=_ORPHAN_GRACE_SECONDS,
-                    spare=self.loop_records,
-                )
-            except Exception as error:
-                # the reap broke: the heal must still land on the groups
-                print(
-                    f'Warning: process-tree reap failed ({error});'
-                    ' killing the recorded groups only',
-                    file=sys.stderr,
-                )
-                for pgid in groups:
-                    try:
-                        os.killpg(pgid, signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        pass
-            else:
-                for group in reaped.spared:
-                    print(
-                        f"Note: spared process group {group} (another node's loop)",
-                        file=sys.stderr,
-                    )
-                for survivor in reaped.survivors:
-                    print(
-                        f'Warning: pid {survivor.pid} survived the reap:'
-                        f' {survivor.command}',
-                        file=sys.stderr,
-                    )
+            lines = fractal.util.process.reap_or_kill(
+                groups,
+                grace=_ORPHAN_GRACE_SECONDS,
+                spare=self.loop_records,
+            )
+            for line in lines:
+                self.log(message=line, level=logging.WARNING)
         for (name, entry), pgid in zip(records, judged):
             if entry is None:
                 continue

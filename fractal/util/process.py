@@ -57,6 +57,23 @@ class Reaped:
     spared: tuple[int, ...] = ()
     inside: bool = False
 
+    def lines(self: Reaped) -> list[str]:
+        """Return the ``Note:`` and ``Warning:`` lines naming what the reap left."""
+        result = [
+            f"Note: spared process group {group} (another node's loop)"
+            for group in self.spared
+        ]
+        result.extend(
+            f'Warning: pid {process.pid} survived the reap: {process.command}'
+            for process in self.survivors
+        )
+        result.extend(
+            f'Warning: pid {process.pid} works in the worktree outside the'
+            f' reaped tree (left running): {process.command}'
+            for process in self.strays
+        )
+        return result
+
 
 def snapshot() -> dict[int, Process]:
     """Return the live process table keyed by pid.
@@ -184,6 +201,40 @@ def reap(
     if outside_only and roots & tree.protected:
         return Reaped(inside=True)
     return _reap(tree, grace=grace, worktree=worktree, owned=owned)
+
+
+def reap_or_kill(
+    roots: Collection[int],
+    *,
+    grace: float = GRACE_SECONDS,
+    spare: Callable[[], Collection[pathlib.Path]] = tuple,
+) -> list[str]:
+    """Reap ``roots`` with their trees, or KILL the root groups if the reap breaks.
+
+    The in-process ends of an invocation -- a step deadline, a dead stream,
+    the crash heal, a timed-out probe -- must land even when :func:`reap`
+    raises, so the root groups alone then draw a plain KILL.
+
+    Args:
+        roots: Recorded process group ids (each its leader's pid).
+        grace: Seconds between the TERM and KILL passes.
+        spare: Returns the files each recording a process group id to
+            spare, as for :func:`reap`.
+
+    Returns:
+        The lines to relay: the reap's report (:meth:`Reaped.lines`), or
+        the warning that the reap broke.
+
+    """
+    try:
+        reaped = reap(roots, grace=grace, spare=spare)
+    except Exception as e:
+        for root in roots:
+            _killpg(root, signal.SIGKILL)
+        return [
+            f'Warning: process-tree reap failed ({e}); killing the recorded groups only'
+        ]
+    return reaped.lines()
 
 
 # ------ helper functions

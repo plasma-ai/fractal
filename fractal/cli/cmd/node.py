@@ -1675,22 +1675,9 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         )
         if reaped.inside:
             raise SystemExit(1)
-        for group in reaped.spared:
-            typer.echo(
-                f"Note: spared process group {group} (another node's loop)",
-                err=True,
-            )
-        for process in reaped.survivors:
-            typer.echo(
-                f'Warning: pid {process.pid} survived the reap: {process.command}',
-                err=True,
-            )
-        for process in reaped.strays:
-            typer.echo(
-                f'Warning: pid {process.pid} works in the worktree outside the'
-                f' reaped tree (left running): {process.command}',
-                err=True,
-            )
+        lines = reaped.lines()
+        for line in lines:
+            typer.echo(line, err=True)
 
     return app
 
