@@ -465,7 +465,8 @@ def commit(
     if skipped:
         held.append(f'{len(skipped)} path(s) ignored')
     if held:
-        output.append(f'Held out: {"; ".join(held)}')
+        counts = '; '.join(held)
+        output.append(f'Held out: {counts}')
     return '\n'.join(output)
 
 
