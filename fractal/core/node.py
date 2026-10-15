@@ -809,6 +809,43 @@ class Node:
                 return True
         return False
 
+    def loop_records(self: Node) -> list[pathlib.Path]:
+        """Return the loop group record of every other node in this tree.
+
+        A process-tree reap spares the groups these record: a node launched
+        from this node's agent stays a child of that agent until its
+        launcher returns, so a walk from the agent would otherwise take a
+        healthy loop at boot. Paths, not ids -- the reap re-reads them
+        before every signal round, catching a record written mid-reap.
+        Pure path arithmetic from each registry row's branch (no git), and
+        never raises: the reap runs on a deadline thread and inside pause,
+        so an unreadable registry answers none and an unreadable entry is
+        skipped.
+
+        Returns:
+            The ``.pgid`` record path of each registered node, this node's
+            own excluded.
+
+        """
+        result: list[pathlib.Path] = []
+        try:
+            repo_dir = self.repo_dir
+            own = self.branch
+            rows = self.db.read(query='SELECT node FROM nodes')
+            for row in rows:
+                branch = row['node']
+                if branch == own:
+                    continue
+                try:
+                    project = worktree.project_path(repo_dir, branch)
+                except OSError:
+                    continue
+                worktree_dir = repo_dir / WORKTREES_FOLDER / branch
+                result.append(node_dir(worktree_dir, project, branch) / PGID_FILE)
+        except Exception:
+            return result
+        return result
+
     @classmethod
     def user_nodes(cls: type[Node], path: PathLike) -> list[Node]:
         """Return every tree's user (root) node in the repo, branch-sorted.
@@ -3714,6 +3751,9 @@ class Node:
             if event_id is not None:
                 self.record.event_end(event_id=event_id, status='failed')
             raise
+        # the reap names what it left alive on stderr
+        for line in result.stderr.splitlines():
+            self.log(message=line, level=logging.WARNING)
         # mark active rows as killed; a loop that landed its own terminal
         # between the signal and the reap keeps it -- the row marking is
         # already fenced, so the status stamp must not overwrite either
@@ -3820,12 +3860,15 @@ class Node:
             event_id = self.record.event_start('pause', metadata=reason or '')
             self.record.signal_set('pause', reason or '')
         try:
-            self._run_script('pause.sh', f'{self._root}')
+            result = self._run_script('pause.sh', f'{self._root}')
         except Exception:
             # the signal is durable -- the loop still parks at its next
             # checkpoint -- but the failed abort must surface
             self.record.event_end(event_id=event_id, status='failed')
             raise
+        # the reap names what it left alive on stderr
+        for line in result.stderr.splitlines():
+            self.log(message=line, level=logging.WARNING)
         self.record.event_end(event_id=event_id, status='completed')
         return True
 

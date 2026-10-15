@@ -47,7 +47,7 @@ ship as data, and a separate metadata-only `shim/` dist at the repo root.
 
 - **`util/`** — shared low-level utilities with no fractal domain knowledge: git
   and tmux wrappers, filesystem helpers, duration and time parsing, system
-  probes, and title formatting.
+  probes, process-tree reaping, and title formatting.
 
 `skills/` carries the plugin's skill definition, and the pytest suite lives in
 `tests/` at the repo root.
