@@ -602,6 +602,8 @@ carry_prepare() {
         CARRY_ERROR="copying $BRANCH's index failed"
         return 1
     fi
+    # >/dev/null and || true: refresh lists each dirty path and exits 1,
+    # which a paused node's frozen step always does
     GIT_INDEX_FILE="$CARRY_INDEX" git -C "$WORKTREE_DIR" update-index -q --refresh >/dev/null || true
     if ! GIT_INDEX_FILE="$CARRY_INDEX" git -C "$WORKTREE_DIR" read-tree -m -u -n \
         "$CHILD_OLD" "$ADVANCE_TREE" 2>"$TMP_DIR/carry-err"; then
@@ -632,8 +634,7 @@ carry_prepare() {
         CARRY_ERROR+=" -- commit, move aside, or resume and finish that work before merging"
         return 1
     fi
-    # git's dry run treats an ignored file as expendable; the clobber guard
-    # does not
+    # git's dry run treats an ignored file as expendable; this guard does not
     find_clobbered "$ADVANCE_TREE"
     if [[ -n "$CLOBBERED" ]]; then
         CARRY_ERROR="advancing $BRANCH's merge-base would write over untracked files in"
@@ -656,6 +657,8 @@ carry_advance() {
         carry_rollback "recording $BRANCH's post-squash commit failed"
     fi
     CHILD_MOVED=true
+    # >/dev/null and || true: refresh lists each dirty path and exits 1,
+    # which a paused node's frozen step always does
     git -C "$WORKTREE_DIR" update-index -q --refresh >/dev/null || true
     if ! git -C "$WORKTREE_DIR" read-tree -m -u "$CHILD_OLD" "$ADVANCE_HEAD"; then
         carry_rollback "updating $BRANCH's worktree failed"
@@ -693,6 +696,8 @@ carry_rollback() {
     trap - INT TERM
     end_merge_event failed
     if [[ "$CHILD_MOVED" == true ]]; then
+        # >/dev/null and || true: refresh lists each dirty path and exits 1,
+        # which a paused node's frozen step always does
         git -C "$WORKTREE_DIR" update-index -q --refresh >/dev/null || true
         git -C "$WORKTREE_DIR" read-tree -m -u "$ADVANCE_HEAD" "$CHILD_OLD" \
             2>"$TMP_DIR/carry-reverse-err" || true
@@ -736,6 +741,8 @@ carry_rollback() {
     fi
     if [[ "$CONTINUE" != true ]]; then
         TARGET_RESET=--hard
+        # -q: drop reset's HEAD-is-now line so the
+        # Error: below is the single user-facing line
         git -C "$PARENT_WORKTREE_DIR" reset -q --hard "$TARGET_BEFORE" || true
         clear_squash_markers
     else
@@ -1245,6 +1252,9 @@ if command -v wiki &>/dev/null; then
         # of the untracked files now there, stage the indexes the refresh
         # created and its tool-owned .wiki/ state -- a file the walk never
         # lists stays out of the squash
+        # read NUL-delimited so a path with spaces stays one entry and a
+        # non-ASCII name is never C-quoted by core.quotePath into a path that
+        # exists nowhere
         while IFS= read -r -d '' CREATED; do
             wiki_owned "$CREATED" "$INDEX_REL" || continue
             [[ "$CREATED" == */_index.md || "$CREATED" == "$INDEX_REL/.wiki/"* ]] || continue
@@ -1269,14 +1279,19 @@ if command -v wiki &>/dev/null; then
         fail_target "listing the wiki indexes of $BRANCH's squash failed"
     fi
     ROOTS=()
+    # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
+    # name is never C-quoted by core.quotePath into a path that exists nowhere
     while IFS= read -r -d '' SETTINGS; do
         ROOT=${SETTINGS%.wiki/settings.json}
         ROOTS+=("${ROOT%/}")
     done <"$TMP_DIR/wiki-roots"
+    # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
+    # name is never C-quoted by core.quotePath into a path that exists nowhere
     while IFS= read -r -d '' INDEX; do
         FOLDER=${INDEX%_index.md}
         FOLDER=${FOLDER%/}
         OWNER=""
+        # safe under set -u even on bash 3.2: an empty array reads as unset
         for ROOT in ${ROOTS[@]+"${ROOTS[@]}"}; do
             if [[ "$FOLDER" == "$ROOT" || "$FOLDER" == "$ROOT"/* ]] \
                 && [[ ${#ROOT} -gt ${#OWNER} ]]; then
@@ -1311,8 +1326,10 @@ if command -v wiki &>/dev/null; then
         fi
         SUBTREE=${FOLDER#"$OWNER"}
         SUBTREE=${SUBTREE#/}
-        # the strays by the wiki's own ignore rules, as under the project wiki
-        # (mirrors plasma-wiki's Wiki._check_ignore)
+        # every pathspec names the folder literally, so a glob character in a
+        # folder name never matches a sibling; the strays are listed by the
+        # wiki's own ignore rules, as under the project wiki (mirrors
+        # plasma-wiki's Wiki._check_ignore)
         if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
             --others --exclude-standard -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-strays"; then
             fail_target "listing the untracked files under $FOLDER_DIR failed"
