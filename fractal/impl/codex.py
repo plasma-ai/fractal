@@ -473,8 +473,8 @@ class CodexAgent(Agent):
             # TERM the probe's whole tree (codex runs tools in groups of their
             # own; other nodes' loops spared) and KILL any survivor after a
             # short grace, since a TERM-trapping grandchild holding the pipe
-            # would block the reap below; the first line is the short reason
-            # callers persist
+            # would block the communicate() drain below; the error's first
+            # line is the short reason callers persist
             lines = fractal.util.process.reap_or_kill(
                 [process.pid],
                 grace=_PREFLIGHT_GRACE,
