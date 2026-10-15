@@ -162,6 +162,10 @@ The joined text is rendered in one pass with ``$VAR`` / ``${VAR}``
 substitution matching GNU ``envsubst``: unknown placeholders and ``$$`` pass
 through verbatim, so ordinary shell text in a step file survives rendering.
 
+A steered relaunch (see `Stuck steps`_) is the one launch built otherwise:
+its whole prompt is the package's ``modes/STALL.md`` alone, rendered with the
+same variables, since its resumed session already holds the step.
+
 On the iteration a resume re-enters, the prompt also ends with an
 unread-inbox digest, appended after rendering (so it is never substituted):
 the twenty highest-priority unread ``inbox`` messages as metadata only —
@@ -458,8 +462,7 @@ fails with ``<step> stalled: ...``, and the loop moves on to the next
 iteration. The loop also posts a ``step stalled: <step>`` notice to the
 node's outbox, which the parent follows, naming the node, step, iteration,
 and trigger. The SYNC step is never steered. The watchdog runs only for
-Claude: the other agents' streams do not yet mark when each tool call
-completes.
+Claude, the one agent whose stream marks when each tool call completes.
 
 Time limits
 -----------
@@ -775,6 +778,19 @@ Step rows land with these statuses:
    * - failed
      - ``failed``
      - the launch reason, e.g. ``agent error (exit N): <stderr tail>``
+   * - stuck, then steered (see `Stuck steps`_)
+     - ``stopped``
+     - ``steered: <trigger>``, or ``<trigger>; paused before the steer`` when
+       a pause lands first
+   * - stuck, steer abandoned by a stop, finish, or spent subtree ceiling
+     - ``failed``
+     - ``<trigger>; steer abandoned``
+   * - stuck again after the steer (a stall)
+     - ``exited``
+     - ``stalled: <trigger>, after a steer``
+   * - steered relaunch
+     - as above
+     - suffixed ``; steer`` (``steer`` alone when there is no other reason)
    * - retry attempt
      - as above
      - suffixed ``; retry``

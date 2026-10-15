@@ -14,7 +14,7 @@ may include breaking changes, each listed under a Breaking heading.
   turn ends while Claude Code waits on background work, and through an API
   retry's backoff; thinking never counts as an action), marks the launch stuck
   exactly like a thinking cap — the first steers the step, a second stalls it —
-  with the step row naming which trigger fired. Codex is not watched yet.
+  with the step row naming which trigger fired. Codex is not watched.
 - `fractal node merge` lands a paused node's committed work into its merge
   target without leaving `paused`: the run, iteration, and step rows stay open
   for `fractal resume`, and the frozen step's uncommitted state stays in the
