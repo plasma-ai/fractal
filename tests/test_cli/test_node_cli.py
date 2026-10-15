@@ -8,7 +8,8 @@ worker nodes. The tests exercise the node lifecycle surface end to end:
 the ``finish``/``stop``/``kill``/``retire``/``unretire``/``attach`` status
 guards (including their ``RuntimeError`` messages and exit codes), ``update``
 of a child's configuration, ``merge``'s ``--ignore-scope`` override reaching
-the script, ``delete``'s unmerged-work warning ahead of its prompt (and behind
+the script and its landing of a paused node under ``--message``, ``delete``'s
+unmerged-work warning ahead of its prompt (and behind
 its refusals, which describe no deletion), orphan coherence after out-of-band
 git cleanup (stored-status display plus ``reconcile``'s event-log audit), and
 the hidden ``_scope`` footprint check ``merge.sh`` shells out to.
@@ -67,6 +68,7 @@ __all__ = [
     'test_init_blind_seeds_no_subs_and_start_sweeps',
     'test_merge_delete_reaps_the_merged_child',
     'test_merge_ignore_scope_flag_lands_an_out_of_scope_squash',
+    'test_merge_lands_a_paused_node_under_its_message',
     'test_delete_warns_of_unmerged_work_before_the_point_of_no_return',
     'test_delete_warns_of_a_descendants_unmerged_work_before_the_prompt',
     'test_delete_refuses_a_locked_worktree_before_any_unmerged_warning',
@@ -1209,6 +1211,40 @@ def test_merge_ignore_scope_flag_lands_an_out_of_scope_squash(
     tracked = _git(root, 'ls-files', 'docs/a.md', 'outside.txt').stdout.split()
     assert tracked == ['docs/a.md', 'outside.txt']
     assert (root / 'outside.txt').read_text(encoding='utf-8') == 'outside the scope\n'
+
+
+def test_merge_lands_a_paused_node_under_its_message(tmp_path: pathlib.Path) -> None:
+    """``node merge --message`` lands a paused node's committed work, keeping it paused.
+
+    The squash lands under the given message, and the node stays paused for
+    ``fractal resume`` with its frozen step's uncommitted edit and scratch
+    file still in its worktree.
+    """
+    root = tmp_path
+    _init_tree(root, 'paused')
+    assert _run(root, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
+    task = root / '.worktrees' / 'main.task'
+    (task / 'feature.txt').write_text('the work\n', encoding='utf-8')
+    _git(task, 'add', 'feature.txt')
+    _git(task, 'commit', '-m', 'main.task: feature')
+    # the frozen step left an uncommitted edit and a scratch file
+    (task / 'README.md').write_text('frozen edit\n', encoding='utf-8')
+    (task / 'scratch.txt').write_text('frozen scratch\n', encoding='utf-8')
+    Node(task).status_set('paused')
+    message = 'Land the paused feature'
+
+    result = _run(root, 'node', 'merge', 'main.task', f'--message={message}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
+    assert _git(root, 'log', '-1', '--format=%B').stdout.strip() == message
+    assert (root / 'feature.txt').read_text(encoding='utf-8') == 'the work\n'
+    assert Node(task).status() == 'paused'
+    assert (task / 'README.md').read_text(encoding='utf-8') == 'frozen edit\n'
+    assert (task / 'scratch.txt').read_text(encoding='utf-8') == 'frozen scratch\n'
+    status = _git(task, 'status', '--porcelain').stdout.splitlines()
+    for entry in (' M README.md', '?? scratch.txt'):
+        assert entry in status, status
 
 
 # ------ delete

@@ -22,16 +22,23 @@ from .conftest import _parse_project_dir
 __all__ = [
     'test_paused_merge_lands_twice_and_carries_the_frozen_step',
     'test_paused_merge_validation_refusal_changes_nothing',
-    'test_paused_merge_refuses_an_advance_over_dirty_paths',
+    'test_paused_merge_refuses_an_advance_over_the_frozen_state',
     'test_paused_merge_refuses_an_unfinished_git_operation',
     'test_paused_merge_refuses_a_branch_that_moved_mid_merge',
     'test_resume_waits_for_a_running_merge',
     'test_paused_continue_rollback_keeps_the_staged_resolution',
     'test_paused_no_op_continue_refusal_keeps_the_squash_message',
+    'test_paused_merge_rolls_back_both_sides_after_the_commit',
+    'test_paused_merge_refuses_when_a_carry_check_fails',
+    'test_paused_no_op_merge_advances_past_a_restored_path',
 ]
 
 FROZEN_EDIT = 'frozen mid-step edit\n'
+FROZEN_STAGED = 'frozen staged file\n'
 FROZEN_UNTRACKED = 'frozen scratch\n'
+SHARED = 'shared at the fork\n'
+SHARED_EDIT = 'shared, edited by a sibling\n'
+SIBLING = 'landed by a sibling\n'
 
 # a standalone holder of the real merge lock file: acquire an exclusive
 # fcntl.flock on argv[1], signal readiness via argv[2], then block -- the same
@@ -48,8 +55,14 @@ _LOCK_HOLDER = (
 def test_paused_merge_lands_twice_and_carries_the_frozen_step(
     git_repo: pathlib.Path,
 ) -> None:
-    """Land A, resume, land B: each lands once and the frozen state survives."""
+    """Land A, resume, land B: each lands once and the frozen state survives.
+
+    A sibling landed on the target first, so the first advance moves its new
+    file and its edit of a shared file into the frozen worktree, beside the
+    step's dirty edit, staged file, and scratch file.
+    """
     _, node = _paused_child(git_repo)
+    _land_sibling(git_repo)
     message = 'Land the first findings\n\nA descriptive body.'
 
     output, _ = node.merge(message=message)
@@ -62,13 +75,16 @@ def test_paused_merge_lands_twice_and_carries_the_frozen_step(
     # the node's branch gained the post-squash commit, its dirt intact
     first = _git(git_repo, 'rev-parse', 'main').stdout.strip()
     _git(node.worktree, 'merge-base', '--is-ancestor', first, 'HEAD')
+    # the advance moved the sibling's landing into the frozen worktree
+    for name, content in (('sib.txt', SIBLING), ('shared.txt', SHARED_EDIT)):
+        assert (node.worktree / name).read_text(encoding='utf-8') == content
+        assert _git(node.worktree, 'show', f'HEAD:{name}').stdout == content
     _assert_frozen(node)
 
-    # resume, commit B over A's file, and park again
+    # resume, commit B over A's file alone, and park again
     node.status_set('active')
     (node.worktree / 'work.txt').write_text('A\nB\n', encoding='utf-8')
-    _git(node.worktree, 'add', 'work.txt')
-    _git(node.worktree, 'commit', '-m', 'work B')
+    _git(node.worktree, 'commit', '-m', 'work B', '--', 'work.txt')
     node.status_set('paused')
 
     output, _ = node.merge()
@@ -111,18 +127,48 @@ def test_paused_merge_validation_refusal_changes_nothing(
     _assert_frozen(node)
 
 
-def test_paused_merge_refuses_an_advance_over_dirty_paths(
+@pytest.mark.parametrize(
+    argnames=('landed', 'ignored', 'named'),
+    argvalues=[
+        # an edit to the file the frozen step holds dirty
+        ('README.md', False, 'README.md'),
+        # a file where the frozen step keeps an untracked one
+        ('scratch.txt', False, 'scratch.txt'),
+        # a file where the node keeps an ignored one
+        ('ignored.txt', True, 'ignored.txt'),
+        # a directory where the frozen step keeps an untracked file
+        ('scratch.txt/note.md', False, 'scratch.txt'),
+    ],
+    ids=['dirty', 'untracked', 'ignored', 'file-for-dir'],
+)
+def test_paused_merge_refuses_an_advance_over_the_frozen_state(
     git_repo: pathlib.Path,
+    landed: str,
+    ignored: bool,
+    named: str,
 ) -> None:
-    """An advance that would rewrite a frozen dirty file refuses the whole merge."""
+    """An advance that would rewrite the frozen state refuses the whole merge.
+
+    The target lands a path the frozen worktree holds dirty, untracked, or
+    ignored, or a directory where it keeps a file: the merge refuses before
+    its commit, naming the path, and leaves the target, the node, and its
+    pause as they were.
+    """
     _, node = _paused_child(git_repo)
-    # the target changes the file the node holds dirty
-    (git_repo / 'README.md').write_text('target edit\n', encoding='utf-8')
-    _git(git_repo, 'add', 'README.md')
-    _git(git_repo, 'commit', '-m', 'target edit')
+    # the node keeps a private file the repo's exclude file ignores
+    if ignored:
+        resolved = _git(git_repo, 'rev-parse', '--git-path', 'info/exclude').stdout
+        with (git_repo / resolved.strip()).open('a', encoding='utf-8') as exclude:
+            exclude.write(f'{landed}\n')
+        (node.worktree / landed).write_text('private\n', encoding='utf-8')
+    # the target lands the path, force-added past the same ignore
+    (git_repo / landed).parent.mkdir(parents=True, exist_ok=True)
+    (git_repo / landed).write_text('landed\n', encoding='utf-8')
+    _git(git_repo, 'add', '-f', landed)
+    _git(git_repo, 'commit', '-m', f'land {landed}')
     before = _snapshot(git_repo, node)
 
-    with pytest.raises(RuntimeError, match=r'README\.md'):
+    with pytest.raises(RuntimeError, match=re.escape(named)):
         node.merge()
 
     assert _snapshot(git_repo, node) == before
@@ -378,15 +424,161 @@ def test_paused_no_op_continue_refusal_keeps_the_squash_message(
     _assert_frozen(node)
 
 
+@pytest.mark.parametrize(
+    argnames='failure',
+    argvalues=['update-ref', 'read-tree'],
+    ids=['update-ref', 'read-tree'],
+)
+def test_paused_merge_rolls_back_both_sides_after_the_commit(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    failure: str,
+) -> None:
+    """A failure after the squash commit rolls the target and the node back whole.
+
+    A sibling's landing gives the advance files to move into the frozen
+    worktree; when the node's branch move or its worktree update fails, the
+    merge reverses the update and resets the target, so both sides match
+    their pre-merge state, the node stays paused, and the target's merge
+    event closes failed.
+    """
+    _, node = _paused_child(git_repo)
+    _land_sibling(git_repo)
+    before = _snapshot(git_repo, node)
+    if failure == 'update-ref':
+        body = (
+            f'[[ " $* " == *" update-ref "*" refs/heads/{node.branch} "* ]] && exit 1\n'
+        )
+    else:
+        # fail the forward update alone; the reverse that follows runs for real
+        fired = tmp_path_factory.mktemp('fired') / 'forward'
+        body = (
+            f'if [[ " $* " == *" read-tree -m -u "[0-9a-f]* && ! -e "{fired}" ]]; then\n'
+            f'    touch "{fired}"\n'
+            '    exit 1\n'
+            'fi\n'
+        )
+    _shim(monkeypatch, tmp_path_factory, 'git', body)
+
+    with pytest.raises(RuntimeError, match='rolled back and both worktrees restored'):
+        node.merge()
+
+    assert _snapshot(git_repo, node) == before
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+    merges = node.db.read('events', where={'event': 'merge'})
+    assert [event['status'] for event in merges] == ['failed']
+
+
+@pytest.mark.parametrize(
+    argnames=('tool', 'body', 'step'),
+    argvalues=[
+        # the node's index path, read with its branch and tip
+        (
+            'git',
+            '[[ " $* " == *" rev-parse --git-path index "* ]] && exit 1\n',
+            "reading main.feature's worktree failed",
+        ),
+        # the post-squash tree, written from a private index
+        (
+            'git',
+            '[[ "$GIT_INDEX_FILE" == */carry-advance-index && " $* " == *" write-tree "* ]]'
+            ' && exit 1\n',
+            "building main.feature's post-squash tree failed",
+        ),
+        # the copy of the node's index the dry run refreshes
+        (
+            'cp',
+            '[[ "${!#}" == */carry-index ]] && exit 1\n',
+            "copying main.feature's index failed",
+        ),
+        # the target's staged tree the advance is judged against
+        (
+            'git',
+            '[[ -z "${GIT_INDEX_FILE:-}" && " $* " == *" write-tree "* ]] && exit 1\n',
+            'reading the staged squash of main.feature failed',
+        ),
+    ],
+    ids=['read-worktree', 'build-tree', 'copy-index', 'staged-tree'],
+)
+def test_paused_merge_refuses_when_a_carry_check_fails(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    tool: str,
+    body: str,
+    step: str,
+) -> None:
+    """A carry check that cannot run refuses the merge before its commit.
+
+    Reading the node's worktree, building its post-squash tree, copying its
+    index for the dry run, or reading the target's staged squash fails
+    closed: the merge refuses, naming the step, and both sides and the
+    node's pause stay as they were.
+    """
+    _, node = _paused_child(git_repo)
+    before = _snapshot(git_repo, node)
+    _shim(monkeypatch, tmp_path_factory, tool, body)
+
+    with pytest.raises(RuntimeError, match=re.escape(step)):
+        node.merge()
+
+    assert _snapshot(git_repo, node) == before
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+
+
+def test_paused_no_op_merge_advances_past_a_restored_path(
+    git_repo: pathlib.Path,
+) -> None:
+    """A paused merge whose squash only edits the target's ``.fractal/`` advances.
+
+    The restore returns the path to the target's content, so nothing lands;
+    the drop is an adjudication, so the carried advance still moves the node
+    past it, its frozen state intact, and the next merge does not re-offer
+    the edit.
+    """
+    _, node = _paused_child(git_repo)
+    notes = '.fractal/notes.txt'
+    (git_repo / notes).write_text('target notes\n', encoding='utf-8')
+    _git(git_repo, 'add', notes)
+    _git(git_repo, 'commit', '-m', 'target notes')
+    # the first landing carries the target's notes into the node, which then
+    # edits only those
+    node.merge()
+    node.status_set('active')
+    (node.worktree / notes).write_text('node notes\n', encoding='utf-8')
+    _git(node.worktree, 'commit', '-m', 'edit the notes', '--', notes)
+    node.status_set('paused')
+    head = _git(git_repo, 'rev-parse', 'HEAD').stdout
+
+    output, notices = node.merge()
+
+    # nothing landed, the restore named the path, and the node moved past it
+    assert 'Nothing to merge' in output
+    assert notes in notices, notices
+    assert _git(git_repo, 'rev-parse', 'HEAD').stdout == head
+    subject = _git(node.worktree, 'log', '-1', '--format=%s').stdout.strip()
+    assert subject == 'merge main (post-squash)'
+    assert (node.worktree / notes).read_text(encoding='utf-8') == 'target notes\n'
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+
+
 # ------ helpers
 
 
 def _paused_child(repo: pathlib.Path) -> tuple[Node, Node]:
     """Return a tree-wide paused root and a depth-1 child frozen mid-step.
 
-    The child committed work A, then froze with an uncommitted edit to a
-    tracked file and an untracked file -- the shape pause leaves behind.
+    The child forked with ``shared.txt`` tracked and committed work A, then
+    froze with an uncommitted edit to a tracked file, a staged new file, and
+    an untracked file -- the shape pause leaves behind.
     """
+    (repo / 'shared.txt').write_text(SHARED, encoding='utf-8')
+    _git(repo, 'add', 'shared.txt')
+    _git(repo, 'commit', '-m', 'shared file')
     root = Node(repo)
     root.init(agent='claude', user=True)
     node = Node(_parse_project_dir(root.init(name='feature')))
@@ -394,6 +586,8 @@ def _paused_child(repo: pathlib.Path) -> tuple[Node, Node]:
     _git(node.worktree, 'add', 'work.txt')
     _git(node.worktree, 'commit', '-m', 'work A')
     (node.worktree / 'README.md').write_text(FROZEN_EDIT, encoding='utf-8')
+    (node.worktree / 'staged.txt').write_text(FROZEN_STAGED, encoding='utf-8')
+    _git(node.worktree, 'add', 'staged.txt')
     (node.worktree / 'scratch.txt').write_text(FROZEN_UNTRACKED, encoding='utf-8')
     # the tree-wide brake latches the root; the child parks paused
     root.pause()
@@ -401,12 +595,29 @@ def _paused_child(repo: pathlib.Path) -> tuple[Node, Node]:
     return root, node
 
 
+def _land_sibling(repo: pathlib.Path) -> None:
+    """Commit a sibling's landing on the target: a new file and a shared edit."""
+    (repo / 'sib.txt').write_text(SIBLING, encoding='utf-8')
+    (repo / 'shared.txt').write_text(SHARED_EDIT, encoding='utf-8')
+    _git(repo, 'add', 'sib.txt', 'shared.txt')
+    _git(repo, 'commit', '-m', 'sibling landing')
+
+
 def _assert_frozen(node: Node) -> None:
-    """Assert the child's frozen mid-step state is byte-identical."""
-    assert (node.worktree / 'README.md').read_text(encoding='utf-8') == FROZEN_EDIT
-    assert (node.worktree / 'scratch.txt').read_text(
-        encoding='utf-8'
-    ) == FROZEN_UNTRACKED
+    """Assert the child's frozen mid-step state is byte-identical and in place.
+
+    The tracked edit stays unstaged, the new file staged, and the scratch
+    file untracked, each with its frozen bytes.
+    """
+    for name, content in (
+        ('README.md', FROZEN_EDIT),
+        ('staged.txt', FROZEN_STAGED),
+        ('scratch.txt', FROZEN_UNTRACKED),
+    ):
+        assert (node.worktree / name).read_text(encoding='utf-8') == content
+    status = _git(node.worktree, 'status', '--porcelain').stdout.splitlines()
+    for entry in (' M README.md', 'A  staged.txt', '?? scratch.txt'):
+        assert entry in status, status
 
 
 def _await_ready(
