@@ -1026,8 +1026,9 @@ class Node:
         """Validate a template charter's fill-sheet before any spend.
 
         The stale-seed gate: it refuses a stale pin, a stale docket row, or
-        a truncated charter before the node's opening seat spends on it.
-        Checks, all pre-worktree:
+        a truncated charter before a seat spends on it -- at init before the
+        worktree exists, at reseed before any seed file is rewritten.
+        Checks:
 
         - ``--pin`` (when given) resolves to a commit;
         - the charter carries its two authored sections (a truncated seed
