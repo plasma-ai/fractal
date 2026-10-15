@@ -62,6 +62,7 @@ __all__ = [
     'test_no_progress_clock_pauses_while_a_tool_runs',
     'test_thinking_never_resets_the_no_progress_clock',
     'test_thinking_cap_then_no_progress_stalls_the_step',
+    'test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session',
     'test_idle_clock_holds_while_the_agent_waits',
     'test_idle_clock_fires_on_a_silent_agent',
     'test_a_reaped_tool_is_gone_before_the_next_launch',
@@ -1528,6 +1529,30 @@ def test_thinking_cap_then_no_progress_stalls_the_step(
         'PLAN/exited/stalled: no action for 1s, after a steer; unpriced',
         'EXECUTE/stopped/failed on PLAN',
     ]
+
+
+def test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A thinking cap on a stream that named no session still steers its launch.
+
+    The launch minted the session it ran on, so the steer resumes that
+    one with ``STALL.md``, as the watchdog's steer does -- never the full
+    step prompt as if no launch had stuck.
+    """
+    anonymous = [
+        {key: value for key, value in frame.items() if key != 'session_id'}
+        for frame in (_THINKING_REPLY, _CONTINUATION)
+    ]
+    capped = _claude_script(*anonymous, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    first, steer, _ = agent.argvs
+    session = first[first.index('--session-id') + 1]
+    assert steer[steer.index('--resume') + 1] == session
+    assert 'ran out of room while still thinking' in steer[-1]
 
 
 @pytest.mark.parametrize(

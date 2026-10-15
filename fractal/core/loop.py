@@ -3307,11 +3307,14 @@ class Loop:
             # still parks
             if self._consume_pause_abort():
                 return StepResult(status='paused', session=session_out, cost=cost_out)
+            # the caller-minted session stands in when the stream never
+            # named one, as for the watchdog's stuck launch
+            stuck_session = stream_error.session or invocation.session
             return StepResult(
                 status='stuck',
                 exit_code=1,
                 reason=f'{stream_error}',
-                session=stream_error.session,
+                session=stuck_session,
             )
         if stream_error is not None:
             # an agent that named a failure on its own stream (drained clean,
