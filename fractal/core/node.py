@@ -5463,9 +5463,10 @@ class Node:
         token (:meth:`end_reason`), ``None`` when nothing is recorded. The
         ``last`` column renders each
         row's newest activity instant as a compact age, flagged (``12m!``)
-        when an active node has sat quiet past ``max(step limit, 5m)`` (the
-        active step's effective ceiling: its ``timeout:`` line, else
-        ``step_timeout``).
+        when an active node has sat quiet past the larger of its step limit
+        (the active step's effective ceiling: its ``timeout:`` line, else
+        ``step_timeout``) and the staleness floor
+        (:data:`_STALE_AGE_FLOOR_SECONDS`).
 
         Args:
             all_nodes: Include retired nodes in output.
@@ -5575,9 +5576,9 @@ class Node:
             node = self.__class__(worktree_dir) if worktree_dir else None
             if node is not None and not node.exists():
                 node = None
-            # render the newest activity instant as the 'last' age; an
-            # active node quiet past max(step limit, 5m) is flagged stale
-            # ('12m!'), the step limit being the child's active step's
+            # render the newest activity instant as the 'last' age; an active
+            # node quiet past max(step limit, staleness floor) is flagged
+            # stale ('12m!'), the step limit being the child's active step's
             # effective ceiling (a gone worktree falls back to the floor alone)
             last = None
             timestamp = recent.get(row['node'])
