@@ -136,7 +136,8 @@ All signal guards share one contract: reconcile crashed-but-active state first,
 check the guard, and on refusal write a `failed` event row stating the reason
 before raising. The reconcile fences its own writes: it snapshots the group
 records before probing, acts only when the status and records are unchanged from
-the judged snapshot, reaps against that snapshot alone, and re-checks its
+the judged snapshot, reaps against that snapshot alone (each recorded group's
+whole process tree, so the dead loop's agent tools die too), and re-checks its
 license under the `.worktrees` flock before stamping `exited` — so a racing
 continue's fresh boot or a flock'd kill stands the heal down. Inside a subtree
 fan-out the same refusal is recorded but skipped silently — attributed as coming

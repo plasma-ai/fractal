@@ -151,6 +151,10 @@ may include breaking changes, each listed under a Breaking heading.
   any other node's loop the agent launched. Pause and kill name any survivor,
   and any other process working in the node's worktree, which they report but
   leave running.
+- The crashed-node heal and a timed-out `codex` preflight probe end the agent's
+  whole process tree instead of only its process group, so tools the agent
+  started in groups or sessions of their own no longer outlive a loop that died
+  or a probe that hung. Both spare any other node's loop and name survivors.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives `$MAX_CHILDREN` and the other config-derived variables from

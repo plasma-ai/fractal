@@ -101,6 +101,7 @@ __all__ = [
     'test_boundary_pause_resume_continues_iteration_count',
     'test_pause_with_pending_finish_still_finishes_the_iteration',
     'test_abort_reaps_the_agents_tool_groups',
+    'test_crash_heal_reaps_the_agents_tool_groups',
     'test_pause_names_a_worktree_stray_and_leaves_it_running',
     'test_abort_spares_another_nodes_loop_group',
     'test_pause_reaps_past_a_broken_sibling',
@@ -1191,6 +1192,41 @@ def test_abort_reaps_the_agents_tool_groups(repo: dict, verb: str, status: str) 
 
     assert alive == [], (alive, tools)
     assert _run(worktree, 'node', 'status').stdout.strip() == status
+
+
+def test_crash_heal_reaps_the_agents_tool_groups(repo: dict) -> None:
+    """The crash heal reaps the process groups the dead loop's agent tools run in.
+
+    A loop that dies out of band leaves its agent invocation running, and
+    the agent's tool commands run in groups (or sessions) of their own. With
+    the gated step parked and two tool sleepers up -- one in its own group,
+    one ``setsid``'d -- the loop process alone is killed: the next status
+    read heals the node and must leave neither sleeper alive.
+    """
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'reapheal', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='reap_heal')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        tools = _tool_pids(capture)
+        assert len(tools) == 2, tools
+        # the out-of-band death: the loop process alone, its agent left running
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=60)
+        status = _run(worktree, 'node', 'status')
+        alive = _alive_pids(tools)
+    finally:
+        (capture / 'gate_release').touch()
+        _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    assert status.stdout.startswith('exited'), status.stdout
+    assert alive == [], (alive, tools, status.stderr)
 
 
 def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
