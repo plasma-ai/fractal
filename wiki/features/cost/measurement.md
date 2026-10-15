@@ -198,9 +198,9 @@ Zero and unknowable are never conflated:
   (`N unpriced steps (NULL cost) excluded`) while stdout stays parseable.
 
 Codex's model-acceptance preflight is a paid invocation -- one short turn at the
-configured model -- that runs before step rows exist. Its usage is unpriced:
-outside the step ledger, absent from the recorded run spend, and counted toward
-no cap.
+configured model -- that runs before step rows exist. Its spend stays off the
+ledger: it lands in no step row, is absent from the recorded run spend, and
+counts toward no cap.
 
 ## Finality
 

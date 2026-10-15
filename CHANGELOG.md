@@ -161,11 +161,13 @@ may include breaking changes, each listed under a Breaking heading.
 - A Claude step killed before its result frame (a deadline, a stall or thinking
   cap, a pause, a dead stream) is priced from Claude Code's own session
   transcript instead of keeping only the stream's partial figure, which was
-  often none. Each reply written during the launch counts once, at its final
-  token usage and its own model, sub-agent replies in the same transcript
-  included; the sum is booked as a non-final figure when it is higher than the
-  streamed one. With no readable transcript the step keeps the streamed figure
-  (or `NULL`) and the agent logs `launch unpriced: <reason>`.
+  often none. Each reply the session's transcript records during the launch
+  counts once, at its final token usage and its own model, and the sum is booked
+  as a non-final figure when it is higher than the streamed one. Sub-agent
+  transcripts, which Claude Code keeps in separate files, are not read, so a
+  killed step's sub-agent spend is left out. With no readable transcript the
+  step keeps the streamed figure (or `NULL`) and the agent logs
+  `launch unpriced: <reason>`.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the
@@ -261,8 +263,8 @@ may include breaking changes, each listed under a Breaking heading.
   left is recorded `stopped` with reason `over budget`, while the steps the
   between-steps subtree-ceiling check cuts off are never launched and book no
   row. The agents guide and the cost wiki pages state that the `codex`
-  model-acceptance probe at run start is a paid invocation whose usage is
-  unpriced — it lands in no step row and counts toward no cap.
+  model-acceptance probe at run start is a paid invocation whose spend stays off
+  the ledger — it lands in no step row and counts toward no cap.
 - Under a cost cap, a token-priced step whose effective model the price table
   cannot price aborts the run at preflight, before the run row commits and
   before the paid `codex` probe, naming the step and the gap
