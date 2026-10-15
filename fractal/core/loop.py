@@ -2078,11 +2078,14 @@ class Loop:
                     # (resume re-enters the step), and a stop, finish, or
                     # spent ceiling abandons it to the failure path
                     paused = self._check_pause()
-                    abandoned = not paused and (
-                        self._check_stop()
-                        or self._check_finish()
-                        or self._check_subtree_ceiling()
-                    )
+                    abandoned = False
+                    if not paused:
+                        if self._check_stop():
+                            abandoned = True
+                        elif self._check_finish():
+                            abandoned = True
+                        elif self._check_subtree_ceiling():
+                            abandoned = True
                     if abandoned:
                         self._fail_reason = f'{step_name} {trigger}; steer abandoned'
                         result = dataclasses.replace(
@@ -3212,11 +3215,12 @@ class Loop:
             # stream never named one
             if self._consume_pause_abort():
                 return StepResult(status='paused', session=session_out, cost=cost_out)
+            stuck_session = session_out or invocation.session
             return StepResult(
                 status='stuck',
                 exit_code=1,
                 reason=f'no action for {_span(NO_PROGRESS_SECONDS)}',
-                session=session_out or invocation.session,
+                session=stuck_session,
                 cost=cost_out,
             )
         if agent_status != 0 and result is not None and result.budget_stopped:
@@ -3339,13 +3343,14 @@ class Loop:
             else:
                 message = f'{type(stream_error).__name__}: {stream_error}'
             detail = _one_line(message)
+            unavailable = agent_borne and _unavailable()
             return StepResult(
                 status='failed',
                 exit_code=1,
                 reason=f'{self._fail_reason}: {detail}',
                 session=session_out,
                 cost=cost_out,
-                unavailable=agent_borne and _unavailable(),
+                unavailable=unavailable,
             )
         # a budget stop reported on the stream keeps its attribution even
         # when the agent exits 0
