@@ -228,9 +228,10 @@ def commit(
     # loud rather than inferred from the diff; the hook retry re-stages through
     # this same closure, so the latest pass's notices are the ones reported
     record_notices: list[str] = []
+    denied: list[str] = []
 
     def _stage_changes() -> None:
-        record_notices[:] = _stage(
+        record_notices[:], denied[:] = _stage(
             node,
             scoped=scoped,
             commit_scopes=commit_scopes,
@@ -295,10 +296,15 @@ def commit(
                 continue
             if any(path.startswith(f'{prefix}/') for prefix in managed):
                 continue
-            # name the shared exclude repo-relative -- a force commit folds
-            # this warning into its body, where machine paths do not belong
+            # name the rule sources outside the repo without their machine
+            # paths -- a force commit folds this warning into its body, where
+            # machine paths do not belong; the shared exclude reads
+            # repo-relative, and any other absolute source is the host's
+            # global ignore file
             if in_exclude:
                 source = '.git/info/exclude'
+            elif os.path.isabs(source):
+                source = 'core.excludesFile'
             skipped.append(f'{path} ({source}:{line}:{pattern})')
     skip_warning = None
     if skipped:
@@ -442,6 +448,15 @@ def commit(
         notice = _push(node)
         if notice:
             output.append(notice)
+    # repeat the held-out counts as the final line -- a hook's or gate's long
+    # output can bury the warnings above, and a no-op commit reads as clean
+    held: list[str] = []
+    if denied:
+        held.append(f'{len(denied)} estate file(s) not staged')
+    if skipped:
+        held.append(f'{len(skipped)} path(s) ignored')
+    if held:
+        output.append(f'Held out: {"; ".join(held)}')
     return '\n'.join(output)
 
 
@@ -932,7 +947,7 @@ def _stage(
     node_prefix: str,
     wiki_prefix: str,
     fractal_prefix: str,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Stage the node's committable paths.
 
     Args:
@@ -946,7 +961,8 @@ def _stage(
             under it; the record pass owns them).
 
     Returns:
-        The estate pass's notices (what it force-staged, what it refused).
+        The estate pass's notices (what it force-staged, what it refused),
+        and the estate files the content law withheld from the adds.
 
     """
     worktree = node.worktree
@@ -1000,7 +1016,7 @@ def _stage(
     else:
         cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
         fractal.util.git.run(cmd, cwd=worktree)
-    return _stage_records(node, fractal_prefix, denied)
+    return _stage_records(node, fractal_prefix, denied), denied
 
 
 def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:

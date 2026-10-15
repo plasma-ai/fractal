@@ -87,13 +87,17 @@ by host ignore rules are counted and named (fractal's own runtime ignores -- the
 managed `info/exclude` block by its line span, so a user line sharing the file
 still alarms -- and self-managing ignored directories stay silent). The warning
 lists the first ten paths, each with the rule that ate it as `check-ignore -v`
-reports it (source file, line, and pattern; the shared `info/exclude` named
-repo-relative, since a force commit folds the warning into its body), then
-counts the rest, and labels them repository or host rules, not node-record
-refusals -- the estate law's refusal warning prints beside it and the two must
-not read as one count. The other guard lists any staged file at or over 10MB by
-name -- an oversized file is usually an accident, but large commits are also
-legitimate.
+reports it (source file, line, and pattern; the shared `info/exclude` reads
+repo-relative and any other absolute source as `core.excludesFile`, since a
+force commit folds the warning into its body), then counts the rest, and labels
+them repository or host rules, not node-record refusals -- the estate law's
+refusal warning prints beside it and the two must not read as one count. The
+other guard lists any staged file at or over 10MB by name -- an oversized file
+is usually an accident, but large commits are also legitimate. Whenever the
+estate refusal or the ignore warning fired, the command's last line repeats both
+counts (`Held out: ...`, non-zero parts only): a hook's or gate's long output
+prints between the warnings and the end, and a no-op commit is exactly when a
+node would otherwise read the tree as clean.
 
 ## The estate content law
 

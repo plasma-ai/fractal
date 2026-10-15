@@ -645,7 +645,12 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    reports it (source file, line, and pattern), and counts the rest
    (``Warning: N path(s) skipped by ignore rules (repository or host rules,
    not node-record refusals): eaten.log (.gitignore:3:*.log), ...``); it is
-   separate from step 3's estate refusal.
+   separate from step 3's estate refusal. Rule sources outside the repository
+   carry no machine path: the shared exclude reads ``.git/info/exclude`` and
+   the host's global ignore file ``core.excludesFile``. Whenever either
+   warning fired, the command's last line repeats the counts (``Held out: N
+   estate file(s) not staged; N path(s) ignored``, non-zero parts only), after
+   any hook or gate output and on a no-op commit too.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
    caller's run/iteration/step lineage. "Nothing staged" is a tolerated
    no-op.

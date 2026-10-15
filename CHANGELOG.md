@@ -83,7 +83,13 @@ may include breaking changes, each listed under a Breaking heading.
   ten, each with its rule as `git check-ignore -v` reports it (source file,
   line, and pattern), then `... and N more`. It says the paths are held by
   repository or host ignore rules and are not node-record refusals, so it is not
-  mistaken for a recount of the estate warning above it.
+  mistaken for a recount of the estate warning above it. Rule sources outside
+  the repository carry no machine path: the shared exclude reads
+  `.git/info/exclude` and the host's global ignore file `core.excludesFile`.
+- `fractal commit` ends on a
+  `Held out: N estate file(s) not staged; N path(s) ignored` line (non-zero
+  parts only) whenever either warning fired, after any hook or gate output and
+  on a no-op commit too.
 - A node's record directories admit `.py` files — plain text like the seeded
   `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
   instead of being withheld as not a node record. Keys, archives, and binaries
