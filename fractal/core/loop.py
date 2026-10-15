@@ -157,6 +157,37 @@ class Step:
                     frontmatter.setdefault(match.group(1), match.group(2).rstrip())
         return cls(path, number=number, frontmatter=frontmatter)
 
+    @classmethod
+    def find(
+        cls: type[Step],
+        steps_dir: pathlib.Path,
+        *,
+        number: int,
+        name: str,
+    ) -> Optional[Step]:
+        """Load the step file a step row names.
+
+        The loop numbers steps by sorted position, so the file at the row's
+        position wins while its name still matches, else the first file of
+        that name (one inserted or removed since the row opened).
+
+        Args:
+            steps_dir: The node's ``steps/`` directory.
+            number: The row's 1-based step number.
+            name: The row's step name.
+
+        Returns:
+            The parsed step, or ``None`` when no file carries the name.
+
+        """
+        paths = sorted(steps_dir.glob('*.md'))
+        named = [path for path in paths if cls(path).name == name]
+        if 0 < number <= len(paths) and paths[number - 1] in named:
+            return cls.load(paths[number - 1], number=number)
+        if named:
+            return cls.load(named[0], number=number)
+        return None
+
     @property
     def name(self: Step) -> str:
         """Return the step name: the filename stem past its ``NN-`` prefix."""
@@ -419,6 +450,7 @@ class Loop:
         self._billing_fails = 0
         self._fail_reason: Optional[str] = None
         self._time_budget = 'no limit'
+        self._step_time_budget = 'no limit'
         self._cost_budget = 'no limit'
         # per-launch state (the exported step vocabulary)
         self._step_label = ''
@@ -1363,9 +1395,9 @@ class Loop:
             else:
                 self._iter_end_epoch = 0
 
-            # re-read the retunable pacing knobs -- ahead of the iteration's
-            # steps so a mid-run wait/step_timeout retune (config edit or
-            # node update) reaches this iteration's labels, launches, and
+            # re-read the retunable pacing knobs -- ahead of the time-budget
+            # label build so a mid-run wait/step_timeout retune (config edit
+            # or node update) reaches this iteration's label, launches, and
             # drains; iteration 1 skips it like the cap re-read below -- run
             # start read the same config moments earlier; a malformed edit
             # warns and keeps the prior value (mirrors the frontmatter
@@ -1394,6 +1426,12 @@ class Loop:
                     )
                 if self._wait_seconds <= 0:
                     self._wait_seconds = 60
+
+            # build the iteration's time-budget label from whichever of the
+            # run/iter/step timeouts are set -- the node's step_timeout, so
+            # a timed-out run's reason names the configured walls; each
+            # step's prompt and env carry that step's own (_run_step)
+            self._time_budget = self._time_budget_label(self._step_timeout)
 
             # refresh the budget caps and heal registry drift: the boundary
             # checks take their own fresh reads, so this read feeds the
@@ -2478,7 +2516,7 @@ class Loop:
                 f' falling back to the node step_timeout',
                 file=sys.stderr,
             )
-        self._build_time_budget(step_timeout)
+        self._step_time_budget = self._time_budget_label(step_timeout)
 
         # a failed build (builder error, missing charter/step file) must fail
         # the step -- launching the agent on an empty prompt would burn
@@ -2575,7 +2613,7 @@ class Loop:
             'ITER_LABEL': self._iter_label,
             'ITER_TIMESTAMP': self._iter_timestamp,
             'ITER_REF': self._iter_ref,
-            'TIME_BUDGET': self._time_budget,
+            'TIME_BUDGET': self._step_time_budget,
             'COST_BUDGET': self._cost_budget,
             'CONTINUE_MODE': 'true' if self._continue else 'false',
             'RESUME_MODE': 'true' if self._resume_mode else 'false',
@@ -2638,17 +2676,20 @@ class Loop:
         ]
         return '\n'.join(lines)
 
-    def _build_time_budget(self: Loop, step_timeout: str) -> None:
-        """Refresh the time-budget label for the step about to launch.
+    def _time_budget_label(self: Loop, step_timeout: str) -> str:
+        """Compose a time-budget label from the run/iter walls and a step part.
 
-        Built per step, never once per iteration: the step part names the
-        launching step's own ceiling (its ``timeout:`` override, else the
-        node's ``step_timeout``), so a step that carries one budgets
-        against what its launch enforces.
+        The step part is the caller's: a launching step's own ceiling (its
+        ``timeout:`` override, else the node's ``step_timeout``) for the
+        per-step ``$TIME_BUDGET``, the node's ``step_timeout`` for the
+        iteration's label.
 
         Args:
-            step_timeout: The step's effective timeout as written (``''``
-                when it has none).
+            step_timeout: The step timeout as written (``''`` when none).
+
+        Returns:
+            The label, e.g. ``24h total, 1h/iter, 10m/step``, or
+            ``no limit``.
 
         """
         time_budget = ''
@@ -2662,7 +2703,7 @@ class Loop:
             if time_budget:
                 time_budget += ', '
             time_budget += f'{step_timeout}/step'
-        self._time_budget = time_budget or 'no limit'
+        return time_budget or 'no limit'
 
     def _build_cost_budget(self: Loop) -> None:
         """Refresh the cost-budget label from the CURRENT remaining.
@@ -2739,7 +2780,7 @@ class Loop:
             'ITER_TIMESTAMP': self._iter_timestamp,
             'ITER_REF': self._iter_ref,
             'ITER_LABEL': self._iter_label,
-            'TIME_BUDGET': self._time_budget,
+            'TIME_BUDGET': self._step_time_budget,
             'COST_BUDGET': self._cost_budget,
             'STEP_LABEL': step_label,
             'STEP_MODEL': self._step_model,

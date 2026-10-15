@@ -63,7 +63,15 @@ when its exported `STEP_ID` names the active step, its exported
 `STEP_TIMEOUT_SECONDS` is the exact ceiling the launch enforces. The lookup can
 run ahead of the loop, which reads step files once per iteration: an edit made
 mid-iteration shows to every other reader before the loop enforces it at the
-next iteration.
+next iteration. The cockpit's step time ceiling resolves the displayed step's
+file the same way.
+
+The step countdown starts where the loop's step deadline does. A steered
+relaunch opens a row of its own, but the loop charges the stuck launch's span
+against its ceiling, so the countdown adds the span of the step's previous row
+in the iteration when that row closed with a `steered:` reason. An attempt buys
+at most one steer, so the chain is one row long. A retry or a model-drop
+re-dispatch arms a fresh deadline in the loop and counts from its own row.
 
 ## Pause credit-back
 

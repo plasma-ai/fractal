@@ -24,6 +24,7 @@ from rich.text import Text
 
 import fractal.core.cost
 import fractal.util
+from fractal.core.loop import Step
 
 from . import fmt, theme
 from .data import TuiData, display_name_of, leaf_of, parse_ts, span, user_tag
@@ -516,6 +517,7 @@ class SnapshotBuilder:
             it=it,
             step=step,
             spends=spends,
+            node_dir=self._data.node_dir(scope),
         )
         history = _history(runs, iters, steps, runcost, config)
         log = _log(log_raw, [run['run_id'] for run in runs], scope, config)
@@ -559,12 +561,14 @@ class SnapshotBuilder:
         it: Optional[dict],
         step: Optional[dict],
         spends: dict[int, float],
+        node_dir: Optional[pathlib.Path],
     ) -> Optional[dict]:
         """Shape the run/iter/step x time/cost matrix with every configured cap.
 
         All six cap axes exist (``timeout`` is the per-RUN wall clock,
-        ``iter_timeout`` the per-iteration one); ``None`` means uncapped and
-        renders ``-``.
+        ``iter_timeout`` the per-iteration one, and the step time cap the
+        displayed step's own ceiling: its step file's ``timeout:``, else
+        ``step_timeout``); ``None`` means uncapped and renders ``-``.
         """
         if run is None:
             return None
@@ -602,8 +606,12 @@ class SnapshotBuilder:
             # bare number (e.g. timeout: 3600) -- coerce to str before parsing
             # (matching Config.validate) so a mistyped value reads as no cap,
             # never an AttributeError that crashes the whole cockpit build
-            'cap_step_s': fractal.util.parse_duration_seconds(
-                str(config.get('step_timeout') or '')
+            'cap_step_s': _step_cap(
+                default=fractal.util.parse_duration_seconds(
+                    str(config.get('step_timeout') or '')
+                ),
+                step=step,
+                node_dir=node_dir,
             ),
             'cap_step_cost': _cost_or_none(config.get('max_step_cost')),
             'cap_iter_s': fractal.util.parse_duration_seconds(
@@ -1037,6 +1045,31 @@ def _step_total(steps: list[dict], run: dict, sync: set[int]) -> Optional[int]:
         default=0,
     )
     return total or None
+
+
+def _step_cap(
+    *,
+    default: Optional[float],
+    step: Optional[dict],
+    node_dir: Optional[pathlib.Path],
+) -> Optional[float]:
+    """Return the displayed step's effective time cap.
+
+    The loop's launch rule: the step file's ``timeout:`` substitutes for
+    the node's ``step_timeout`` (``default``). Step files are live-edited,
+    so a vanished, unreadable, or malformed one falls back to ``default``,
+    as at launch -- never a crashed cockpit build.
+    """
+    if step is None or node_dir is None:
+        return default
+    try:
+        found = Step.find(
+            node_dir / 'steps', number=step['step'], name=step['step_name']
+        )
+        seconds = default if found is None else found.limit(default)
+    except (OSError, ValueError):
+        seconds = default
+    return float(seconds) if seconds is not None and seconds > 0 else None
 
 
 def _cost_or_none(value: object) -> Optional[float]:

@@ -244,10 +244,14 @@ may include breaking changes, each listed under a Breaking heading.
   names that step's own ceiling (a 6h step on a 2h node reads `6h/step`).
   `fractal node time remaining` and `Time.limit('step')` count down the active
   step's ceiling, and the node's own seat reads the exact value its launch
-  exported. The `node list` stale flag waits out the active step's ceiling. The
-  soft-cap warning stays quiet when every launch has a timeout, counting each
-  step file's own. The boot banner labels the node value
-  `step-timeout: 2h (default)`.
+  exported. The `node list` stale flag waits out the active step's ceiling, and
+  the cockpit's step time ceiling shows it. The soft-cap warning stays quiet
+  when every launch has a timeout, counting each step file's own. The boot
+  banner labels the node value `step-timeout: 2h (default)`, and a timed-out
+  run's reason keeps naming the node's walls.
+- `fractal node time remaining` counts a steered step down from its stuck
+  launch, as the loop's deadline does, instead of overstating the time left by
+  the stuck launch's span.
 
 ## [1.3.0] - 2026-09-17
 

@@ -51,9 +51,10 @@ class Time:
         one. The ``run`` scope (``--timeout``) is anchored on the active
         run's ``started_at``; the ``iter`` scope (``--iter-timeout``) on
         its active iteration's; the ``step`` scope on its active step's,
-        against that step's effective ceiling (see :meth:`limit`). With
-        no ``scope`` the soonest of the configured deadlines is returned
-        -- the time until the next timeout fires.
+        against that step's effective ceiling (see :meth:`limit`), with a
+        steered relaunch also charged its stuck launch's span, as the loop
+        charges it. With no ``scope`` the soonest of the configured
+        deadlines is returned -- the time until the next timeout fires.
 
         Args:
             scope: ``'run'``, ``'iter'``, or ``'step'`` to query one
@@ -110,10 +111,13 @@ class Time:
         # pause parks the loop with the run/iter rows left open, so the raw
         # wall clock would charge the frozen time against the deadline (a
         # step never spans a pause: the interrupted step row closes paused
-        # and resume opens a fresh one)
+        # and resume opens a fresh one); a steered step also owes its stuck
+        # launch's span
         elapsed = fractal.util.time.elapsed(rows[0]['started_at'])
         if scope in ('run', 'iter'):
             elapsed -= self._pause_credit(run_id=run_id, since=rows[0]['started_at'])
+        else:
+            elapsed += self._steered_span(rows[0])
         remaining = seconds - elapsed
         return remaining if remaining > 0 else 0.0
 
@@ -189,29 +193,58 @@ class Time:
                 pass
             else:
                 return float(seconds) if seconds > 0 else None
-        # locate the step file: the loop numbers steps by sorted position,
-        # so the position wins when its name still matches, else the first
-        # file of that name (one inserted or removed since); the SYNC
-        # pseudo-step runs from the package's mode doc
+        # the row's step file; the SYNC pseudo-step runs from the package's
+        # mode doc, and a vanished, unreadable, or malformed file falls back
+        # to the node value, as at launch
         row = self.db.read('steps', where={'step_id': step_id}, limit=1)[0]
-        number, name = row['step'], row['step_name']
-        if name == 'SYNC':
-            path = self._node._package_dir / '_node' / 'modes' / 'SYNC.md'
-        else:
-            paths = sorted((self._node.node_dir / 'steps').glob('*.md'))
-            named = [path for path in paths if Step(path).name == name]
-            if 0 < number <= len(paths) and paths[number - 1] in named:
-                path = paths[number - 1]
-            elif named:
-                path = named[0]
-            else:
-                return default
-        # a malformed override falls back to the node value, as at launch
         try:
-            seconds = Step.load(path).limit(default)
+            if row['step_name'] == 'SYNC':
+                sync = self._node._package_dir / '_node' / 'modes' / 'SYNC.md'
+                step = Step.load(sync)
+            else:
+                step = Step.find(
+                    self._node.node_dir / 'steps',
+                    number=row['step'],
+                    name=row['step_name'],
+                )
+            seconds = default if step is None else step.limit(default)
         except (OSError, ValueError):
             seconds = default
         return float(seconds) if seconds is not None and seconds > 0 else None
+
+    def _steered_span(self: Time, row: dict) -> float:
+        """Return the seconds a steered step's stuck launch already ran.
+
+        A steer relaunches a stuck step on a row of its own, and the loop
+        charges the stuck launch's span against the steered launch's
+        ceiling, so the step deadline runs from the attempt's first
+        launch. The stuck row is the step's previous row in the iteration,
+        closed with a ``steered:`` reason; an attempt buys at most one
+        steer, so the chain is one row long. A retry or a model-drop
+        re-dispatch arms a fresh deadline in the loop, and its row never
+        follows a ``steered:`` one.
+
+        Args:
+            row: The active step row.
+
+        Returns:
+            The stuck launch's seconds, ``0.0`` when the row is no steer.
+
+        """
+        rows = self.db.read(
+            'steps',
+            where={
+                'iter_id': row['iter_id'],
+                'step': row['step'],
+                'step_name': row['step_name'],
+            },
+        )
+        prior = [other for other in rows if other['step_id'] < row['step_id']]
+        if not prior or not prior[0]['metadata'].startswith('steered: '):
+            return 0.0
+        stuck = prior[0]
+        started = fractal.util.time.elapsed(stuck['started_at'])
+        return started - fractal.util.time.elapsed(stuck['ended_at'])
 
     def _pause_credit(
         self: Time,

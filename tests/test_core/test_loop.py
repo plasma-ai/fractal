@@ -2875,9 +2875,16 @@ def test_run_records_step_attribution_matrix(
     assert (step['status'], step['exit_code'], step['metadata']) == row
 
 
+@pytest.mark.parametrize(
+    argnames=('frontmatter', 'limit'),
+    argvalues=[('', '30s'), ('---\ntimeout: 45s\n---\n', '45s')],
+    ids=['node-step-timeout', 'own-timeout'],
+)
 def test_step_timeout_reason_names_step_and_limit(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
+    frontmatter: str,
+    limit: str,
 ) -> None:
     """A step deadline overrun names the step and its effective ceiling.
 
@@ -2885,15 +2892,20 @@ def test_step_timeout_reason_names_step_and_limit(
     column already names the step) while the iteration row carries the
     enriched ``<step> timed out (<limit>)`` label -- and the run still ends
     ``exited`` with the run-qualified timeout reason: a timeout on the
-    final iteration is never relabeled ``completed``.
+    final iteration is never relabeled ``completed``. The run reason names
+    the configured walls (the node's ``step_timeout``), never the last
+    step's own ``timeout:``.
     """
     monkeypatch.setenv('_NODE', '')
     _configure(loop_node, step_timeout='30s')
+    (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+        f'{frontmatter}# PLAN\n\nWork.\n', encoding='utf-8'
+    )
     timeout = StepResult(status='timed out', exit_code=124)
     loop = MockLoop(loop_node, results=[timeout])
     assert loop.run() == 0
     iteration = loop_node.db.read('iters', where={'node': loop_node.branch})[0]
-    assert iteration['metadata'] == 'PLAN timed out (30s)'
+    assert iteration['metadata'] == f'PLAN timed out ({limit})'
     run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert (run['status'], run['exit_code']) == ('exited', 1)
     assert run['metadata'] == f'Timed out at iteration {loop._run_id}.1 (30s/step)'

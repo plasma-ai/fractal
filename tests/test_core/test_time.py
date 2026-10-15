@@ -48,6 +48,7 @@ __all__ = [
     'test_default_reports_soonest_of_run_and_iter',
     'test_step_limit_follows_the_active_steps_timeout',
     'test_step_limit_prefers_the_seats_exported_ceiling',
+    'test_steered_step_counts_down_from_its_stuck_launch',
     'test_time_remaining_credits_paused_spans',
 ]
 
@@ -281,6 +282,55 @@ def test_step_limit_prefers_the_seats_exported_ceiling(
     monkeypatch.setenv('STEP_ID', f'{step_id if seat else step_id + 1}')
     monkeypatch.setenv('STEP_TIMEOUT_SECONDS', '14400')
     assert node.time.limit('step') == limit
+
+
+@pytest.mark.parametrize(
+    argnames=('status', 'metadata', 'charged'),
+    argvalues=[
+        ('stopped', 'steered: no progress for 1800s', 600.0),
+        ('failed', 'agent error (exit 1)', 0.0),
+    ],
+    ids=['steer', 'retry'],
+)
+def test_steered_step_counts_down_from_its_stuck_launch(
+    node_with_db: Node,
+    status: str,
+    metadata: str,
+    charged: float,
+) -> None:
+    """A steered relaunch's countdown keeps its stuck launch's span.
+
+    The loop charges the stuck launch's seconds against the steered
+    launch's ceiling, so the step deadline runs from the attempt's first
+    launch; a retry after a failed attempt arms a fresh deadline.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    first_id = _active_step(node, '')
+    # the first launch ran 600s (1000s ago to 400s ago), then closed
+    node.record.step_end(
+        step_id=first_id, status=status, exit_code=0, metadata=metadata
+    )
+    node.db.update(
+        data={
+            'started_at': _past_timestamp(1000.0),
+            'ended_at': _past_timestamp(400.0),
+        },
+        table='steps',
+        where={'step_id': first_id},
+    )
+    row = node.db.read('steps', where={'step_id': first_id})[0]
+    step_id = node.record.step_start(
+        iter_id=row['iter_id'],
+        run_id=row['run_id'],
+        step=1,
+        step_name='EXECUTE',
+    )
+    _age_step(node, step_id, 100.0)
+    remaining = node.time.remaining(scope='step')
+    assert remaining is not None
+    expected = NODE_STEP_TIMEOUT_SECONDS - 100.0 - charged
+    assert expected - 5.0 < remaining <= expected
 
 
 # ------ pause credit
