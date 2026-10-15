@@ -422,11 +422,14 @@ frozen step's uncommitted work stays in the node's worktree. The merge-base
 advance carries that state the way ``git checkout`` moves a branch; if the
 advance would change a path the node holds dirty or staged, or write over an
 untracked or ignored file, the whole merge refuses and names the paths, and a
-failure after the squash commit rolls back both the target and the node. The
-target must still be settled (a depth-1 node lands into its user branch even
-during a tree-wide pause); a live node, or a child landing into a live or
-paused parent, still refuses. ``--message`` sets the squash commit's text, so
-a descriptive message needs no amend (an amended squash orphans the advance).
+failure or interrupt after the squash commit rolls back both the target and
+the node and exits 1. After a ``--continue``, that rollback returns the target
+to its pre-merge commit and so discards the staged resolution: redo the squash
+by hand before re-running. The target must still be settled (a depth-1 node
+lands into its user branch even during a tree-wide pause); a live node, or a
+child landing into a live or paused parent, still refuses. ``--message`` sets
+the squash commit's text, so a descriptive message needs no amend (an amended
+squash orphans the advance).
 
 The pause latch
 ~~~~~~~~~~~~~~~

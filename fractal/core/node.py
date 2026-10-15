@@ -4135,12 +4135,13 @@ class Node:
         amended squash orphans the merge-base advance recorded against it).
 
         A paused node merges without leaving ``paused``: it runs no loop and
-        no agent, so its branch is quiescent, and its run, iteration, and step
-        rows stay open for :meth:`resume` to adopt. Only committed work lands;
-        the advance carries the frozen step's uncommitted state the way
-        ``git checkout`` moves a branch, refusing the whole merge when it
-        would touch a dirty path or an untracked or ignored file, and rolling
-        the target and the node back when anything fails after the commit.
+        no agent, and its run, iteration, and step rows stay open for
+        :meth:`resume` to adopt. Only committed work lands; the advance
+        carries the frozen step's uncommitted state the way ``git checkout``
+        moves a branch, refusing the whole merge when it would touch a dirty
+        path or an untracked or ignored file, and rolling the target and the
+        node back when anything fails after the commit (a continue's staged
+        resolution goes with the target's rollback).
 
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target

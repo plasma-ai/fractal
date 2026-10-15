@@ -386,9 +386,10 @@ seed; once done, merge it and launch the target.
   commit, merge-base advance) that a hand-rolled finish would miss, and the
   merge-base advance writes your adjudicated tree into the child's worktree, so
   the resolution lands on the child too. The continue's own failures leave your
-  staged resolution in place to fix and re-run; a footprint refusal on the
-  continue names its own remedies: `--continue --ignore-scope`, or widen the
-  child's scope and redo the squash
+  staged resolution in place to fix and re-run (except a paused child's failure
+  after the squash commit, whose rollback discards it -- redo the squash); a
+  footprint refusal on the continue names its own remedies:
+  `--continue --ignore-scope`, or widen the child's scope and redo the squash
   (`git reset --hard HEAD && git merge --squash <branch>` in your worktree),
   since the widening commit lands after the hand squash and a continue refuses a
   child commit newer than its squash. Deleting after the merge
