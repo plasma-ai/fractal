@@ -135,6 +135,8 @@ __all__ = [
     'test_provider_unavailable_retries_back_off_exponentially_to_the_cap',
     'test_a_success_resets_the_provider_unavailable_backoff',
     'test_non_provider_failures_keep_the_fixed_backoff',
+    'test_an_outage_past_the_retries_holds_the_next_launch',
+    'test_an_interrupted_outage_hold_books_the_consumed_steps',
     'test_retry_waits_end_at_the_run_deadline',
     'test_launch_reads_the_provider_outage_off_the_result_frame',
     'test_rejected_retunes_warn_once_not_every_iteration',
@@ -4842,6 +4844,65 @@ def test_non_provider_failures_keep_the_fixed_backoff(
         '1s',
         '1s',
     ]
+
+
+def test_an_outage_past_the_retries_holds_the_next_launch(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """An outage that outlasts a step's retries still paces the next launch.
+
+    The failed iteration's successor holds its first launch on the outage
+    streak's doubling clock -- with no retries at all, the only pacing an
+    outage gets -- and a completed launch clears the streak, so the
+    iteration after it launches at once.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, max_iters=4, step_retries=0, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    loop = PaidLoop(loop_node, results=[outage, outage])
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    # the hold each iteration waited before its launch, if any
+    iterations = re.split(r'=== Iteration \d+ of \d+ at ', out)[1:]
+    holds = [re.findall(r'probing again in (\d+s)', text) for text in iterations]
+    assert holds == [[], ['1s'], ['2s'], []]
+    assert len(loop.launched) == 4
+
+
+def test_an_interrupted_outage_hold_books_the_consumed_steps(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop landing during an outage hold books the steps it consumed.
+
+    The hold guards a step's first launch, step 1 included, so its
+    interrupt would otherwise close an iteration with no step rows at
+    all: the gated step and the never-run tail book ``stopped`` rows
+    naming the hold, and the iteration closes ``stopped``.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _configure(loop_node, max_iters=2, step_retries=0)
+
+    def _stop_mid_wait(seconds: float) -> None:
+        loop_node.record.signal_set('stop', 'operator')
+
+    monkeypatch.setattr('fractal.core.loop.time.sleep', _stop_mid_wait)
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    loop = PaidLoop(loop_node, results=[outage])
+    assert loop.run() == 0
+    assert loop.launched == ['step 1 of 2 (PLAN)']
+    assert _step_rows(loop_node) == [
+        'PLAN/failed/agent error',
+        'EXECUTE/stopped/failed on PLAN',
+        'PLAN/stopped/outage gate interrupted',
+        'EXECUTE/stopped/outage gate interrupted',
+    ]
+    iteration = loop_node.db.read('iters', where={'iter': 2})[0]
+    assert (iteration['status'], iteration['exit_code']) == ('stopped', 0)
 
 
 def test_retry_waits_end_at_the_run_deadline(

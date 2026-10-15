@@ -1917,9 +1917,16 @@ class Loop:
                 if self._paused:
                     return True
                 break
+            # and through a provider outage's: one that outlasted the last
+            # step's retries still paces the next launch
+            if not self._unavailable_gate(steps, step_num):
+                if self._paused:
+                    return True
+                break
 
             # --- SYNC before each step ---
-            if self._sync_mode and self._sync_file.is_file():
+            synced = self._sync_mode and self._sync_file.is_file()
+            if synced:
                 started = True
                 # the sync belongs to the step it precedes (the drain-wait
                 # sync, which precedes nothing, stays step 0)
@@ -1975,6 +1982,12 @@ class Loop:
             # have just armed: the work step must never be the hot call the
             # gate above exists to refuse
             if not self._billing_gate(steps, step_num):
+                if self._paused:
+                    return True
+                break
+            # and the outage streak it may have extended -- with no SYNC, the
+            # streak is the one the hold above already waited out
+            if synced and not self._unavailable_gate(steps, step_num):
                 if self._paused:
                     return True
                 break
@@ -3765,6 +3778,63 @@ class Loop:
                 pass
         # the sequence was cut short: never book this iteration 'completed'
         # off steps it only ever recorded as stopped
+        self._iter_interrupted = True
+        return False
+
+    def _unavailable_gate(self: Loop, steps: list[Step], step_num: int) -> bool:
+        """Hold the next launch through a provider outage's backoff, if one stands.
+
+        A failure the agent names as its provider being unavailable paces
+        its own step's retries; once those run out, the iteration fails and
+        the next launch would go out hot for as long as the outage lasts
+        (with no retries at all, nothing would pace it). While the streak
+        stands, the step's first launch waits its doubling clock instead:
+        the launch after the wait is the probe that clears or extends it.
+
+        Args:
+            steps: The iteration's whole step sequence.
+            step_num: The gated step's 1-based number.
+
+        Returns:
+            Whether the step loop may proceed. ``False`` means the wait
+            was interrupted: the caller parks on ``_paused``, else ends
+            the sequence.
+
+        """
+        if not self._unavailable_fails:
+            return True
+        node = self.node
+        wait = self._unavailable_wait()
+        print(
+            f'=== Provider unavailable — {self._unavailable_fails} consecutive'
+            f' failure(s); probing again in {wait}s ==='
+        )
+        # an interrupted wait never buys a hot launch: a pause parks, and a
+        # stop, finish, or spent ceiling ends the step loop
+        if self._retry_backoff(seconds=wait):
+            return True
+        if self._paused:
+            return False
+        # book the gated step and the never-run tail as the billing gate does
+        for missed in steps[step_num - 1 :]:
+            try:
+                missed_id = node.record.step_start(
+                    iter_id=self._iter_id,
+                    run_id=self._run_id,
+                    step=missed.number,
+                    step_name=missed.name,
+                )
+                node.record.step_end(
+                    step_id=missed_id,
+                    status='stopped',
+                    exit_code=0,
+                    metadata='outage gate interrupted',
+                )
+                # never launched, so the spend is a knowable zero
+                node.record.step_cost(step_id=missed_id, cost=0.0)
+            except Exception:
+                pass
+        # the sequence was cut short: never book this iteration 'completed'
         self._iter_interrupted = True
         return False
 

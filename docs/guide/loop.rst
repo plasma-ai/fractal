@@ -414,6 +414,17 @@ attempts, the wait polls the same signals as a retry backoff, and an armed
 billing breaker's clock takes precedence. No config key tunes the doubling or
 the cap.
 
+An outage that outlasts the retries (or meets ``step_retries: 0``) fails the
+iteration as usual, but the streak stands: the next step's first launch waits
+the same doubling clock before it goes out, announced as ``=== Provider
+unavailable — N consecutive failure(s); probing again in Ns ===``, and so does
+the work step after a SYNC that met the outage too. The launch after the wait
+is the probe that clears or extends the streak. The wait polls the same
+signals as a retry backoff; a stop, finish, or spent subtree ceiling ends the
+iteration, booking the gated step and the never-run tail as ``stopped`` rows
+with ``outage gate interrupted`` in their metadata, as the billing breaker's
+gate does.
+
 Stuck steps
 ~~~~~~~~~~~
 

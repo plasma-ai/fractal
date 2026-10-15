@@ -82,7 +82,11 @@ may include breaking changes, each listed under a Breaking heading.
   first retry waits `step_retry_backoff`, each consecutive one doubles it to a
   one-hour cap (`retrying in 20s (provider unavailable)`), and a completed
   launch resets the streak. `step_retries` still bounds the attempts; other
-  failures keep the fixed backoff.
+  failures keep the fixed backoff. An outage that outlasts the retries still
+  fails the iteration, but the next step's first launch waits the same clock
+  (`=== Provider unavailable — N consecutive failure(s); probing again in Ns ===`),
+  so the outage paces the iterations after it too, with `step_retries` 0
+  included.
 - A node's record directories admit `.diff` and `.patch` files — plain text,
   like `.py` — so a patch kept under `plans/` commits instead of being withheld
   as not a node record. Images and run output (`.png`, `.log`, `.err`) stay
