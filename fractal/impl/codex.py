@@ -415,7 +415,7 @@ class CodexAgent(Agent):
         return _rates(model)
 
     def _unavailable(self: CodexAgent, detail: str) -> bool:
-        """Match codex's reconnect give-up and its overloaded or erroring API."""
+        """Match codex's provider-outage shapes."""
         return _UNAVAILABLE.search(detail) is not None
 
     def _preflight(

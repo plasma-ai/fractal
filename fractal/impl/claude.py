@@ -637,7 +637,7 @@ class ClaudeAgent(Agent):
         return _rates(model)
 
     def _unavailable(self: ClaudeAgent, detail: str) -> bool:
-        """Match Claude Code's overloaded, erroring, or rate-limited API."""
+        """Match claude's provider-outage shapes."""
         return _UNAVAILABLE.search(detail) is not None
 
     def tracks_cost(self: ClaudeAgent, model: Optional[str] = None) -> bool:
