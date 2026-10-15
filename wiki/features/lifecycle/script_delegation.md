@@ -100,9 +100,10 @@ group alone misses those groups, and once the agent dies they live on,
 reparented to init. Every path that ends an agent invocation therefore reaps its
 whole tree through one helper, `fractal.util.process.reap`: `pause.sh` and
 `kill.sh` call it through the private
-`fractal node _reap --pgid=<pgid> [--worktree=<dir>]`, and the loop calls it
+`fractal node _reap --pgid=<pgid> [--worktree=<dir>]`; the loop calls it
 in-process when a step's deadline fires and when its stream reader dies with the
-agent still running.
+agent still running; the crashed-but-active heal calls it on a dead loop's
+recorded groups; and codex's preflight calls it when its model probe times out.
 
 The helper finds the tree before sending any signal. The agent leader starts its
 own session, so every process whose session id is the recorded group id belongs
@@ -113,11 +114,12 @@ leads joins the match. The helper TERMs every member group, re-walks, and TERMs
 any group the walk newly finds, for up to five rounds; it waits out the grace
 (five seconds from the scripts, the loop's own grace for a deadline, two seconds
 when the stream reader dies — enough for a tool's `git commit` to drop
-`.git/index.lock` before the force-commit backstop needs it) while still
-signaling late groups, then KILLs every group with a live member the same way.
-Members still alive after that are named on stderr, which `Node` relays as
-warnings — the survivors on the pause or kill output, and a `Warning:` line in
-the loop's log for the in-process paths.
+`.git/index.lock` before the force-commit backstop needs it — two seconds for
+the crash heal, and the probe's own grace for a codex preflight timeout) while
+still signaling late groups, then KILLs every group with a live member the same
+way. Members still alive after that are named on stderr, which `Node` relays as
+warnings — the survivors on the pause or kill output, and a `Warning:` line on
+stderr for the in-process paths.
 
 `pause.sh` hands the reap its `.pause_abort` marker, which the reap touches just
 before its first signal to the step group: the loop still finds the marker
@@ -126,8 +128,9 @@ marked, so a later unrelated failure is never read as a park.
 
 `kill.sh` passes the loop's recorded group beside the step group, so the loop
 dies in the same round as its agent and cannot launch the next step while the
-agent's tree drains. Pause passes only the step group: the loop sits above the
-tree and must live to record the park.
+agent's tree drains. The crash heal passes the same two groups, each only after
+its identity check proves it the recorded one. Pause passes only the step group:
+the loop sits above the tree and must live to record the park.
 
 Pause and kill also pass the node's worktree for a report-only sweep: each
 process outside the tree whose working directory lies in the worktree is named
@@ -160,10 +163,11 @@ caller's own group, not its ancestors', which no table names -- so a self-pause
 from a tool shell in a group of its own can hit the step group, as `pause.sh`'s
 own fallback does); when a later read fails, it keeps signaling the groups it
 already knows, minus the protected and spared ones, probing them by signal
-instead of re-walking; the loop warns and falls back to a plain group KILL if
-the reap itself breaks; when `fractal node _reap` itself cannot run, `pause.sh`
-and `kill.sh` fall back to their own group-only teardown, so a helper failure
-never fails the pause or kill.
+instead of re-walking; the loop, the crash heal, and codex's preflight warn and
+fall back to a plain group KILL if the reap itself breaks; when
+`fractal node _reap` itself cannot run, `pause.sh` and `kill.sh` fall back to
+their own group-only teardown, so a helper failure never fails the pause or
+kill.
 
 ## Launch environment
 
@@ -205,7 +209,7 @@ a tmux launch clears it), `.pgid` and `.step_pgid` (process groups for liveness
 and pause/kill reaping — the step marker also names the codex preflight probe's
 group for the probe's lifetime, which `kill` reaps by that handle and a later
 boot, finding it live under an idle node, reaps as an orphan through the crash
-heal's cadence before recording its own), `.pgid.lock` (the launch handoff's
+heal's tree reap before recording its own), `.pgid.lock` (the launch handoff's
 flock sidecar), `.paused` (the tree-wide pause latch beside the central
 database) and `.pause_abort`. Signals the loop observes — finish, stop, pause —
 take effect at iteration or step boundaries; the escalation path that does not
@@ -236,7 +240,9 @@ identity is judged only by this Python law, `Node._kill`'s flock'd vet included.
 The crashed-but-active heal holds no flock over its probe, so it fences its own
 writes instead: it fingerprints `.pgid`/`.step_pgid` before probing, re-verifies
 at act time that the status is still `active` and the records unchanged, reaps
-only that judged snapshot, and re-checks its license under the `.worktrees`
-flock after the reap — status still `active` and no record on disk the verdict
-never judged — before stamping `exited`. A kill or continue landing mid-heal
-keeps its stamp, and a relaunch racing the probe stands the heal down.
+only that judged snapshot (each live, identity-checked group with its whole
+process tree, so tools the dead loop's agent started die too), and re-checks its
+license under the `.worktrees` flock after the reap — status still `active` and
+no record on disk the verdict never judged — before stamping `exited`. A kill or
+continue landing mid-heal keeps its stamp, and a relaunch racing the probe
+stands the heal down.

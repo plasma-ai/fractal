@@ -13,6 +13,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import tomllib
 import typing
@@ -21,6 +22,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any, BinaryIO, Optional
 
 import fractal.core.pricing
+import fractal.util
 from fractal.core.agent import Agent, Invocation, StreamEvent, StreamParser
 
 __all__ = [
@@ -38,8 +40,8 @@ _NO_FORK = (
 # bound the model preflight probe so a hung codex (network/auth stall)
 # cannot wedge a run start
 _PREFLIGHT_TIMEOUT = 60
-# TERM-to-KILL grace for the probe's own process group -- mirrors the loop's
-# _KILL_GRACE_SECONDS for a step group
+# TERM-to-KILL grace for the probe's process tree -- mirrors the loop's
+# _KILL_GRACE_SECONDS for a step's
 _PREFLIGHT_GRACE = 10
 
 # the usage buckets a rollout counter carries (cached input and reasoning
@@ -467,35 +469,40 @@ class CodexAgent(Agent):
             output, _ = process.communicate(timeout=_PREFLIGHT_TIMEOUT)
         except subprocess.TimeoutExpired as e:
             # a hung probe never responded -- distinct from an actual rejection;
-            # TERM the whole group and KILL any survivor after a short grace,
-            # since a TERM-trapping grandchild holding the pipe would block the
-            # reap below; the first line is the short reason callers persist
+            # TERM the probe's whole tree (codex runs tools in groups of their
+            # own; other nodes' loops spared) and KILL any survivor after a
+            # short grace, since a TERM-trapping grandchild holding the pipe
+            # would block the reap below; the first line is the short reason
+            # callers persist
             try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            deadline = time.monotonic() + _PREFLIGHT_GRACE
-            gone = False
-            while time.monotonic() < deadline:
-                # reap the leader (clears its zombie so the group probe below
-                # reads true), then check the whole group: a survivor that
-                # traps TERM must still draw the KILL
-                process.poll()
-                try:
-                    os.killpg(process.pid, 0)
-                except ProcessLookupError:
-                    gone = True
-                    break
-                except PermissionError:
-                    pass
-                time.sleep(0.1)
-            # a group the grace proved gone is never signaled again -- its id
-            # may already lead an unrelated process
-            if not gone:
+                reaped = fractal.util.process.reap(
+                    [process.pid],
+                    grace=_PREFLIGHT_GRACE,
+                    spare=self.node.loop_records,
+                )
+            except Exception as error:
+                # the reap broke: the timeout must still land on the group
+                print(
+                    f'Warning: process-tree reap failed ({error});'
+                    ' killing the probe group only',
+                    file=sys.stderr,
+                )
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
+            else:
+                for group in reaped.spared:
+                    print(
+                        f"Note: spared process group {group} (another node's loop)",
+                        file=sys.stderr,
+                    )
+                for survivor in reaped.survivors:
+                    print(
+                        f'Warning: pid {survivor.pid} survived the reap:'
+                        f' {survivor.command}',
+                        file=sys.stderr,
+                    )
             process.communicate()
             raise RuntimeError(
                 'codex preflight timed out\n'

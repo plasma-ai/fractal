@@ -83,6 +83,21 @@ may include breaking changes, each listed under a Breaking heading.
   (`retrying in 20s (provider unavailable)`), and a completed launch resets the
   streak. `step_retries` still bounds the attempts; other failures keep the
   fixed backoff.
+- A node's record directories admit `.diff` and `.patch` files — plain text,
+  like `.py` — so a patch kept under `plans/` commits instead of being withheld
+  as not a node record. Images and run output (`.png`, `.log`, `.err`) stay
+  refused.
+- `fractal commit`'s ignore-rule warning names the paths it counts: the first
+  ten, each with its rule as `git check-ignore -v` reports it (source file,
+  line, and pattern), then `... and N more`. It says the paths are held by
+  repository or host ignore rules and are not node-record refusals, so it is not
+  mistaken for a recount of the estate warning above it. Rule sources outside
+  the repository carry no machine path: the shared exclude reads
+  `.git/info/exclude` and the host's global ignore file `core.excludesFile`.
+- `fractal commit` ends on a
+  `Held out: N estate file(s) not staged; N path(s) ignored` line (non-zero
+  parts only) whenever either warning fired, after any hook or gate output and
+  on a no-op commit too.
 - A node's record directories admit `.py` files — plain text like the seeded
   `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
   instead of being withheld as not a node record. Keys, archives, and binaries
@@ -159,6 +174,10 @@ may include breaking changes, each listed under a Breaking heading.
   any other node's loop the agent launched. Pause and kill name any survivor,
   and any other process working in the node's worktree, which they report but
   leave running.
+- The crashed-node heal and a timed-out `codex` preflight probe end the agent's
+  whole process tree instead of only its process group, so tools the agent
+  started in groups or sessions of their own no longer outlive a loop that died
+  or a probe that hung. Both spare any other node's loop and name survivors.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives `$MAX_CHILDREN` and the other config-derived variables from

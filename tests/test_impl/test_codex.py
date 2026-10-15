@@ -38,6 +38,7 @@ from typing import Any, Optional
 
 import pytest
 
+import fractal.util.process
 from fractal.cli.utils import StreamRenderer
 from fractal.core import pricing
 from fractal.core.agent import Invocation, StreamEvent, StreamResult
@@ -97,11 +98,28 @@ __all__ = [
     'test_preflight_probes_model_acceptance',
     'test_preflight_timeout_reaps_a_term_ignoring_probe',
     'test_preflight_timeout_never_kills_a_group_term_ended',
+    'test_preflight_timeout_reaps_the_probes_tool_groups',
 ]
 
 # a stand-in router: run a backend's spawns as a real `sh` body, logging each
 # launch as its invocation and the live process
 _Router = Callable[[CodexAgent, str], list[tuple[Invocation, subprocess.Popen]]]
+
+# a stand-in tool command: argv is <role> <dir> <token>; it leaves the
+# probe's group the way codex runs a tool (a group of its own, or a session
+# of its own), records its pid as <dir>/<role>.pid, then sleeps; the token
+# in its argv tags it for the teardown
+_TOOL = """
+import os, sys, time
+role, directory = sys.argv[1:3]
+if role == 'group':
+    os.setpgid(0, 0)
+else:
+    os.setsid()
+with open(f'{directory}/{role}.pid', 'w') as handle:
+    handle.write(f'{os.getpid()}')
+time.sleep(600)
+"""
 
 # pricing with a distinct (cheaper) cache rate so an unfloored cached>input
 # would go negative -- used by the cost-guard regression tests
@@ -2100,6 +2118,50 @@ def test_preflight_timeout_never_kills_a_group_term_ended(
     assert signal.SIGKILL not in sent
 
 
+def test_preflight_timeout_reaps_the_probes_tool_groups(
+    node_with_db: Node,
+    router: _Router,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A timed-out probe's tool commands die with it.
+
+    codex runs each tool command in a group (or session) of its own, so
+    signaling the probe's group alone leaves them running. The probe here
+    starts one sleeper in a group of its own and one ``setsid``'d, then
+    hangs: the timeout must leave neither alive.
+    """
+    backend = CodexAgent(node_with_db, 'sh')
+    # the timeout must outlast the sleepers' startup, which the probe waits
+    # on before it hangs
+    monkeypatch.setattr(codex, '_PREFLIGHT_TIMEOUT', 5)
+    monkeypatch.setattr(codex, '_PREFLIGHT_GRACE', 1)
+    token = f'fractal-reap-test-{uuid.uuid4().hex}'
+    tool = tmp_path / 'tool.py'
+    tool.write_text(_TOOL, encoding='utf-8')
+    roles = ['group', 'session']
+    pid_files = [tmp_path / f'{role}.pid' for role in roles]
+    # start the sleepers off the probe's stdout, wait for both, then hang
+    launches = ' '.join(
+        f'{_quote(sys.executable)} {_quote(f"{tool}")} {role}'
+        f' {_quote(f"{tmp_path}")} {token} >/dev/null 2>&1 &'
+        for role in roles
+    )
+    pending = ' || '.join(f'[ ! -s {_quote(f"{path}")} ]' for path in pid_files)
+    router(backend, f'{launches} while {pending}; do sleep 0.05; done; exec sleep 60')
+    try:
+        with pytest.raises(RuntimeError, match='timed out'):
+            backend.preflight('gpt-5-codex')
+        pids = [int(path.read_text(encoding='utf-8')) for path in pid_files]
+        alive = _alive(pids)
+    finally:
+        for path in pid_files:
+            if path.exists():
+                _kill_tagged(int(path.read_text(encoding='utf-8')), token)
+
+    assert alive == [], (alive, pids)
+
+
 # ------ helpers
 
 
@@ -2366,3 +2428,23 @@ def _drive(
         process.stdout.close()
         process.stderr.close()
     return result, events
+
+
+def _alive(pids: list[int]) -> list[int]:
+    """The subset of ``pids`` still running (zombies count as dead)."""
+    table = fractal.util.process.snapshot()
+    return [pid for pid in pids if pid in table and not table[pid].zombie]
+
+
+def _kill_tagged(pid: int, token: str) -> None:
+    """SIGKILL ``pid`` only while its command line carries ``token``."""
+    result = subprocess.run(
+        ['ps', '-o', 'command=', '-p', f'{pid}'],
+        capture_output=True,
+        text=True,
+    )
+    if token in result.stdout:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
