@@ -155,6 +155,7 @@ __all__ = [
     'test_an_interrupted_outage_hold_books_the_consumed_steps',
     'test_retry_waits_end_at_the_run_deadline',
     'test_launch_reads_the_provider_outage_off_the_result_frame',
+    'test_launch_reads_the_provider_outage_off_error_frames_and_stderr',
     'test_rejected_retunes_warn_once_not_every_iteration',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
@@ -388,6 +389,14 @@ _RESULT = {
     'duration_ms': 1,
 }
 
+# codex exec --json frames for the scripted stand-in: a thread and its turn
+# opening, and the disconnect codex retries behind `Reconnecting... k/N`
+_CODEX_OPEN = [
+    {'type': 'thread.started', 'thread_id': 'thr-1'},
+    {'type': 'turn.started'},
+]
+_CODEX_DISCONNECT = 'stream disconnected before completion: error sending request'
+
 
 # rates for the transcript-priced launch: every claude bucket distinct, and a
 # sub-agent model at its own rates
@@ -553,6 +562,42 @@ class FaultingAgent(SampleAgent):
         """Read one frame, then raise a fractal-side fault."""
         lines.readline()
         raise ValueError('parser boom')
+
+
+class ScriptedCodex(CodexAgent):
+    """The real codex backend and parser over a scripted bash stand-in.
+
+    Each launch runs the next script in place of ``codex``, in the
+    production spawn shape, without capturing a rollout window: the
+    scripted launches fail, and a failed launch never reads one.
+    """
+
+    def __init__(self: ScriptedCodex, node: Node, scripts: list[str]) -> None:
+        """Initialize ``ScriptedCodex``."""
+        super().__init__(node, 'codex')
+        self.scripts = list(scripts)
+        self.spawned: list[subprocess.Popen] = []
+
+    def __deepcopy__(self: ScriptedCodex, memo: dict[int, Any]) -> ScriptedCodex:
+        """Share the stand-in: event payloads copy their source, not processes."""
+        return self
+
+    def _spawn(
+        self: ScriptedCodex,
+        invocation: Any,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Run the next script."""
+        process = subprocess.Popen(
+            ['bash', '-c', self.scripts.pop(0)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            **kwargs,
+        )
+        self.spawned.append(process)
+        return process
 
 
 @pytest.fixture
@@ -5518,6 +5563,7 @@ def test_retry_waits_end_at_the_run_deadline(
 def test_launch_reads_the_provider_outage_off_the_result_frame(
     loop_node: Node,
     scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
     result: str,
     wait: str,
@@ -5528,6 +5574,7 @@ def test_launch_reads_the_provider_outage_off_the_result_frame(
     on stderr, so the launch must carry that frame's detail to the
     backend's classifier for the retry to wait out the outage.
     """
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
     frame = {
         'type': 'result',
         'subtype': 'success',
@@ -5537,6 +5584,87 @@ def test_launch_reads_the_provider_outage_off_the_result_frame(
     }
     script = _claude_script(_INIT, frame, 'exit 1')
     agent = scripted_claude([script, script])
+    _configure(loop_node, step_retries=1, step_retry_backoff='1s')
+    ScriptedLoop(loop_node, agent).run()
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [wait]
+
+
+@pytest.mark.parametrize(
+    argnames=('backend', 'frames', 'stderr', 'wait'),
+    argvalues=[
+        # codex reconnects until it gives up: an outage
+        pytest.param(
+            'codex',
+            [
+                *_CODEX_OPEN,
+                *(
+                    {
+                        'type': 'error',
+                        'message': f'Reconnecting... {attempt}/5 ({_CODEX_DISCONNECT})',
+                    }
+                    for attempt in range(1, 6)
+                ),
+                {'type': 'error', 'message': _CODEX_DISCONNECT},
+            ],
+            '',
+            '1s (provider unavailable)',
+            id='codex-give-up',
+        ),
+        # a reconnect codex recovered from, then a request it refused
+        pytest.param(
+            'codex',
+            [
+                *_CODEX_OPEN,
+                {
+                    'type': 'error',
+                    'message': f'Reconnecting... 1/5 ({_CODEX_DISCONNECT})',
+                },
+                {
+                    'type': 'error',
+                    'message': 'unexpected status 400 Bad Request: model not supported',
+                },
+            ],
+            '',
+            '1s',
+            id='codex-bad-request',
+        ),
+        # an outage named on stderr alone
+        pytest.param(
+            'claude',
+            [_INIT],
+            'API Error: 529 Overloaded',
+            '1s (provider unavailable)',
+            id='claude-stderr',
+        ),
+    ],
+)
+def test_launch_reads_the_provider_outage_off_error_frames_and_stderr(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    backend: str,
+    frames: list[dict[str, Any]],
+    stderr: str,
+    wait: str,
+) -> None:
+    """The real launch hands the backend its stream's errors and stderr too.
+
+    Codex names an outage only in error frames, which the stream joins
+    into one failure detail, and its verdict rests on that joining: an
+    earlier reconnect it recovered from is no outage. Any backend may
+    name one on stderr alone; the launch carries both to the classifier.
+    """
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    parts: list[Any] = [*frames]
+    if stderr:
+        parts.append(f"echo '{stderr}' >&2")
+    script = _claude_script(*parts, 'exit 1')
+    if backend == 'codex':
+        agent = ScriptedCodex(loop_node, [script, script])
+    else:
+        agent = scripted_claude([script, script])
     _configure(loop_node, step_retries=1, step_retry_backoff='1s')
     ScriptedLoop(loop_node, agent).run()
     out = capsys.readouterr().out
