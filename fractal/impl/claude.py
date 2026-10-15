@@ -40,12 +40,15 @@ _CONTINUATION_PREFIX = 'Output token limit hit'
 #: Content block types of a reply that is still thinking.
 _THINKING_BLOCKS = frozenset({'thinking', 'redacted_thinking'})
 
-# Claude Code's provider-outage shapes, as its failed result frame names
-# them once its own API retries are spent: an `API Error: <status>` line
-# (529 overloaded, a 5xx, a 429 rate limit), the API's error types, or the
-# overloaded/unavailable wording
+# Claude Code's provider-outage shapes, as its failed result frame names them
+# once its own API retries are spent: an `API Error: <status>` line (529
+# overloaded, a 5xx, a 429 rate limit), its own `API Error:` text for a
+# response stream that broke off (a lost connection, a server error, a stall),
+# the API's error types, or the overloaded or service-unavailable wording
 _UNAVAILABLE = re.compile(
     r'API Error:\s*(?:Repeated\s+)?(?:429|5\d\d)\b'
+    r'|API Error:\s*(?:Connection lost|Server error mid-response)'
+    r'|API Error:\s*The response (?:stopped arriving|stalled)'
     r'|\b(?:overloaded|rate_limit|api)_error\b'
     r'|\boverloaded\b'
     r'|\bservice unavailable\b',

@@ -119,17 +119,18 @@ is deliberate — an approval never transfers between attempts.
 
 A failure the agent backend names as its provider being unavailable waits out
 the outage instead of the fixed backoff: an overloaded, erroring, or
-rate-limited API (a 429 or 5xx status) or codex's give-up after its own
-reconnects. Each backend matches its own CLI's error text (an `_unavailable`
-hook on the agent, read by the provider-neutral `unavailable` verb) over
-everything the failed launch said — failed result frames, the stream's error,
-and the stderr capture — since Claude names a spent API retry only on its result
-frame. The first retry waits the configured backoff, and each consecutive outage
-failure doubles it up to the billing breaker's one-hour cap. The streak counts
-every launch, SYNC included, and spans steps and iterations, because an outage
-belongs to the provider, not to one step. A completed launch resets it, and any
-other failure breaks it. The retry count still bounds the attempts, and an armed
-billing breaker's clock wins.
+rate-limited API (a 429 or 5xx status), a response stream Claude Code reports as
+broken off (a lost connection, a server error, or a stall), or codex's give-up
+after its own reconnects. Each backend matches its own CLI's error text (an
+`_unavailable` hook on the agent, read by the provider-neutral `unavailable`
+verb) over everything the failed launch said — failed result frames, the
+stream's error, and the stderr capture — since Claude names a spent API retry
+only on its result frame. The first retry waits the configured backoff, and each
+consecutive outage failure doubles it up to the billing breaker's one-hour cap.
+The streak counts every launch, SYNC included, and spans steps and iterations,
+because an outage belongs to the provider, not to one step. A completed launch
+resets it, and any other failure breaks it. The retry count still bounds the
+attempts, and an armed billing breaker's clock wins.
 
 ## Stuck steps
 

@@ -1421,6 +1421,44 @@ def test_rates_falls_back_through_the_openrouter_chain_claude(
             True,
             id='rate-limit',
         ),
+        # Claude Code's own text (2.1.300) for a response stream that broke
+        # off: a lost connection, a server error, or a stall
+        pytest.param(
+            'API Error: Connection lost mid-response. The response above may be'
+            ' incomplete.',
+            True,
+            id='connection-lost',
+        ),
+        pytest.param(
+            'API Error: Connection lost before a response was produced. Try again.',
+            True,
+            id='connection-lost-before-response',
+        ),
+        pytest.param(
+            'API Error: Server error mid-response. The response above may be'
+            ' incomplete.',
+            True,
+            id='server-error-mid-response',
+        ),
+        pytest.param(
+            'API Error: The response stopped arriving. The response above may be'
+            ' incomplete.',
+            True,
+            id='response-stopped',
+        ),
+        pytest.param(
+            'API Error: The response stalled before a response was produced. Try'
+            ' again.',
+            True,
+            id='response-stalled',
+        ),
+        # the host's own fault, not the provider's
+        pytest.param(
+            'API Error: Your computer went to sleep mid-response. The response'
+            ' above may be incomplete.',
+            False,
+            id='host-asleep',
+        ),
         pytest.param(
             "API Error: Claude's response exceeded the 128000 output token maximum.",
             False,
@@ -1446,7 +1484,7 @@ def test_unavailable_names_the_provider_outage_shapes_claude(
     detail: str,
     unavailable: bool,
 ) -> None:
-    """Only an overloaded, erroring, or rate-limited API reads as an outage."""
+    """Only an overloaded, failing, rate-limited, or cut-off API reads as an outage."""
     backend = ClaudeAgent(node_with_db, 'claude')
     assert backend.unavailable(detail) is unavailable
 

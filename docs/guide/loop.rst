@@ -391,7 +391,9 @@ own CLI's error text: the failed result frame, the stream's error frames, and
 the stderr capture.
 
 - **Claude**: an ``API Error:`` with a 429 or 5xx status (529 overloaded
-  included), the API's ``overloaded_error``, ``api_error``, or
+  included), Claude Code's own ``API Error:`` for a response stream that
+  broke off (a lost connection, a server error, or a stall, before or
+  mid-response), the API's ``overloaded_error``, ``api_error``, or
   ``rate_limit_error`` types, or the words "overloaded" or "service
   unavailable".
 - **Codex**: its give-up after its own reconnects (the last ``Reconnecting...

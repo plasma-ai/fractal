@@ -77,12 +77,14 @@ may include breaking changes, each listed under a Breaking heading.
 
 - A failed step whose agent names its provider as unavailable waits out the
   outage: Claude's `API Error:` with a 429 or 5xx status (529 overloaded
-  included) or an overloaded, server, or rate-limit error, and codex's give-up
-  after its reconnects, a 429 or 5xx status, or a model-at-capacity refusal. The
-  first retry waits `step_retry_backoff`, each consecutive one doubles it to a
-  one-hour cap (`retrying in 20s (provider unavailable)`), and a completed
-  launch resets the streak. `step_retries` still bounds the attempts; other
-  failures keep the fixed backoff.
+  included), an overloaded, server, or rate-limit error, or Claude Code's own
+  `API Error:` for a response stream that broke off (a lost connection, a server
+  error, or a stall), and codex's give-up after its reconnects, a 429 or 5xx
+  status, or a model-at-capacity refusal. The first retry waits
+  `step_retry_backoff`, each consecutive one doubles it to a one-hour cap
+  (`retrying in 20s (provider unavailable)`), and a completed launch resets the
+  streak. `step_retries` still bounds the attempts; other failures keep the
+  fixed backoff.
 - A node's record directories admit `.diff` and `.patch` files — plain text,
   like `.py` — so a patch kept under `plans/` commits instead of being withheld
   as not a node record. Images and run output (`.png`, `.log`, `.err`) stay
