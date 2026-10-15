@@ -28,7 +28,7 @@ import pytest
 import fractal.util
 from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
 from fractal.core import loop as loop_module, pricing, worktree
-from fractal.core.agent import StreamEvent, StreamResult
+from fractal.core.agent import Agent, StreamEvent, StreamResult
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
@@ -58,6 +58,8 @@ __all__ = [
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
     'test_agent_borne_stream_error_keeps_the_exit_code',
+    'test_a_dead_stream_reaps_the_tree_and_spares_the_index_lock',
+    'test_a_broken_reap_still_kills_the_step_group',
     'test_no_progress_steers_then_stalls_without_retry',
     'test_no_progress_clock_pauses_while_a_tool_runs',
     'test_thinking_never_resets_the_no_progress_clock',
@@ -458,9 +460,9 @@ class ScriptedClaude(ClaudeAgent):
 
 
 class ScriptedLoop(MockLoop):
-    """Mock loop running the REAL launch over a ``ScriptedClaude``."""
+    """Mock loop running the REAL launch over a scripted agent."""
 
-    def __init__(self: ScriptedLoop, node: Node, agent: ScriptedClaude) -> None:
+    def __init__(self: ScriptedLoop, node: Node, agent: Agent) -> None:
         """Initialize ``ScriptedLoop``."""
         super().__init__(node)
         self.agent = agent
@@ -481,6 +483,47 @@ class PaidLoop(MockLoop):
         result = super()._launch(step, prompt, **kwargs)
         self.node.record.step_cost(step_id=self._step_id, cost=0.5)
         return result
+
+
+class FaultingAgent(SampleAgent):
+    """A backend whose stream reader dies after one frame, its agent still live.
+
+    Each launch runs ``script`` in the production spawn shape (its own
+    session, stderr to the capture); the stream reads one line, then
+    raises a fractal-side fault, so the launch must reap a live tree.
+    """
+
+    def __init__(self: FaultingAgent, node: Node, script: str) -> None:
+        """Initialize ``FaultingAgent``."""
+        super().__init__(node)
+        self.script = script
+        self.spawned: list[subprocess.Popen] = []
+
+    def __deepcopy__(self: FaultingAgent, memo: dict[int, Any]) -> FaultingAgent:
+        """Share the stand-in: event payloads copy their source, not processes."""
+        return self
+
+    def _spawn(
+        self: FaultingAgent,
+        invocation: Any,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Run the script, keeping its process."""
+        process = subprocess.Popen(
+            ['bash', '-c', self.script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            **kwargs,
+        )
+        self.spawned.append(process)
+        return process
+
+    def stream(self: FaultingAgent, lines: Any, **kwargs: Any) -> Any:
+        """Read one frame, then raise a fractal-side fault."""
+        lines.readline()
+        raise ValueError('parser boom')
 
 
 @pytest.fixture
@@ -1440,6 +1483,132 @@ def test_agent_borne_stream_error_keeps_the_exit_code(
     assert (step['metadata'] or '').startswith(
         'agent error (exit 3): sample reported an error: quota exhausted; stub crashed'
     )
+
+
+def test_a_dead_stream_reaps_the_tree_and_spares_the_index_lock(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A dead stream reader ends the agent's tools with a grace for git's lock.
+
+    The reap TERMs the whole tree, a tool in a session of its own
+    included, and waits a short grace, so a tool caught holding
+    ``.git/index.lock`` drops it and the failure path's backstop commit
+    lands; a group-only signal or an immediate KILL would leave the lock
+    behind and the save would fail.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=0)
+    git_path = subprocess.run(
+        ['git', 'rev-parse', '--git-path', 'index.lock'],
+        cwd=loop_node.worktree,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lock = loop_node.worktree / git_path.stdout.strip()
+    # a tool in a session of its own holding the index lock until its TERM
+    tool = tmp_path / 'tool.py'
+    tool.write_text(
+        'import os, pathlib, signal, sys, time\n'
+        'lock, pid = (pathlib.Path(arg) for arg in sys.argv[1:])\n'
+        'os.setsid()\n'
+        'def drop(*_):\n'
+        '    lock.unlink()\n'
+        '    sys.exit(0)\n'
+        'signal.signal(signal.SIGTERM, drop)\n'
+        'lock.touch()\n'
+        'pid.write_text(f"{os.getpid()}\\n")\n'
+        'time.sleep(60)\n',
+        encoding='utf-8',
+    )
+    pid_file = tmp_path / 'tool.pid'
+    agent = FaultingAgent(
+        loop_node,
+        f'{sys.executable} {tool} {lock} {pid_file} >/dev/null 2>&1 &'
+        f' while [ ! -s {pid_file} ]; do sleep 0.05; done;'
+        " echo '{}'; exec sleep 30",
+    )
+    # leave real uncommitted work for the backstop sweep to save
+    (loop_node.worktree / 'partial.txt').write_text('half-done\n', encoding='utf-8')
+    loop = ScriptedLoop(loop_node, agent)
+    try:
+        loop.run()
+    finally:
+        # the tool left the stand-in's group, so a broken reap leaves it running
+        try:
+            os.kill(int(pid_file.read_text(encoding='utf-8')), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+    # the tool is gone (or a zombie awaiting its reaper), its lock with it
+    pid = pid_file.read_text(encoding='utf-8').strip()
+    state = subprocess.run(
+        ['ps', '-o', 'stat=', '-p', pid],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert state.stdout.strip()[:1] in ('', 'Z'), state.stdout
+    assert not lock.exists()
+    assert _step_rows(loop_node) == [
+        'PLAN/failed/stream error: ValueError: parser boom; unpriced'
+    ]
+    log = subprocess.run(
+        ['git', '-C', f'{loop_node.worktree}', 'log', '-1', '--format=%s'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subject = f'{loop_node.branch}: iteration {loop._run_id}.1 (failed on PLAN)'
+    assert log.stdout.strip() == subject
+
+
+@pytest.mark.parametrize(
+    argnames=('kill', 'row'),
+    argvalues=[
+        pytest.param('deadline', 'PLAN/exited/timed out; unpriced', id='deadline'),
+        pytest.param(
+            'stream error',
+            'PLAN/failed/stream error: ValueError: parser boom; unpriced',
+            id='stream-error',
+        ),
+    ],
+)
+def test_a_broken_reap_still_kills_the_step_group(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    kill: str,
+    row: str,
+) -> None:
+    """A process-tree reap that raises still lands its kill on the step group.
+
+    The walk reads the process table and can fail; the deadline or the
+    dead stream must still end the agent, so the launch KILLs the group
+    it recorded and warns that the tree went unwalked.
+    """
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=0)
+
+    def _reap(*args: Any, **kwargs: Any) -> Any:
+        raise OSError('ps unavailable')
+
+    monkeypatch.setattr('fractal.util.process.reap', _reap)
+    if kill == 'deadline':
+        _configure(loop_node, step_timeout='1s')
+        # the open call holds the idle clock, so only the deadline ends it
+        agent = scripted_claude([_claude_script(_INIT, _TOOL_START, 'exec sleep 30')])
+    else:
+        agent = FaultingAgent(loop_node, "echo '{}'; exec sleep 30")
+    ScriptedLoop(loop_node, agent).run()
+    (process,) = agent.spawned
+    assert process.returncode == -signal.SIGKILL
+    assert _step_rows(loop_node) == [row]
+    err = capsys.readouterr().err
+    assert 'Warning: process-tree reap failed (ps unavailable)' in err
 
 
 # ------ no-progress watchdog
