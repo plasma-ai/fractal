@@ -1264,16 +1264,17 @@ def test_merge_sibling_wiki_work_lands_without_conflict(
 def test_merge_orders_sibling_rows_in_every_wiki_root(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Sibling pages in one folder of a corpus wiki land with its index in order.
+    """Sibling pages in one folder of a corpus wiki land with its index current.
 
-    The ``_index.md`` merge driver appends the second sibling's row after the
-    first's, so a clean merge leaves the folder's index out of order and a
-    whole-root ``wiki update --check`` fails. The squash regenerates every
-    index changed on both sides in each declared wiki root, not only the
-    project wiki, so the merged index carries both rows in order; an index the
-    merges never touched keeps its bytes, stale as it is. The refresh reads the
-    disk, so an untracked draft in a folder it regenerates would be indexed
-    into the commit: the merge refuses it by name and restores the target.
+    The ``_index.md`` merge driver unions both siblings' rows, but it cannot
+    add a row for a page a sibling committed without refreshing its index, so
+    the merged index would fail a whole-root ``wiki update --check``. The
+    squash regenerates every index the driver merged in each declared wiki
+    root, not only the project wiki, so the merged index carries every page's
+    row in order; an index the merges never touched keeps its bytes, stale as
+    it is. The refresh reads the disk, so an untracked draft in a folder it
+    regenerates would be indexed into the commit: the merge refuses it by name
+    and restores the target.
     """
     repo = _init_tree(tmp_path / 'corpusrepo')
     # a declared corpus root beside the project wiki: a folder both siblings
@@ -1327,6 +1328,11 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
         )
         _git(worktree, 'add', '-A')
         _git(worktree, 'commit', '-m', f'{page} card')
+    # the second sibling then commits a card without refreshing the index, so
+    # only the merge's own refresh can give it a row
+    _write_page(worktrees['two'] / 'library' / 'cards' / 'mid.md')
+    _git(worktrees['two'], 'add', '-A')
+    _git(worktrees['two'], 'commit', '-m', 'mid card')
     first = _script('merge.sh', repo, f'{worktrees["one"]}')
     assert first.returncode == 0, (first.stdout, first.stderr)
     # an untracked draft in the folder the second merge regenerates refuses
@@ -1344,9 +1350,15 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
     second = _script('merge.sh', repo, f'{worktrees["two"]}')
     assert second.returncode == 0, (second.stdout, second.stderr)
 
-    # the shared folder's index lists both cards in order...
+    # the shared folder's index lists every card in order, the unrefreshed
+    # one included...
     index = _git(repo, 'show', 'main:library/cards/_index.md').stdout
-    assert index.index('[[cards/alpha') < index.index('[[cards/zeta'), index
+    assert '[[cards/mid' in index, index
+    assert (
+        index.index('[[cards/alpha')
+        < index.index('[[cards/mid')
+        < index.index('[[cards/zeta')
+    ), index
     # ...the index no merge touched kept its stale bytes...
     assert _git(repo, 'show', 'main:library/other/_index.md').stdout == stale
     # ...and the refresh left the target clean
@@ -1395,10 +1407,16 @@ def test_merge_orders_merged_rows_wherever_the_index_sits(
         result = _script('merge.sh', repo, f'{worktrees[name]}')
         assert result.returncode == 0, (result.stdout, result.stderr)
 
-    # the merged index lists both pages in order, linked relative to its root
+    # the merged index lists every page in order, the unrefreshed one
+    # included, linked relative to its root
     prefix = '' if folder == '.' else f'{folder}/'
     index = _git(repo, 'show', f'main:{root}/{prefix}_index.md').stdout
-    assert index.index(f'[[{prefix}alpha') < index.index(f'[[{prefix}zeta'), index
+    assert f'[[{prefix}mid' in index, index
+    assert (
+        index.index(f'[[{prefix}alpha')
+        < index.index(f'[[{prefix}mid')
+        < index.index(f'[[{prefix}zeta')
+    ), index
     # the target is clean but for the untouched stray
     status = _git(repo, 'status', '--porcelain').stdout.strip()
     assert status == ('' if stray is None else f'?? {stray.rsplit("/", 2)[0]}/')
@@ -1413,8 +1431,9 @@ def test_merge_regenerates_an_index_merged_over_a_criss_cross_base(
     names one of two merge bases; when the target's index matches the named
     base, a base-relative test would call the index the node's own. The
     squash still merges it against both, and its staged bytes match neither
-    side's, so the merge regenerates it: in order, with the row for a page
-    the merge deleted pruned.
+    side's, so the merge regenerates it: in order, with a row for the page
+    the node committed without refreshing the index, and with the row for a
+    page the merge deleted pruned.
     """
     repo = _init_tree(tmp_path / 'crissrepo')
     # the target carries the merge-driver attribute itself: its ours-merge of
@@ -1456,11 +1475,15 @@ def test_merge_regenerates_an_index_merged_over_a_criss_cross_base(
     _git(worktree, 'add', '-A', '--', 'library')
     _git(worktree, 'commit', '-m', 'take the b card')
     _git(repo, 'merge', '--no-ff', '-s', 'ours', '-m', 'record the node', node_side)
-    # the node then adds a
+    # the node then adds a, and c without refreshing the index, so only the
+    # merge's own refresh can give c a row
     _write_page(worktree / 'library' / 'cards' / 'a.md')
     _wiki_update(worktree / 'library')
     _git(worktree, 'add', '-A', '--', 'library')
     _git(worktree, 'commit', '-m', 'add the a card')
+    _write_page(worktree / 'library' / 'cards' / 'c.md')
+    _git(worktree, 'add', '-A', '--', 'library')
+    _git(worktree, 'commit', '-m', 'add the c card')
     # git names the target's side, where the target's index has not changed
     assert _git(repo, 'merge-base', 'main', 'main.two').stdout.strip() == target_side
 
@@ -1468,8 +1491,12 @@ def test_merge_regenerates_an_index_merged_over_a_criss_cross_base(
 
     assert result.returncode == 0, (result.stdout, result.stderr)
     index = _git(repo, 'show', 'main:library/cards/_index.md').stdout
+    assert '[[cards/c' in index, index
     assert (
-        index.index('[[cards/a') < index.index('[[cards/b') < index.index('[[cards/m')
+        index.index('[[cards/a')
+        < index.index('[[cards/b')
+        < index.index('[[cards/c')
+        < index.index('[[cards/m')
     ), index
     assert '[[cards/y' not in index, index
     assert _git(repo, 'status', '--porcelain').stdout == ''
@@ -6716,9 +6743,10 @@ def _sibling_pages(
     """Fork siblings ``one`` and ``two`` off one tip, each committing a page.
 
     ``one`` adds ``zeta`` and ``two`` adds ``alpha`` to ``folder`` of the wiki
-    at ``root`` (both worktree-relative), each refreshing only that folder,
-    so the second merge leaves the driver's union of the folder's index out
-    of order. Returns the worktrees by node name.
+    at ``root`` (both worktree-relative), each refreshing only that folder;
+    ``two`` then commits ``mid`` without refreshing, so the second merge's
+    index lacks ``mid``'s row until the merge's own refresh adds it. Returns
+    the worktrees by node name.
     """
     worktrees = {}
     for name in ('one', 'two'):
@@ -6742,6 +6770,9 @@ def _sibling_pages(
         )
         _git(worktree, 'add', '-A')
         _git(worktree, 'commit', '-m', f'{page} page')
+    _write_page(worktrees['two'] / root / folder / 'mid.md')
+    _git(worktrees['two'], 'add', '-A')
+    _git(worktrees['two'], 'commit', '-m', 'mid page')
     return worktrees
 
 
