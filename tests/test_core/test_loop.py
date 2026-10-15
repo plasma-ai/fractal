@@ -71,6 +71,7 @@ __all__ = [
     'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
+    'test_the_steer_runs_on_what_the_stuck_launch_left',
     'test_idle_clock_holds_while_the_agent_waits',
     'test_idle_clock_fires_on_a_silent_agent',
     'test_a_reaped_tool_is_gone_before_the_next_launch',
@@ -125,6 +126,7 @@ __all__ = [
     'test_slow_approval_sync_never_hides_a_real_drop',
     'test_failed_drop_redispatch_keeps_the_failure',
     'test_spent_deadline_abandons_the_drop_redispatch',
+    'test_each_attempt_earns_its_own_steer',
     'test_err_snapshots_keep_every_attempts_diagnosis',
     'test_run_end_drain_outlives_the_closed_iterations_deadline',
     'test_before_last_step_drain_uses_the_run_wall_not_the_iter_deadline',
@@ -1765,6 +1767,39 @@ def test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer(
     assert len(agent.argvs) == 1
     assert _step_rows(loop_node) == ['PLAN/paused/unpriced']
     assert loop_node.status() == 'paused'
+
+
+def test_the_steer_runs_on_what_the_stuck_launch_left(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """The steer is charged the stuck launch's seconds against the step ceiling.
+
+    The step's own timeout counts from the attempt's first launch, so a
+    launch stuck after about 5 of its 8 seconds leaves the steer about 3,
+    never a fresh 8.
+    """
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_timeout='8s')
+    # a tool holds the idle clock for 4s, then the agent goes silent until
+    # the watchdog ends it about 1s later
+    stuck = _claude_script(_INIT, _TOOL_START, 'sleep 4', _TOOL_RESULT, 'exec sleep 30')
+    # the steer's open call holds the idle clock, so only its ceiling ends it
+    steer = _claude_script(_INIT, _TOOL_START, 'exec sleep 30')
+    agent = scripted_claude([stuck, steer])
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/exited/timed out; steer; unpriced',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    steered = max(rows, key=lambda row: row['step_id'])
+    span = fractal.util.time.elapsed(steered['started_at'])
+    span -= fractal.util.time.elapsed(steered['ended_at'])
+    # NOTE: real clocks under parallel load -- the steer's ceiling is the
+    #   ~3s the stuck launch left, a fresh one 8s; 6s splits them with 2x
+    #   margin over the remainder
+    assert span < 6
 
 
 @pytest.mark.parametrize(
@@ -3805,12 +3840,27 @@ def test_pause_during_retry_backoff_parks(
             'PLAN/failed/thinking cap; steer abandoned',
             id='stop',
         ),
+        # so does a finish
+        pytest.param(
+            'finish',
+            'completed',
+            'PLAN/failed/thinking cap; steer abandoned',
+            id='finish',
+        ),
+        # and a subtree ceiling the stuck launch spent past, whose own poll
+        # sends the budget finish (no signal set beforehand)
+        pytest.param(
+            None,
+            'exited',
+            'PLAN/failed/thinking cap; steer abandoned',
+            id='ceiling',
+        ),
     ],
 )
 def test_signal_before_the_steer_parks_or_abandons_it(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
-    signal: str,
+    signal: Optional[str],
     status: str,
     row: str,
 ) -> None:
@@ -3818,12 +3868,17 @@ def test_signal_before_the_steer_parks_or_abandons_it(
     monkeypatch.setenv('_NODE', '')
     _seed_steps(loop_node, ['01-PLAN.md'])
     _configure(loop_node, step_retry_backoff='1s')
+    if signal is None:
+        _configure(loop_node, max_cost=5.0)
 
     class SignalingLoop(MockLoop):
-        """Mock loop whose stuck launch lands beside a signal."""
+        """Mock loop whose stuck launch lands beside a signal or a spent ceiling."""
 
         def _launch(self: SignalingLoop, *args: Any, **kwargs: Any) -> StepResult:
-            self.node.record.signal_set(signal, 'operator')
+            if signal is None:
+                self.node.record.step_cost(step_id=self._step_id, cost=6.0)
+            else:
+                self.node.record.signal_set(signal, 'operator')
             return super()._launch(*args, **kwargs)
 
     stuck = StepResult(status='stuck', exit_code=1, reason='thinking cap', session='s1')
@@ -4156,6 +4211,69 @@ def test_spent_deadline_abandons_the_drop_redispatch(
         iter_row['metadata'] or ''
     )
     assert 'model drop' in loop_node.status_detail()
+
+
+@pytest.mark.parametrize(
+    argnames=('redispatch', 'rows'),
+    argvalues=[
+        # a failure retry: the steer inside the retry attempt carries its mark
+        pytest.param(
+            'retry',
+            [
+                'PLAN/stopped/steered: thinking cap',
+                'PLAN/failed/agent error (exit 2); steer',
+                'PLAN/stopped/steered: thinking cap; retry',
+                'PLAN/completed/steer; retry',
+            ],
+            id='retry',
+        ),
+        # a model-drop re-dispatch, outside the retry allowance
+        pytest.param(
+            'drop',
+            [
+                'PLAN/stopped/steered: thinking cap',
+                'PLAN/completed/model drop (served dropped-model); steer',
+                'PLAN/stopped/steered: thinking cap',
+                'PLAN/completed/steer',
+            ],
+            id='drop',
+        ),
+    ],
+)
+def test_each_attempt_earns_its_own_steer(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    redispatch: str,
+    rows: list[str],
+) -> None:
+    """A retry or a drop re-dispatch starts an attempt with a steer of its own.
+
+    The steer is one per attempt: a launch stuck again after a failure
+    retry or a model-drop re-dispatch is steered once more, never stalled
+    on the earlier attempt's steer.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=1, step_retry_backoff='1s')
+    stuck = StepResult(status='stuck', exit_code=1, reason='thinking cap', session='s1')
+    done = StepResult(status='completed')
+    if redispatch == 'retry':
+        failure = StepResult(
+            status='failed',
+            exit_code=2,
+            reason='agent error (exit 2)',
+        )
+        loop = MockLoop(loop_node, results=[stuck, failure, stuck, done])
+    else:
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            '---\nmodel: pinned-model\n---\n# PLAN\n\nWork.\n',
+            encoding='utf-8',
+        )
+        serves = [None, 'dropped-model', None, None]
+        loop = ServingLoop(loop_node, results=[stuck, done, stuck, done], serves=serves)
+    assert loop.run() == 0
+    assert _step_rows(loop_node) == rows
 
 
 # ------ launch diagnostics
