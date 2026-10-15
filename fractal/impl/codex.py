@@ -68,8 +68,7 @@ _UNEXPLAINED = 'Rollout window saw a rollout it cannot explain: {name!r}'
 # after its own reconnects (the last `Reconnecting... N/N`, then a bare
 # `stream disconnected before completion`), a 429 or 5xx status, or the
 # overloaded/unavailable/at-capacity wording -- an earlier reconnect, which
-# carries the disconnect in parentheses, is a retry codex may still recover
-# from
+# carries the disconnect in parentheses, is a retry codex may still recover from
 _UNAVAILABLE = re.compile(
     r'(?<!\()stream disconnected before completion'
     r'|reconnecting(?:\.{3}|\u2026)\s*(\d+)/\1\b'
