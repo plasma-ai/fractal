@@ -2493,8 +2493,14 @@ def test_soft_cap_warning_fires_once_for_unbraked_caps(
         (('6h', '4h'), False, False),
         (('6h', None), False, True),
         (('6h', '4h'), True, True),
+        (('soon', '4h'), False, True),
     ],
-    ids=['every-step-bounded', 'one-step-unbounded', 'sync-unbounded'],
+    ids=[
+        'every-step-bounded',
+        'one-step-unbounded',
+        'sync-unbounded',
+        'malformed-step',
+    ],
 )
 def test_soft_cap_warning_counts_step_timeouts(
     loop_node: Node,
@@ -2509,7 +2515,8 @@ def test_soft_cap_warning_counts_step_timeouts(
     With no run/iter timeout and no node ``step_timeout``, each step file's
     ``timeout:`` line still bounds its own launch, so steps that all carry
     one leave no runaway exposure; a step without one, or the SYNC step
-    (which runs on the node value), still does.
+    (which runs on the node value), still does, as does a step whose line
+    does not parse (its launch falls back to the node value).
     """
     node = loop_node
     monkeypatch.setattr(MockLoop, '_preflight', lambda self: None)

@@ -30,6 +30,8 @@ back-dating ``started_at`` (deterministic, no sleeps).
 
 from __future__ import annotations
 
+import pathlib
+from collections.abc import Callable
 from typing import Optional
 
 import pytest
@@ -50,6 +52,7 @@ __all__ = [
     'test_run_scope_anchors_on_run_iter_scope_on_iter',
     'test_default_reports_soonest_of_run_and_iter',
     'test_step_limit_follows_the_active_steps_timeout',
+    'test_step_limit_survives_an_unusable_step_file',
     'test_step_limit_prefers_the_seats_exported_ceiling',
     'test_step_limit_tells_same_named_step_files_apart',
     'test_step_limit_tells_a_sync_pass_from_a_user_sync_step',
@@ -291,30 +294,63 @@ def test_step_limit_follows_the_active_steps_timeout(
 
 
 @pytest.mark.parametrize(
-    argnames=('seat', 'limit'),
-    argvalues=[(True, 14400.0), (False, 21600.0)],
-    ids=['own-seat', 'other-caller'],
+    argnames='damage',
+    argvalues=[
+        lambda path: path.unlink(),
+        lambda path: path.chmod(0),
+        lambda path: path.write_bytes(b'---\ntimeout: 6h\n---\n\xff'),
+    ],
+    ids=['vanished', 'unreadable', 'undecodable'],
+)
+def test_step_limit_survives_an_unusable_step_file(
+    node_with_db: Node,
+    damage: Callable[[pathlib.Path], object],
+) -> None:
+    """An active step file the reader cannot use reads as ``step_timeout``.
+
+    Step files are live-edited, so the active step's file can be gone,
+    unreadable, or undecodable when a reader resolves it; each falls back
+    to the node value rather than raising out of every reader.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    _active_step(node, '---\ntimeout: 6h\n---\n')
+    damage(node.node_dir / 'steps' / '01-EXECUTE.md')
+    assert node.time.limit('step') == NODE_STEP_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    argnames=('seat', 'exported', 'limit'),
+    argvalues=[
+        (True, '14400', 14400.0),
+        (True, '-1', None),
+        (True, 'soon', 21600.0),
+        (False, '14400', 21600.0),
+    ],
+    ids=['own-seat', 'own-seat-unbounded', 'own-seat-malformed', 'other-caller'],
 )
 def test_step_limit_prefers_the_seats_exported_ceiling(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
     seat: bool,
-    limit: float,
+    exported: str,
+    limit: Optional[float],
 ) -> None:
     """The node's own seat reads the ceiling its launch exported.
 
     The loop reads step files once per iteration, so an edit landing
     mid-iteration changes the file but not the enforced ceiling; the
-    seat's ``STEP_TIMEOUT_SECONDS`` is that ceiling. Any caller whose
-    ``STEP_ID`` is not the active step's (another node's seat, an
-    operator) reads the step file.
+    seat's ``STEP_TIMEOUT_SECONDS`` is that ceiling, ``-1`` for a launch
+    with none. The seat can edit its own env, so an export that does not
+    parse reads the step file, as any caller whose ``STEP_ID`` is not the
+    active step's (another node's seat, an operator) does.
     """
     node = node_with_db
     node.config.set('step_timeout', NODE_STEP_TIMEOUT)
     step_id = _active_step(node, '---\ntimeout: 6h\n---\n')
-    # the launch exported 4h; the file was edited to 6h since
+    # the launch exported its ceiling; the file was edited to 6h since
     monkeypatch.setenv('STEP_ID', f'{step_id if seat else step_id + 1}')
-    monkeypatch.setenv('STEP_TIMEOUT_SECONDS', '14400')
+    monkeypatch.setenv('STEP_TIMEOUT_SECONDS', exported)
     assert node.time.limit('step') == limit
 
 
