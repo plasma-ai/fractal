@@ -35,6 +35,8 @@ __all__ = [
     'test_active_card_streams_live_state',
     'test_settled_card_is_a_time_machine',
     'test_six_cap_matrix',
+    'test_step_cap_is_the_displayed_steps_own_timeout',
+    'test_step_clock_carries_the_steer_charge',
     'test_step_denominator_scopes_to_each_run',
     'test_measures_tolerate_a_numeric_config_duration',
     'test_measures_tolerate_a_string_cost_cap',
@@ -351,6 +353,102 @@ def test_six_cap_matrix(builder: SnapshotBuilder) -> None:
         1.0,
         5.0,
     )
+
+
+@pytest.mark.parametrize(
+    argnames=('frontmatter', 'cap'),
+    argvalues=[('', 600.0), ('---\ntimeout: 30m\n---\n', 1800.0)],
+    ids=['node-step-timeout', 'own-timeout'],
+)
+def test_step_cap_is_the_displayed_steps_own_timeout(
+    pair_tree: pathlib.Path,
+    frontmatter: str,
+    cap: float,
+) -> None:
+    """The step time cap is the displayed step's effective ceiling.
+
+    A step file's ``timeout:`` line substitutes for the node's
+    ``step_timeout`` at launch, so the card's step cap shows it; a step
+    without one keeps the node value.
+    """
+    alpha = Node(pair_tree / '.worktrees' / 'main.alpha')
+    alpha.config.set('step_timeout', '10m')
+    steps_dir = alpha.node_dir / 'steps'
+    for existing in steps_dir.glob('*.md'):
+        existing.unlink()
+    (steps_dir / '01-EXECUTE.md').write_text(
+        f'{frontmatter}# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
+    with deterministic_core() as clock:
+        clock.at(600.0)
+        run_id = alpha.record.run_start()
+        iter_id = alpha.record.iter_start(run_id=run_id, iter=1)
+        alpha.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=1,
+            step_name='EXECUTE',
+        )
+    alpha.status_set('active')
+    data = TuiData(resolve_node(pair_tree))
+    builder = SnapshotBuilder(data, NodePoller(data.db_dir), now=lambda: NOW_EPOCH)
+    assert builder.build('main.alpha').measures['cap_step_s'] == cap
+
+
+@pytest.mark.parametrize(
+    argnames=('status', 'metadata', 'charged'),
+    argvalues=[
+        ('stopped', 'steered: no progress for 1800s', 600.0),
+        ('failed', 'agent error (exit 1)', 0.0),
+    ],
+    ids=['steer', 'retry'],
+)
+def test_step_clock_carries_the_steer_charge(
+    pair_tree: pathlib.Path,
+    status: str,
+    metadata: str,
+    charged: float,
+) -> None:
+    """A steered step's clock runs from its stuck launch, against the same cap.
+
+    The loop charges the stuck launch's span against the steered launch's
+    ceiling, so the card's step clock (baked and re-ticked) carries it too;
+    a retry arms a fresh deadline and counts from its own row.
+    """
+    alpha = Node(pair_tree / '.worktrees' / 'main.alpha')
+    with deterministic_core() as clock:
+        clock.at(1000.0)
+        run_id = alpha.record.run_start()
+        iter_id = alpha.record.iter_start(run_id=run_id, iter=1)
+        first_id = alpha.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=1,
+            step_name='EXECUTE',
+        )
+        # the first launch ran 600s, then closed
+        clock.at(400.0)
+        alpha.record.step_end(
+            step_id=first_id,
+            status=status,
+            exit_code=0,
+            metadata=metadata,
+        )
+        clock.at(100.0)
+        alpha.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=1,
+            step_name='EXECUTE',
+        )
+    alpha.status_set('active')
+    data = TuiData(resolve_node(pair_tree))
+    builder = SnapshotBuilder(data, NodePoller(data.db_dir), now=lambda: NOW_EPOCH)
+    measures = builder.build('main.alpha').measures
+    # the open row started 700s before the pinned clock
+    assert measures['elapsed_step'] == pytest.approx(700.0 + charged)
+    assert NOW_EPOCH - measures['started_step'] == pytest.approx(700.0 + charged)
 
 
 def test_step_denominator_scopes_to_each_run(pair_tree: pathlib.Path) -> None:
