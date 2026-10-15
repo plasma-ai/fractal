@@ -785,12 +785,15 @@ def _baseline_check(node: Node, bounds: Scope) -> None:
     """
     seed = f'{bounds.fractal_prefix}/{node.branch}/'
     attributes_ok = _attributes_is_init_edit(node)
-    offending = sorted(
-        path
-        for path in _changed_paths(node)
-        if not path.startswith(seed)
-        and not (path == '.gitattributes' and attributes_ok)
-    )
+    offending = []
+    for path in sorted(_changed_paths(node)):
+        # the node's own seed is what the baseline carries
+        if path.startswith(seed):
+            continue
+        # init's own worktree-root .gitattributes edit rides along
+        if path == '.gitattributes' and attributes_ok:
+            continue
+        offending.append(path)
     if offending:
         listing = '\n'.join(offending)
         raise RuntimeError(
