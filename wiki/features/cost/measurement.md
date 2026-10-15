@@ -130,9 +130,11 @@ step prices its own rows alone.
 A Claude launch that ends without its result frame -- killed by a deadline, a
 stall or thinking cap, a pause, or a dead stream -- carries only the stream's
 running estimate, which prices each reply from its first frame (or nothing, when
-the kill cut a reply off before its frame). Once the process exits, the loop
-calls `Agent.settle_cost` with the launch's window (its spawn instant to its
-exit), and the claude backend prices that window from Claude Code's own session
+the kill cut a reply off before its frame). Once the process exits and the loop
+has dropped the launch's `.step_pgid` handle (a pause or kill landing during the
+transcript read must never signal the dead group's recycled id), it calls
+`Agent.settle_cost` with the launch's window (its spawn instant to its exit),
+and the claude backend prices that window from Claude Code's own session
 transcript, resolved through `Agent.transcript`: every `assistant` entry stamped
 inside the window, sidechain (sub-agent) entries written into the same file
 included, deduplicated by message id keeping the **last** line -- Claude splits

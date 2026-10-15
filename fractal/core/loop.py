@@ -3097,6 +3097,10 @@ class Loop:
             if thread is not None:
                 thread.join(_REAP_WAIT_SECONDS)
 
+        # the invocation is over -- drop the group handle so a later
+        # pause/kill can never signal a recycled pgid
+        (node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
+
         # a launch that ended without its authoritative cost (killed, or its
         # stream dead before the closing figure) is priced from the
         # provider's own usage record, read once the process has exited and
@@ -3113,10 +3117,6 @@ class Loop:
                     f'Warning: pricing the ended launch failed ({error})',
                     file=sys.stderr,
                 )
-
-        # the invocation is over -- drop the group handle so a later
-        # pause/kill can never signal a recycled pgid
-        (node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
 
         session_out = result.session if result is not None else None
         cost_out = result.cost if result is not None else None

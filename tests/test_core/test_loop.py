@@ -69,6 +69,7 @@ __all__ = [
     'test_launch_prices_the_step_from_the_finish_frame',
     'test_killed_claude_launch_prices_from_its_transcript',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
+    'test_killed_launch_settles_after_dropping_its_group_handle',
     'test_agent_launch_failure_books_a_failed_step',
     'test_setup_tolerates_non_utf8_output',
     'test_unsupported_provider_frontmatter_refuses_the_step',
@@ -1886,6 +1887,37 @@ def test_killed_claude_launch_without_a_transcript_stays_unpriced(
         if record.getMessage().startswith('launch unpriced')
     ]
     assert unpriced == [f'launch unpriced: no transcript for session {session}']
+
+
+def test_killed_launch_settles_after_dropping_its_group_handle(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A killed launch is priced only once ``.step_pgid`` is gone.
+
+    Pricing reads the whole transcript, and a pause or kill landing
+    meanwhile signals whatever group the handle names -- by then a dead
+    group, whose id the OS may already have recycled.
+    """
+    agent = scripted_claude(
+        [
+            _claude_script(_INIT, 'exec sleep 30'),
+            _claude_script(_INIT, _RESULT),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+    handles: list[bool] = []
+    settle = agent._settle_cost
+
+    def _settle_cost(session: str, **kwargs: Any) -> Optional[float]:
+        handles.append((loop_node.node_dir / STEP_PGID_FILE).exists())
+        return settle(session, **kwargs)
+
+    monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
+    ScriptedLoop(loop_node, agent).run()
+    # one settle, for the launch the watchdog ended
+    assert handles == [False]
 
 
 def test_agent_launch_failure_books_a_failed_step(
