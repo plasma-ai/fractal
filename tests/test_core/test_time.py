@@ -30,6 +30,8 @@ back-dating ``started_at`` (deterministic, no sleeps).
 
 from __future__ import annotations
 
+from typing import Optional
+
 import pytest
 
 from fractal.core.node import Node
@@ -48,6 +50,8 @@ __all__ = [
     'test_default_reports_soonest_of_run_and_iter',
     'test_step_limit_follows_the_active_steps_timeout',
     'test_step_limit_prefers_the_seats_exported_ceiling',
+    'test_step_limit_tells_same_named_step_files_apart',
+    'test_idle_step_limit_counts_step_file_timeouts',
     'test_steered_step_counts_down_from_its_stuck_launch',
     'test_time_remaining_credits_paused_spans',
 ]
@@ -281,6 +285,82 @@ def test_step_limit_prefers_the_seats_exported_ceiling(
     # the launch exported 4h; the file was edited to 6h since
     monkeypatch.setenv('STEP_ID', f'{step_id if seat else step_id + 1}')
     monkeypatch.setenv('STEP_TIMEOUT_SECONDS', '14400')
+    assert node.time.limit('step') == limit
+
+
+@pytest.mark.parametrize(
+    argnames='files',
+    argvalues=[
+        ('00-x.md', '01-plan.md', '03-plan.md'),
+        ('00-x.md', '01-plan.md', '02-exec.md', '03-plan.md'),
+    ],
+    ids=['renamed', 'inserted'],
+)
+def test_step_limit_tells_same_named_step_files_apart(
+    node_with_db: Node,
+    files: tuple[str, ...],
+) -> None:
+    """A shifted step file still resolves to the one the active row ran.
+
+    The iteration began on ``01-plan``, a middle step, and ``03-plan`` (1h
+    and 3h); ``00-x`` was added since, shifting every position. Step 3 is
+    the second ``plan``, so it reads 3h, never the first file of the name.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    steps_dir = node.node_dir / 'steps'
+    steps_dir.mkdir()
+    timeouts = {'01-plan.md': '1h', '03-plan.md': '3h'}
+    for name in files:
+        frontmatter = ''
+        if name in timeouts:
+            frontmatter = f'---\ntimeout: {timeouts[name]}\n---\n'
+        (steps_dir / name).write_text(f'{frontmatter}# step\n', encoding='utf-8')
+    run_id = node.record.run_start()
+    iter_id = node.record.iter_start(run_id=run_id, iter=1)
+    for number, name in ((1, 'plan'), (2, 'exec'), (3, 'plan')):
+        step_id = node.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=number,
+            step_name=name,
+        )
+        if number < 3:
+            node.record.step_end(step_id=step_id, status='completed', exit_code=0)
+    assert node.time.limit('step') == 10800.0
+
+
+@pytest.mark.parametrize(
+    argnames=('node_timeout', 'frontmatter', 'limit'),
+    argvalues=[
+        (None, '---\ntimeout: 6h\n---\n', 21600.0),
+        (NODE_STEP_TIMEOUT, '---\ntimeout: 6h\n---\n', NODE_STEP_TIMEOUT_SECONDS),
+        (None, '', None),
+    ],
+    ids=['step-files-only', 'node-step-timeout', 'none'],
+)
+def test_idle_step_limit_counts_step_file_timeouts(
+    node_with_db: Node,
+    node_timeout: Optional[str],
+    frontmatter: str,
+    limit: Optional[float],
+) -> None:
+    """An idle node's step limit exists when only its step files carry one.
+
+    With no current step, the node's ``step_timeout`` answers, else the
+    tightest step file's own ``timeout:`` -- so ``time remaining`` reads
+    "not running" rather than "no limit", as the run and iteration scopes
+    do when a limit is set but nothing runs.
+    """
+    node = node_with_db
+    if node_timeout is not None:
+        node.config.set('step_timeout', node_timeout)
+    steps_dir = node.node_dir / 'steps'
+    steps_dir.mkdir()
+    (steps_dir / '01-EXECUTE.md').write_text(
+        f'{frontmatter}# EXECUTE\n', encoding='utf-8'
+    )
+    (steps_dir / '02-COMMIT.md').write_text('# COMMIT\n', encoding='utf-8')
     assert node.time.limit('step') == limit
 
 

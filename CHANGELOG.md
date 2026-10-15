@@ -251,7 +251,9 @@ may include breaking changes, each listed under a Breaking heading.
   run's reason keeps naming the node's walls.
 - `fractal node time remaining` counts a steered step down from its stuck
   launch, as the loop's deadline does, instead of overstating the time left by
-  the stuck launch's span.
+  the stuck launch's span; the cockpit's step clock carries the same charge. An
+  idle node whose step files carry their own `timeout:` reads `not running` for
+  the step scope, not `no limit`.
 
 ## [1.3.0] - 2026-09-17
 

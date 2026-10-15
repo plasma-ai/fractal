@@ -55,16 +55,22 @@ have no timeout configured, and `not running` when a limit exists but no run,
 iteration, or step is currently active to anchor it. The countdown clamps at
 zero — an overrun deadline reads `0s`, never negative.
 
-The step limit resolves from the active step row: its step number and name
-locate the step file in the node's `steps/` (the SYNC pseudo-step reads the
-package's mode doc), whose `timeout:` line substitutes for `step_timeout` by the
-same rule the loop applies at launch. The node's own seat skips that lookup:
-when its exported `STEP_ID` names the active step, its exported
-`STEP_TIMEOUT_SECONDS` is the exact ceiling the launch enforces. The lookup can
-run ahead of the loop, which reads step files once per iteration: an edit made
-mid-iteration shows to every other reader before the loop enforces it at the
-next iteration. The cockpit's step time ceiling resolves the displayed step's
-file the same way.
+The step limit resolves from the active step row: its name locates the step file
+in the node's `steps/` (the SYNC pseudo-step reads the package's mode doc),
+whose `timeout:` line substitutes for `step_timeout` by the same rule the loop
+applies at launch. The row's step number is the file's position when the
+iteration began, which a file added since shifts, so a name that several files
+share is told apart by occurrence: the earlier step numbers of the iteration
+carrying the same name count the same-named files ahead of it. An idle node has
+no current step, so its step limit is `step_timeout`, else the tightest step
+file's own `timeout:`, and a node with either reads `not running`, as the run
+and iteration scopes do. The node's own seat skips that lookup: when its
+exported `STEP_ID` names the active step, its exported `STEP_TIMEOUT_SECONDS` is
+the exact ceiling the launch enforces. The lookup can run ahead of the loop,
+which reads step files once per iteration: an edit made mid-iteration shows to
+every other reader before the loop enforces it at the next iteration. The
+cockpit's step time ceiling resolves the displayed step's file the same way, and
+its step clock carries the same steer charge as the countdown below.
 
 The step countdown starts where the loop's step deadline does. A steered
 relaunch opens a row of its own, but the loop charges the stuck launch's span

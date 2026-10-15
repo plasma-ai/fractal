@@ -118,15 +118,31 @@ def test_remaining_reports_not_running_without_active_run(time_node: dict) -> No
     assert _remaining(time_node['repo']) == 'not running'
 
 
-def test_remaining_reports_not_running_with_only_step_timeout(time_node: dict) -> None:
-    """A lone ``--step-timeout`` is still a limit -> ``"not running"``, not ``"no limit"``.
+@pytest.mark.parametrize(
+    argnames='source',
+    argvalues=['node', 'step-file'],
+)
+def test_remaining_reports_not_running_with_only_step_timeout(
+    time_node: dict,
+    source: str,
+) -> None:
+    """A lone step timeout is still a limit -> ``"not running"``, not ``"no limit"``.
 
-    A configured step timeout still time-bounds the node -- there is just
-    nothing active to count down against.
+    A configured ``--step-timeout``, or a step file's own ``timeout:`` line,
+    still time-bounds the node -- there is just nothing active to count
+    down against.
     """
     node = time_node['node']
-    node.config.set('step_timeout', TIMEOUT)
-    assert _remaining(time_node['repo']) == 'not running'
+    if source == 'node':
+        node.config.set('step_timeout', TIMEOUT)
+    else:
+        steps_dir = node.node_dir / 'steps'
+        steps_dir.mkdir()
+        (steps_dir / '01-EXECUTE.md').write_text(
+            f'---\ntimeout: {STEP_TIMEOUT}\n---\n# EXECUTE\n',
+            encoding='utf-8',
+        )
+    assert _remaining(time_node['repo'], scope='step') == 'not running'
 
 
 def test_remaining_counts_down_for_the_run(time_node: dict) -> None:

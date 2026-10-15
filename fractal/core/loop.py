@@ -54,6 +54,9 @@ _FRONTMATTER_LINE = re.compile(r'^([a-z_]+):\s*(.+)$')
 # NN- step filename: a digit prefix, a dash, and a name
 _STEP_PREFIX = re.compile(r'^([0-9]+)-.*\.md$')
 
+# a step ceiling's unset convention passes through Step.limit untouched
+_Default = typing.TypeVar('_Default')
+
 # grace between the deadline's TERM and the follow-up KILL on the step tree
 _KILL_GRACE_SECONDS = 10.0
 
@@ -162,19 +165,21 @@ class Step:
         cls: type[Step],
         steps_dir: pathlib.Path,
         *,
-        number: int,
         name: str,
+        occurrence: int = 0,
     ) -> Optional[Step]:
         """Load the step file a step row names.
 
-        The loop numbers steps by sorted position, so the file at the row's
-        position wins while its name still matches, else the first file of
-        that name (one inserted or removed since the row opened).
+        A row's step number is the file's sorted position when its
+        iteration began, which a file added or removed since shifts; the
+        name and its occurrence among same-named files (see
+        ``fractal.core.time._step_occurrence``) survive such an edit.
 
         Args:
             steps_dir: The node's ``steps/`` directory.
-            number: The row's 1-based step number.
             name: The row's step name.
+            occurrence: Which file carrying the name, 0-based in sorted
+                order; past the last, the last.
 
         Returns:
             The parsed step, or ``None`` when no file carries the name.
@@ -182,11 +187,9 @@ class Step:
         """
         paths = sorted(steps_dir.glob('*.md'))
         named = [path for path in paths if cls(path).name == name]
-        if 0 < number <= len(paths) and paths[number - 1] in named:
-            return cls.load(paths[number - 1], number=number)
-        if named:
-            return cls.load(named[0], number=number)
-        return None
+        if not named:
+            return None
+        return cls.load(named[min(occurrence, len(named) - 1)])
 
     @property
     def name(self: Step) -> str:
@@ -230,7 +233,7 @@ class Step:
         """Return the raw ``detached:`` frontmatter value, if any."""
         return self.frontmatter.get('detached')
 
-    def limit(self: Step, default: Optional[float]) -> Optional[float]:
+    def limit(self: Step, default: _Default) -> int | _Default:
         """Return the step's effective ceiling in seconds.
 
         The one rule every reader of a step's ceiling shares: the
@@ -243,7 +246,9 @@ class Step:
                 unset convention (``-1`` or ``None``).
 
         Returns:
-            The override's seconds, or ``default`` when there is none.
+            The override's whole seconds (``-1`` for a blank ``timeout:``,
+            which bounds nothing), or ``default`` unchanged when there is
+            none.
 
         Raises:
             ValueError: If the override is malformed -- step files are
@@ -2504,11 +2509,11 @@ class Loop:
         # surfaces, so a malformed scalar warns and falls back to the global
         # instead of crashing the loop; resolved ahead of the prompt build,
         # whose $TIME_BUDGET names this ceiling
-        step_timeout = self._step_timeout
+        step_timeout_label = self._step_timeout
         try:
             self._step_timeout_effective = step.limit(self._step_timeout_seconds)
             if step.timeout is not None:
-                step_timeout = step.timeout
+                step_timeout_label = step.timeout
         except ValueError as error:
             self._step_timeout_effective = self._step_timeout_seconds
             print(
@@ -2516,7 +2521,7 @@ class Loop:
                 f' falling back to the node step_timeout',
                 file=sys.stderr,
             )
-        self._step_time_budget = self._time_budget_label(step_timeout)
+        self._step_time_budget = self._time_budget_label(step_timeout_label)
 
         # a failed build (builder error, missing charter/step file) must fail
         # the step -- launching the agent on an empty prompt would burn

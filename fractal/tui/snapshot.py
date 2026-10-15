@@ -25,6 +25,7 @@ from rich.text import Text
 import fractal.core.cost
 import fractal.util
 from fractal.core.loop import Step
+from fractal.core.time import _steer_charge, _step_occurrence
 
 from . import fmt, theme
 from .data import TuiData, display_name_of, leaf_of, parse_ts, span, user_tag
@@ -583,6 +584,16 @@ class SnapshotBuilder:
             iter_max = None
         if iter_max is not None and iter_max < 0:
             iter_max = None
+        # a steered step's clock runs from its stuck launch, as the loop's
+        # deadline does, so it reads against the same cap
+        elapsed_step = self._elapsed(step) if step else None
+        started_step = _open_epoch(step)
+        if step is not None:
+            charge = _steer_charge(step, it_steps)
+            if elapsed_step is not None:
+                elapsed_step += charge
+            if started_step is not None:
+                started_step -= charge
         return {
             'run': len(runs),
             'iter': it['iter'] if it else None,
@@ -590,13 +601,13 @@ class SnapshotBuilder:
             'step': step['step'] if step else None,
             'step_total': _step_total(steps, run, _sync_ids(steps, config)),
             'step_name': step['step_name'] if step else None,
-            'elapsed_step': self._elapsed(step) if step else None,
+            'elapsed_step': elapsed_step,
             'elapsed_iter': self._elapsed(it) if it else None,
             'elapsed_run': self._elapsed(run),
             # open rows also carry their start instant: a quiet tree reuses
             # this snapshot tick after tick, so the pane re-ticks their
             # elapsed against the render clock instead of the baked value
-            'started_step': _open_epoch(step),
+            'started_step': started_step,
             'started_iter': _open_epoch(it),
             'started_run': _open_epoch(run),
             'cost_step': step['cost'] if step else None,
@@ -611,6 +622,7 @@ class SnapshotBuilder:
                     str(config.get('step_timeout') or '')
                 ),
                 step=step,
+                it_steps=it_steps,
                 node_dir=node_dir,
             ),
             'cap_step_cost': _cost_or_none(config.get('max_step_cost')),
@@ -1051,6 +1063,7 @@ def _step_cap(
     *,
     default: Optional[float],
     step: Optional[dict],
+    it_steps: list[dict],
     node_dir: Optional[pathlib.Path],
 ) -> Optional[float]:
     """Return the displayed step's effective time cap.
@@ -1064,7 +1077,9 @@ def _step_cap(
         return default
     try:
         found = Step.find(
-            node_dir / 'steps', number=step['step'], name=step['step_name']
+            node_dir / 'steps',
+            name=step['step_name'],
+            occurrence=_step_occurrence(step, it_steps),
         )
         seconds = default if found is None else found.limit(default)
     except (OSError, ValueError):
