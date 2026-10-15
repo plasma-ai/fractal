@@ -110,12 +110,15 @@ The loop brackets every step with lifecycle and budget checks:
 
 Only a failed launch retries; timed out, paused, and skipped are deliberate
 outcomes that never retry. The extra-attempt count and the backoff before each
-retry are node configuration, and a count of zero disables retries. Every
-attempt books its own step row, so cost and duration attribute honestly to the
-attempt that spent them. A step with `requires_approval` arms an approval gate
-on each attempt's row; a failure retry follows a failed attempt whose wait never
-ran, and a model-drop re-dispatch (below) produces new work, so its fresh demand
-is deliberate — an approval never transfers between attempts.
+retry are node configuration, and a count of zero disables retries. No wait the
+loop holds a launch through (a retry backoff, the billing breaker's, an
+outage's) runs past the run or iteration deadline: it ends there, and the launch
+it was holding books the timeout. Every attempt books its own step row, so cost
+and duration attribute honestly to the attempt that spent them. A step with
+`requires_approval` arms an approval gate on each attempt's row; a failure retry
+follows a failed attempt whose wait never ran, and a model-drop re-dispatch
+(below) produces new work, so its fresh demand is deliberate — an approval never
+transfers between attempts.
 
 A failure the agent backend names as its provider being unavailable waits out
 the outage instead of the fixed backoff: an overloaded, erroring, or

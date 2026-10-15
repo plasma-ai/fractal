@@ -135,6 +135,7 @@ __all__ = [
     'test_provider_unavailable_retries_back_off_exponentially_to_the_cap',
     'test_a_success_resets_the_provider_unavailable_backoff',
     'test_non_provider_failures_keep_the_fixed_backoff',
+    'test_retry_waits_end_at_the_run_deadline',
     'test_launch_reads_the_provider_outage_off_the_result_frame',
     'test_rejected_retunes_warn_once_not_every_iteration',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
@@ -4841,6 +4842,33 @@ def test_non_provider_failures_keep_the_fixed_backoff(
         '1s',
         '1s',
     ]
+
+
+def test_retry_waits_end_at_the_run_deadline(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry's wait stops at the run deadline instead of sleeping past it.
+
+    An outage doubles the wait up to an hour, so an unbounded wait could
+    overrun ``--timeout`` by the whole cap: the wait ends at the deadline
+    and the next attempt books the timeout there.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, timeout='5s', step_retries=3, step_retry_backoff='4s')
+    # the waits run a fake clock forward
+    slept: list[float] = []
+    started = time.time()
+    monkeypatch.setattr('fractal.core.loop.time.time', lambda: started + sum(slept))
+    monkeypatch.setattr('fractal.core.loop.time.sleep', slept.append)
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    loop = PaidLoop(loop_node, results=[outage] * 3)
+    assert loop.run() == 0
+    assert sum(slept) <= 5
+    run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
+    assert run['status'] == 'exited'
+    assert run['metadata'].startswith(f'Timed out at iteration {loop._run_id}.1')
 
 
 @pytest.mark.parametrize(

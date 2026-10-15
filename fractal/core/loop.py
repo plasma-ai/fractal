@@ -3654,7 +3654,9 @@ class Loop:
         once the cap is spent, and the billing breaker's waits reach an
         hour: a cascaded budget finish (the very signal an outage
         produces) must never sleep one out, especially since a pending
-        finish silences the ceiling poll.
+        finish silences the ceiling poll. Nor does a wait run past the
+        run or iteration deadline: it ends there, and the launch it was
+        holding books the timeout.
 
         Args:
             seconds: Wait to sleep out; ``None`` takes the step-retry
@@ -3667,6 +3669,10 @@ class Loop:
         """
         if seconds is None:
             seconds = self._step_retry_backoff_seconds
+        # never sleep past the soonest deadline (keeps the walls true)
+        deadline = self._soonest_deadline()
+        if deadline > 0:
+            seconds = min(seconds, max(0, deadline - int(time.time())))
         waited = 0
         while waited < seconds:
             time.sleep(1)

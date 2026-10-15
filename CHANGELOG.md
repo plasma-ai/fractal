@@ -155,6 +155,10 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- A wait the loop holds a launch through — a retry backoff, a provider outage's
+  doubling wait, the billing breaker's — ends at the run or iteration deadline
+  instead of sleeping past it by up to its one-hour cap; the launch it was
+  holding books the timeout.
 - A Claude step killed before its result frame (a deadline, a stall or thinking
   cap, a pause, a dead stream) is priced from Claude Code's own session
   transcript instead of keeping only the stream's partial figure, which was

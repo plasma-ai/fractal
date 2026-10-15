@@ -326,6 +326,9 @@ model re-dispatches once — see below). These config keys control it:
      - Delay before each retry. Slept in one-second increments, polling
        pause (parks the run), stop, finish, and the subtree cost ceiling —
        a failed step never buys another attempt once the budget is spent.
+       A wait (this one, the billing breaker's, or an outage's) ends at
+       the run or iteration deadline, and the launch it was holding books
+       the timeout.
 
 Every attempt books its own step row, so cost and duration are attributed
 accurately per attempt; retry rows carry a ``retry`` marker in their
