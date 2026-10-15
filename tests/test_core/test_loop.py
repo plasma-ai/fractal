@@ -82,6 +82,9 @@ __all__ = [
     'test_killed_claude_launch_prices_from_its_transcript',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_killed_launch_settles_after_dropping_its_group_handle',
+    'test_a_settle_never_lowers_the_streamed_figure',
+    'test_a_failed_settle_leaves_the_killed_launch_as_booked',
+    'test_every_kill_prices_the_launch_from_its_transcript',
     'test_agent_launch_failure_books_a_failed_step',
     'test_setup_tolerates_non_utf8_output',
     'test_unsupported_provider_frontmatter_refuses_the_step',
@@ -353,6 +356,13 @@ _THINKING_REPLY = {
     'parent_tool_use_id': None,
     'session_id': 'SID',
 }
+# the API's own stop of a reply cut at the output cap
+_MAX_TOKENS = {
+    'type': 'stream_event',
+    'event': {'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens'}},
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
 # claude's output-cap continuation, verbatim from a real transcript
 _CONTINUATION_TEXT = (
     'Output token limit hit. Resume directly \u2014 no apology, no recap of what'
@@ -392,6 +402,13 @@ _CLAUDE_PRICING = {
         'input_cost_per_token': 1e-6,
         'output_cost_per_token': 5e-6,
     },
+}
+# the rate each claude usage bucket prices at
+_RATE_KEYS = {
+    'input_tokens': 'input_cost_per_token',
+    'output_tokens': 'output_cost_per_token',
+    'cache_read_input_tokens': 'cache_read_input_token_cost',
+    'cache_creation_input_tokens': 'cache_creation_input_token_cost',
 }
 
 
@@ -2305,6 +2322,123 @@ def test_killed_launch_settles_after_dropping_its_group_handle(
     ScriptedLoop(loop_node, agent).run()
     # one settle, for the launch the watchdog ended
     assert handles == [False]
+
+
+def test_a_settle_never_lowers_the_streamed_figure(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed estimate above the transcript's sum stands, with no flush over it.
+
+    Both figures undercount a killed launch, so the higher is the closer:
+    the settle leaves a stream figure above its transcript sum on the row
+    and books nothing after it.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    streamed = {'input_tokens': 1_000, 'output_tokens': 2_000}
+    written = {'input_tokens': 100, 'output_tokens': 200}
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', streamed),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', written)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(streamed))
+    # the stream's own flush is the killed launch's last figure
+    assert agent.flushed == [
+        (pytest.approx(_price(streamed)), False),
+        (_RESULT['total_cost_usd'], True),
+        (_RESULT['total_cost_usd'], True),
+    ]
+
+
+def test_a_failed_settle_leaves_the_killed_launch_as_booked(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A settle that raises never changes how the killed launch is booked.
+
+    Pricing reads a file the provider writes, so it can fail in ways the
+    hook does not foresee: the launch keeps its outcome and row, the run
+    goes on, and the pane says what went unpriced.
+    """
+    agent = scripted_claude(
+        [
+            _claude_script(_INIT, 'exec sleep 30'),
+            _claude_script(_INIT, _RESULT),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+
+    def _settle_cost(session: str, **kwargs: Any) -> Optional[float]:
+        raise OSError('transcript gone')
+
+    monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    err = capsys.readouterr().err
+    assert 'Warning: pricing the ended launch failed (transcript gone)' in err
+
+
+@pytest.mark.parametrize(
+    argnames=('kill', 'outcome'),
+    argvalues=[
+        # the cap ends the launch from inside the stream reader: no result
+        pytest.param('thinking cap', 'PLAN/stopped/steered: thinking cap', id='cap'),
+        # a deadline and a pause end a drained stream short of its result
+        pytest.param('deadline', 'PLAN/exited/timed out', id='deadline'),
+        pytest.param('pause', 'PLAN/paused/', id='pause'),
+    ],
+)
+def test_every_kill_prices_the_launch_from_its_transcript(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    kill: str,
+    outcome: str,
+) -> None:
+    """A launch ended by a cap, a deadline, or a pause books its transcript's sum.
+
+    The thinking cap ends the launch from inside the stream reader, so the
+    stream yields no result at all; a deadline or a pause ends a drained
+    stream that never saw its result frame. Each launch settles alike.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    usage = {'input_tokens': 100, 'output_tokens': 900}
+    if kill == 'thinking cap':
+        script = _claude_script(_INIT, _THINKING_REPLY, _MAX_TOKENS, 'exec sleep 30')
+    elif kill == 'deadline':
+        _configure(loop_node, step_timeout='1s')
+        # the open call holds the idle clock, so only the deadline ends it
+        script = _claude_script(_INIT, _TOOL_START, 'exec sleep 30')
+    else:
+        marker = loop_node.node_dir / PAUSE_ABORT_FILE
+        script = _claude_script(_INIT, f'touch {marker}', 'kill -TERM $$')
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', usage)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(usage))
 
 
 def test_agent_launch_failure_books_a_failed_step(
@@ -6581,6 +6715,12 @@ def _assistant_entry(
             'usage': usage,
         },
     }
+
+
+def _price(usage: dict[str, int], model: str = 'claude-fable-5') -> float:
+    """Return a claude reply's cost at the test rates (``_CLAUDE_PRICING``)."""
+    rates = _CLAUDE_PRICING[model]
+    return sum(count * rates[_RATE_KEYS[bucket]] for bucket, count in usage.items())
 
 
 def _step_rows(node: Node) -> list[str]:
