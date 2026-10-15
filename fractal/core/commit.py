@@ -67,6 +67,9 @@ _LARGE_FILE_WARN_BYTES = 10 * 1024 * 1024
 # line cap for the staged diffstat a force commit folds into its body
 _DIFFSTAT_CAP_LINES = 20
 
+# listing cap for the paths the ignore-skip warning names
+_SKIP_LIST_CAP = 10
+
 
 def commit(
     node: Node,
@@ -225,9 +228,10 @@ def commit(
     # loud rather than inferred from the diff; the hook retry re-stages through
     # this same closure, so the latest pass's notices are the ones reported
     record_notices: list[str] = []
+    denied: list[str] = []
 
     def _stage_changes() -> None:
-        record_notices[:] = _stage(
+        record_notices[:], denied[:] = _stage(
             node,
             scoped=scoped,
             commit_scopes=commit_scopes,
@@ -238,13 +242,14 @@ def commit(
 
     _stage_changes()
     output.extend(record_notices)
-    # count workspace files the staging expansion dropped solely because ignore
-    # rules match them -- a tracked host ignore pattern can silently eat node
-    # artifacts; fractal's own runtime ignores stay silent (the info/exclude
-    # block and the stage's pathspec excludes are intentional), and so do
-    # self-ignoring dirs (a dir whose ignore rule lives inside it, like a wiki
-    # .cache/, manages itself -- its collapsed dir line and the content lines
-    # it also emits are one managed entity, not eaten files)
+    # count and name the workspace files the staging expansion dropped solely
+    # because ignore rules match them -- a tracked host ignore pattern can
+    # silently eat node artifacts; fractal's own runtime ignores stay silent
+    # (the info/exclude block and the stage's pathspec excludes are
+    # intentional), and so do self-ignoring dirs (a dir whose ignore rule lives
+    # inside it, like a wiki .cache/, manages itself -- its collapsed dir line
+    # and the content lines it also emits are one managed entity, not eaten
+    # files)
     cmd = [
         'ls-files',
         '--others',
@@ -259,7 +264,7 @@ def commit(
     # path's leading whitespace
     raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
     ignored = os.fsdecode(raw)
-    skipped = 0
+    skipped: list[str] = []
     if ignored:
         # raw git call bypassing util.git.run -- the helper feeds no stdin,
         # and check-ignore's batch form reads its paths from --stdin; -z on
@@ -278,7 +283,8 @@ def commit(
         # -v -z emits <source> <linenum> <pattern> <pathname> quadruples,
         # the source already bare (no :line:pattern suffix to strip)
         fields = result.stdout.split('\0')
-        for source, line, path in zip(fields[::4], fields[1::4], fields[3::4]):
+        quads = zip(fields[::4], fields[1::4], fields[2::4], fields[3::4])
+        for source, line, pattern, path in quads:
             in_exclude = source == '.git/info/exclude' or source.endswith(
                 '/.git/info/exclude'
             )
@@ -290,11 +296,24 @@ def commit(
                 continue
             if any(path.startswith(f'{prefix}/') for prefix in managed):
                 continue
-            skipped += 1
+            # name the rule sources outside the repo without their machine
+            # paths -- a force commit folds this warning into its body, where
+            # machine paths do not belong; the shared exclude reads
+            # repo-relative, and any other absolute source is the host's
+            # global ignore file
+            if in_exclude:
+                source = '.git/info/exclude'
+            elif os.path.isabs(source):
+                source = 'core.excludesFile'
+            skipped.append(f'{path} ({source}:{line}:{pattern})')
     skip_warning = None
-    if skipped > 0:
+    if skipped:
+        listing = ', '.join(skipped[:_SKIP_LIST_CAP])
+        if len(skipped) > _SKIP_LIST_CAP:
+            listing += f', ... and {len(skipped) - _SKIP_LIST_CAP} more'
         skip_warning = (
-            f'Warning: {skipped} path(s) skipped by ignore rules (see git check-ignore)'
+            f'Warning: {len(skipped)} path(s) skipped by ignore rules (repository'
+            f' or host rules, not node-record refusals): {listing}'
         )
         output.append(skip_warning)
     # an oversized staged file is usually an artifact staged by accident, but a
@@ -429,6 +448,15 @@ def commit(
         notice = _push(node)
         if notice:
             output.append(notice)
+    # repeat the held-out counts as the final line -- a hook's or gate's long
+    # output can bury the warnings above, and a no-op commit reads as clean
+    held: list[str] = []
+    if denied:
+        held.append(f'{len(denied)} estate file(s) not staged')
+    if skipped:
+        held.append(f'{len(skipped)} path(s) ignored')
+    if held:
+        output.append(f'Held out: {"; ".join(held)}')
     return '\n'.join(output)
 
 
@@ -828,8 +856,10 @@ _RECORD_FILES = ('NODE.md', '_template.toml', 'config.json')
 #: force pass can never stage a key, a certificate, an archive, or a binary
 _RECORD_SUFFIXES = (
     '.csv',
+    '.diff',
     '.json',
     '.md',
+    '.patch',
     '.py',
     '.sh',
     '.toml',
@@ -917,7 +947,7 @@ def _stage(
     node_prefix: str,
     wiki_prefix: str,
     fractal_prefix: str,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Stage the node's committable paths.
 
     Args:
@@ -931,7 +961,8 @@ def _stage(
             under it; the record pass owns them).
 
     Returns:
-        The estate pass's notices (what it force-staged, what it refused).
+        The estate pass's notices (what it force-staged, what it refused),
+        and the estate files the content law withheld from the adds.
 
     """
     worktree = node.worktree
@@ -985,7 +1016,7 @@ def _stage(
     else:
         cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
         fractal.util.git.run(cmd, cwd=worktree)
-    return _stage_records(node, fractal_prefix, denied)
+    return _stage_records(node, fractal_prefix, denied), denied
 
 
 def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
