@@ -1665,9 +1665,9 @@ def node_reap(app: typer.Typer) -> typer.Typer:
             pgid,
             worktree=worktree_dir,
             owner=owner,
-            spare=spare,
             mark=mark,
             outside_only=outside_only,
+            spare=spare,
         )
         if reaped.inside:
             raise SystemExit(1)

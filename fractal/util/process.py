@@ -144,9 +144,9 @@ def reap(
     grace: float = GRACE_SECONDS,
     worktree: Optional[pathlib.Path] = None,
     owner: Optional[pathlib.Path] = None,
-    spare: Callable[[], Collection[pathlib.Path]] = tuple,
     mark: Optional[pathlib.Path] = None,
     outside_only: bool = False,
+    spare: Callable[[], Collection[pathlib.Path]] = tuple,
 ) -> Reaped:
     """TERM, then KILL, every process group an invocation's tree holds.
 
@@ -197,13 +197,13 @@ def reap(
             (the node's own loop), whose processes the ``worktree`` sweep
             never names; read before the first signal, since an abort
             parks the loop, which drops its record mid-reap.
-        spare: Returns the files each recording a process group id to
-            spare (a missing or unreadable file spares nothing); called
-            before every signal round.
         mark: File to touch just before the first signal to a root group;
             left alone when every root group is protected.
         outside_only: Signal nothing when the caller runs inside the tree,
             reporting it as ``inside``.
+        spare: Returns the files each recording a process group id to
+            spare (a missing or unreadable file spares nothing); called
+            before every signal round.
 
     Returns:
         The tree's survivors, the spared groups it reached, and, with
