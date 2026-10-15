@@ -219,9 +219,14 @@ class CodexParser(StreamParser):
         return self._wire_usage
 
     def finish(self: CodexParser) -> list[StreamEvent]:
-        """Close the drained stream on its settled cost and wall time."""
+        """Close the drained stream on its settled cost and wall time.
+
+        The close is final only when it priced the turn; an unpriced one
+        (a non-zero exit, usage it cannot bind) leaves the cost open to
+        ``Agent.settle_cost``.
+        """
         wall = time.monotonic() - self._started
-        self.final = True
+        self.final = self.cost is not None
         return [StreamEvent(kind='result', cost=self.cost, final=True, duration=wall)]
 
 
