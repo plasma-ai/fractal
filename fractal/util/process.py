@@ -17,15 +17,22 @@ __all__ = []
 #: Seconds between the TERM pass and the KILL of every group still alive.
 GRACE_SECONDS = 5.0
 
-#: Signal rounds per pass: each re-walks the tree for groups the last round
-#: missed (a tool forking as it dies) and stops early once a walk finds none.
-ROUNDS = 5
+# signal rounds per pass: each re-walks the tree for groups the last round
+# missed (a tool forking as it dies) and stops early once a walk finds none;
+# the wait after the rounds still signals any later group, so a few suffice
+_ROUNDS = 5
 
-#: Seconds the KILL pass waits for delivery before naming survivors.
-SETTLE_SECONDS = 1.0
+# seconds the KILL pass waits before naming survivors: a KILL cannot be
+# caught, so this covers only its delivery and the process table catching up
+_SETTLE_SECONDS = 1.0
 
-#: Seconds between process-table snapshots while waiting on a group.
-POLL_SECONDS = 0.2
+# seconds between process-table snapshots while waiting on a group: each
+# runs ps, so the poll stays coarse beside a grace of seconds
+_POLL_SECONDS = 0.2
+
+# a host-wide lsof scan takes seconds on a busy macOS host; past this the
+# worktree sweep names nothing rather than hold the reap open
+_LSOF_TIMEOUT_SECONDS = 30
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,7 +159,7 @@ def reap(
     its parent, which the first signal may kill.
 
     Each pass signals every member group, re-walks, and signals the groups
-    the walk newly finds, for up to :data:`ROUNDS` rounds. A positive
+    the walk newly finds, for a bounded number of rounds. A positive
     ``grace`` opens with a TERM pass and waits for the groups to empty
     (still signaling late groups) before the KILL pass; zero KILLs at once.
 
@@ -252,49 +259,6 @@ def reap_or_kill(
     return reaped.lines(branch=branch)
 
 
-# ------ helper functions
-
-
-def _reap(
-    tree: _Tree,
-    *,
-    grace: float,
-    worktree: Optional[pathlib.Path],
-    owned: frozenset[int],
-) -> Reaped:
-    """Run :func:`reap` over a tree whose first snapshot was read."""
-    # TERM pass, then the KILL pass over every group still alive
-    if grace > 0:
-        tree.signal_pass(signal.SIGTERM, wait=grace)
-    tree.signal_pass(signal.SIGKILL, wait=SETTLE_SECONDS)
-    live = tree.live()
-    survivors = tuple(
-        tree.table[pid]
-        for pid in sorted(tree.members)
-        if not tree.table[pid].zombie and tree.members[pid] in live
-    )
-    strays: tuple[Process, ...] = ()
-    if worktree is not None:
-        # no stray: the tree, what it hangs from, the caller, the owner's
-        # loop group, and everything at or below another node's loop -- a
-        # child's loop works in the worktree of the tool that started it
-        excluded = (
-            tree.seen
-            | tree.owners
-            | set(tree.lineage)
-            | _blocked(tree.table, tree.read_spared())
-        )
-        strays = tuple(
-            tree.table[pid]
-            for pid in sorted(_cwd_inside(worktree, tree.table))
-            if pid not in excluded
-            and tree.table[pid].pgid not in owned
-            and not tree.table[pid].zombie
-        )
-    spared = tuple(sorted(tree.stopped))
-    return Reaped(survivors=survivors, strays=strays, spared=spared)
-
-
 class _Tree:
     """An invocation's process tree, re-walked from each fresh snapshot."""
 
@@ -310,8 +274,8 @@ class _Tree:
         self.mark = mark
         self.spared = self.read_spared()
         self.stopped: set[int] = set()
-        # a later snapshot failure blinds the tree: no re-walks, liveness by
-        # signal probe
+        # a later snapshot failure blinds the tree: no re-walks,
+        # liveness by signal probe
         self.blind = False
         self.table = snapshot()
         self.members: dict[int, int] = {}
@@ -338,11 +302,11 @@ class _Tree:
 
     def walk(self: _Tree) -> None:
         """Re-walk the current snapshot from the known members."""
-        self.members, stopped = _walk(
-            self.roots,
-            self.table,
-            self.members,
-            self.spared,
+        self.members, stopped = _find_members(
+            roots=self.roots,
+            table=self.table,
+            known=self.members,
+            spared=self.spared,
         )
         self.stopped |= stopped
 
@@ -391,7 +355,7 @@ class _Tree:
         """
         signaled: set[int] = set()
         # signal in rounds until a walk finds no new group
-        for _ in range(ROUNDS):
+        for _ in range(_ROUNDS):
             self.respare()
             groups = self.live() - signaled
             if not groups:
@@ -402,14 +366,57 @@ class _Tree:
         # wait out the allowance, signaling late groups
         deadline = time.monotonic() + wait
         while self.live() and time.monotonic() < deadline:
-            time.sleep(POLL_SECONDS)
+            time.sleep(_POLL_SECONDS)
             self.refresh()
             groups = self.live() - signaled
             self.signal(groups, sig)
             signaled |= groups
 
 
-def _walk(
+# ------ helper functions
+
+
+def _reap(
+    tree: _Tree,
+    *,
+    grace: float,
+    worktree: Optional[pathlib.Path],
+    owned: frozenset[int],
+) -> Reaped:
+    """Run :func:`reap` over a tree whose first snapshot was read."""
+    # TERM pass, then the KILL pass over every group still alive
+    if grace > 0:
+        tree.signal_pass(signal.SIGTERM, wait=grace)
+    tree.signal_pass(signal.SIGKILL, wait=_SETTLE_SECONDS)
+    live = tree.live()
+    survivors = tuple(
+        tree.table[pid]
+        for pid in sorted(tree.members)
+        if not tree.table[pid].zombie and tree.members[pid] in live
+    )
+    strays: tuple[Process, ...] = ()
+    if worktree is not None:
+        # no stray: the tree, what it hangs from, the caller, the owner's
+        # loop group, and everything at or below another node's loop -- a
+        # child's loop works in the worktree of the tool that started it
+        excluded = (
+            tree.seen
+            | tree.owners
+            | set(tree.lineage)
+            | _blocked(tree.table, tree.read_spared())
+        )
+        strays = tuple(
+            tree.table[pid]
+            for pid in sorted(_cwd_inside(worktree, tree.table))
+            if pid not in excluded
+            and tree.table[pid].pgid not in owned
+            and not tree.table[pid].zombie
+        )
+    spared = tuple(sorted(tree.stopped))
+    return Reaped(survivors=survivors, strays=strays, spared=spared)
+
+
+def _find_members(
     roots: frozenset[int],
     table: Mapping[int, Process],
     known: Mapping[int, int],
@@ -524,7 +531,7 @@ def _reap_groups(
             _killpg(group, signal.SIGTERM)
         deadline = time.monotonic() + grace
         while groups and time.monotonic() < deadline:
-            time.sleep(POLL_SECONDS)
+            time.sleep(_POLL_SECONDS)
             groups = {group for group in groups if _group_alive(group)}
     for group in groups:
         _killpg(group, signal.SIGKILL)
@@ -562,12 +569,12 @@ def _cwd_inside(worktree: pathlib.Path, table: Mapping[int, Process]) -> set[int
                 capture_output=True,
                 text=True,
                 errors='replace',
-                timeout=30,
+                timeout=_LSOF_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired):
             return set()
-        # -F emits one field per line: p<pid> opens a process, n<path> names
-        # its cwd
+        # -F emits one field per line: p<pid> opens a
+        # process, n<path> names its cwd
         pid = 0
         for line in result.stdout.splitlines():
             if line.startswith('p') and line[1:].isdigit():
