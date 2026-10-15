@@ -995,6 +995,26 @@ class Agent:
         """
         return pricing.rates(model)
 
+    def unavailable(self: Agent, detail: str) -> bool:
+        """Return whether a failed launch's detail names a provider outage.
+
+        The provider-neutral verdict the loop paces retries by: an
+        overloaded, erroring, or unreachable API is weather to wait out,
+        not work that failed. ``detail`` is everything the failed launch
+        said (failed result frames, stream errors, the stderr capture).
+        """
+        return self._unavailable(detail)
+
+    def _unavailable(self: Agent, detail: str) -> bool:
+        """Hook for matching a provider's outage shapes. Default returns ``False``.
+
+        Override in a backend whose CLI names its provider's outages::
+
+            def _unavailable(self, detail):
+                return 'overloaded' in detail.lower()
+        """
+        return False
+
     def transcript(self: Agent, session: str) -> dict[str, Any]:
         """Resolve a session's transcript for this node.
 

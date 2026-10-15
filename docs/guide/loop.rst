@@ -382,6 +382,34 @@ them. While an active node's newest launches carry this signature,
 ``fractal node list`` shows ``PAUSED: billing`` in its ``detail`` column
 (see :doc:`/cli/node`).
 
+Provider outages
+~~~~~~~~~~~~~~~~
+
+A failed launch whose agent names its provider as unavailable waits out the
+outage instead of retrying on the fixed backoff. Each agent backend reads its
+own CLI's error text: the failed result frame, the stream's error frames, and
+the stderr capture.
+
+- **Claude**: an ``API Error:`` with a 429 or 5xx status (529 overloaded
+  included), the API's ``overloaded_error``, ``api_error``, or
+  ``rate_limit_error`` types, or the words "overloaded" or "service
+  unavailable".
+- **Codex**: its give-up after its own reconnects (the last ``Reconnecting...
+  N/N``, or ``stream disconnected before completion``), a 429 or 5xx status,
+  or the words "overloaded", "service unavailable", or "experiencing high
+  demand". An earlier reconnect that codex recovers from never fails the step.
+
+Other backends name no outages and keep the fixed backoff. The first retry
+after such a failure waits ``step_retry_backoff``; each consecutive one doubles
+the wait, capped at one hour (a ``step_retry_backoff`` above the cap still
+holds), announced as ``retrying in 20s (provider unavailable)``. The streak
+counts every launch, the before-step SYNC included, and spans steps and
+iterations. Any completed launch resets it; any other failed or timed-out
+launch breaks it. Only the wait changes: ``step_retries`` still bounds the
+attempts, the wait polls the same signals as a retry backoff, and an armed
+billing breaker's clock takes precedence. No config key tunes the doubling or
+the cap.
+
 Stuck steps
 ~~~~~~~~~~~
 

@@ -75,6 +75,14 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Changed
 
+- A failed step whose agent names its provider as unavailable waits out the
+  outage: Claude's `API Error:` with a 429 or 5xx status (529 overloaded
+  included) or an overloaded, server, or rate-limit error, and codex's give-up
+  after its reconnects or a 429 or 5xx status. The first retry waits
+  `step_retry_backoff`, each consecutive one doubles it to a one-hour cap
+  (`retrying in 20s (provider unavailable)`), and a completed launch resets the
+  streak. `step_retries` still bounds the attempts; other failures keep the
+  fixed backoff.
 - A node's record directories admit `.py` files — plain text like the seeded
   `.sh` scripts — so a Python checker under `memory/` or `scripts/` commits
   instead of being withheld as not a node record. Keys, archives, and binaries
