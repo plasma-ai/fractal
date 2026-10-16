@@ -37,6 +37,7 @@ from fractal.constants import (
     STATUS_FILE,
     STATUSES,
     STEP_PGID_FILE,
+    UNAVAILABLE_REASON_PREFIX,
     WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
@@ -5380,8 +5381,10 @@ class Node:
         (``agent launch failed``) and a wrapper that runs and exits 127,
         the ``command not found`` convention (``agent error (exit 127)``
         -- the step row's own exit code is the binary failure marker, so
-        the reason is where the code survives). Active nodes only: a
-        settled node's trailing failures are history.
+        the reason is where the code survives). A failure the loop judged
+        a provider outage (its reason leads ``provider unavailable: ``)
+        breaks the streak too, as it never arms the loop's breaker.
+        Active nodes only: a settled node's trailing failures are history.
         """
         if self.status() != 'active':
             return False
@@ -5400,6 +5403,11 @@ class Node:
             # not billing-shaped -- either recorded reason (retry-marker safe:
             # the marker is a suffix) breaks the streak like a paid failure
             if row['metadata'].startswith(_CANNOT_EXEC_REASONS):
+                return False
+            # a launch the loop judged a provider outage is not billing-shaped
+            # either, however instant and unpriced -- its verdict leads the
+            # reason, so a launch-authored tail can never forge it
+            if row['metadata'].startswith(UNAVAILABLE_REASON_PREFIX):
                 return False
             if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
                 return False

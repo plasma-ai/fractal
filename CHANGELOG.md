@@ -186,6 +186,11 @@ may include breaking changes, each listed under a Breaking heading.
   judgement, and the merge-base advance all take that commit, so a commit the
   node makes during the merge skips the advance with a warning instead of being
   reverted by it.
+- `fractal node list` no longer shows `PAUSED: billing` for a run of instant,
+  unpriced failures the loop judged provider outages, such as codex's
+  model-at-capacity refusals: the failed step row's reason now leads with
+  `provider unavailable:`, and that verdict breaks the census's billing streak
+  as it breaks the loop's own breaker.
 - A wait the loop holds a launch through — a retry backoff, a provider outage's
   doubling wait, the billing breaker's — ends at the run or iteration deadline
   instead of sleeping past it by up to its one-hour cap; the launch it was
@@ -231,7 +236,9 @@ may include breaking changes, each listed under a Breaking heading.
   finish or abort before the node is merged. A pause the agent runs from inside
   its own tree ends nothing: the step finishes with every tool it started, the
   loop parks at its next checkpoint, and the confirmation says the caller's own
-  agent was not aborted.
+  agent was not aborted. `fractal node _reap` reports that case with its own
+  exit 3, so a helper that cannot run at all (a broken install's failed import
+  exits 1) still ends the step through the pause's own TERM of its group.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives the template variables (the paths, the branch, and the spawn

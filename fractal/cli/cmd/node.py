@@ -1651,10 +1651,11 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         with ``--worktree``, each spared loop group the walk reached and
         each process outside the tree whose working directory lies in that
         directory, other than a node's loop -- reported, never signaled --
-        and in each line the node the worktree belongs to. Exit 1 when
+        and in each line the node the worktree belongs to. Exit 3 when
         ``--outside-only`` finds this command inside the tree (nothing
         signaled), 0 after a reap, 2 on a command error -- pause.sh branches
-        on the exit code.
+        on the exit code, and 3 is one no interpreter, typer, or CLI failure
+        exits with (an uncaught error or a failed import exits 1).
         """
         worktree_dir = pathlib.Path(worktree) if worktree else None
         node = resolve_node(worktree) if worktree else None
@@ -1670,7 +1671,7 @@ def node_reap(app: typer.Typer) -> typer.Typer:
             spare=spare,
         )
         if reaped.inside:
-            raise SystemExit(1)
+            raise SystemExit(3)
         branch = node.branch if node else None
         lines = reaped.lines(branch=branch)
         for line in lines:

@@ -116,7 +116,8 @@ column. Several qualifiers can stand at once, ``;``-joined:
   the latest run advanced with no recorded row.
 - ``PAUSED: billing`` composes the same way, on ``active`` nodes only — the
   newest launches carry the dead-credits signature (three or more instant,
-  zero-cost failures) and the loop's billing breaker is backing off.
+  zero-cost failures that the loop did not judge provider outages) and the
+  loop's billing breaker is backing off.
 
 Transitions at a glance
 ~~~~~~~~~~~~~~~~~~~~~~~

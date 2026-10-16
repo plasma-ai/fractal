@@ -87,9 +87,10 @@ REAP_STATUS=0
 fractal node _reap --pgid="$STEP_PGID" --worktree="$WORKTREE_DIR" \
     --abort-marker="$ABORT_MARKER" --outside-only || REAP_STATUS=$?
 
-# exit 1: the pause runs inside the agent's own tree (an agent pausing its
-# own node), so nothing was signaled -- the step finishes and the loop parks
-if ((REAP_STATUS == 1)); then
+# exit 3: the pause runs inside the agent's own tree (an agent pausing its
+# own node), so nothing was signaled -- the step finishes and the loop parks;
+# the helper's own verdict, never an interpreter or CLI failure's exit
+if ((REAP_STATUS == 3)); then
     echo "Kept in-flight agent (pgid $STEP_PGID): the pause runs inside it," \
         "so the loop parks at its next checkpoint"
     exit 0
