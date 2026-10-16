@@ -673,8 +673,10 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``--ignore-scope`` or ``--force``.
 2. **Refreshes and lints.** ``wiki update`` runs on the project wiki and the
    node's memory wiki, then ``scripts/lint.sh`` runs; either failing fails
-   the commit with the tool's output. Skipped with ``--force`` or ``--init``
-   (the baseline wiki lints dirty by design).
+   the commit with the tool's output. Skipped with ``--force`` or ``--init``:
+   neither may block a backstop save or a baseline, the setup save a node
+   starts from, which carries only fractal's own setup — project content
+   takes an ordinary, linted commit.
 3. **Stages.** Scoped staging of the scope roots, node directory, and wiki
    (the whole worktree when unscoped), always excluding runtime artifacts
    (``**/.venv``, ``**/.db``, ``**/.db-*``, ``**/.status``, ``**/.paused``,
@@ -687,31 +689,33 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    those directories, the tool state ``.wiki/`` and ``.gitkeep``. Anything
    else a node parks there — a key, a ``.env`` file, an archive, a
    dot-directory, any other file at the root — is withheld by name and
-   reported (``Warning: N estate file(s) are not node records and were NOT
-   staged: ...``), on the plain add and the ignore-rule force-add alike;
-   what the node directory already tracks keeps committing. Node records
-   that only a machine-local ignore layer holds out (a foreign
-   ``.git/info/exclude`` line, ``core.excludesFile``) are force-added by
-   explicit path and reported (``Force-staged N node record(s) held out by
-   an ignore rule: ...``); repo ``.gitignore`` files keep their hold, and
-   records they hold surface through step 4's ignore-rule warning instead,
-   while records held by fractal's own exclude block (its ``tmp/`` and
-   ``__pycache__/`` lines among them) or by a self-ignoring directory stay
-   silent and are not counted in ``Held out``. ``--check`` applies the
-   same law, so a refused untracked file under the node directory never
-   counts as uncommitted.
+   reported, on the plain add (``Warning: N estate file(s) are not node
+   records and were NOT staged: ...``) and the ignore-rule force-add
+   (``Warning: N ignored estate file(s) are not node records and were NOT
+   force-staged: ...``) alike; what the node directory already tracks keeps
+   committing. Node records that only a machine-local ignore layer holds out
+   (a foreign ``.git/info/exclude`` line, ``core.excludesFile``) are
+   force-added by explicit path and reported (``Force-staged N node
+   record(s) held out by an ignore rule: ...``); repo ``.gitignore`` files
+   keep their hold, and records they hold surface through step 4's
+   ignore-rule warning instead, while records held by fractal's own exclude
+   block (its ``tmp/`` and ``__pycache__/`` lines among them) or by a
+   self-ignoring directory stay silent and are not counted in ``Held out``.
+   ``--check`` applies the same law, so a refused untracked file under the
+   node directory never counts as uncommitted.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
    rules and staged files of 10 MB or more. The ignore warning names the first
    ten eaten paths, each with the rule that ate it as ``git check-ignore -v``
    reports it (source file, line, and pattern), and counts the rest
    (``Warning: N path(s) skipped by ignore rules (repository or host rules,
-   not node-record refusals): eaten.log (.gitignore:3:*.log), ...``); it is
-   separate from step 3's estate refusal. Rule sources outside the repository
-   carry no machine path: the shared exclude reads ``.git/info/exclude`` and
-   the host's global ignore file ``core.excludesFile``. Whenever either
-   warning fired, the command's last line repeats the counts (``Held out: N
-   estate file(s) not staged; N path(s) ignored``, non-zero parts only), after
-   any hook or gate output and on a no-op commit too.
+   not node-record refusals): eaten.log (.gitignore:3:*.log), ...``); it
+   leaves out every estate file step 3 left unstaged, which step 3's warnings
+   name. Rule sources outside the repository carry no machine path: the shared
+   exclude reads ``.git/info/exclude`` and the host's global ignore file
+   ``core.excludesFile``. Whenever step 3 left an estate file unstaged or the
+   ignore warning fired, the command's last line repeats the counts (``Held
+   out: N estate file(s) not staged; N path(s) ignored``, non-zero parts
+   only), after any hook or gate output and on a no-op commit too.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
    caller's run/iteration/step lineage. "Nothing staged" is a tolerated
    no-op.

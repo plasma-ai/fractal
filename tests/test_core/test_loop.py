@@ -170,7 +170,8 @@ __all__ = [
     'test_drain_survives_a_pause_and_resume',
     'test_drain_guards_survive_an_env_scrub',
     'test_drain_guards_survive_a_worktree_scrub',
-    'test_drain_lineage_follows_the_seat_session',
+    'test_drain_lineage_recognizes_the_seat_commands',
+    'test_drain_lineage_survives_an_unreadable_process_table',
     'test_drain_run_blocks_spawns_and_re_arms',
     'test_census_distinguishes_run_exhausted_from_done_conditions',
     'test_timeout_void_force_commit_is_loud',
@@ -6223,16 +6224,16 @@ def test_drain_guards_survive_a_worktree_scrub(
     falls back to the node owning the working directory, so a seat that
     steps into a SIBLING worktree resolves to a real but WRONG node the
     drain never binds, and one that steps outside every worktree resolves
-    to no node at all -- which failed open. Neither is a lie the seat can
-    tell about its session: the loop makes each agent invocation its own
-    session leader and records the id, so the tree can ask which of its
-    draining runs owns this process. A caller in some other session -- an
-    operator's own shell -- is unaffected.
+    to no node at all, which alone would fail open. Neither is a lie the
+    seat can tell about its lineage: the loop records each agent
+    invocation, so the tree can ask which of its draining runs this
+    process descends from or shares a session with. A caller outside
+    every seat's lineage -- an operator's own shell -- is unaffected.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
     child.record.signal_set('drain', 'continue --drain')
-    # this process stands in for the draining seat's agent invocation: the
-    # session the loop records is the one the seat runs its commands from
+    # this process's session leader stands in for the draining seat's
+    # recorded agent, so this process reads as one of the seat's commands
     step_pgid = child.node_dir / STEP_PGID_FILE
     step_pgid.write_text(f'{os.getsid(0)}\n', encoding='utf-8')
     monkeypatch.delenv('_DRAIN', raising=False)
@@ -6249,8 +6250,8 @@ def test_drain_guards_survive_a_worktree_scrub(
     # guard's, so the pin cannot pass on somebody else's error
     for name in ('main.parent.escapee', 'main.escapee2'):
         assert not (git_repo / '.worktrees' / name).exists(), name
-    # an operator acting while the same drain runs is in another session,
-    # so the tree's spawn doors stay open to them
+    # an operator acting while the same drain runs is neither below the
+    # recorded agent nor in its session, so the spawn doors stay open
     operator = subprocess.Popen(['sleep', '300'], start_new_session=True)
     try:
         step_pgid.write_text(f'{operator.pid}\n', encoding='utf-8')
@@ -6261,54 +6262,138 @@ def test_drain_guards_survive_a_worktree_scrub(
         operator.wait()
 
 
-def test_drain_lineage_follows_the_seat_session(
+@pytest.mark.parametrize(
+    argnames='case',
+    argvalues=['own-group', 'own-session', 'orphan-in-session'],
+    ids=['own-group', 'own-session', 'orphan-in-session'],
+)
+def test_drain_lineage_recognizes_the_seat_commands(
     git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    case: str,
 ) -> None:
-    """A seat's command in its own process group is still the seat.
+    """A seat's command is the seat in each shape an agent CLI runs it in.
 
-    Agent CLIs run each shell command in a fresh process group, so the
-    command's group never names the recorded agent invocation -- but it
-    stays in the session that invocation leads. A real session leader
-    stands in for the agent, recorded as the draining run's step group,
-    and a grandchild in its own group asks the lineage question; a
-    process in an unrelated session gets no.
+    Agent CLIs run each shell command in a process group of its own, so its
+    group never names the recorded agent invocation, and Claude Code runs it
+    in a session of its own, so its session does not either -- but the
+    command descends from the agent. A command whose parent exited before it
+    asks is out of that tree, yet while it stays in the agent's session it
+    is still the seat. A real session leader stands in for the agent,
+    recorded as the draining run's step group, and runs the check in each
+    shape; a process in an unrelated session, outside the leader's tree,
+    gets no.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
     child.record.signal_set('drain', 'continue --drain')
-    # the leader waits for its record, then runs the check from a command
-    # in its own process group, the way an agent CLI runs a shell command
+    # the check records its pid before anything else (it leads a group of
+    # its own in every shape, out of reach of the leader's group), confirms
+    # the shape its case names, then asks the lineage question
+    check_pid = tmp_path / 'check.pid'
     check = (
-        'import os, sys\n'
+        'import os, pathlib, sys, time\n'
+        'pathlib.Path(sys.argv[3]).write_text(f"{os.getpid()}\\n")\n'
+        'case, repo = sys.argv[1:3]\n'
+        'if case == "own-group":\n'
+        '    assert os.getpgid(0) != os.getsid(0)\n'
+        'elif case == "own-session":\n'
+        '    assert os.getsid(0) == os.getpid()\n'
+        'else:\n'
+        '    starter = int(sys.argv[4])\n'
+        '    deadline = time.monotonic() + 30\n'
+        '    while os.getppid() == starter and time.monotonic() < deadline:\n'
+        '        time.sleep(0.01)\n'
+        '    assert os.getppid() != starter\n'
         'from fractal.core.node import Node\n'
-        'assert os.getpgid(0) != os.getsid(0)\n'
-        'print(Node(sys.argv[1]).drain_lineage())\n'
+        'print(Node(repo).drain_lineage())\n'
     )
+    # the leader waits for its record, starts the command the way the case's
+    # agent CLI runs one, and relays the answer once the check closes its
+    # output -- so the leader outlives the question in every shape
     leader_script = (
         'import subprocess, sys\n'
         'sys.stdin.readline()\n'
-        'argv = [sys.executable, "-c", sys.argv[1], sys.argv[2]]\n'
-        'subprocess.run(argv, process_group=0, check=True)\n'
+        'mode, *argv = sys.argv[1:]\n'
+        'result = subprocess.run(\n'
+        '    argv,\n'
+        '    stdout=subprocess.PIPE,\n'
+        '    text=True,\n'
+        '    check=True,\n'
+        '    process_group=0 if mode == "group" else None,\n'
+        '    start_new_session=mode == "session",\n'
+        ')\n'
+        'print(result.stdout, end="")\n'
     )
+    if case == 'own-group':
+        # a CLI that keeps the agent's session: a group of its own
+        launch = ['group']
+    elif case == 'own-session':
+        # Claude Code: a session of its own
+        launch = ['session']
+    else:
+        # an intermediate in the agent's session starts the check
+        # in a group of its own and exits at once, so the check
+        # asks from the agent's session but outside its tree
+        intermediate = (
+            'import os, subprocess, sys\n'
+            'subprocess.Popen([*sys.argv[1:], f"{os.getpid()}"], process_group=0)\n'
+        )
+        launch = ['inherit', sys.executable, '-c', intermediate]
+    command = [sys.executable, '-c', check, case, f'{git_repo}', f'{check_pid}']
     leader = subprocess.Popen(
-        [sys.executable, '-c', leader_script, check, f'{git_repo}'],
+        [sys.executable, '-c', leader_script, *launch, *command],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
     )
     try:
         step_pgid = child.node_dir / STEP_PGID_FILE
         step_pgid.write_text(f'{leader.pid}\n', encoding='utf-8')
-        # this test process sits in an unrelated session
+        # this test process sits in an unrelated session, outside its tree
         assert not parent.drain_lineage()
-        stdout, _ = leader.communicate(input='\n', timeout=60)
-        assert leader.returncode == 0
-        assert stdout.strip() == 'True'
+        stdout, stderr = leader.communicate(input='\n', timeout=60)
+        assert leader.returncode == 0, stderr
+        assert stdout.strip() == 'True', stderr
     finally:
-        if leader.poll() is None:
-            os.killpg(leader.pid, signal.SIGKILL)
-            leader.wait()
+        # kill the check's group, then the leader's -- the check leads a
+        # group of its own, which the leader's group kill never reaches
+        groups = []
+        if check_pid.exists():
+            groups.append(int(check_pid.read_text(encoding='utf-8')))
+        groups.append(leader.pid)
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if leader.returncode is None:
+            leader.communicate()
+
+
+def test_drain_lineage_survives_an_unreadable_process_table(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed process-table read leaves the session to answer alone.
+
+    The ancestry walk reads the whole process table through ``ps``; when
+    that read fails, the check still answers rather than raising, and a
+    caller in the recorded agent's session is still the seat.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    child.record.signal_set('drain', 'continue --drain')
+    # this process's session leader stands in for the draining seat's agent
+    step_pgid = child.node_dir / STEP_PGID_FILE
+    step_pgid.write_text(f'{os.getsid(0)}\n', encoding='utf-8')
+
+    def unreadable() -> dict[int, Any]:
+        raise OSError('ps cannot run')
+
+    monkeypatch.setattr('fractal.util.process.snapshot', unreadable)
+    assert parent.drain_lineage() is True
 
 
 def test_drain_run_blocks_spawns_and_re_arms(

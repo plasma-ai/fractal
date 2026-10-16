@@ -729,11 +729,10 @@ class Node:
         node; one that steps outside every worktree resolves to no actor
         and would fail open. Each guard answers that from its own side
         rather than here: the drain adds process-lineage attribution
-        (:meth:`drain_lineage` -- the recorded agent's session, which
-        moving cannot rewrite, though a tool command the agent CLI runs in
-        a session of its own is outside it), and the mailbox seal sits on
-        the owner-only channel rule, which asks what a caller may read
-        rather than who it claims to be.
+        (:meth:`drain_lineage` -- descent from the recorded agent, which
+        moving cannot rewrite), and the mailbox seal sits on the
+        owner-only channel rule, which asks what a caller may read rather
+        than who it claims to be.
 
         Returns:
             The acting node, or ``None`` outside any node context.
@@ -784,30 +783,28 @@ class Node:
         the environment and steps into a sibling worktree resolves to a
         real but WRONG node the drain never binds; one that steps outside
         every worktree resolves to no node and fails open. Neither is a
-        lie a process can tell about its *session*: the loop spawns each
-        agent invocation as its own session leader and records the id
-        (``.step_pgid``). Ask the tree which of its open runs drain, then
-        whether this process sits in one of their seats' sessions --
-        attribution by lineage, which no ``env -u`` or ``cd`` rewrites.
-        The session holds the agent and whatever it starts in a process
-        group of its own, but not a tool command the agent CLI runs in a
-        session of its own (Claude Code runs every one so): such a command
-        never matches here, and one that scrubs ``_DRAIN`` and ``_NODE``
-        and leaves its worktree escapes every drain source.
+        lie the seat can tell about its *ancestry*: the loop records each
+        agent invocation's pid (``.step_pgid``), and every command that
+        seat runs descends from it, whether the agent CLI starts the
+        command in a process group or a session of its own. Ask the tree
+        which of its open runs drain, then whether one of their recorded
+        agents is this process or an ancestor of it -- attribution by
+        lineage, which no ``env -u`` or ``cd`` rewrites. A command whose
+        parent chain was cut (a double fork, or an intermediate that
+        exited) is reparented out of that ancestry: it still matches while
+        it stays in the agent's session, but under a CLI that starts each
+        command in a session of its own it escapes.
 
         Identity-checked like the reap's (:func:`_recorded_group`), so a
         stale handle naming a recycled id never refuses an unrelated
         caller. Best-effort: an unreadable record or database answers no,
-        leaving the other two drain sources to speak.
+        leaving the other two drain sources to speak, and an unreadable
+        process table leaves the session match alone.
 
         Returns:
             Whether this process is a seat of a draining run in this tree.
 
         """
-        try:
-            sid = os.getsid(0)
-        except OSError:
-            return False
         # the tree's open runs carrying a drain signal (the central DB is
         # per-tree, so this is exactly the trees this caller could act on)
         query = (
@@ -819,6 +816,8 @@ class Node:
             rows = self.db.read(query=query)
         except Exception:
             return False
+        # each draining run's recorded agent, dated by its record
+        records: list[tuple[int, float]] = []
         for row in rows:
             worktree_dir = fractal.util.git.find_worktree(
                 repo_dir=self.repo_dir,
@@ -832,7 +831,27 @@ class Node:
                 recorded = int(pgid_file.read_text(encoding='utf-8').strip())
             except (OSError, ValueError):
                 continue
-            if recorded == sid and _recorded_group(sid, recorded_at) is True:
+            records.append((recorded, recorded_at))
+        if not records:
+            return False
+        # this process and its ancestors, from one read of the process table
+        lineage: set[int] = set()
+        try:
+            table = fractal.util.process.snapshot()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        else:
+            lineage.update(fractal.util.process._lineage(os.getpid(), table))
+        # and its session: a command reparented out of the agent's tree
+        # still matches while it stays in the agent's session
+        try:
+            lineage.add(os.getsid(0))
+        except OSError:
+            pass
+        # match a recorded agent in that lineage, identity-checked
+        # so a recycled pid never stands in for it
+        for recorded, recorded_at in records:
+            if recorded in lineage and _recorded_group(recorded, recorded_at) is True:
                 return True
         return False
 
@@ -7018,9 +7037,8 @@ def _draining(node: Node) -> bool:
     across a pause/resume, which the export alone does not survive. Both
     of those still ask the seat who it is, and a seat that moves can
     answer wrongly -- so the last source asks the operating system
-    instead: whether this process sits in a draining seat's recorded
-    session (:meth:`Node.drain_lineage`), which a tool command the agent
-    CLI runs in a session of its own is outside.
+    instead: whether this process descends from a draining seat's
+    recorded agent invocation (:meth:`Node.drain_lineage`).
 
     Args:
         node: Any node of the tree the verb acts on -- the drain that

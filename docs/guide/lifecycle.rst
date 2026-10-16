@@ -242,13 +242,12 @@ the command line instead of inside a dying tmux pane. Start also refuses:
   tree-wide latch);
 - a launch from inside a draining run — a seat of a ``--continue --drain``
   run, detected by the ``_DRAIN`` export, the run's durable ``drain``
-  signal, or the agent's recorded session, which a tool command the agent
-  CLI runs in a session of its own is outside ("Cannot start a node from a
-  draining run (--drain forbids re-arms)"); ``node init`` (a spawn, or a
-  whole new tree via ``fractal init``), ``node update``, and
-  ``node resume`` refuse the same way. The guard binds the acting seat, not
-  the target — an operator's ``node resume`` of a parked drain run
-  relaunches it, and the relaunch keeps draining;
+  signal, or descent from the seat's recorded agent invocation ("Cannot
+  start a node from a draining run (--drain forbids re-arms)");
+  ``node init`` (a spawn, or a whole new tree via ``fractal init``),
+  ``node update``, and ``node resume`` refuse the same way. The guard
+  binds the acting seat, not the target — an operator's ``node resume``
+  of a parked drain run relaunches it, and the relaunch keeps draining;
 - a fresh start when a foreign tmux session already holds this node's
   session name (another fractal sharing the repository basename — rename a
   repository directory, never kill the foreign session); a headless fresh

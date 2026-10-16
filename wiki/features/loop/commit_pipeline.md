@@ -34,7 +34,8 @@ qualifier. An optional body paragraph lands below the subject.
 ## Scope, refresh, and lint
 
 With a scope configured, the pipeline checks the working tree, index, and
-untracked files for out-of-scope changes and refuses to commit them; the shared
+untracked files for out-of-scope changes and refuses to commit them -- a rename
+counts as both its paths, as `merge.sh`'s footprint listing reads it; the shared
 project wiki (`wiki/` unless the project's `.fractal/.settings.json` names
 another folder; see [[features/wiki_system/knowledge_stores]]) and the node's
 `.fractal/` prefix are always committable. The boundaries are one record
@@ -91,13 +92,16 @@ reports it (source file, line, and pattern; the shared `info/exclude` reads
 repo-relative and any other absolute source as `core.excludesFile`, since a
 force commit folds the warning into its body), then counts the rest, and labels
 them repository or host rules, not node-record refusals -- the estate law's
-refusal warning prints beside it and the two must not read as one count. The
-other guard lists any staged file at or over 10MB by name -- an oversized file
-is usually an accident, but large commits are also legitimate. Whenever the
-estate refusal or the ignore warning fired, the command's last line repeats both
-counts (`Held out: ...`, non-zero parts only): a hook's or gate's long output
-prints between the warnings and the end, and a no-op commit is exactly when a
-node would otherwise read the tree as clean.
+refusal warnings print beside it and the two must not read as one count, so an
+estate file the commit left unstaged (refused on either staging path, or a
+record the force-add could not stage) is theirs to name and never lists here,
+nor does the collapsed directory entry holding one. The other guard lists any
+staged file at or over 10MB by name -- an oversized file is usually an accident,
+but large commits are also legitimate. Whenever an estate file was left unstaged
+or the ignore warning fired, the command's last line repeats both counts
+(`Held out: ...`, non-zero parts only): a hook's or gate's long output prints
+between the warnings and the end, and a no-op commit is exactly when a node
+would otherwise read the tree as clean.
 
 ## The estate content law
 

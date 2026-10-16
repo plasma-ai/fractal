@@ -115,14 +115,18 @@ may include breaking changes, each listed under a Breaking heading.
 - `fractal commit`'s ignore-rule warning names the paths it counts: the first
   ten, each with its rule as `git check-ignore -v` reports it (source file,
   line, and pattern), then `... and N more`. It says the paths are held by
-  repository or host ignore rules and are not node-record refusals, so it is not
-  mistaken for a recount of the estate warning above it. Rule sources outside
-  the repository carry no machine path: the shared exclude reads
-  `.git/info/exclude` and the host's global ignore file `core.excludesFile`.
+  repository or host ignore rules and are not node-record refusals, and it
+  leaves out every estate file the estate warnings name, an ignored one the
+  force-add refused included, so it is not mistaken for a recount of the estate
+  warning above it. Rule sources outside the repository carry no machine path:
+  the shared exclude reads `.git/info/exclude` and the host's global ignore file
+  `core.excludesFile`.
 - `fractal commit` ends on a
   `Held out: N estate file(s) not staged; N path(s) ignored` line (non-zero
   parts only) whenever either warning fired, after any hook or gate output and
-  on a no-op commit too.
+  on a no-op commit too. The estate count covers every estate file left
+  unstaged: refused on either staging path, or a record the force-add could not
+  stage.
 - The packaged node charter and memory skill tell a node to name its own files
   through `$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR`, with scratch in
   `$NODE_DIR/tmp/` — a path at the worktree root is the project, not the node,
@@ -313,12 +317,14 @@ may include breaking changes, each listed under a Breaking heading.
   met at launch stays a step failure with the same words. Three such launch
   refusals in a row read as the `PAUSED: billing` backoff, which the preflight
   check forestalls.
-- A drain run's lineage guard matches the caller's session against the recorded
-  agent session instead of its process group, so a process the agent starts in a
-  process group of its own still refuses spawns and re-arms after scrubbing
-  `_DRAIN` and leaving its worktree. A tool command the agent CLI runs in a
-  session of its own, as Claude Code runs every tool command, is outside that
-  session and goes unmatched.
+- A drain run's lineage guard recognizes its seat's commands: it looks for the
+  recorded agent invocation among the caller's ancestors, so a command the agent
+  CLI starts in a process group or a session of its own (Claude Code starts each
+  tool command in a new session) still refuses spawns and re-arms after
+  scrubbing `_DRAIN` and leaving its worktree. A command whose parent chain was
+  cut (a double fork, or an intermediate that exited) still matches while it
+  stays in the agent's session, and escapes under a CLI that starts each command
+  in a new session.
 - A step file's `timeout:` frontmatter now reaches every report of that step's
   limit, not only its enforcement. `$TIME_BUDGET` is rebuilt for each step and
   names that step's own ceiling (a 6h step on a 2h node reads `6h/step`). Each
@@ -341,6 +347,10 @@ may include breaking changes, each listed under a Breaking heading.
   `node list` instead of raising `AttributeError`. One active node holding such
   a value failed `node list` for its whole tree, and with it the resolution of
   short node names from an ancestor.
+- A scoped node's `fractal commit` refuses a tracked file moved (`git mv`) into
+  its scope from outside it, naming the old path, as the merge's footprint check
+  does. The scope check read git's rename-detecting diff, which names only a
+  rename's new path, so the deletion outside the scope committed unchecked.
 
 ## [1.3.0] - 2026-09-17
 
