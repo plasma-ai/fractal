@@ -192,9 +192,11 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   folder its wiki excludes is skipped; and a failed refresh restores the
   target with the child unadvanced, as does a failed declaration read,
   listing, or staging step around it. Untracked files are judged by the
-  wiki's own rules: a file only a personal ignore hides refuses the merge,
-  since the wiki would index it, and one under a dot-prefixed folder neither
-  refuses it nor rides the squash. A merged index whose folder encloses
+  wiki's ignore and dot rules: a file only a personal ignore hides refuses
+  the merge, since the wiki would index it, and one under a dot-prefixed
+  folder neither refuses it nor rides the squash; a symlink, or a file the
+  wiki's ``exclude.patterns`` matches, still refuses, which is safe, and
+  committing or moving the file clears it. A merged index whose folder encloses
   another declared wiki, which the wiki refuses to sweep, lands as the
   driver merged it, with a warning.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
@@ -1543,21 +1545,40 @@ def test_merge_refuses_a_wiki_declared_at_the_worktree_root(
     assert (repo / 'notes.md').read_text(encoding='utf-8') == bare
 
 
-@pytest.mark.parametrize('stray', [False, True], ids=['clean', 'untracked-file'])
+@pytest.mark.parametrize(
+    argnames=('folder', 'patterns', 'stray'),
+    argvalues=[
+        # a dot folder, which the wiki's walk never lists
+        ('.notes', [], False),
+        # an untracked file there is no stray at all
+        ('.notes', [], True),
+        # a folder the wiki's exclude.patterns names, holding a stray the
+        # guard lists, so only the excluded-folder probe lets the merge land
+        ('notes', ['notes'], True),
+    ],
+    ids=['dot-folder', 'dot-folder-untracked-file', 'pattern-untracked-file'],
+)
 def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
     tmp_path: pathlib.Path,
+    folder: str,
+    patterns: list[str],
     stray: bool,
 ) -> None:
     """An index in a folder its wiki excludes lands as the merge left it.
 
-    The wiki's own walk skips a dot folder, and a refresh scoped to one is
-    refused, so the merge skips such an index rather than failing: both
-    sides' edits land, and an untracked file there refuses nothing.
+    The wiki's own walk skips a dot folder and a folder its
+    ``exclude.patterns`` names, and a refresh scoped to either is refused,
+    so the merge skips such an index rather than failing: both sides' edits
+    land, and an untracked file there refuses nothing and stays untracked.
     """
     repo = _init_tree(tmp_path / 'excludedrepo')
     corpus = repo / 'library'
     _declare_wiki(corpus)
-    notes = corpus / '.notes'
+    settings = {'exclude': {'patterns': patterns}} if patterns else {}
+    (corpus / '.wiki' / 'settings.json').write_text(
+        f'{json.dumps(settings)}\n', encoding='utf-8'
+    )
+    notes = corpus / folder
     notes.mkdir()
     body = 'first line\n' + 'filler line\n' * 6 + 'last line\n'
     head = '---\nname: notes\ndesc: Excluded notes.\n---\n# notes\n\n***\n\n'
@@ -1571,7 +1592,7 @@ def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
         worktrees[name] = repo / '.worktrees' / f'main.{name}'
     # the siblings edit opposite ends of the excluded index's authored body
     for name, old in (('one', 'first line'), ('two', 'last line')):
-        index = worktrees[name] / 'library' / '.notes' / '_index.md'
+        index = worktrees[name] / 'library' / folder / '_index.md'
         index.write_text(
             index.read_text(encoding='utf-8').replace(old, f'{old}, edited by {name}'),
             encoding='utf-8',
@@ -1585,11 +1606,12 @@ def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
         result = _script('merge.sh', repo, f'{worktrees[name]}')
         assert result.returncode == 0, (result.stdout, result.stderr)
 
-    merged = _git(repo, 'show', 'main:library/.notes/_index.md').stdout
+    merged = _git(repo, 'show', f'main:library/{folder}/_index.md').stdout
     assert 'first line, edited by one' in merged, merged
     assert 'last line, edited by two' in merged, merged
-    status = _git(repo, 'status', '--porcelain').stdout.strip()
-    assert status == ('?? library/.notes/scratch.txt' if stray else ''), status
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+    expected = f'?? library/{folder}/scratch.txt' if stray else ''
+    assert status.strip() == expected, status
 
 
 @pytest.mark.parametrize(
@@ -1616,13 +1638,15 @@ def test_merge_judges_untracked_files_by_the_wikis_own_rules(
     stray: str,
     refused: bool,
 ) -> None:
-    """The refresh's untracked-file guard follows the wiki's own walk.
+    """The refresh's untracked-file guard follows the wiki's ignore and dot rules.
 
     The wiki indexes by the repository's ignore rules alone, so a file only a
     personal ``core.excludesFile`` hides would get a row in the squash commit
     while the file itself stays behind: the merge refuses it by name. A file
     under a dot-prefixed folder is never indexed, so it neither refuses the
-    merge nor rides the squash commit.
+    merge nor rides the squash commit. The guard mirrors no other exclusion:
+    a symlink, or a file the wiki's ``exclude.patterns`` matches, still
+    refuses, which is safe, and committing or moving the file clears it.
     """
     repo = _init_tree(tmp_path / 'strayrepo')
     _declare_wiki(repo / 'library', 'cards')
@@ -1812,9 +1836,11 @@ def test_merge_restores_the_target_when_a_wiki_refresh_step_fails(
 
     The refresh runs after the squash is staged, so a declaration read, a
     listing, or a staging step git cannot complete refuses the merge like a
-    conflict -- the step named, no commit, the target's tracked state reset,
-    and the child unadvanced -- instead of exiting under ``set -e`` with the
-    squash left staged for the target's next commit.
+    conflict -- the step named, no commit, the target reset, and the child
+    unadvanced -- instead of exiting under ``set -e`` with the squash left
+    staged for the target's next commit. An index the refresh created
+    before the failure goes too, so the retry lands instead of refusing it
+    as an untracked file the refresh would index.
     """
     repo = _init_tree(tmp_path / 'stepfailrepo')
     _declare_wiki(repo / 'library', 'cards')
@@ -1844,9 +1870,12 @@ def test_merge_restores_the_target_when_a_wiki_refresh_step_fails(
     assert subject in refused.stderr, refused.stderr
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     assert _git(repo, 'rev-parse', 'main.two').stdout == child
-    # the restore judges the target by its tracked state, as merge.sh does
-    status = _git(repo, 'status', '--porcelain', '--untracked-files=no').stdout
+    # nothing of the abandoned merge is left, untracked files included...
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
     assert status == '', status
+    # ...so the same merge lands once the step can run
+    retry = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert retry.returncode == 0, (retry.stdout, retry.stderr)
 
 
 def test_failed_merge_restore_removes_the_staged_child_additions(

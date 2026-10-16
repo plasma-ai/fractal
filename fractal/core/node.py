@@ -3852,8 +3852,9 @@ class Node:
         # catches children spawned mid-fan-out; best-effort per node
         # (mirrors kill), each attempted exactly once
         outcomes: list[str] = []
-        if not self.is_user and (outcome := self._pause(reason)) is not None:
-            outcomes.append(outcome)
+        if not self.is_user:
+            if (outcome := self._pause(reason)) is not None:
+                outcomes.append(outcome)
         attempted = set()
         while True:
             pending = [
@@ -4057,10 +4058,21 @@ class Node:
         # worktree whose info/exclude predates the current block heals here
         # and the adopted run's cleanup and commits see fresh ignores
         self._git_exclude()
+
+        # say once why the relaunch waits: a merge's validation can run long
+        def _waiting() -> None:
+            self.log(
+                message=(
+                    'Waiting for a merge in progress to finish before resuming'
+                    f' {self.branch}...'
+                ),
+                level=logging.WARNING,
+            )
+
         # a merge's carried advance rewrites a paused node's worktree, so the
         # relaunch waits for one in flight by taking the merge flock, as
         # reseed does
-        with worktree.merge_lock(self.repo_dir):
+        with worktree.merge_lock(self.repo_dir, waiting=_waiting):
             # the resume event lands before the relaunch so the booting loop's
             # deadline credit sees the pause..resume span closed
             event_id = self.record.event_start('resume')

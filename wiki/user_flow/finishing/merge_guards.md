@@ -28,10 +28,11 @@ interleaving their index writes.
 A paused node merges without leaving `paused`: it runs no loop and no agent, and
 its run, iteration, and step rows stay open for `fractal resume` to adopt. A
 resume relaunches the loop only under the merge lock, so it waits for a running
-merge, and the merge re-reads the node's status once it holds the lock, refusing
-a node that left `paused` while it waited; a commit the node gains during the
-merge anyway (a hand commit) refuses the merge
-(`<node> moved during the merge`), since the advance would revert it.
+merge (saying so once before it waits, since a merge's validation can run long),
+and the merge re-reads the node's status once it holds the lock, refusing a node
+that left `paused` while it waited; a commit the node gains during the merge
+anyway (a hand commit) refuses the merge (`<node> moved during the merge`),
+since the advance would revert it.
 
 Only committed work lands. A frozen step that stopped inside a git operation — a
 merge, squash merge, cherry-pick, or revert stopped on a conflict, a rebase
@@ -54,15 +55,22 @@ whole merge, restoring the target and naming the paths. After the commit a
 two-tree `read-tree -m -u` moves the node's index and worktree, keeping its
 local changes, and a compare-and-swap `update-ref` moves its branch; any failure
 or interrupt before the branch moves reverses the `read-tree`, returns every
-path the advance changes to the node's old commit (an update cut short leaves
-some of them written, which the reverse `read-tree` keeps), moves the target
-back to its pre-merge HEAD, and closes the merge event `failed` — a fresh
+path the forward update wrote to the node's old commit (an update cut short
+leaves some of them written, which the reverse `read-tree` keeps), moves the
+target back to its pre-merge HEAD, and closes the merge event `failed` — a fresh
 merge's target is reset whole, while a `--continue` keeps the operator's
 resolution staged and its squash message in place, so it can be re-run. The
 rollback is judged by both sides' state, and when it falls short the error names
-the paths still changed and the `git -C <target worktree> reset` to run. An
-interrupt once the branch has moved finishes the merge instead: the move comes
-only after the worktree update succeeded, so the carry has landed whole. A
+the paths still changed and the `git -C <target worktree> reset` to run. Nothing
+locks the paused worktree against a chat or a hand edit, so a path the advance
+changes can be written after the check, which is the likeliest reason the
+forward update fails; the rollback therefore judges each such path, index entry
+and disk alike, by content: one holding the old commit's version stays, one
+holding the advance's is the update's own write and goes back, and one holding
+anything else is left as found and named in the error
+(`left as found in <node>'s worktree, since something else wrote them during the merge`).
+An interrupt once the branch has moved finishes the merge instead: the move
+comes only after the worktree update succeeded, so the carry has landed whole. A
 `--message` sets the squash commit's text, so a descriptive message never needs
 an amend that would orphan the advance.
 

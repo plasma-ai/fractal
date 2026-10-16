@@ -11,7 +11,7 @@ import re
 import shutil
 import signal
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Optional
 
 import fractal.util
@@ -70,7 +70,11 @@ def lock(repo_dir: pathlib.Path) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def merge_lock(repo_dir: pathlib.Path) -> Iterator[None]:
+def merge_lock(
+    repo_dir: pathlib.Path,
+    *,
+    waiting: Optional[Callable[[], None]] = None,
+) -> Iterator[None]:
     """Hold the repo-wide merge flock while a squash merge runs.
 
     ``git merge --squash`` locks the target's index only for its final
@@ -83,12 +87,20 @@ def merge_lock(repo_dir: pathlib.Path) -> Iterator[None]:
 
     Args:
         repo_dir: Main git repo root.
+        waiting: Called once, before blocking, when another process holds
+            the lock -- so a caller can say what it waits for.
 
     """
     lock_dir = repo_dir / WORKTREES_FOLDER
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / MERGE_LOCK_FILE, 'a', encoding='utf-8') as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        # try without blocking first, so a held lock is known before the wait
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if waiting is not None:
+                waiting()
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
         yield
 
 

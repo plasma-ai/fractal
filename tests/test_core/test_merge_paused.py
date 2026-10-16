@@ -25,10 +25,13 @@ __all__ = [
     'test_paused_merge_refuses_an_advance_over_the_frozen_state',
     'test_paused_merge_refuses_an_unfinished_git_operation',
     'test_paused_merge_refuses_a_branch_that_moved_mid_merge',
+    'test_paused_merge_refuses_a_node_that_left_paused_while_it_waited',
     'test_resume_waits_for_a_running_merge',
     'test_paused_continue_rollback_keeps_the_staged_resolution',
     'test_paused_no_op_continue_refusal_keeps_the_squash_message',
     'test_paused_merge_rolls_back_both_sides_after_the_commit',
+    'test_paused_merge_names_what_a_failed_rollback_left',
+    'test_paused_merge_rollback_keeps_a_write_made_during_the_merge',
     'test_paused_merge_lands_when_interrupted_after_the_branch_moved',
     'test_paused_merge_refuses_when_a_carry_check_fails',
     'test_paused_no_op_merge_advances_past_a_restored_path',
@@ -282,18 +285,77 @@ def test_paused_merge_refuses_a_branch_that_moved_mid_merge(
     _assert_frozen(node)
 
 
+def test_paused_merge_refuses_a_node_that_left_paused_while_it_waited(
+    git_repo: pathlib.Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A node that leaves ``paused`` while its merge waits for the lock refuses it.
+
+    The merge builds its arguments from the status it first read, so once it
+    holds the repo's merge lock it reads the status again: a node that went
+    active meanwhile refuses the merge, naming both statuses, with nothing
+    changed on either side.
+    """
+    _, node = _paused_child(git_repo)
+    _land_sibling(git_repo)
+    before = _snapshot(git_repo, node)
+    lock_file = git_repo / WORKTREES_FOLDER / MERGE_LOCK_FILE
+    ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
+    holder = subprocess.Popen(
+        [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
+    )
+    errors: list[Exception] = []
+
+    def _merge() -> None:
+        try:
+            node.merge()
+        except Exception as error:
+            errors.append(error)
+
+    merger = threading.Thread(target=_merge)
+    try:
+        _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
+        merger.start()
+        # the merge read paused and now waits behind the held lock
+        merger.join(timeout=3)
+        assert merger.is_alive()
+        # the node goes active, then the holder dies and releases the lock
+        node.status_set('active')
+        holder.kill()
+        holder.wait(timeout=5)
+        merger.join(timeout=60)
+        assert not merger.is_alive()
+    finally:
+        # the holder is a single leaf process, so a pid kill reaps it fully
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
+        if merger.is_alive():
+            merger.join(timeout=60)
+
+    assert [f'{error}' for error in errors] == [
+        'Cannot merge: the node went from paused to active while the merge'
+        ' waited. Merge again.'
+    ]
+    assert _snapshot(git_repo, node) == before
+
+
 def test_resume_waits_for_a_running_merge(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path_factory: pytest.TempPathFactory,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A resume relaunches a paused node only once a running merge lets go.
 
     A merge's carried advance rewrites the paused node's worktree, so the
     relaunch takes the repo's merge lock first: while another process holds
-    it the relaunch waits, and it runs once the lock is released.
+    it the relaunch says once that it waits, and it runs once the lock is
+    released.
     """
-    root, _ = _paused_child(git_repo)
+    root, node = _paused_child(git_repo)
+    # only the resume's own notices count
+    caplog.clear()
     run_scripts = _stub_run_script(monkeypatch, Node)
     lock_file = git_repo / WORKTREES_FOLDER / MERGE_LOCK_FILE
     ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
@@ -308,12 +370,18 @@ def test_resume_waits_for_a_running_merge(
         resumer.join(timeout=3)
         assert resumer.is_alive()
         assert run_scripts == []
+        notice = (
+            'Waiting for a merge in progress to finish before resuming'
+            f' {node.branch}...'
+        )
+        assert caplog.messages == [notice], caplog.messages
         # the holder dies, the kernel releases the lock, and the relaunch runs
         holder.kill()
         holder.wait(timeout=5)
         resumer.join(timeout=60)
         assert not resumer.is_alive()
         assert [call[0] for call in run_scripts] == ['resume.sh']
+        assert caplog.messages == [notice], caplog.messages
     finally:
         # the holder is a single leaf process, so a pid kill reaps it fully
         if holder.poll() is None:
@@ -435,24 +503,49 @@ def test_paused_no_op_continue_refusal_keeps_the_squash_message(
 
 
 @pytest.mark.parametrize(
-    argnames='failure',
-    argvalues=['update-ref', 'read-tree', 'read-tree-cut-short'],
-    ids=['update-ref', 'read-tree', 'read-tree-cut-short'],
+    argnames=('failure', 'step'),
+    argvalues=[
+        # the node's branch refuses to move
+        ('update-ref', 'moving main.feature to its post-squash commit failed'),
+        # the forward worktree update fails, or is cut short after writing
+        ('read-tree', "updating main.feature's worktree failed"),
+        ('read-tree-cut-short', "updating main.feature's worktree failed"),
+        # the post-squash commit cannot be recorded
+        ('commit-tree', "recording main.feature's post-squash commit failed"),
+        # a target pre-commit hook stages a file past the judged tree
+        (
+            'tree-check',
+            "main's commit does not hold the tree the advance was judged against",
+        ),
+        # an interrupt lands during the forward update, before the branch moves
+        ('interrupt', 'merge of main.feature was interrupted'),
+    ],
+    ids=[
+        'update-ref',
+        'read-tree',
+        'read-tree-cut-short',
+        'commit-tree',
+        'tree-check',
+        'interrupt',
+    ],
 )
 def test_paused_merge_rolls_back_both_sides_after_the_commit(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path_factory: pytest.TempPathFactory,
     failure: str,
+    step: str,
 ) -> None:
     """A failure after the squash commit rolls the target and the node back whole.
 
     A sibling's landing gives the advance files to move into the frozen
-    worktree; when the node's branch move or its worktree update fails --
-    the update cut short too, after it wrote some of those files -- the
-    merge returns the node's paths and resets the target, so both sides
-    match their pre-merge state, the node stays paused, and the target's
-    merge event closes failed.
+    worktree; when the target's commit holds another tree than the one the
+    advance was judged against, the post-squash commit cannot be recorded,
+    the node's branch move or its worktree update fails -- the update cut
+    short too, after it wrote some of those files -- or an interrupt lands
+    before the branch moves, the merge names the step, returns the node's
+    paths, and resets the target, so both sides match their pre-merge state,
+    the node stays paused, and the target's merge event closes failed.
     """
     _, node = _paused_child(git_repo)
     _land_sibling(git_repo)
@@ -460,13 +553,15 @@ def test_paused_merge_rolls_back_both_sides_after_the_commit(
     # the forward update alone: the reverse that follows runs for real
     fired = tmp_path_factory.mktemp('fired') / 'forward'
     forward = f'[[ " $* " == *" read-tree -m -u "[0-9a-f]* && ! -e "{fired}" ]]'
+    real_git = shutil.which('git')
+    body = ''
     if failure == 'update-ref':
         body = (
             f'[[ " $* " == *" update-ref "*" refs/heads/{node.branch} "* ]] && exit 1\n'
         )
     elif failure == 'read-tree':
         body = f'if {forward}; then\n    touch "{fired}"\n    exit 1\nfi\n'
-    else:
+    elif failure == 'read-tree-cut-short':
         # cut short once the sibling's new file and its shared edit are written
         body = (
             f'if {forward}; then\n'
@@ -475,12 +570,171 @@ def test_paused_merge_rolls_back_both_sides_after_the_commit(
             '    exit 130\n'
             'fi\n'
         )
+    elif failure == 'commit-tree':
+        body = '[[ " $* " == *" commit-tree "* ]] && exit 1\n'
+    elif failure == 'tree-check':
+        # the hook stages a file into the very commit, after the advance's check
+        hook = _git(git_repo, 'rev-parse', '--git-path', 'hooks/pre-commit').stdout
+        hook_path = git_repo / hook.strip()
+        hook_path.parent.mkdir(parents=True, exist_ok=True)
+        hook_path.write_text(
+            '#!/usr/bin/env bash\nprintf "hook\\n" > extra.txt\ngit add extra.txt\n',
+            encoding='utf-8',
+        )
+        hook_path.chmod(0o755)
+    else:
+        # the TERM reaches the script while the forward update runs; bash
+        # takes it once git returns, the node's branch not yet moved
+        body = (
+            f'if {forward}; then\n'
+            f'    touch "{fired}"\n'
+            f'    "{real_git}" "$@"\n'
+            '    STATUS=$?\n'
+            '    kill -TERM "$PPID"\n'
+            '    exit "$STATUS"\n'
+            'fi\n'
+        )
     _shim(monkeypatch, tmp_path_factory, 'git', body)
 
-    with pytest.raises(RuntimeError, match='rolled back and both worktrees restored'):
+    with pytest.raises(
+        RuntimeError, match='rolled back and both worktrees restored'
+    ) as raised:
         node.merge()
 
+    assert step in f'{raised.value}', raised.value
     assert _snapshot(git_repo, node) == before
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+    merges = node.db.read('events', where={'event': 'merge'})
+    assert [event['status'] for event in merges] == ['failed']
+
+
+def test_paused_merge_names_what_a_failed_rollback_left(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A rollback that cannot restore a path names it and the reset to run.
+
+    The forward update is cut short after writing the sibling's files, and
+    both the reverse update and the restore of the shared file fail: the
+    target still goes back, but the error says the merge could not be fully
+    rolled back, names the path still changed and the node's old commit, and
+    gives the exact reset that restores the target.
+    """
+    _, node = _paused_child(git_repo)
+    _land_sibling(git_repo)
+    head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
+    child_old = _git(node.worktree, 'rev-parse', 'HEAD').stdout.strip()
+    fired = tmp_path_factory.mktemp('fired') / 'forward'
+    _shim(
+        monkeypatch,
+        tmp_path_factory,
+        'git',
+        # the forward update writes the sibling's files and is cut short...
+        f'if [[ " $* " == *" read-tree -m -u "[0-9a-f]* ]]; then\n'
+        f'    [[ -e "{fired}" ]] && exit 1\n'
+        f'    touch "{fired}"\n'
+        f'    cp "{git_repo}/sib.txt" "{git_repo}/shared.txt" "{node.worktree}/"\n'
+        '    exit 130\n'
+        'fi\n'
+        # ...and nothing can write the shared file back
+        '[[ " $* " == *" checkout "*":(literal)shared.txt"* ]] && exit 1\n'
+        '[[ " $* " == *" restore "*":(literal)shared.txt"* ]] && exit 1\n',
+    )
+
+    with pytest.raises(RuntimeError, match='could NOT be fully rolled back') as raised:
+        node.merge()
+
+    error = f'{raised.value}'
+    assert f"'git -C {git_repo} reset --hard {head}'" in error, error
+    assert f'check that {node.branch} is at {child_old}' in error, error
+    assert '(still changed: shared.txt)' in error, error
+    # the target is back, and the node keeps its frozen step and pause
+    assert _git(git_repo, 'rev-parse', 'HEAD').stdout.strip() == head
+    assert _git(node.worktree, 'rev-parse', 'HEAD').stdout.strip() == child_old
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+    merges = node.db.read('events', where={'event': 'merge'})
+    assert [event['status'] for event in merges] == ['failed']
+
+
+@pytest.mark.parametrize(
+    argnames=('written', 'cut_short', 'status'),
+    argvalues=[
+        # an edit to the file the advance changes, which the update refuses
+        ('shared.txt', False, ' M shared.txt'),
+        # a new file where the advance adds one, which the update refuses
+        ('sib.txt', False, '?? sib.txt'),
+        # an edit over a file an update cut short had already written
+        ('shared.txt', True, ' M shared.txt'),
+    ],
+    ids=['changed-path', 'added-path', 'after-cut-short'],
+)
+def test_paused_merge_rollback_keeps_a_write_made_during_the_merge(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    written: str,
+    cut_short: bool,
+    status: str,
+) -> None:
+    """A rollback keeps a write made in the paused worktree during the merge.
+
+    Nothing locks a paused worktree against a chat or a hand edit, so a file
+    the advance changes can be written after the merge judged the move safe,
+    and the worktree update then fails over it. The rollback returns only
+    what the update itself wrote: the other write survives byte for byte
+    and the error names it, while the target, the node's branch and index,
+    and every other path go back to their pre-merge state.
+    """
+    _, node = _paused_child(git_repo)
+    _land_sibling(git_repo)
+    before = _snapshot(git_repo, node)
+    foreign = 'written during the merge\n'
+    fired = tmp_path_factory.mktemp('fired') / 'forward'
+    real_git = shutil.which('git')
+    # the write lands as the forward update starts; an update cut short has
+    # written the sibling's files first, and a whole one runs and refuses
+    body = (
+        f'if [[ " $* " == *" read-tree -m -u "[0-9a-f]* && ! -e "{fired}" ]]; then\n'
+        f'    touch "{fired}"\n'
+    )
+    if cut_short:
+        body += (
+            f'    cp "{git_repo}/sib.txt" "{git_repo}/shared.txt" "{node.worktree}/"\n'
+            f'    printf "{foreign.strip()}\\n" > "{node.worktree / written}"\n'
+            '    exit 130\n'
+        )
+    else:
+        body += (
+            f'    printf "{foreign.strip()}\\n" > "{node.worktree / written}"\n'
+            f'    exec "{real_git}" "$@"\n'
+        )
+    body += 'fi\n'
+    _shim(monkeypatch, tmp_path_factory, 'git', body)
+
+    with pytest.raises(
+        RuntimeError, match='rolled back and both worktrees restored'
+    ) as raised:
+        node.merge()
+
+    # the write survives and is named...
+    error = f'{raised.value}'
+    assert f"left as found in {node.branch}'s worktree" in error, error
+    assert error.endswith(f'during the merge: {written}'), error
+    assert (node.worktree / written).read_text(encoding='utf-8') == foreign
+    # ...and everything else is as it was: the target whole, the node's
+    # branch and index, its frozen step, and the advance's other path
+    assert _state(git_repo) == before[:3]
+    head, index, entries = _state(node.worktree)
+    assert (head, index) == before[3:5]
+    expected = [*before[5].splitlines(), status]
+    assert sorted(entries.splitlines()) == sorted(expected), entries
+    if written == 'shared.txt':
+        assert not (node.worktree / 'sib.txt').exists()
+    else:
+        assert (node.worktree / 'shared.txt').read_text(encoding='utf-8') == SHARED
     assert node.status() == 'paused'
     _assert_frozen(node)
     merges = node.db.read('events', where={'event': 'merge'})

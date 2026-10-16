@@ -414,26 +414,82 @@ clear_squash_markers() {
         rm -rf -- "$MARKER"
     done
 }
+# each folder the wiki refresh regenerates, its wiki root, and the untracked
+# files listed there before its wiki update: reset --hard keeps untracked
+# files, so an index or .wiki/ state a failed refresh created would outlive
+# the restore and refuse the retry as a stray -- a failure drops each such
+# path its folder's listing lacks and leaves every file listed before;
+# RESIDUE names what could not be dropped (wiki_owned, defined with the
+# refresh, runs only once a folder is listed)
+REFRESH_FOLDERS=()
+REFRESH_OWNERS=()
+RESIDUE=""
+drop_refresh_residue() {
+    RESIDUE=""
+    REFRESH_I=0
+    while [[ "$REFRESH_I" -lt ${#REFRESH_FOLDERS[@]} ]]; do
+        REFRESH_FOLDER=${REFRESH_FOLDERS[$REFRESH_I]}
+        REFRESH_OWNER=${REFRESH_OWNERS[$REFRESH_I]}
+        LISTED=()
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
+        while IFS= read -r -d '' LISTED_PATH; do
+            LISTED+=("$LISTED_PATH")
+        done <"$TMP_DIR/wiki-listed-$REFRESH_I"
+        REFRESH_I=$((REFRESH_I + 1))
+        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+            --others --exclude-standard -- ":(literal)$REFRESH_FOLDER" >"$TMP_DIR/wiki-residue"; then
+            RESIDUE+="the indexes the refresh created under $REFRESH_FOLDER (listing them failed), "
+            continue
+        fi
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
+        while IFS= read -r -d '' CREATED; do
+            wiki_owned "$CREATED" "$REFRESH_OWNER" || continue
+            [[ "$CREATED" == */_index.md || "$CREATED" == "$REFRESH_OWNER/.wiki/"* ]] || continue
+            CREATED_NEW=true
+            # safe under set -u even on bash 3.2: an empty array reads as unset
+            for LISTED_PATH in ${LISTED[@]+"${LISTED[@]}"}; do
+                if [[ "$LISTED_PATH" == "$CREATED" ]]; then
+                    CREATED_NEW=false
+                    break
+                fi
+            done
+            [[ "$CREATED_NEW" == true ]] || continue
+            # 2>/dev/null: a path rm cannot remove is named by the check below
+            rm -f -- "$PARENT_WORKTREE_DIR/$CREATED" 2>/dev/null || true
+            if [[ -e "$PARENT_WORKTREE_DIR/$CREATED" || -L "$PARENT_WORKTREE_DIR/$CREATED" ]]; then
+                RESIDUE+="$CREATED, "
+            fi
+        done <"$TMP_DIR/wiki-residue"
+    done
+}
 # fail after the squash is staged: record the event, restore or preserve the
 # target, and exit -- a fresh merge owns the staged state and resets it away,
 # while a --continue's staged state is the operator's own conflict
-# resolution, which a reset --hard would destroy; arguments are joined with
-# spaces into the message, so long messages split across lines like echo's
+# resolution, which a reset --hard would destroy; either way the untracked
+# files a failed refresh created go; arguments are joined with spaces into
+# the message, so long messages split across lines like echo's
 fail_target() {
     end_merge_event failed
     if [[ "$CONTINUE" != true ]]; then
         # -q: drop reset's HEAD-is-now line so the
         # Error: below is the single user-facing line
         git -C "$PARENT_WORKTREE_DIR" reset -q --hard HEAD || true
-        if target_restored; then
+        drop_refresh_residue
+        if [[ -z "$RESIDUE" ]] && target_restored; then
             echo "Error: $*; the parent worktree has been restored" >&2
         else
             echo "Error: $*; the parent worktree could NOT be restored -- run" \
-                "'git -C $PARENT_Q reset --hard HEAD' before merging again" >&2
+                "'git -C $PARENT_Q reset --hard HEAD'${RESIDUE:+ and remove ${RESIDUE%, }}" \
+                "before merging again" >&2
         fi
     else
+        drop_refresh_residue
         echo "Error: $*; the staged squash is left in place --" \
-            "fix and re-run with --continue" >&2
+            "fix${RESIDUE:+, remove ${RESIDUE%, },} and re-run with --continue" >&2
     fi
     exit 1
 }
@@ -556,6 +612,7 @@ TARGET_TREE=""
 CARRY_ERROR=""
 CHILD_MOVED=false
 UNRESTORED=""
+FOREIGN=""
 carry_prepare() {
     if ! CHILD_HEAD=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null) \
         || ! CHILD_TIP=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
@@ -672,8 +729,8 @@ carry_advance() {
     fi
     ADVANCING=false
 }
-# restored means a moved child back at CHILD_OLD with every path the advance
-# changes as it was, and the target at its pre-merge HEAD: clean and out of
+# restored means a moved child back at CHILD_OLD with every path the forward
+# update wrote returned, and the target at its pre-merge HEAD: clean and out of
 # the squash after a fresh merge, and after a --continue holding the squash
 # message the re-run reads
 carry_restored() {
@@ -687,6 +744,92 @@ carry_restored() {
     else
         target_restored
     fi
+}
+# build the private indexes carry_return judges the disk by: one holding
+# CHILD_OLD's entry, one the advance's, for each path the advance changes
+carry_judges() {
+    : >"$TMP_DIR/carry-old-info"
+    : >"$TMP_DIR/carry-new-info"
+    # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
+    # name is never C-quoted by core.quotePath into a path that exists nowhere
+    while IFS= read -r -d '' CARRY_META && IFS= read -r -d '' CARRY_PATH; do
+        read -r OLD_MODE NEW_MODE OLD_SHA NEW_SHA _ <<<"${CARRY_META#:}"
+        [[ "$OLD_MODE" == 000000 ]] \
+            || printf '%s %s\t%s\0' "$OLD_MODE" "$OLD_SHA" "$CARRY_PATH" >>"$TMP_DIR/carry-old-info"
+        [[ "$NEW_MODE" == 000000 ]] \
+            || printf '%s %s\t%s\0' "$NEW_MODE" "$NEW_SHA" "$CARRY_PATH" >>"$TMP_DIR/carry-new-info"
+    done <"$TMP_DIR/carry-paths"
+    GIT_INDEX_FILE="$TMP_DIR/carry-old-judge" git -C "$WORKTREE_DIR" update-index -z \
+        --index-info <"$TMP_DIR/carry-old-info" \
+        && GIT_INDEX_FILE="$TMP_DIR/carry-new-judge" git -C "$WORKTREE_DIR" update-index -z \
+            --index-info <"$TMP_DIR/carry-new-info"
+}
+# whether path $1 holds the entry $2 ("<mode> <sha>", empty for no path) that
+# private index $3 records: the porcelain diff compares content, as git add
+# would store it, wherever the stat data says nothing
+carry_holds() {
+    if [[ -z "$2" ]]; then
+        [[ ! -e "$WORKTREE_DIR/$1" && ! -L "$WORKTREE_DIR/$1" ]]
+    else
+        GIT_INDEX_FILE="$3" git -C "$WORKTREE_DIR" diff --quiet --no-ext-diff --no-textconv \
+            -- ":(literal)$1" 2>/dev/null
+    fi
+}
+# return path $2, whose diff-tree record from CHILD_OLD to the advance is $1,
+# to CHILD_OLD wherever it still holds what the forward update wrote: the
+# index entry and the disk are each judged by content -- CHILD_OLD's stays,
+# the advance's is the update's own write and goes back, and anything else
+# was written by someone else during the merge, so it is left as found and
+# named in FOREIGN (a write of the advance's own bytes cannot be told apart
+# and returns like the update's); UNRESTORED names a path that cannot go back
+carry_return() {
+    read -r OLD_MODE NEW_MODE OLD_SHA NEW_SHA _ <<<"${1#:}"
+    OLD_ENTRY=""
+    [[ "$OLD_MODE" == 000000 ]] || OLD_ENTRY="$OLD_MODE $OLD_SHA"
+    NEW_ENTRY=""
+    [[ "$NEW_MODE" == 000000 ]] || NEW_ENTRY="$NEW_MODE $NEW_SHA"
+    CARRY_LEFT=false
+    # the index entry, picked out by its exact path (a literal pathspec
+    # also matches the entries under a directory of that name)
+    if ! git -C "$WORKTREE_DIR" ls-files -s -z -- ":(literal)$2" >"$TMP_DIR/carry-entry"; then
+        UNRESTORED+="$2, "
+        return 0
+    fi
+    INDEX_ENTRY=""
+    while IFS= read -r -d '' LISTED_ENTRY; do
+        [[ "${LISTED_ENTRY#*$'\t'}" == "$2" ]] || continue
+        INDEX_ENTRY=${LISTED_ENTRY%%$'\t'*}
+        INDEX_ENTRY=${INDEX_ENTRY% *}
+    done <"$TMP_DIR/carry-entry"
+    if [[ "$INDEX_ENTRY" == "$NEW_ENTRY" && "$INDEX_ENTRY" != "$OLD_ENTRY" ]]; then
+        # a mode-0 entry removes the path from the index
+        if ! printf '%s %s\t%s\0' "$OLD_MODE" "$OLD_SHA" "$2" \
+            | git -C "$WORKTREE_DIR" update-index -z --index-info; then
+            UNRESTORED+="$2, "
+            return 0
+        fi
+    elif [[ "$INDEX_ENTRY" != "$OLD_ENTRY" ]]; then
+        CARRY_LEFT=true
+    fi
+    # the disk, written by restore alone so the index stays as judged above
+    if carry_holds "$2" "$OLD_ENTRY" "$TMP_DIR/carry-old-judge"; then
+        :
+    elif carry_holds "$2" "$NEW_ENTRY" "$TMP_DIR/carry-new-judge"; then
+        if [[ -z "$OLD_ENTRY" ]]; then
+            # 2>/dev/null: a path rm cannot remove is named by the check below
+            rm -f -- "$WORKTREE_DIR/$2" 2>/dev/null || true
+        else
+            git -C "$WORKTREE_DIR" restore --source="$CHILD_OLD" --worktree --quiet \
+                -- ":(literal)$2" || true
+        fi
+        if ! carry_holds "$2" "$OLD_ENTRY" "$TMP_DIR/carry-old-judge"; then
+            UNRESTORED+="$2, "
+            return 0
+        fi
+    else
+        CARRY_LEFT=true
+    fi
+    [[ "$CARRY_LEFT" != true ]] || FOREIGN+="$2, "
 }
 # undo a carried merge after the target committed: the reverse two-tree update
 # returns the child's index and worktree to CHILD_OLD with its dirt intact (a
@@ -705,42 +848,32 @@ carry_rollback() {
         git -C "$WORKTREE_DIR" read-tree -m -u "$ADVANCE_HEAD" "$CHILD_OLD" \
             2>"$TMP_DIR/carry-reverse-err" || true
         # a forward update cut short leaves advance content the reverse update
-        # keeps, since its index entries still match CHILD_OLD, so each path
-        # the advance changes is judged by its state and returned to CHILD_OLD
-        # -- carry_prepare proved every one clean there, or absent; the paths
+        # keeps, since its index entries still match CHILD_OLD, and a failed
+        # one may have met a write made in the paused worktree after
+        # carry_prepare's check (nothing locks it against chat or a hand
+        # edit), which a forced restore would destroy -- so each path the
+        # advance changes is judged by its content (carry_return); the paths
         # it adds go first, so a file can come back where a directory stood
-        if ! git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=A \
-            "$CHILD_OLD" "$ADVANCE_HEAD" >"$TMP_DIR/carry-added" \
-            || ! git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=a \
-                "$CHILD_OLD" "$ADVANCE_HEAD" >"$TMP_DIR/carry-changed"; then
+        if ! git -C "$WORKTREE_DIR" diff-tree -r -z --no-renames \
+            "$CHILD_OLD" "$ADVANCE_HEAD" >"$TMP_DIR/carry-paths" \
+            || ! carry_judges; then
             UNRESTORED="the paths the advance changes (listing them failed), "
+        else
+            # read NUL-delimited so a path with spaces stays one
+            # entry and a non-ASCII name is never C-quoted by
+            # core.quotePath into a path that exists nowhere
+            while IFS= read -r -d '' CARRY_META && IFS= read -r -d '' CARRY_PATH; do
+                [[ "$CARRY_META" == *" A" ]] || continue
+                carry_return "$CARRY_META" "$CARRY_PATH"
+            done <"$TMP_DIR/carry-paths"
+            # read NUL-delimited so a path with spaces stays one
+            # entry and a non-ASCII name is never C-quoted by
+            # core.quotePath into a path that exists nowhere
+            while IFS= read -r -d '' CARRY_META && IFS= read -r -d '' CARRY_PATH; do
+                [[ "$CARRY_META" != *" A" ]] || continue
+                carry_return "$CARRY_META" "$CARRY_PATH"
+            done <"$TMP_DIR/carry-paths"
         fi
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
-        while IFS= read -r -d '' CARRY_PATH; do
-            git -C "$WORKTREE_DIR" update-index --force-remove -- "$CARRY_PATH" || true
-            # 2>/dev/null: a path rm cannot remove is named by the check below
-            rm -f -- "$WORKTREE_DIR/$CARRY_PATH" 2>/dev/null || true
-            if [[ -e "$WORKTREE_DIR/$CARRY_PATH" || -L "$WORKTREE_DIR/$CARRY_PATH" ]] \
-                || [[ -n "$(git -C "$WORKTREE_DIR" ls-files -- ":(literal)$CARRY_PATH")" ]]; then
-                UNRESTORED+="$CARRY_PATH, "
-            fi
-        done <"$TMP_DIR/carry-added"
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
-        while IFS= read -r -d '' CARRY_PATH; do
-            if git -C "$WORKTREE_DIR" diff --cached --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH" \
-                && git -C "$WORKTREE_DIR" diff --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH"; then
-                continue
-            fi
-            git -C "$WORKTREE_DIR" checkout -q "$CHILD_OLD" -- ":(literal)$CARRY_PATH" || true
-            if ! git -C "$WORKTREE_DIR" diff --cached --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH" \
-                || ! git -C "$WORKTREE_DIR" diff --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH"; then
-                UNRESTORED+="$CARRY_PATH, "
-            fi
-        done <"$TMP_DIR/carry-changed"
     fi
     if [[ "$CONTINUE" != true ]]; then
         TARGET_RESET=--hard
@@ -753,6 +886,11 @@ carry_rollback() {
         git -C "$PARENT_WORKTREE_DIR" reset --soft "$TARGET_BEFORE" || true
         cp "$TMP_DIR/squash-msg" "$SQUASH_MSG_FILE" || true
     fi
+    FOREIGN_NOTE=""
+    if [[ -n "$FOREIGN" ]]; then
+        FOREIGN_NOTE="; left as found in $BRANCH's worktree, since something else wrote"
+        FOREIGN_NOTE+=" them during the merge: ${FOREIGN%, }"
+    fi
     if ! carry_restored; then
         # the reverse update's own refusal says why the child did not move back
         [[ ! -s "$TMP_DIR/carry-reverse-err" ]] || cat "$TMP_DIR/carry-reverse-err" >&2
@@ -763,12 +901,14 @@ carry_rollback() {
         fi
         echo "Error: $*; the merge could NOT be fully rolled back -- run" \
             "'git -C $PARENT_Q reset $TARGET_RESET $TARGET_BEFORE' to restore" \
-            "$PARENT_BRANCH$CHILD_CHECK, before merging again" >&2
+            "$PARENT_BRANCH$CHILD_CHECK, before merging again$FOREIGN_NOTE" >&2
     elif [[ "$CONTINUE" == true ]]; then
         echo "Error: $*; the merge was rolled back and $BRANCH's worktree restored;" \
-            "the staged squash is left in place -- fix and re-run with --continue" >&2
+            "the staged squash is left in place -- fix and re-run with" \
+            "--continue$FOREIGN_NOTE" >&2
     else
-        echo "Error: $*; the merge was rolled back and both worktrees restored" >&2
+        echo "Error: $*; the merge was rolled back and both worktrees" \
+            "restored$FOREIGN_NOTE" >&2
     fi
     exit 1
 }
@@ -945,12 +1085,14 @@ if [[ "$CONTINUE" != true ]]; then
         # -q: drop reset's HEAD-is-now line so the
         # Error: below is the single user-facing line
         git -C "$PARENT_WORKTREE_DIR" reset -q --hard HEAD || true
-        if target_restored; then
+        drop_refresh_residue
+        if [[ -z "$RESIDUE" ]] && target_restored; then
             echo "Error: merge of $BRANCH was interrupted;" \
                 "the parent worktree has been restored" >&2
         else
             echo "Error: merge of $BRANCH was interrupted; the parent worktree could NOT be" \
-                "restored -- run 'git -C $PARENT_Q reset --hard HEAD' before merging again" >&2
+                "restored -- run 'git -C $PARENT_Q reset --hard HEAD'" \
+                "${RESIDUE:+and remove ${RESIDUE%, } }before merging again" >&2
         fi
         exit 1
     }
@@ -1155,9 +1297,13 @@ fi
 # ------ wiki refresh
 
 # whether $1, untracked under wiki root $2, is the refresh's to index or
-# stage: the wiki's walk lists no dot-prefixed file or folder below its root
-# (mirrors plasma-wiki's Wiki._is_excluded_file and Wiki._is_excluded_dir),
-# while the root's own .wiki/ state is the tool's
+# stage, by the wiki's dot rule: the walk lists no dot-prefixed file or
+# folder below its root (mirrors the dot test of plasma-wiki's
+# Wiki._is_excluded_file and Wiki._is_excluded_dir), while the root's own
+# .wiki/ state is the tool's; the walk's other exclusions, symlinks and
+# exclude.patterns matches, are not mirrored, so such a file refuses the
+# merge though the refresh would skip it -- safe, and committing or moving
+# the file clears the refusal
 wiki_owned() {
     [[ "/${1#"$2"/}" != */.* || "$1" == "$2/.wiki/"* ]]
 }
@@ -1224,15 +1370,19 @@ if command -v wiki &>/dev/null; then
                 "after merging $BRANCH failed"
         fi
         [[ -n "$TRACKED" ]] || continue
+        # the wiki indexes by the repository's own ignore rules alone, with
+        # core.excludesFile pinned out (mirrors plasma-wiki's
+        # Wiki._check_ignore), so the strays are listed by them too: a file
+        # only a personal ignore hides would still get a row; the listing is
+        # also what a failure keeps (drop_refresh_residue)
+        LISTED_FILE="$TMP_DIR/wiki-listed-${#REFRESH_FOLDERS[@]}"
+        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+            --others --exclude-standard -- ":(literal)$INDEX_REL" >"$LISTED_FILE"; then
+            fail_target "listing the untracked files under $INDEX_DIR failed"
+        fi
+        REFRESH_FOLDERS+=("$INDEX_REL")
+        REFRESH_OWNERS+=("$INDEX_REL")
         if [[ "$INDEX_DIR" == "$WIKI_DIR" ]]; then
-            # the wiki indexes by the repository's own ignore rules alone, with
-            # core.excludesFile pinned out (mirrors plasma-wiki's
-            # Wiki._check_ignore), so the strays are listed by them too: a file
-            # only a personal ignore hides would still get a row
-            if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
-                --others --exclude-standard -- ":(literal)$INDEX_REL" >"$TMP_DIR/wiki-strays"; then
-                fail_target "listing the untracked files under $INDEX_DIR failed"
-            fi
             STRAYS=""
             # read NUL-delimited so a path with spaces stays one entry and a
             # non-ASCII name is never C-quoted by core.quotePath into a path
@@ -1240,7 +1390,7 @@ if command -v wiki &>/dev/null; then
             while IFS= read -r -d '' STRAY; do
                 wiki_owned "$STRAY" "$INDEX_REL" || continue
                 STRAYS+="$STRAY, "
-            done <"$TMP_DIR/wiki-strays"
+            done <"$LISTED_FILE"
             if [[ -n "$STRAYS" ]]; then
                 fail_target "untracked files under $INDEX_DIR would be indexed by the" \
                     "squash of $BRANCH: ${STRAYS%, }; commit them or move them" \
@@ -1257,9 +1407,9 @@ if command -v wiki &>/dev/null; then
         # of the untracked files now there, stage the indexes the refresh
         # created and its tool-owned .wiki/ state -- a file the walk never
         # lists stays out of the squash
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
         while IFS= read -r -d '' CREATED; do
             wiki_owned "$CREATED" "$INDEX_REL" || continue
             [[ "$CREATED" == */_index.md || "$CREATED" == "$INDEX_REL/.wiki/"* ]] || continue
@@ -1331,28 +1481,33 @@ if command -v wiki &>/dev/null; then
         fi
         SUBTREE=${FOLDER#"$OWNER"}
         SUBTREE=${SUBTREE#/}
-        # every pathspec names the folder literally, so a glob character in a
-        # folder name never matches a sibling; the strays are listed by the
-        # wiki's own ignore rules, as under the project wiki (mirrors
-        # plasma-wiki's Wiki._check_ignore)
+        # every pathspec names the folder literally, so a glob character
+        # in a folder name never matches a sibling; the strays are
+        # listed by the wiki's own ignore rules, as under the project
+        # wiki (mirrors plasma-wiki's Wiki._check_ignore), and the
+        # listing is also what a failure keeps (drop_refresh_residue)
+        LISTED_FILE="$TMP_DIR/wiki-listed-${#REFRESH_FOLDERS[@]}"
         if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
-            --others --exclude-standard -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-strays"; then
+            --others --exclude-standard -- ":(literal)$FOLDER" >"$LISTED_FILE"; then
             fail_target "listing the untracked files under $FOLDER_DIR failed"
         fi
+        REFRESH_FOLDERS+=("$FOLDER")
+        REFRESH_OWNERS+=("$OWNER")
         STRAYS=""
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
         while IFS= read -r -d '' STRAY; do
             wiki_owned "$STRAY" "$OWNER" || continue
             STRAYS+="$STRAY, "
-        done <"$TMP_DIR/wiki-strays"
+        done <"$LISTED_FILE"
         if [[ -n "$STRAYS" ]]; then
             # a folder its wiki excludes is never refreshed, strays or not
             # NOTE: the phrase is plasma-wiki's Wiki._resolve_folder refusal,
             #   which exits 2 like every wiki error -- a reworded message turns
             #   this skip into a refused merge, safe but blocking, and
-            #   test_merge_skips_an_index_in_a_folder_its_wiki_excludes pins it
+            #   test_merge_skips_an_index_in_a_folder_its_wiki_excludes's
+            #   pattern-untracked-file case pins it
             wiki update --check --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} \
                 >/dev/null 2>"$TMP_DIR/wiki-err" || true
             grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err" && continue
@@ -1376,9 +1531,9 @@ if command -v wiki &>/dev/null; then
             fail_target "staging the refreshed wiki indexes under $FOLDER_DIR" \
                 "after merging $BRANCH failed"
         fi
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
         while IFS= read -r -d '' CREATED; do
             wiki_owned "$CREATED" "$OWNER" || continue
             [[ "$CREATED" == */_index.md || "$CREATED" == "$OWNER/.wiki/"* ]] || continue
