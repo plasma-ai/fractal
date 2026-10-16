@@ -1297,9 +1297,13 @@ fi
 # ------ wiki refresh
 
 # whether $1, untracked under wiki root $2, is the refresh's to index or
-# stage: the wiki's walk lists no dot-prefixed file or folder below its root
-# (mirrors plasma-wiki's Wiki._is_excluded_file and Wiki._is_excluded_dir),
-# while the root's own .wiki/ state is the tool's
+# stage, by the wiki's dot rule: the walk lists no dot-prefixed file or
+# folder below its root (mirrors the dot test of plasma-wiki's
+# Wiki._is_excluded_file and Wiki._is_excluded_dir), while the root's own
+# .wiki/ state is the tool's; the walk's other exclusions, symlinks and
+# exclude.patterns matches, are not mirrored, so such a file refuses the
+# merge though the refresh would skip it -- safe, and committing or moving
+# the file clears the refusal
 wiki_owned() {
     [[ "/${1#"$2"/}" != */.* || "$1" == "$2/.wiki/"* ]]
 }

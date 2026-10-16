@@ -256,12 +256,14 @@ may include breaking changes, each listed under a Breaking heading.
   wiki, which the wiki refuses to sweep. The refresh reads the disk, so the
   merge refuses an untracked file under the project wiki or in a refreshed
   folder, naming it, instead of indexing it into the squash commit, where its
-  row would dangle in every clean checkout. Strays are judged by the wiki's own
-  rules: a file only a personal `core.excludesFile` hides refuses too, and one
-  under a dot-prefixed folder, which the wiki never indexes, neither refuses the
-  merge nor rides the squash commit. A wiki declared at the worktree root
-  refuses the merge by name, since every refresh would walk the whole worktree
-  and leave the target dirty.
+  row would dangle in every clean checkout. Strays are judged by the wiki's
+  ignore and dot rules: a file only a personal `core.excludesFile` hides refuses
+  too, and one under a dot-prefixed folder, which the wiki never indexes,
+  neither refuses the merge nor rides the squash commit. A symlink, or a file
+  the wiki's `exclude.patterns` matches, still refuses though the wiki would
+  skip it, which is safe; committing or moving the file clears the refusal. A
+  wiki declared at the worktree root refuses the merge by name, since every
+  refresh would walk the whole worktree and leave the target dirty.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The

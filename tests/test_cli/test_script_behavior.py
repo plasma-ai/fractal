@@ -192,9 +192,11 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   folder its wiki excludes is skipped; and a failed refresh restores the
   target with the child unadvanced, as does a failed declaration read,
   listing, or staging step around it. Untracked files are judged by the
-  wiki's own rules: a file only a personal ignore hides refuses the merge,
-  since the wiki would index it, and one under a dot-prefixed folder neither
-  refuses it nor rides the squash. A merged index whose folder encloses
+  wiki's ignore and dot rules: a file only a personal ignore hides refuses
+  the merge, since the wiki would index it, and one under a dot-prefixed
+  folder neither refuses it nor rides the squash; a symlink, or a file the
+  wiki's ``exclude.patterns`` matches, still refuses, which is safe, and
+  committing or moving the file clears it. A merged index whose folder encloses
   another declared wiki, which the wiki refuses to sweep, lands as the
   driver merged it, with a warning.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
@@ -1636,13 +1638,15 @@ def test_merge_judges_untracked_files_by_the_wikis_own_rules(
     stray: str,
     refused: bool,
 ) -> None:
-    """The refresh's untracked-file guard follows the wiki's own walk.
+    """The refresh's untracked-file guard follows the wiki's ignore and dot rules.
 
     The wiki indexes by the repository's ignore rules alone, so a file only a
     personal ``core.excludesFile`` hides would get a row in the squash commit
     while the file itself stays behind: the merge refuses it by name. A file
     under a dot-prefixed folder is never indexed, so it neither refuses the
-    merge nor rides the squash commit.
+    merge nor rides the squash commit. The guard mirrors no other exclusion:
+    a symlink, or a file the wiki's ``exclude.patterns`` matches, still
+    refuses, which is safe, and committing or moving the file clears it.
     """
     repo = _init_tree(tmp_path / 'strayrepo')
     _declare_wiki(repo / 'library', 'cards')
