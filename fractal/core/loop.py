@@ -22,6 +22,7 @@ from fractal.constants import (
     PAUSE_ABORT_FILE,
     PGID_FILE,
     SOCKET_FILE,
+    STEER_REASON_PREFIX,
     STEP_PGID_FILE,
 )
 from fractal.exceptions import AgentStreamError, _Abort, _ThinkingCap
@@ -178,9 +179,10 @@ class Step:
         """Load the step file a step row names.
 
         A row's step number is the file's sorted position when its
-        iteration began, which a file added or removed since shifts; the
-        name and its occurrence among same-named files (see
-        ``fractal.core.time._step_occurrence``) survive such an edit.
+        iteration began, which any file added or removed since shifts;
+        the name and its occurrence among same-named files (see
+        ``fractal.core.time._step_occurrence``) survive an edit to
+        differently-named files only.
 
         Args:
             steps_dir: The node's ``steps/`` directory.
@@ -2093,7 +2095,7 @@ class Loop:
                         )
                     else:
                         if self._step_id is not None:
-                            steer_reason = f'steered: {trigger}'
+                            steer_reason = f'{STEER_REASON_PREFIX}{trigger}'
                             if paused:
                                 steer_reason = f'{trigger}; paused before the steer'
                             if attempt > 0:
@@ -2558,6 +2560,18 @@ class Loop:
                 file=sys.stderr,
             )
         self._step_time_budget = self._time_budget_label(step_timeout_label)
+
+        # the ceiling lands on the step row, so a reader outside the seat
+        # reports the one this launch enforces, never a step file edited
+        # since (the loop reads step files once per iteration)
+        if self._step_id is not None:
+            try:
+                node.record.step_timeout(
+                    step_id=self._step_id,
+                    seconds=self._step_timeout_effective,
+                )
+            except Exception:
+                pass
 
         # a failed build (builder error, missing charter/step file) must fail
         # the step -- launching the agent on an empty prompt would burn

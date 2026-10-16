@@ -52,6 +52,7 @@ __all__ = [
     'test_duration_validation_mirrors_the_launch_contract',
     'test_step_timeout_frontmatter_substitutes_at_launch',
     'test_time_budget_renders_each_steps_effective_timeout',
+    'test_step_limit_reports_the_ceiling_its_launch_enforces',
     'test_malformed_midrun_retune_warns_and_keeps_the_previous_value',
     'test_provider_frontmatter_rebinds_the_boot_agent',
     'test_agent_env_publishes_node_branch',
@@ -79,6 +80,7 @@ __all__ = [
     'test_idle_clock_fires_on_a_silent_agent',
     'test_deadline_reap_reports_on_stderr',
     'test_a_reaped_tool_is_gone_before_the_next_launch',
+    'test_steered_launch_reports_the_deadline_it_runs_under',
     'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
@@ -868,6 +870,53 @@ def test_time_budget_renders_each_steps_effective_timeout(
     for (env, prompt), budget in zip(loop.seen, ['6h/step', '2h/step'], strict=True):
         assert f'Time budget: {budget}' in prompt
         assert env['TIME_BUDGET'] == budget
+
+
+def test_step_limit_reports_the_ceiling_its_launch_enforces(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step file edited mid-iteration leaves the step's reported ceiling.
+
+    The loop reads step files once per iteration, so an edit landing
+    mid-iteration changes the file but not the ceiling the step runs
+    under. Each launch records that ceiling on its row, so a reader
+    outside the seat -- with no ``STEP_ID`` of its own -- reports the
+    enforced 6h, never the file's 1h.
+    """
+    monkeypatch.setenv('_NODE', '')
+    steps_dir = loop_node.node_dir / 'steps'
+    (steps_dir / '02-EXECUTE.md').write_text(
+        '---\ntimeout: 6h\n---\n# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
+
+    class EditingLoop(MockLoop):
+        """Mock loop whose PLAN launch shortens EXECUTE's timeout on disk."""
+
+        def __init__(self: EditingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``EditingLoop``."""
+            super().__init__(node, **kwargs)
+            self.reported: list[tuple[Optional[float], int]] = []
+
+        def _launch(
+            self: EditingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Edit EXECUTE's file during PLAN; record EXECUTE's reported limit."""
+            if step.name == 'PLAN':
+                (steps_dir / '02-EXECUTE.md').write_text(
+                    '---\ntimeout: 1h\n---\n# EXECUTE\n\nWork.\n',
+                    encoding='utf-8',
+                )
+            else:
+                limit = self.node.time.limit('step')
+                self.reported.append((limit, self._step_timeout_effective))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = EditingLoop(loop_node)
+    assert loop.run() == 0
+    # the reader outside the seat agrees with the ceiling the loop enforces
+    assert loop.reported == [(21600.0, 21600)]
 
 
 @pytest.mark.parametrize(
@@ -2150,6 +2199,51 @@ def test_a_reaped_tool_is_gone_before_the_next_launch(
     assert check_file.read_text(encoding='utf-8') == 'dead\n'
 
 
+def test_steered_launch_reports_the_deadline_it_runs_under(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A steered relaunch's step countdown matches the deadline the loop arms.
+
+    The loop charges the stuck launch's span against the steered launch's
+    ceiling, and ``time remaining`` finds that span by the reason the steer
+    closed the stuck row with -- so the countdown the steered launch reads
+    is the deadline it runs under, never a fresh ceiling.
+    """
+    # a no-progress clock long enough to give the stuck launch a span
+    monkeypatch.setattr(loop_module, 'NO_PROGRESS_SECONDS', 3)
+    silent = _claude_script(_INIT, _TOOL_START, _TOOL_RESULT, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([silent, resumed, _claude_script(_INIT, _RESULT)])
+
+    class ReportingLoop(ScriptedLoop):
+        """Scripted loop recording each launch's countdown and armed deadline."""
+
+        def __init__(self: ReportingLoop, node: Node, agent: ScriptedClaude) -> None:
+            """Initialize ``ReportingLoop``."""
+            super().__init__(node, agent)
+            self.seen: list[tuple[Optional[float], int]] = []
+
+        def _launch(
+            self: ReportingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the step's time remaining and armed limit, then launch."""
+            remaining = self.node.time.remaining(scope='step')
+            self.seen.append((remaining, self._step_limit_seconds))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = ReportingLoop(loop_node, agent)
+    loop.run()
+    # the stuck PLAN launch, its steered relaunch, then EXECUTE
+    assert len(agent.argvs) == 3
+    remaining, armed = loop.seen[1]
+    assert remaining is not None
+    # both carry the stuck launch's span (the armed deadline in whole
+    # seconds); a countdown missing it reads the whole span over
+    assert armed - 2 <= remaining <= armed + 1
+
+
 def test_launch_stamps_the_effort_on_the_step_row(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -3320,8 +3414,14 @@ def test_soft_cap_warning_fires_once_for_unbraked_caps(
         (('6h', '4h'), False, False),
         (('6h', None), False, True),
         (('6h', '4h'), True, True),
+        (('soon', '4h'), False, True),
     ],
-    ids=['every-step-bounded', 'one-step-unbounded', 'sync-unbounded'],
+    ids=[
+        'every-step-bounded',
+        'one-step-unbounded',
+        'sync-unbounded',
+        'malformed-step',
+    ],
 )
 def test_soft_cap_warning_counts_step_timeouts(
     loop_node: Node,
@@ -3336,7 +3436,8 @@ def test_soft_cap_warning_counts_step_timeouts(
     With no run/iter timeout and no node ``step_timeout``, each step file's
     ``timeout:`` line still bounds its own launch, so steps that all carry
     one leave no runaway exposure; a step without one, or the SYNC step
-    (which runs on the node value), still does.
+    (which runs on the node value), still does, as does a step whose line
+    does not parse (its launch falls back to the node value).
     """
     node = loop_node
     monkeypatch.setattr(MockLoop, '_preflight', lambda self: None)

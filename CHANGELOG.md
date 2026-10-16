@@ -321,16 +321,26 @@ may include breaking changes, each listed under a Breaking heading.
   session and goes unmatched.
 - A step file's `timeout:` frontmatter now reaches every report of that step's
   limit, not only its enforcement. `$TIME_BUDGET` is rebuilt for each step and
-  names that step's own ceiling (a 6h step on a 2h node reads `6h/step`).
+  names that step's own ceiling (a 6h step on a 2h node reads `6h/step`). Each
+  launch records the ceiling it enforces on its step row, and
   `fractal node time remaining` counts down, and `Time.limit('step')` returns,
-  the active step's ceiling, and the node's own seat reads the exact value its
-  launch exported; an idle node whose step files carry their own `timeout:`
-  reads `not running` for the step scope, not `no limit`. The `node list` stale
-  flag waits out the active step's ceiling, and the cockpit's step time ceiling
-  shows it. The soft-cap warning stays quiet when every launch has a timeout,
-  counting each step file's own. The boot banner labels the node value
+  that recorded ceiling, so a step file edited mid-iteration never shows a
+  ceiling the loop is not enforcing; the node's own seat reads the same value
+  from its launch's export, and an idle node whose step files carry their own
+  `timeout:` reads `not running` for the step scope, not `no limit`. The
+  `node list` stale flag waits out the active step's ceiling, and the cockpit's
+  step time ceiling shows it. `timeout` is a new `steps` column taken without a
+  rebuild: the schema version is now 3, and an older database is lifted in place
+  as for the `effort` column; a step recorded before the lift reads its step
+  file instead. The soft-cap warning stays quiet when every launch has a
+  timeout, counting each step file's own. The boot banner labels the node value
   `step-timeout: 2h (default)`, and a timed-out run's reason keeps naming the
   node's walls.
+- A timeout key in `config.json` holding a bare number (a hand edit such as
+  `"step_timeout": 3600`) reads as no limit in `fractal node time remaining` and
+  `node list` instead of raising `AttributeError`. One active node holding such
+  a value failed `node list` for its whole tree, and with it the resolution of
+  short node names from an ancestor.
 
 ## [1.3.0] - 2026-09-17
 

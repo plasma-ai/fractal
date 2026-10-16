@@ -29,7 +29,9 @@ if any(arg == '--cov' or arg.startswith('--cov=') for arg in sys.argv):
 # or in-process Node.init() adopts the live node as parent (see _isolate_loop_env)
 # and Node.commit logs commit events under the live RUN_ID/ITER_ID/STEP_ID lineage
 # missing from the test DB, silently losing them; ITER mislabels commit subjects;
-# FRACTAL_HEADLESS overrides the backend a bare start reads from the node's record
+# FRACTAL_HEADLESS overrides the backend a bare start reads from the node's record;
+# STEP_TIMEOUT_SECONDS hands a test whose STEP_ID names its own active step the
+# live seat's ceiling as that step's limit
 _LOOP_ENV_VARS = [
     '_NODE',
     'NODE_DIR',
@@ -39,6 +41,7 @@ _LOOP_ENV_VARS = [
     'RUN_ID',
     'ITER_ID',
     'STEP_ID',
+    'STEP_TIMEOUT_SECONDS',
     'ITER',
     'FRACTAL_HEADLESS',
 ]
