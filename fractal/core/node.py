@@ -13,7 +13,6 @@ import os
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -38,6 +37,7 @@ from fractal.constants import (
     STATUS_FILE,
     STATUSES,
     STEP_PGID_FILE,
+    UNAVAILABLE_REASON_PREFIX,
     WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
@@ -75,9 +75,8 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # quiet-time floor for the listing's staleness flag: an active loop writes
-# activity at least once per step, so silence past max(step limit, 5m) --
-# the active step's effective ceiling -- earns the '!' suffix on the
-# rendered age
+# activity at least once per step, so silence past max(step limit, 5m) -- the
+# active step's effective ceiling -- earns the '!' suffix on the rendered age
 _STALE_AGE_FLOOR_SECONDS = 300.0
 
 # the listing's spend column is a steering read, not an invoice, so it
@@ -111,6 +110,10 @@ _CLAIM_IN_FLIGHT = 'claim in flight'
 # TERM-to-KILL grace for the crash heal's reap of a dead loop's recorded
 # groups and their trees
 _ORPHAN_GRACE_SECONDS = 2.0
+
+# pause.sh's outcome for an in-flight agent that runs the pause itself: the
+# reap leaves its whole tree alone, so no abort can be claimed for it
+_PAUSE_KEPT = 'Kept in-flight agent'
 
 # argv shapes a launch pane carries at every exec stage (env/start.sh, then
 # the exec'd loop): a pane command bearing one while naming another worktree
@@ -612,7 +615,7 @@ class Node:
         keeps both its group and its record. Both judged groups are the
         roots of one process-tree reap, as in ``kill.sh``: every group the
         agent's tools started dies with them, other nodes' loop groups are
-        spared, and survivors are named on stderr. Logs an ``orphan`` event
+        spared, and survivors are named in warnings. Logs an ``orphan`` event
         naming each reaped pgid. Best-effort: a dead, recycled, or foreign
         group reads as already gone -- recycled meaning the OS re-issued a
         dead group's id to an unrelated same-user group, which answers a
@@ -648,36 +651,14 @@ class Node:
         # nodes' loops -- the agent's tools run in groups of their own
         groups = [pgid for pgid in judged if pgid > 0]
         if groups:
-            try:
-                reaped = fractal.util.process.reap(
-                    groups,
-                    grace=_ORPHAN_GRACE_SECONDS,
-                    spare=self.loop_records,
-                )
-            except Exception as error:
-                # the reap broke: the heal must still land on the groups
-                print(
-                    f'Warning: process-tree reap failed ({error});'
-                    ' killing the recorded groups only',
-                    file=sys.stderr,
-                )
-                for pgid in groups:
-                    try:
-                        os.killpg(pgid, signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        pass
-            else:
-                for group in reaped.spared:
-                    print(
-                        f"Note: spared process group {group} (another node's loop)",
-                        file=sys.stderr,
-                    )
-                for survivor in reaped.survivors:
-                    print(
-                        f'Warning: pid {survivor.pid} survived the reap:'
-                        f' {survivor.command}',
-                        file=sys.stderr,
-                    )
+            lines = fractal.util.process.reap_or_kill(
+                groups,
+                grace=_ORPHAN_GRACE_SECONDS,
+                branch=self.branch,
+                spare=self.loop_records,
+            )
+            for line in lines:
+                self.log(message=line, level=logging.WARNING)
         for (name, entry), pgid in zip(records, judged):
             if entry is None:
                 continue
@@ -747,9 +728,9 @@ class Node:
         never the last word for a guard. A seat that unsets ``_NODE`` and
         steps into a *sibling* worktree resolves to a real but wrong
         node; one that steps outside every worktree resolves to no actor
-        and would fail open. Each guard closes that from its own side
+        and would fail open. Each guard answers that from its own side
         rather than here: the drain adds process-lineage attribution
-        (:meth:`drain_lineage` -- the recorded agent's session, which
+        (:meth:`drain_lineage` -- descent from the recorded agent, which
         moving cannot rewrite), and the mailbox seal sits on the
         owner-only channel rule, which asks what a caller may read rather
         than who it claims to be.
@@ -803,28 +784,28 @@ class Node:
         the environment and steps into a sibling worktree resolves to a
         real but WRONG node the drain never binds; one that steps outside
         every worktree resolves to no node and fails open. Neither is a
-        lie the seat can tell about its *session*: the loop spawns each
-        agent invocation as its own session leader and records the id
-        (``.step_pgid``), and every command that seat runs stays in that
-        session, even one the agent CLI starts in its own process group
-        (only a deliberate ``setsid`` leaves it). Ask the tree which of
-        its open runs drain, then whether this process sits in one of
-        their seats -- attribution by lineage, which no ``env -u`` or
-        ``cd`` rewrites.
+        lie the seat can tell about its *ancestry*: the loop records each
+        agent invocation's pid (``.step_pgid``), and every command that
+        seat runs descends from it, whether the agent CLI starts the
+        command in a process group or a session of its own. Ask the tree
+        which of its open runs drain, then whether one of their recorded
+        agents is this process or an ancestor of it -- attribution by
+        lineage, which no ``env -u`` or ``cd`` rewrites. A command whose
+        parent chain was cut (a double fork, or an intermediate that
+        exited) is reparented out of that ancestry: it still matches while
+        it stays in the agent's session, but under a CLI that starts each
+        command in a session of its own it escapes.
 
         Identity-checked like the reap's (:func:`_recorded_group`), so a
         stale handle naming a recycled id never refuses an unrelated
         caller. Best-effort: an unreadable record or database answers no,
-        leaving the other two drain sources to speak.
+        leaving the other two drain sources to speak, and an unreadable
+        process table leaves the session match alone.
 
         Returns:
             Whether this process is a seat of a draining run in this tree.
 
         """
-        try:
-            sid = os.getsid(0)
-        except OSError:
-            return False
         # the tree's open runs carrying a drain signal (the central DB is
         # per-tree, so this is exactly the trees this caller could act on)
         query = (
@@ -836,6 +817,8 @@ class Node:
             rows = self.db.read(query=query)
         except Exception:
             return False
+        # each draining run's recorded agent, dated by its record
+        records: list[tuple[int, float]] = []
         for row in rows:
             worktree_dir = fractal.util.git.find_worktree(
                 repo_dir=self.repo_dir,
@@ -849,22 +832,43 @@ class Node:
                 recorded = int(pgid_file.read_text(encoding='utf-8').strip())
             except (OSError, ValueError):
                 continue
-            if recorded == sid and _recorded_group(sid, recorded_at) is True:
+            records.append((recorded, recorded_at))
+        if not records:
+            return False
+        # this process and its ancestors, from one read of the process table
+        lineage: set[int] = set()
+        try:
+            table = fractal.util.process.snapshot()
+        except (OSError, RuntimeError):
+            pass
+        else:
+            lineage.update(fractal.util.process._lineage(os.getpid(), table))
+        # and its session: a command reparented out of the agent's tree
+        # still matches while it stays in the agent's session
+        try:
+            lineage.add(os.getsid(0))
+        except OSError:
+            pass
+        # match a recorded agent in that lineage, identity-checked
+        # so a recycled pid never stands in for it
+        for recorded, recorded_at in records:
+            if recorded in lineage and _recorded_group(recorded, recorded_at) is True:
                 return True
         return False
 
     def loop_records(self: Node) -> list[pathlib.Path]:
         """Return the loop group record of every other node in this tree.
 
-        A process-tree reap spares the groups these record: a node launched
-        from this node's agent stays a child of that agent until its
-        launcher returns, so a walk from the agent would otherwise take a
-        healthy loop at boot. Paths, not ids -- the reap re-reads them
-        before every signal round, catching a record written mid-reap.
-        Pure path arithmetic from each registry row's branch (no git), and
-        never raises: the reap runs on a deadline thread and inside pause,
-        so an unreadable registry answers none and an unreadable entry is
-        skipped.
+        A process-tree reap spares the groups these record: a node this
+        node's agent launches headless stays a child of the agent's tool
+        while its launcher runs (a tmux launch forks the loop from the tmux
+        server, outside the agent's tree), so a walk from the agent would
+        otherwise take a healthy loop at boot. Paths, not ids -- the reap
+        re-reads them before every signal round, catching a record written
+        mid-reap. Pure path arithmetic from each registry row's branch (no
+        git), and never raises: the reap runs on a deadline thread and
+        inside pause, so an unreadable registry answers none and an
+        unreadable entry is skipped.
 
         Returns:
             The ``.pgid`` record path of each registered node, this node's
@@ -1022,8 +1026,9 @@ class Node:
         """Validate a template charter's fill-sheet before any spend.
 
         The stale-seed gate: it refuses a stale pin, a stale docket row, or
-        a truncated charter before the node's opening seat spends on it.
-        Checks, all pre-worktree:
+        a truncated charter before a seat spends on it -- at init before the
+        worktree exists, at reseed before any seed file is rewritten.
+        Checks:
 
         - ``--pin`` (when given) resolves to a commit;
         - the charter carries its two authored sections (a truncated seed
@@ -3798,6 +3803,8 @@ class Node:
         # the reap names what it left alive on stderr
         for line in result.stderr.splitlines():
             self.log(message=line, level=logging.WARNING)
+        # name any git operation the abort left in progress
+        self._warn_git_in_progress()
         # mark active rows as killed; a loop that landed its own terminal
         # between the signal and the reap keeps it -- the row marking is
         # already fenced, so the status stamp must not overwrite either
@@ -3813,17 +3820,20 @@ class Node:
         """Pause the node and its active descendants (parent-first).
 
         Signals ``pause`` then aborts each node's in-flight agent invocation
-        (``pause.sh`` reaps the recorded step process group), so every loop
+        (``pause.sh`` reaps the in-flight agent's whole process tree and
+        names survivors and other processes in the worktree), so every loop
         reclassifies the abort and parks: it exits with status ``paused``,
         leaving its run and iteration rows open for :meth:`resume` to adopt.
-        Fans out parent-first -- the inverse of every other signal -- so a
-        parent parked before its children can never drain-complete over
-        them, and re-enumerates until the subtree is fully signaled,
-        catching children spawned mid-fan-out (``init``/``start`` refuse
-        new work under the pause latch). On the user (root) node, which has
-        no loop of its own, the fan-out covers the whole tree with no self
-        signal -- the tree-wide brake -- and latches the root first, so
-        even a depth-1 start racing the sweep refuses until resume.
+        An agent that runs the pause itself is never aborted: its step
+        finishes and its loop parks at the next checkpoint. Fans out
+        parent-first -- the inverse of every other signal -- so a parent
+        parked before its children can never drain-complete over them, and
+        re-enumerates until the subtree is fully signaled, catching children
+        spawned mid-fan-out (``init``/``start`` refuse new work under the
+        pause latch). On the user (root) node, which has no loop of its own,
+        the fan-out covers the whole tree with no self signal -- the
+        tree-wide brake -- and latches the root first, so even a depth-1
+        start racing the sweep refuses until resume.
 
         Args:
             reason: Optional reason for pausing.
@@ -3842,10 +3852,10 @@ class Node:
         # every active one carries a pause signal -- the re-enumeration
         # catches children spawned mid-fan-out; best-effort per node
         # (mirrors kill), each attempted exactly once
-        paused_count = 0
+        outcomes: list[str] = []
         if not self.is_user:
-            self._pause(reason)
-            paused_count += 1
+            if (outcome := self._pause(reason)) is not None:
+                outcomes.append(outcome)
         attempted = set()
         while True:
             pending = [
@@ -3860,20 +3870,26 @@ class Node:
             for branch, descendant in pending:
                 attempted.add(branch)
                 try:
-                    if descendant._pause(propagated, fan_out=True):
-                        paused_count += 1
+                    outcome = descendant._pause(propagated, fan_out=True)
                 except Exception:
                     self.log(
                         message=f'Warning: failed to pause {descendant._root}',
                         level=logging.WARNING,
                     )
+                    continue
+                if outcome is not None:
+                    outcomes.append(outcome)
         # build confirmation
-        if paused_count == 0:
+        if not outcomes:
             return 'No active nodes to pause (tree latched until resume).'
-        suffix = 's' if paused_count != 1 else ''
+        suffix = 's' if len(outcomes) != 1 else ''
+        # an agent that runs the pause itself is kept to finish its step
+        aborted = 'in-flight agents aborted'
+        if any(outcome.startswith(_PAUSE_KEPT) for outcome in outcomes):
+            aborted = "in-flight agents aborted except the caller's own"
         result = (
-            f'Pause signal sent to {paused_count} node{suffix}'
-            ' (in-flight agents aborted; loops park paused)'
+            f'Pause signal sent to {len(outcomes)} node{suffix}'
+            f' ({aborted}; loops park paused)'
         )
         if reason:
             result += f': {reason}'
@@ -3884,20 +3900,22 @@ class Node:
         reason: Optional[str] = None,
         *,
         fan_out: bool = False,
-    ) -> bool:
+    ) -> Optional[str]:
         """Signal ``pause`` and abort this node's in-flight agent invocation.
 
         The guard re-read and the event/signal writes stay atomic under the
-        ``.worktrees`` flock; ``pause.sh`` runs outside the lock. Reports
-        whether the signal landed, so the sweep's count skips a refused
-        descendant.
+        ``.worktrees`` flock; ``pause.sh`` runs outside the lock. Returns
+        ``pause.sh``'s outcome line, or ``None`` when the signal was
+        refused, so the sweep's count skips a refused descendant and the
+        confirmation can tell an abort from an agent the pause left running
+        because the agent runs the pause itself.
         """
         with worktree.lock(self.repo_dir):
             # re-read under the lock -- a rival verb or the settling loop
             # may have moved this node since the caller enumerated it
             guard = self._signal_guard('pause', 'pause', fan_out=fan_out, locked=True)
             if guard is None:
-                return False
+                return None
             # the signal lands before the abort so the loop reclassifies
             # the killed step as paused, never as a failed step (a failure
             # would force-commit and open a fresh session)
@@ -3913,8 +3931,28 @@ class Node:
         # the reap names what it left alive on stderr
         for line in result.stderr.splitlines():
             self.log(message=line, level=logging.WARNING)
+        # name any git operation the abort left in progress
+        self._warn_git_in_progress()
         self.record.event_end(event_id=event_id, status='completed')
-        return True
+        return result.stdout.strip()
+
+    def _warn_git_in_progress(self: Node) -> None:
+        """Warn of each git operation the worktree has in progress.
+
+        An abort can cut a git command short -- an agent's merge, rebase,
+        or index write -- and the operation stays in the worktree until
+        finished or aborted, where a later merge of this node trips over
+        it; pause and kill name each one after the reap.
+        """
+        # a probe that cannot answer names nothing: kill's row marking follows
+        for _, marker in fractal.util.git.in_progress(self._root, check=False):
+            self.log(
+                message=(
+                    f'Warning: {self._root} has a git operation in progress'
+                    f' ({marker.name}); finish or abort it before merging this node'
+                ),
+                level=logging.WARNING,
+            )
 
     def resume(self: Node) -> str:
         """Resume the node and its paused descendants (leaf-first).
@@ -4021,15 +4059,30 @@ class Node:
         # worktree whose info/exclude predates the current block heals here
         # and the adopted run's cleanup and commits see fresh ignores
         self._git_exclude()
-        # the resume event lands before the relaunch so the booting loop's
-        # deadline credit sees the pause..resume span closed
-        event_id = self.record.event_start('resume')
-        try:
-            self._run_script('resume.sh', f'{self._root}')
-        except Exception:
-            self.record.event_end(event_id=event_id, status='failed')
-            raise
-        self.record.event_end(event_id=event_id, status='completed')
+
+        # say once why the relaunch waits: a merge's validation can run long
+        def _waiting() -> None:
+            self.log(
+                message=(
+                    'Waiting for a merge in progress to finish before resuming'
+                    f' {self.branch}...'
+                ),
+                level=logging.WARNING,
+            )
+
+        # a merge's carried advance rewrites a paused node's worktree, so the
+        # relaunch waits for one in flight by taking the merge flock, as
+        # reseed does
+        with worktree.merge_lock(self.repo_dir, waiting=_waiting):
+            # the resume event lands before the relaunch so the booting loop's
+            # deadline credit sees the pause..resume span closed
+            event_id = self.record.event_start('resume')
+            try:
+                self._run_script('resume.sh', f'{self._root}')
+            except Exception:
+                self.record.event_end(event_id=event_id, status='failed')
+                raise
+            self.record.event_end(event_id=event_id, status='completed')
 
     def pause_latched(
         self: Node,
@@ -4092,8 +4145,8 @@ class Node:
         *,
         continue_merge: bool = False,
         ignore_scope: bool = False,
-        validation_script: str | None = None,
-        message: str | None = None,
+        validation_script: Optional[str] = None,
+        message: Optional[str] = None,
     ) -> tuple[str, str]:
         """Squash-merge the node's branch into its merge target.
 
@@ -4132,12 +4185,20 @@ class Node:
         amended squash orphans the merge-base advance recorded against it).
 
         A paused node merges without leaving ``paused``: it runs no loop and
-        no agent, so its branch is quiescent, and its run, iteration, and step
-        rows stay open for :meth:`resume` to adopt. Only committed work lands;
-        the advance carries the frozen step's uncommitted state the way
+        no agent, and its run, iteration, and step rows stay open for
+        :meth:`resume` to adopt. A resume relaunches the loop only under the
+        merge lock, and the merge re-reads the node's status once it holds
+        that lock, refusing a node that changed status while it waited; a
+        commit the node gains during the merge anyway refuses it, since the
+        advance would revert that commit. Only committed work lands; the
+        advance carries the frozen step's uncommitted state the way
         ``git checkout`` moves a branch, refusing the whole merge when it
         would touch a dirty path or an untracked or ignored file, and rolling
-        the target and the node back when anything fails after the commit.
+        the target and the node back when anything fails after the commit (a
+        continue keeps its staged resolution). A frozen step stopped inside a
+        git operation -- a merge, squash merge, cherry-pick, revert, or
+        rebase, or a git command still running or killed with its
+        ``index.lock`` held -- refuses the merge before anything changes.
 
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
@@ -4216,6 +4277,29 @@ class Node:
         # one squash at a time per repo: two sibling merges racing into the
         # same target interleave their index writes and leave it half-merged
         with worktree.merge_lock(self.repo_dir):
+            # the status the arguments were built from must still hold: a
+            # resume relaunches a paused node only under this lock, so no
+            # relaunch starts while the script runs
+            if (status := self.status()) != current:
+                raise RuntimeError(
+                    f'Cannot merge: the node went from {current} to {status}'
+                    ' while the merge waited. Merge again.'
+                )
+            # a frozen step can stop inside a git operation, which the carried
+            # advance would move the branch under (git itself refuses to
+            # switch branches mid-merge); a probe that cannot answer raises
+            if current == 'paused':
+                if operations := fractal.util.git.in_progress(self.worktree):
+                    named = ', '.join(
+                        f'{operation} ({marker})' for operation, marker in operations
+                    )
+                    raise RuntimeError(
+                        f'Cannot merge paused node {self.branch}: its worktree has'
+                        f' {named}. Resume the node and let it finish or abort'
+                        ' the operation, or finish or abort it by hand in the'
+                        ' worktree, then merge again; remove a stale index.lock'
+                        ' only once no git process runs there.'
+                    )
             result = self._run_script('merge.sh', *args)
         # success-path warnings ride stderr (e.g. a skipped merge-base
         # advance predicting spurious re-merge diffs) and would vanish with
@@ -5297,8 +5381,10 @@ class Node:
         (``agent launch failed``) and a wrapper that runs and exits 127,
         the ``command not found`` convention (``agent error (exit 127)``
         -- the step row's own exit code is the binary failure marker, so
-        the reason is where the code survives). Active nodes only: a
-        settled node's trailing failures are history.
+        the reason is where the code survives). A failure the loop judged
+        a provider outage (its reason leads ``provider unavailable: ``)
+        breaks the streak too, as it never arms the loop's breaker.
+        Active nodes only: a settled node's trailing failures are history.
         """
         if self.status() != 'active':
             return False
@@ -5317,6 +5403,11 @@ class Node:
             # not billing-shaped -- either recorded reason (retry-marker safe:
             # the marker is a suffix) breaks the streak like a paid failure
             if row['metadata'].startswith(_CANNOT_EXEC_REASONS):
+                return False
+            # a launch the loop judged a provider outage is not billing-shaped
+            # either, however instant and unpriced -- its verdict leads the
+            # reason, so a launch-authored tail can never forge it
+            if row['metadata'].startswith(UNAVAILABLE_REASON_PREFIX):
                 return False
             if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
                 return False
@@ -5464,9 +5555,10 @@ class Node:
         token (:meth:`end_reason`), ``None`` when nothing is recorded. The
         ``last`` column renders each
         row's newest activity instant as a compact age, flagged (``12m!``)
-        when an active node has sat quiet past ``max(step limit, 5m)`` (the
-        active step's effective ceiling: its ``timeout:`` line, else
-        ``step_timeout``).
+        when an active node has sat quiet past the larger of its step limit
+        (the active step's effective ceiling: its ``timeout:`` line, else
+        ``step_timeout``) and the staleness floor
+        (:data:`_STALE_AGE_FLOOR_SECONDS`).
 
         Args:
             all_nodes: Include retired nodes in output.
@@ -5576,11 +5668,10 @@ class Node:
             node = self.__class__(worktree_dir) if worktree_dir else None
             if node is not None and not node.exists():
                 node = None
-            # render the newest activity instant as the 'last' age; an
-            # active node quiet past max(step limit, 5m) is flagged stale
-            # ('12m!'), the step limit being the child's active step's
-            # effective ceiling (a gone worktree falls back to the floor
-            # alone)
+            # render the newest activity instant as the 'last' age; an active
+            # node quiet past max(step limit, staleness floor) is flagged
+            # stale ('12m!'), the step limit being the child's active step's
+            # effective ceiling (a gone worktree falls back to the floor alone)
             last = None
             timestamp = recent.get(row['node'])
             if timestamp is not None:
@@ -6966,8 +7057,8 @@ def _draining(node: Node) -> bool:
     across a pause/resume, which the export alone does not survive. Both
     of those still ask the seat who it is, and a seat that moves can
     answer wrongly -- so the last source asks the operating system
-    instead: whether this process sits in a draining seat's recorded
-    session (:meth:`Node.drain_lineage`).
+    instead: whether this process descends from a draining seat's
+    recorded agent invocation (:meth:`Node.drain_lineage`).
 
     Args:
         node: Any node of the tree the verb acts on -- the drain that

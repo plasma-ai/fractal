@@ -34,7 +34,8 @@ qualifier. An optional body paragraph lands below the subject.
 ## Scope, refresh, and lint
 
 With a scope configured, the pipeline checks the working tree, index, and
-untracked files for out-of-scope changes and refuses to commit them; the shared
+untracked files for out-of-scope changes and refuses to commit them -- a rename
+counts as both its paths, as `merge.sh`'s footprint listing reads it; the shared
 project wiki (`wiki/` unless the project's `.fractal/.settings.json` names
 another folder; see [[features/wiki_system/knowledge_stores]]) and the node's
 `.fractal/` prefix are always committable. The boundaries are one record
@@ -91,13 +92,16 @@ reports it (source file, line, and pattern; the shared `info/exclude` reads
 repo-relative and any other absolute source as `core.excludesFile`, since a
 force commit folds the warning into its body), then counts the rest, and labels
 them repository or host rules, not node-record refusals -- the estate law's
-refusal warning prints beside it and the two must not read as one count. The
-other guard lists any staged file at or over 10MB by name -- an oversized file
-is usually an accident, but large commits are also legitimate. Whenever the
-estate refusal or the ignore warning fired, the command's last line repeats both
-counts (`Held out: ...`, non-zero parts only): a hook's or gate's long output
-prints between the warnings and the end, and a no-op commit is exactly when a
-node would otherwise read the tree as clean.
+refusal warnings print beside it and the two must not read as one count, so an
+estate file the commit left unstaged (refused on either staging path, or a
+record the force-add could not stage) is theirs to name and never lists here,
+nor does the collapsed directory entry holding one. The other guard lists any
+staged file at or over 10MB by name -- an oversized file is usually an accident,
+but large commits are also legitimate. Whenever an estate file was left unstaged
+or the ignore warning fired, the command's last line repeats both counts
+(`Held out: ...`, non-zero parts only): a hook's or gate's long output prints
+between the warnings and the end, and a no-op commit is exactly when a node
+would otherwise read the tree as clean.
 
 ## The estate content law
 
@@ -155,16 +159,22 @@ touched wiki root that linted clean before the rewrite still lints clean after
 it (a pre-existing lint failure is surfaced as a notice and tolerated, mirroring
 the pipeline's own lint step); every other node-data page keeps byte-identity,
 so any hook rewrite there is refused. A rewrite that breaks a gate is restored
-to its authored bytes and fails the commit with remediation guidance. The commit
-event is logged from a single emit point keyed on the new sha, so the retry
-never double-logs (no event for `--init`, whose baseline has no run lineage),
-and a failed event insert warns rather than blocking the save. A `--force`
-commit -- the loop's backstop save -- passes `--no-verify` so a failing or
-mutating hook can neither block nor rewrite the save, and folds the record
-pass's notices and the staged-sweep warnings plus a capped diffstat into its
-body so the backstop describes what it saved (and what it deliberately overrode
-or refused) from git history alone. `--check` commits nothing and errors if
-uncommitted changes exist -- counting only work the stage could commit, so the
-stage's own excludes and the estate content law both ride along: dirt no pass
-may ever stage would otherwise read as permanently dirty and fire the backstop
-every iteration over a file that can never clear.
+to its authored bytes and fails the commit with remediation guidance. Node
+records pass through the repository's hooks like any staged file, so a hook that
+rewrites one -- a formatter reflowing a `.py` record, or trailing-whitespace
+stripping a `.patch` record's single-space context lines -- fails each ordinary
+commit that stages it, until the iteration's backstop commit, which bypasses
+hooks, lands the record as written. A hooked repository should keep rewriting
+hooks off `.fractal/` (for example `exclude: ^\.fractal/` in its pre-commit
+config), as the failure message says. The commit event is logged from a single
+emit point keyed on the new sha, so the retry never double-logs (no event for
+`--init`, whose baseline has no run lineage), and a failed event insert warns
+rather than blocking the save. A `--force` commit -- the loop's backstop save --
+passes `--no-verify` so a failing or mutating hook can neither block nor rewrite
+the save, and folds the record pass's notices and the staged-sweep warnings plus
+a capped diffstat into its body so the backstop describes what it saved (and
+what it deliberately overrode or refused) from git history alone. `--check`
+commits nothing and errors if uncommitted changes exist -- counting only work
+the stage could commit, so the stage's own excludes and the estate content law
+both ride along: dirt no pass may ever stage would otherwise read as permanently
+dirty and fire the backstop every iteration over a file that can never clear.

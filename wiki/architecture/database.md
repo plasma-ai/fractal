@@ -83,8 +83,9 @@ on `node`, and attribution never depends on which mailbox a row sits in.
 - **Execution accounting** — `runs`, `iters`, and `steps`: one row per run, per
   iteration within a run, and per step within an iteration. Rows carry start and
   end instants (duration is derived, never stored), status, exit code, and — on
-  step rows — the agent, served model, and launch effort, the recorded cost, and
-  the approval state, so cost aggregates roll up from steps.
+  step rows — the agent, served model, launch effort, and the step ceiling the
+  launch enforces, the recorded cost, and the approval state, so cost aggregates
+  roll up from steps.
 - **Events** — point-in-time lifecycle entries (init, spawn, commit, merge,
   pause, resume, and the rest), each optionally pinned to the run, iteration,
   and step context it happened in.

@@ -15,8 +15,8 @@ The time matrix's semantics:
   since the active iteration's ``started_at``, clamped at ``0``.
 - ``--step-timeout`` is the **per-step** default. ``Time.remaining(scope='step')``
   reports the active step's effective ceiling -- its step file's ``timeout:``
-  line when it carries one, else ``step_timeout`` -- minus elapsed since the
-  active step's ``started_at``.
+  line when it carries one, else ``step_timeout``, as its launch recorded it
+  -- minus elapsed since the active step's ``started_at``.
 - With no ``scope`` the method returns the **soonest** of the configured
   run/iter/step deadlines -- the time until the next timeout fires.
 
@@ -30,16 +30,21 @@ back-dating ``started_at`` (deterministic, no sleeps).
 
 from __future__ import annotations
 
+import pathlib
+import sqlite3
+from collections.abc import Callable
 from typing import Optional
 
 import pytest
 
+from fractal.constants import STEER_REASON_PREFIX
 from fractal.core.node import Node
 from tests._helpers import _age_iter, _age_run, _age_step, _past_timestamp
 
 __all__ = [
     'test_time_remaining_none_without_any_timeout',
     'test_time_limit_reads_configured_scopes',
+    'test_time_limit_reads_a_numeric_duration_as_unset',
     'test_run_timeout_counts_down_from_run_start',
     'test_run_timeout_clamps_to_zero_on_overspend',
     'test_run_timeout_none_without_active_run',
@@ -49,8 +54,12 @@ __all__ = [
     'test_run_scope_anchors_on_run_iter_scope_on_iter',
     'test_default_reports_soonest_of_run_and_iter',
     'test_step_limit_follows_the_active_steps_timeout',
+    'test_step_limit_survives_an_unusable_step_file',
     'test_step_limit_prefers_the_seats_exported_ceiling',
+    'test_step_limit_reads_the_ceiling_its_launch_recorded',
+    'test_step_limit_reads_a_database_it_cannot_lift',
     'test_step_limit_tells_same_named_step_files_apart',
+    'test_step_limit_tells_a_sync_pass_from_a_user_sync_step',
     'test_idle_step_limit_counts_step_file_timeouts',
     'test_steered_step_counts_down_from_its_stuck_launch',
     'test_time_remaining_credits_paused_spans',
@@ -97,6 +106,34 @@ def test_time_limit_reads_configured_scopes(node_with_db: Node) -> None:
     assert node.time.limit('step') is None
     # the no-scope default is the soonest configured limit
     assert node.time.limit() == 300.0
+
+
+@pytest.mark.parametrize(
+    argnames=('key', 'scope'),
+    argvalues=[
+        ('timeout', 'run'),
+        ('iter_timeout', 'iter'),
+        ('step_timeout', 'step'),
+    ],
+    ids=['run', 'iter', 'step'],
+)
+def test_time_limit_reads_a_numeric_duration_as_unset(
+    node_with_db: Node,
+    key: str,
+    scope: str,
+) -> None:
+    """A bare-number duration in config reads as no limit, never a crash.
+
+    ``config.json`` is hand-editable and ``Config.set`` stores any value, so
+    a duration can arrive as a number with no unit suffix; like any duration
+    that does not parse, it reads as no limit (the cockpit shows it as no
+    cap) rather than raising out of every reader of the limit.
+    """
+    node = node_with_db
+    # whole seconds with no unit suffix, as a hand edit writes them
+    node.config.set(key, 3600)
+    assert node.time.limit(scope) is None
+    assert node.time.limit() is None
 
 
 def test_run_timeout_counts_down_from_run_start(node_with_db: Node) -> None:
@@ -261,31 +298,111 @@ def test_step_limit_follows_the_active_steps_timeout(
 
 
 @pytest.mark.parametrize(
-    argnames=('seat', 'limit'),
-    argvalues=[(True, 14400.0), (False, 21600.0)],
-    ids=['own-seat', 'other-caller'],
+    argnames='damage',
+    argvalues=[
+        lambda path: path.unlink(),
+        lambda path: path.chmod(0),
+        lambda path: path.write_bytes(b'---\ntimeout: 6h\n---\n\xff'),
+    ],
+    ids=['vanished', 'unreadable', 'undecodable'],
+)
+def test_step_limit_survives_an_unusable_step_file(
+    node_with_db: Node,
+    damage: Callable[[pathlib.Path], object],
+) -> None:
+    """An active step file the reader cannot use reads as ``step_timeout``.
+
+    Step files are live-edited, so the active step's file can be gone,
+    unreadable, or undecodable when a reader resolves it; each falls back
+    to the node value rather than raising out of every reader.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    _active_step(node, '---\ntimeout: 6h\n---\n')
+    damage(node.node_dir / 'steps' / '01-EXECUTE.md')
+    assert node.time.limit('step') == NODE_STEP_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    argnames=('seat', 'exported', 'limit'),
+    argvalues=[
+        (True, '14400', 14400.0),
+        (True, '-1', None),
+        (True, 'soon', 21600.0),
+        (False, '14400', 21600.0),
+    ],
+    ids=['own-seat', 'own-seat-unbounded', 'own-seat-malformed', 'other-caller'],
 )
 def test_step_limit_prefers_the_seats_exported_ceiling(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
     seat: bool,
-    limit: float,
+    exported: str,
+    limit: Optional[float],
 ) -> None:
     """The node's own seat reads the ceiling its launch exported.
 
     The loop reads step files once per iteration, so an edit landing
     mid-iteration changes the file but not the enforced ceiling; the
-    seat's ``STEP_TIMEOUT_SECONDS`` is that ceiling. Any caller whose
-    ``STEP_ID`` is not the active step's (another node's seat, an
-    operator) reads the step file.
+    seat's ``STEP_TIMEOUT_SECONDS`` is that ceiling, ``-1`` for a launch
+    with none. The seat can edit its own env, so an export that does not
+    parse falls through to what any caller whose ``STEP_ID`` is not the
+    active step's (another node's seat, an operator) reads -- here the step
+    file, as the row carries no recorded ceiling.
     """
     node = node_with_db
     node.config.set('step_timeout', NODE_STEP_TIMEOUT)
     step_id = _active_step(node, '---\ntimeout: 6h\n---\n')
-    # the launch exported 4h; the file was edited to 6h since
+    # the launch exported its ceiling; the file was edited to 6h since
     monkeypatch.setenv('STEP_ID', f'{step_id if seat else step_id + 1}')
-    monkeypatch.setenv('STEP_TIMEOUT_SECONDS', '14400')
+    monkeypatch.setenv('STEP_TIMEOUT_SECONDS', exported)
     assert node.time.limit('step') == limit
+
+
+@pytest.mark.parametrize(
+    argnames=('recorded', 'limit'),
+    argvalues=[(14400, 14400.0), (-1, None)],
+    ids=['recorded', 'recorded-unbounded'],
+)
+def test_step_limit_reads_the_ceiling_its_launch_recorded(
+    node_with_db: Node,
+    recorded: int,
+    limit: Optional[float],
+) -> None:
+    """A step row's recorded ceiling answers every caller.
+
+    Each launch records the ceiling it enforces on its row (``-1`` for a
+    launch with none), and the loop reads step files once per iteration,
+    so neither the file's 6h nor the node's 2h overrides what the launch
+    recorded.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    step_id = _active_step(node, '---\ntimeout: 6h\n---\n')
+    node.record.step_timeout(step_id=step_id, seconds=recorded)
+    assert node.time.limit('step') == limit
+
+
+def test_step_limit_reads_a_database_it_cannot_lift(node_with_db: Node) -> None:
+    """A reader denied the lift to the recorded-ceiling column still answers.
+
+    A write-denied reader (a sandboxed seat) reads the schema it finds, so
+    on a database stamped before the step row's ``timeout`` column the
+    active row reads as unrecorded and its step file answers.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    _active_step(node, '---\ntimeout: 6h\n---\n')
+    # stamp the database before the column, then deny this reader writes
+    connection = sqlite3.connect(f'{node.db.path}')
+    try:
+        connection.execute('ALTER TABLE steps DROP COLUMN timeout')
+        connection.execute('PRAGMA user_version = 2')
+        connection.commit()
+    finally:
+        connection.close()
+    node.db.path.chmod(0o444)
+    assert node.time.limit('step') == 21600.0
 
 
 @pytest.mark.parametrize(
@@ -331,6 +448,52 @@ def test_step_limit_tells_same_named_step_files_apart(
 
 
 @pytest.mark.parametrize(
+    argnames=('sync', 'rows', 'limit'),
+    argvalues=[
+        (True, ((1, 'SYNC'),), NODE_STEP_TIMEOUT_SECONDS),
+        (False, ((0, 'SYNC'),), NODE_STEP_TIMEOUT_SECONDS),
+        (False, ((1, 'PLAN'), (2, 'SYNC')), 21600.0),
+    ],
+    ids=['sync-pass', 'drain-pass', 'user-step'],
+)
+def test_step_limit_tells_a_sync_pass_from_a_user_sync_step(
+    node_with_db: Node,
+    sync: bool,
+    rows: tuple[tuple[int, str], ...],
+    limit: float,
+) -> None:
+    """A SYNC row is the built-in pass at step 0 or under sync mode.
+
+    The pass runs the package's mode doc, which carries no ``timeout:``,
+    so ``step_timeout`` bounds it; with sync off no pass runs before a
+    step, so a numbered SYNC row is a user step file of that name, bounded
+    by its own ``timeout:`` line. The last row is the active one.
+    """
+    node = node_with_db
+    node.config.set('step_timeout', NODE_STEP_TIMEOUT)
+    node.config.set('sync', sync)
+    steps_dir = node.node_dir / 'steps'
+    steps_dir.mkdir()
+    (steps_dir / '01-PLAN.md').write_text('# PLAN\n', encoding='utf-8')
+    (steps_dir / '02-SYNC.md').write_text(
+        '---\ntimeout: 6h\n---\n# SYNC\n',
+        encoding='utf-8',
+    )
+    run_id = node.record.run_start()
+    iter_id = node.record.iter_start(run_id=run_id, iter=1)
+    for index, (number, name) in enumerate(rows, 1):
+        step_id = node.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=number,
+            step_name=name,
+        )
+        if index < len(rows):
+            node.record.step_end(step_id=step_id, status='completed', exit_code=0)
+    assert node.time.limit('step') == limit
+
+
+@pytest.mark.parametrize(
     argnames=('node_timeout', 'frontmatter', 'limit'),
     argvalues=[
         (None, '---\ntimeout: 6h\n---\n', 21600.0),
@@ -367,7 +530,7 @@ def test_idle_step_limit_counts_step_file_timeouts(
 @pytest.mark.parametrize(
     argnames=('status', 'metadata', 'charged'),
     argvalues=[
-        ('stopped', 'steered: no progress for 1800s', 600.0),
+        ('stopped', f'{STEER_REASON_PREFIX}no action for 30 minutes', 600.0),
         ('failed', 'agent error (exit 1)', 0.0),
     ],
     ids=['steer', 'retry'],

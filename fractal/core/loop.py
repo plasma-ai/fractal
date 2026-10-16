@@ -9,21 +9,22 @@ import os
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
 import traceback
 import typing
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import fractal.util
 from fractal.constants import (
     PAUSE_ABORT_FILE,
     PGID_FILE,
     SOCKET_FILE,
+    STEER_REASON_PREFIX,
     STEP_PGID_FILE,
+    UNAVAILABLE_REASON_PREFIX,
 )
 from fractal.exceptions import AgentStreamError, _Abort, _ThinkingCap
 
@@ -60,14 +61,18 @@ _Default = typing.TypeVar('_Default')
 # grace between the deadline's TERM and the follow-up KILL on the step tree
 _KILL_GRACE_SECONDS = 10.0
 
-#: Seconds of the agent's own idle time -- counted while it holds control
-#: (from its launch, a tool result, visible text, or a wake-up), paused while
-#: a tool runs or its turn has ended -- after which the loop ends the launch
-#: as stuck.
-NO_PROGRESS_SECONDS = 1800
+# bound on the wait for a reap still running when its launch ends: the grace,
+# the KILL's settle, and slack for the process-table walks between signals
+_REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS + 5.0
+
+#: Seconds of the agent's own idle time -- counted while it holds
+#: control (from its launch, a tool result, visible text, a think's
+#: end, or a wake-up), paused while a tool runs, a think is open, or
+#: its turn has ended -- after which the loop ends the launch as stuck.
+NO_PROGRESS_SECONDS = 1_800
 
 # grace between the TERM and KILL when the stream reader dies -- short, but
-# long enough for a tool's ``git commit`` to drop ``.git/index.lock``, which
+# long enough for a tool's `git commit` to drop `.git/index.lock`, which
 # would otherwise block the force-commit backstop
 _STREAM_ERROR_GRACE_SECONDS = 2.0
 
@@ -175,9 +180,10 @@ class Step:
         """Load the step file a step row names.
 
         A row's step number is the file's sorted position when its
-        iteration began, which a file added or removed since shifts; the
-        name and its occurrence among same-named files (see
-        ``fractal.core.time._step_occurrence``) survive such an edit.
+        iteration began, which any file added or removed since shifts;
+        the name and its occurrence among same-named files (see
+        ``fractal.core.time._step_occurrence``) survive an edit to
+        differently-named files only.
 
         Args:
             steps_dir: The node's ``steps/`` directory.
@@ -237,7 +243,7 @@ class Step:
         """Return the raw ``detached:`` frontmatter value, if any."""
         return self.frontmatter.get('detached')
 
-    def limit(self: Step, default: _Default) -> int | _Default:
+    def limit(self: Step, default: _Default) -> Union[int, _Default]:
         """Return the step's effective ceiling in seconds.
 
         The one rule every reader of a step's ceiling shares: the
@@ -410,8 +416,8 @@ class Loop:
                 self._iter_timeout_seconds = self._interval_seconds
         # SYNC_MODE gates the SYNC step run before each step; unlike the
         # prompt-injection modes (DETACHED_MODE/CONTINUE_MODE/RESUME_MODE/
-        # RESERVE_MODE/META_MODE) SYNC.md is run as its own step, not appended
-        # to step prompts (the prompt builder skips it)
+        # RESERVE_MODE/DRAIN_MODE/META_MODE) SYNC.md is run as its own step, not
+        # appended to step prompts (the prompt builder skips it)
         sync = config.get('sync')
         self._sync_mode = True if sync is None else bool(sync)
         # pin the boot-time modes so a mid-run config edit cannot flip a run's
@@ -424,6 +430,10 @@ class Loop:
         # the boot-pinned mode flags, the one source the step env and the
         # step prompt both read (every other variable is derived per step)
         self._boot_modes = _boot_modes(node, detached=self._detached, meta=meta)
+        # the static variables a step's prompt and env share, re-read per step
+        # under the prompt build's guard (the render parameter shadows the
+        # module here, hence the dotted path)
+        self._step_vars = fractal.core.render.variables(node)
         # run/iteration lifecycle state
         self._iter = 0
         self._iter_timestamp = ''
@@ -478,6 +488,7 @@ class Loop:
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
         self._step_limit_seconds = 0
+        self._step_ceiling_seconds = 0
         self._step_timeout_effective = self._step_timeout_seconds
         self._step_budget_value: Optional[float] = None
         # a steered launch: the stuck session it resumes and the
@@ -1908,9 +1919,16 @@ class Loop:
                 if self._paused:
                     return True
                 break
+            # and through a provider outage's: one that outlasted the last
+            # step's retries still paces the next launch
+            if not self._unavailable_gate(steps, step_num):
+                if self._paused:
+                    return True
+                break
 
             # --- SYNC before each step ---
-            if self._sync_mode and self._sync_file.is_file():
+            synced = self._sync_mode and self._sync_file.is_file()
+            if synced:
                 started = True
                 # the sync belongs to the step it precedes (the drain-wait
                 # sync, which precedes nothing, stays step 0)
@@ -1969,6 +1987,12 @@ class Loop:
                 if self._paused:
                     return True
                 break
+            # and the outage streak it may have extended -- with no SYNC, the
+            # streak is the one the hold above already waited out
+            if synced and not self._unavailable_gate(steps, step_num):
+                if self._paused:
+                    return True
+                break
 
             # if finishing, wait for children before last step
             if step_num == step_count and self._signal('finish'):
@@ -2007,9 +2031,8 @@ class Loop:
             # re-dispatches once, outside the failure-retry allowance
             attempt = 0
             drop_retried = False
-            # a stuck launch (a thinking cap, or no action for too long) buys
-            # one steered relaunch per attempt, on a row of its own (never a
-            # retry)
+            # a stuck launch (a thinking cap, or no action for too long) buys one
+            # steered relaunch per attempt, on a row of its own, never a retry
             steered = False
             # the newest step name rides every backstop commit's context
             self._last_step_name = step_name
@@ -2056,11 +2079,14 @@ class Loop:
                     # (resume re-enters the step), and a stop, finish, or
                     # spent ceiling abandons it to the failure path
                     paused = self._check_pause()
-                    abandoned = not paused and (
-                        self._check_stop()
-                        or self._check_finish()
-                        or self._check_subtree_ceiling()
-                    )
+                    abandoned = False
+                    if not paused:
+                        if self._check_stop():
+                            abandoned = True
+                        elif self._check_finish():
+                            abandoned = True
+                        elif self._check_subtree_ceiling():
+                            abandoned = True
                     if abandoned:
                         self._fail_reason = f'{step_name} {trigger}; steer abandoned'
                         result = dataclasses.replace(
@@ -2070,7 +2096,7 @@ class Loop:
                         )
                     else:
                         if self._step_id is not None:
-                            steer_reason = f'steered: {trigger}'
+                            steer_reason = f'{STEER_REASON_PREFIX}{trigger}'
                             if paused:
                                 steer_reason = f'{trigger}; paused before the steer'
                             if attempt > 0:
@@ -2110,8 +2136,8 @@ class Loop:
                     # a deadline that expired before the launch resolved no
                     # ceiling, so the label skips the parenthetical
                     limit = ''
-                    if self._step_limit_seconds > 0:
-                        limit = f' ({self._step_limit_seconds}s)'
+                    if self._step_ceiling_seconds > 0:
+                        limit = f' ({self._step_ceiling_seconds}s)'
                     self._fail_reason = f'{step_name} timed out{limit}'
                     step_status = 'exited'
                     step_exit_code = 1
@@ -2255,6 +2281,10 @@ class Loop:
                             step_reason = 'awaiting approval'
                     elif step_status == 'failed':
                         step_reason = result.reason or 'agent error'
+                        # the outage verdict leads the reason, so the census
+                        # never reads an instant unpriced outage as billing
+                        if result.unavailable:
+                            step_reason = f'{UNAVAILABLE_REASON_PREFIX}{step_reason}'
                     elif step_status == 'completed':
                         # a drop marks its own attempt's row -- the durable
                         # fact `node list` composes into its detail column
@@ -2347,11 +2377,10 @@ class Loop:
                         if self._paused:
                             return True
 
-                # only a failed launch buys a retry, and only
-                # while attempts remain; a billing-shaped failure waits the
-                # breaker's exponential clock instead of the hot default, and
-                # a provider-unavailable one doubles the default per
-                # consecutive failure
+                # only a failed launch buys a retry, and only while attempts
+                # remain; a billing-shaped failure waits the breaker's exponential
+                # clock instead of the hot default, and a provider-unavailable one
+                # doubles the default per consecutive failure
                 if result.status != 'failed' or attempt >= self._step_retries:
                     break
                 retry_wait: Optional[int] = None
@@ -2537,10 +2566,25 @@ class Loop:
             )
         self._step_time_budget = self._time_budget_label(step_timeout_label)
 
+        # the ceiling lands on the step row, so a reader outside the seat
+        # reports the one this launch enforces, never a step file edited
+        # since (the loop reads step files once per iteration)
+        if self._step_id is not None:
+            try:
+                node.record.step_timeout(
+                    step_id=self._step_id,
+                    seconds=self._step_timeout_effective,
+                )
+            except Exception:
+                pass
+
         # a failed build (builder error, missing charter/step file) must fail
         # the step -- launching the agent on an empty prompt would burn
         # a full turn
+        # (the static variables are read once here, inside the guard: the
+        # prompt and the env share them, and the spawn reads no config)
         try:
+            self._step_vars = render.variables(self.node)
             prompt = self._build_step_prompt(step)
         except Exception as error:
             print(f'Error: {error}', file=sys.stderr)
@@ -2549,22 +2593,27 @@ class Loop:
             )
 
         # compute step time limit: min(run remaining, iteration
-        # remaining, step timeout)
+        # remaining, step timeout) -- and the ceiling a timeout names: the
+        # step's whole timeout when it binds, a steer's charge included
         self._step_limit_seconds = 0
+        self._step_ceiling_seconds = 0
         deadline = self._soonest_deadline()
         if deadline > 0:
             remaining = deadline - int(time.time())
             if remaining <= 0:
                 return close(StepResult(status='timed out', exit_code=124))
             self._step_limit_seconds = remaining
+            self._step_ceiling_seconds = remaining
         if self._step_timeout_effective > 0:
             step_timeout = self._step_timeout_effective - self._steer_elapsed
             if step_timeout <= 0:
+                self._step_ceiling_seconds = self._step_timeout_effective
                 return close(StepResult(status='timed out', exit_code=124))
             no_limit = self._step_limit_seconds == 0
             tighter = step_timeout < self._step_limit_seconds
             if no_limit or tighter:
                 self._step_limit_seconds = step_timeout
+                self._step_ceiling_seconds = self._step_timeout_effective
 
         # a cost cap requires spend the loop can track: token-priced and
         # routed agents price from token counts, so a cap needs a priceable
@@ -2619,11 +2668,12 @@ class Loop:
 
         The charter, the step (frontmatter stripped), and any active
         modes (SYNC.md runs as its own step, so it is skipped there):
-        static vars (paths, limits) come from the node's config/git, and
-        the run-scoped vars pass through as overrides -- the boot-pinned
-        DETACHED/META flags and meta target included, so a mid-run config
-        edit cannot flip a run's mode composition. A steer renders
-        ``STALL.md`` alone: its resumed session already holds the step.
+        static vars (paths, limits) come from the step's one config/git
+        read, the one its env exports, and the run-scoped vars pass
+        through as overrides -- the boot-pinned DETACHED/META flags and
+        meta target included, so a mid-run config edit cannot flip a run's
+        mode composition. A steer renders ``STALL.md`` alone: its resumed
+        session already holds the step.
         """
         # refresh the cost budget so each step's context reflects spend so far
         self._build_cost_budget()
@@ -2643,10 +2693,11 @@ class Loop:
             'META_TARGET': self._boot_modes['META_TARGET'],
             'DRAIN_MODE': 'true' if self._drain else 'false',
         }
+        variables = {**self._step_vars, **overrides}
         if self._steer_session is not None:
             text = self._stall_file.read_text(encoding='utf-8')
-            return render.render(text, render.variables(self.node, overrides))
-        prompt = self.node.build_prompt(f'{step.path}', overrides=overrides)
+            return render.render(text, variables)
+        prompt = self.node.build_prompt(f'{step.path}', overrides=variables)
         # a resumed iteration replays a frozen plan -- the harness re-reads
         # the inbox at every attached seat, so directives that arrived after
         # the plan froze are in context before any replayed decision executes
@@ -2755,24 +2806,23 @@ class Loop:
         """Build the per-launch agent environment.
 
         Rebuilt at every step/SYNC launch, never boot-static: the static
-        vocabulary derived fresh from config (paths, spawn limits) under
-        the boot-pinned mode flags, plus the run parameters (cost caps,
-        ``AGENT_COMMAND``, timeouts --
-        ``STEP_TIMEOUT_SECONDS`` carrying the step's own effective
-        ceiling, ``_NODE``, ``NODE_BRANCH``) plus live lineage
-        (``RUN_ID``, ``ITER_ID``, ``STEP_ID``, ``STEP_MODEL``), the
-        per-iteration quartet
-        (``ITER``, ``ITER_TIMESTAMP``, ``ITER_REF``, ``ITER_LABEL``),
-        and the current ``STEP_LABEL``; ``$ITER_REF`` feeds
-        ``fractal plan init``'s envvar fallback. Passed to the seam as
-        ``invocation(env=...)``'s caller overlay (merge order ruled at
-        the seam: ``os.environ``, then this overlay, then provider keys
-        -- provider wins).
+        vocabulary the step's prompt rendered (paths, spawn limits, read
+        once per step) under the boot-pinned mode flags, plus the run
+        parameters (cost caps, ``AGENT_COMMAND``, timeouts --
+        ``STEP_TIMEOUT_SECONDS`` carrying the step's own effective ceiling,
+        ``_NODE``, ``NODE_BRANCH``) plus live lineage (``RUN_ID``,
+        ``ITER_ID``, ``STEP_ID``, ``STEP_MODEL``), the per-iteration
+        quartet (``ITER``, ``ITER_TIMESTAMP``, ``ITER_REF``,
+        ``ITER_LABEL``), and the current ``STEP_LABEL``; ``$ITER_REF``
+        feeds ``fractal plan init``'s envvar fallback. Passed to the seam
+        as ``invocation(env=...)``'s caller overlay (merge order ruled at
+        the seam: ``os.environ``, then this overlay, then provider keys --
+        provider wins).
         """
         step_budget = ''
         if self._step_budget_value is not None:
             step_budget = f'{self._step_budget_value:.6g}'
-        env = {**render.variables(self.node), **self._boot_modes}
+        env = {**self._step_vars, **self._boot_modes}
         overlay = {
             'MAX_COST': self._max_cost_label,
             'MAX_ITER_COST': self._max_iter_cost_label,
@@ -2956,28 +3006,13 @@ class Loop:
             # tool commands run in groups of their own, and a TERM-trapping
             # survivor holding the stdout pipe must still draw the KILL or
             # the reader blocks on it
-            try:
-                reaped = fractal.util.process.reap(
-                    [process.pid],
-                    grace=_KILL_GRACE_SECONDS,
-                    spare=node.loop_records,
-                )
-            except Exception as error:
-                # the reap broke: the deadline must still land on the group
-                print(
-                    f'Warning: process-tree reap failed ({error});'
-                    ' killing the step group only',
-                    file=sys.stderr,
-                )
-                _killpg(process.pid, signal.SIGKILL)
-                return
-            for group in reaped.spared:
-                print(f"Note: spared process group {group} (another node's loop)")
-            for survivor in reaped.survivors:
-                print(
-                    f'Warning: pid {survivor.pid} survived the reap: {survivor.command}',
-                    file=sys.stderr,
-                )
+            lines = fractal.util.process.reap_or_kill(
+                [process.pid],
+                grace=_KILL_GRACE_SECONDS,
+                spare=node.loop_records,
+            )
+            for line in lines:
+                print(line, file=sys.stderr)
 
         timer: Optional[threading.Timer] = None
         if self._step_limit_seconds > 0:
@@ -3000,15 +3035,20 @@ class Loop:
         # failed result frames' detail -- a backend that reports its failure
         # there (claude) names the provider error nowhere else
         failures: list[str] = []
+        # the session the stream names, which a capped launch's steer
+        # resumes (the reader dies at the cap, so no result carries it)
+        stream_session: Optional[str] = None
 
         def _render(event: StreamEvent) -> None:
-            nonlocal idle_since
+            nonlocal idle_since, stream_session
             if self._render is not None:
                 self._render(event)
+            if event.session is not None:
+                stream_session = event.session
             if event.kind == 'result' and event.failed and event.message:
                 failures.append(event.message)
             if watch_cap and event.kind == 'thinking_cap':
-                raise _ThinkingCap(event.session)
+                raise _ThinkingCap()
             if event.kind == 'acting':
                 idle_since = time.monotonic()
             elif event.kind == 'waiting':
@@ -3029,8 +3069,10 @@ class Loop:
                     _deadline(idle)
                     return
 
+        watchdog: Optional[threading.Thread] = None
         if watch_cap and agent.reports_progress:
-            threading.Thread(target=_watchdog, daemon=True).start()
+            watchdog = threading.Thread(target=_watchdog, daemon=True)
+            watchdog.start()
 
         # drive the stream in-process: recording (session, per-frame cost
         # flush) and the pane rendering ride the seam's driver
@@ -3051,30 +3093,13 @@ class Loop:
             # the whole tree (other nodes' loops spared) so a blocked writer
             # cannot outlive its step
             if process.poll() is None:
-                try:
-                    reaped = fractal.util.process.reap(
-                        [process.pid],
-                        grace=_STREAM_ERROR_GRACE_SECONDS,
-                        spare=node.loop_records,
-                    )
-                except Exception as reap_error:
-                    print(
-                        f'Warning: process-tree reap failed ({reap_error});'
-                        ' killing the step group only',
-                        file=sys.stderr,
-                    )
-                    _killpg(process.pid, signal.SIGKILL)
-                else:
-                    for group in reaped.spared:
-                        print(
-                            f"Note: spared process group {group} (another node's loop)"
-                        )
-                    for survivor in reaped.survivors:
-                        print(
-                            f'Warning: pid {survivor.pid} survived the reap:'
-                            f' {survivor.command}',
-                            file=sys.stderr,
-                        )
+                lines = fractal.util.process.reap_or_kill(
+                    [process.pid],
+                    grace=_STREAM_ERROR_GRACE_SECONDS,
+                    spare=node.loop_records,
+                )
+                for line in lines:
+                    print(line, file=sys.stderr)
         finally:
             watchdog_done.set()
             # a truncated stream (no result frame) ends mid-line with no summary
@@ -3084,15 +3109,24 @@ class Loop:
         agent_status = process.wait()
         if timer is not None:
             timer.cancel()
+        # a reap the deadline or the watchdog started runs on its own thread:
+        # wait out its grace and KILL, so a tool that ignores TERM never
+        # outlives the launch into the next one; an unfired thread ends at once
+        for thread in (timer, watchdog):
+            if thread is not None:
+                thread.join(_REAP_WAIT_SECONDS)
+
+        # the invocation is over -- drop the group handle so a later
+        # pause/kill can never signal a recycled pgid
+        (node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
 
         # a launch that ended without its authoritative cost (killed, or its
-        # stream dead before the closing figure) is priced from the
-        # provider's own usage record, read once the process has exited and
-        # flushed it
+        # stream dead before the closing figure) is priced from the provider's
+        # own usage record, read once the process has exited and flushed it
         if self._step_id is not None and (result is None or not result.final):
             try:
                 agent.settle_cost(
-                    self._step_id,
+                    step_id=self._step_id,
                     started=launched,
                     ended=fractal.util.time.utc_now(),
                 )
@@ -3101,10 +3135,6 @@ class Loop:
                     f'Warning: pricing the ended launch failed ({error})',
                     file=sys.stderr,
                 )
-
-        # the invocation is over -- drop the group handle so a later
-        # pause/kill can never signal a recycled pgid
-        (node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
 
         session_out = result.session if result is not None else None
         cost_out = result.cost if result is not None else None
@@ -3167,11 +3197,12 @@ class Loop:
             # stream never named one
             if self._consume_pause_abort():
                 return StepResult(status='paused', session=session_out, cost=cost_out)
+            stuck_session = session_out or invocation.session
             return StepResult(
                 status='stuck',
                 exit_code=1,
                 reason=f'no action for {_span(NO_PROGRESS_SECONDS)}',
-                session=session_out or invocation.session,
+                session=stuck_session,
                 cost=cost_out,
             )
         if agent_status != 0 and result is not None and result.budget_stopped:
@@ -3263,15 +3294,17 @@ class Loop:
                 cost=cost_out,
             )
         if isinstance(stream_error, _ThinkingCap):
-            # the loop ended the invocation itself -- a pause racing the cap
-            # still parks
+            # the loop ended the invocation itself; a pause racing the cap still parks
             if self._consume_pause_abort():
                 return StepResult(status='paused', session=session_out, cost=cost_out)
+            # the caller-minted session stands in when the stream never
+            # named one, as for the watchdog's stuck launch
+            stuck_session = stream_session or invocation.session
             return StepResult(
                 status='stuck',
                 exit_code=1,
-                reason=f'{stream_error}',
-                session=stream_error.session,
+                reason='thinking cap',
+                session=stuck_session,
             )
         if stream_error is not None:
             # an agent that named a failure on its own stream (drained clean,
@@ -3291,13 +3324,14 @@ class Loop:
             else:
                 message = f'{type(stream_error).__name__}: {stream_error}'
             detail = _one_line(message)
+            unavailable = agent_borne and _unavailable()
             return StepResult(
                 status='failed',
                 exit_code=1,
                 reason=f'{self._fail_reason}: {detail}',
                 session=session_out,
                 cost=cost_out,
-                unavailable=agent_borne and _unavailable(),
+                unavailable=unavailable,
             )
         # a budget stop reported on the stream keeps its attribution even
         # when the agent exits 0
@@ -3466,6 +3500,9 @@ class Loop:
                 sync_reason = 'over budget'
             elif result.status == 'failed':
                 sync_status, sync_exit_code = 'failed', 1
+                # the outage verdict leads the reason, as on a work step's row
+                if result.unavailable:
+                    sync_reason = f'{UNAVAILABLE_REASON_PREFIX}{result.reason}'
             else:
                 sync_status, sync_exit_code = 'completed', 0
         else:
@@ -3627,7 +3664,9 @@ class Loop:
         once the cap is spent, and the billing breaker's waits reach an
         hour: a cascaded budget finish (the very signal an outage
         produces) must never sleep one out, especially since a pending
-        finish silences the ceiling poll.
+        finish silences the ceiling poll. Nor does a wait run past the
+        run or iteration deadline: it ends there, and the launch it was
+        holding books the timeout.
 
         Args:
             seconds: Wait to sleep out; ``None`` takes the step-retry
@@ -3640,6 +3679,10 @@ class Loop:
         """
         if seconds is None:
             seconds = self._step_retry_backoff_seconds
+        # never sleep past the soonest deadline (keeps the walls true)
+        deadline = self._soonest_deadline()
+        if deadline > 0:
+            seconds = min(seconds, max(0, deadline - int(time.time())))
         waited = 0
         while waited < seconds:
             time.sleep(1)
@@ -3735,6 +3778,63 @@ class Loop:
         self._iter_interrupted = True
         return False
 
+    def _unavailable_gate(self: Loop, steps: list[Step], step_num: int) -> bool:
+        """Hold the next launch through a provider outage's backoff, if one stands.
+
+        A failure the agent names as its provider being unavailable paces
+        its own step's retries; once those run out, the iteration fails and
+        the next launch would go out hot for as long as the outage lasts
+        (with no retries at all, nothing would pace it). While the streak
+        stands, the step's first launch waits its doubling clock instead:
+        the launch after the wait is the probe that clears or extends it.
+
+        Args:
+            steps: The iteration's whole step sequence.
+            step_num: The gated step's 1-based number.
+
+        Returns:
+            Whether the step loop may proceed. ``False`` means the wait
+            was interrupted: the caller parks on ``_paused``, else ends
+            the sequence.
+
+        """
+        if not self._unavailable_fails:
+            return True
+        node = self.node
+        wait = self._unavailable_wait()
+        print(
+            f'=== Provider unavailable — {self._unavailable_fails} consecutive'
+            f' failure(s); probing again in {wait}s ==='
+        )
+        # an interrupted wait never buys a hot launch: a pause parks, and a
+        # stop, finish, or spent ceiling ends the step loop
+        if self._retry_backoff(seconds=wait):
+            return True
+        if self._paused:
+            return False
+        # book the gated step and the never-run tail as the billing gate does
+        for missed in steps[step_num - 1 :]:
+            try:
+                missed_id = node.record.step_start(
+                    iter_id=self._iter_id,
+                    run_id=self._run_id,
+                    step=missed.number,
+                    step_name=missed.name,
+                )
+                node.record.step_end(
+                    step_id=missed_id,
+                    status='stopped',
+                    exit_code=0,
+                    metadata='outage gate interrupted',
+                )
+                # never launched, so the spend is a knowable zero
+                node.record.step_cost(step_id=missed_id, cost=0.0)
+            except Exception:
+                pass
+        # the sequence was cut short: never book this iteration 'completed'
+        self._iter_interrupted = True
+        return False
+
     def _book_billing(self: Loop, result: StepResult, duration: int) -> None:
         """Fold one agent launch's outcome into the billing breaker's streak.
 
@@ -3793,10 +3893,14 @@ class Loop:
         (a cost cap over an unpriced model, a per-step agent that cannot
         run) bought nothing and proves nothing about credits; a
         cannot-exec launch (127) is a different class and never arms the
-        breaker; an unknowable (``None``) cost on an instant failure
-        reads as zero, since a launch that paid reports its frames.
+        breaker, and neither does a failure the agent names as its
+        provider being unavailable, which the outage streak paces; an
+        unknowable (``None``) cost on an instant failure reads as zero,
+        since a launch that paid reports its frames.
         """
         if not self._step_launched:
+            return False
+        if result.unavailable:
             return False
         if result.exit_code == 127 or duration >= _BILLING_INSTANT_SECONDS:
             return False
@@ -4174,10 +4278,9 @@ class Loop:
         )
         if any(seconds > 0 for seconds in timeouts):
             return
-        # a step file's own timeout: brakes its launch, so the exposure
-        # stands only while some launch has no ceiling -- SYNC runs on the
-        # unset node value, and an unreadable or malformed file falls back
-        # to it
+        # a step file's own timeout: brakes its launch, so the exposure stands
+        # only while some launch has no ceiling -- SYNC runs on the unset node
+        # value, and an unreadable or malformed file falls back to it
         launches = sorted((self.node.node_dir / 'steps').glob('*.md'))
         if self._sync_mode and self._sync_file.is_file():
             launches.append(self._sync_file)
@@ -4187,7 +4290,7 @@ class Loop:
                 seconds = Step.load(path).limit(self._step_timeout_seconds)
             except (OSError, ValueError):
                 seconds = self._step_timeout_seconds
-            if seconds is None or seconds <= 0:
+            if seconds <= 0:
                 unbraked = True
                 break
         if not unbraked:
@@ -5136,14 +5239,6 @@ def _span(seconds: int) -> str:
     if seconds >= 60 and seconds % 60 == 0:
         return f'{seconds // 60} minutes'
     return f'{seconds}s'
-
-
-def _killpg(pgid: int, sig: signal.Signals) -> None:
-    """Signal a process group, ignoring one that is gone or not ours."""
-    try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 def _one_line(text: str) -> str:

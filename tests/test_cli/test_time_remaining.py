@@ -10,7 +10,8 @@ displayed seconds.
 ``Time.remaining`` returns ``None`` (no timeout / nothing running) or a float;
 the command turns that into exactly one of:
 
-- ``"no limit"`` -- no ``timeout``/``iter_timeout``/``step_timeout`` configured;
+- ``"no limit"`` -- no ``timeout``/``iter_timeout``/``step_timeout`` configured
+  and no step file carrying its own ``timeout:`` line;
 - ``"not running"`` -- a timeout is set but nothing active counts down;
 - ``"<N>s"`` -- ``int(remaining)`` for the soonest active deadline (run,
   iteration, or step).
@@ -119,18 +120,24 @@ def test_remaining_reports_not_running_without_active_run(time_node: dict) -> No
 
 
 @pytest.mark.parametrize(
+    argnames='scope',
+    argvalues=[None, 'step'],
+    ids=['soonest', 'step-scope'],
+)
+@pytest.mark.parametrize(
     argnames='source',
     argvalues=['node', 'step-file'],
 )
 def test_remaining_reports_not_running_with_only_step_timeout(
     time_node: dict,
     source: str,
+    scope: Optional[str],
 ) -> None:
     """A lone step timeout is still a limit -> ``"not running"``, not ``"no limit"``.
 
     A configured ``--step-timeout``, or a step file's own ``timeout:`` line,
     still time-bounds the node -- there is just nothing active to count
-    down against.
+    down against, whether the soonest default or the step scope is asked.
     """
     node = time_node['node']
     if source == 'node':
@@ -142,7 +149,7 @@ def test_remaining_reports_not_running_with_only_step_timeout(
             f'---\ntimeout: {STEP_TIMEOUT}\n---\n# EXECUTE\n',
             encoding='utf-8',
         )
-    assert _remaining(time_node['repo'], scope='step') == 'not running'
+    assert _remaining(time_node['repo'], scope=scope) == 'not running'
 
 
 def test_remaining_counts_down_for_the_run(time_node: dict) -> None:

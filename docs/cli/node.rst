@@ -454,14 +454,17 @@ in-flight agent invocation is aborted, and the loops park with status
 tmux session — that is its normal state, not a crash. While a node (or the
 whole tree, via ``fractal pause``) is paused, spawning and starting refuse
 anywhere beneath it; the only legal verbs on a paused node are ``resume``,
-``kill``, and ``chat``.
+``kill``, ``chat``, and ``merge`` (committed work only; the node stays
+paused).
 
 ``resume`` relaunches the parked subtree leaf-first. Each loop adopts its open
 run — same budgets and iteration count, the interrupted step re-entered
 (resuming the recorded agent session when one exists) — and run and iteration
 deadlines are credited for the paused span. A node still parking gets its
 pending pause withdrawn instead. Resuming refuses when the node is not paused
-or when an ancestor is still paused.
+or when an ancestor is still paused. A relaunch waits for a merge in progress
+anywhere in the repository, since a paused node's merge rewrites its worktree,
+and says so once before it waits.
 
 .. code-block:: console
 
@@ -505,14 +508,15 @@ Integration and teardown
 .. code-block:: console
 
    $ fractal node merge [NODE] [--continue] [--ignore-scope]
-         [--validate <script>] [--delete] [--force|-f]
+         [--validate <script>] [--message <text>] [--delete] [--force|-f]
 
 Squash-merge the node's branch into its merge target — the configured
 ``base`` when set, else the dotted parent. One squash commit lands on the
 target; the node's full history stays on its own branch. Merging refuses on
-the user node, when the node itself is ``active`` or ``paused``, and when the
-*target* is ``active`` or ``paused`` (except from inside the target's own
-loop, its normal child-merge path). Non-fatal warnings ride stderr.
+the user node, when the node itself is ``active``, and when the *target* is
+``active`` or ``paused`` (except from inside the target's own loop, its
+normal child-merge path). A ``paused`` node merges its committed work and
+stays paused (see :doc:`/guide/lifecycle`). Non-fatal warnings ride stderr.
 
 Before committing, the merge holds the squash to the node's commit scope: the
 staged paths outside ``.fractal/`` are judged by the node's ``scope`` roots
@@ -676,6 +680,11 @@ overwrites it.
    merge (``Nothing to merge``) skips it. An absolute path, a ``..``
    component, a symlink script, or a path escaping the target worktree is
    refused.
+
+``--message <text>``
+   Commit the squash with ``<text>`` instead of the default
+   ``merge <branch>``, verbatim, so a descriptive message needs no amend (an
+   amended squash orphans the merge-base advance recorded against it).
 
 ``--delete``
    Delete the node (worktree, branch, and whole subtree) after a successful
@@ -1096,11 +1105,11 @@ default the soonest of the configured run, iteration, and step deadlines
 answers; ``--scope`` narrows to one: ``run`` reads ``timeout``, ``iter``
 reads ``iter_timeout`` (falling back to ``interval``), ``step`` reads the
 active step's ``timeout:`` frontmatter, else ``step_timeout`` — the ceiling
-the loop enforces for that step. Inside a step, the node's own seat reads the
-exact ceiling its launch exported (``$STEP_TIMEOUT_SECONDS``); any other
-caller reads the step file, which the loop reads only once per iteration, so
-an edit made mid-iteration shows here before the loop enforces it at the next
-iteration. A steered step counts down from its stuck launch, as the loop's
+the loop enforces for that step, which its launch records on the step row.
+The loop reads step files only once per iteration, so an edit made
+mid-iteration shows here from the step's next launch, when the loop enforces
+it; the node's own seat reads the same ceiling from ``$STEP_TIMEOUT_SECONDS``.
+A steered step counts down from its stuck launch, as the loop's
 deadline does. Paused spans are credited back to run and iteration deadlines.
 Two non-numeric answers are distinct: ``no limit`` means no timeout is
 configured for the queried scope; ``not running`` means a limit exists but no

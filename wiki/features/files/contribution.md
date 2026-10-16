@@ -74,5 +74,5 @@ listing only once committed. A narrow pathspec commit stages and commits exactly
 the named uploaded paths — no lint, scope check, or push, and no `commit` event
 is logged, because an upload has no run lineage and fabricating one would
 silently shift the `iteration`/`run` diff anchors. Both writes and pathspec
-commits refuse on a paused node, whose frozen work admits only resume, kill, and
-chat.
+commits refuse on a paused node, whose frozen work admits only resume, kill,
+chat, and merge (committed work only; the node stays paused).

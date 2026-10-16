@@ -143,9 +143,10 @@ Refuses when:
   ``wiki init --path=<folder>``; the refusal lands after the data directory is
   written, and the re-run completes the partial init;
 - the command runs from a draining seat (an agent invocation of a
-  ``fractal node start --continue --drain`` run, or any process in its
-  process group — see ``--drain`` in :doc:`/cli/node`): a drain forbids
-  every spawn, a whole new tree included;
+  ``fractal node start --continue --drain`` run, or any process it starts,
+  detected by the ``_DRAIN`` export, the run's durable ``drain`` signal, or
+  descent from the seat's recorded agent invocation — see ``--drain`` in
+  :doc:`/cli/node`): a drain forbids every spawn, a whole new tree included;
 - another live fractal on the machine shares this repository's directory
   basename: tmux session names carry the basename, so two fractals under
   one basename would collide. Rename one repository directory.
@@ -248,7 +249,9 @@ work is never swept in, and it does not push. Its subject is
 ``--init``
    Baseline commit labeled ``init`` instead of ``iteration <run>.<iter>``.
    Skips the wiki index refresh and lint. The only commit form a user node
-   accepts. Default: off.
+   accepts. On a child node it carries only the node's seed and init's
+   ``.gitattributes`` edit; anything else, copied project material
+   included, takes an ordinary ``fractal commit``. Default: off.
 
 ``--check``
    Exit ``1`` if uncommitted changes exist instead of committing: the
@@ -274,6 +277,10 @@ Refuses when:
 - ``MESSAGE`` is missing and ``--check`` is not set;
 - the command runs on a user node without ``--init``
   (``Cannot commit from a user node (only --init is supported).``);
+- ``--init`` on a child node finds a change outside the node's seed and
+  init's ``.gitattributes`` edit (``The --init baseline commits only the
+  node seed (<seed>) and skips the lint; commit these with an ordinary
+  fractal commit``), naming each path before anything is staged;
 - changes fall outside the node's configured ``scope`` and neither
   ``--ignore-scope`` nor ``--force`` is set;
 - ``lint.sh`` fails;

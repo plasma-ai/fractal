@@ -211,10 +211,10 @@ def variables(node: Node, overrides: Optional[dict[str, str]] = None) -> dict[st
 
     The static variables (paths, git, config, modes) are the single
     derivation the loop and every other renderer share. Run-scoped
-    variables (step/iteration/budget and the continue/resume/reserve modes)
-    are not derived here -- a caller supplies them via ``overrides`` (the
-    loop with live state, a chat with ``N/A (chat)``); any placeholder left
-    unsupplied stays verbatim.
+    variables (step/iteration/budget and the continue/resume/reserve/drain
+    modes) are not derived here -- a caller supplies them via
+    ``overrides`` (the loop with live state, a chat with ``N/A (chat)``);
+    any placeholder left unsupplied stays verbatim.
 
     Args:
         node: The node whose variables to derive.

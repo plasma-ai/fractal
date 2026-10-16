@@ -31,11 +31,15 @@ normalize to "ours" — `wiki update` owns them, so their churn must never
 conflict — while authored keys (`title`, `desc`, `created`, `category`, `tags`,
 `sources`) get a normal three-way merge that can conflict. The generated link
 block resolves to the union of both sides' rows, less each row the base had that
-one side deleted while the other left it alone, so a merge never drops one
-side's additions and never brings back one side's deletions. A deletion stands
-only when the deleting side's rows carry no formatter escape damage (`\[\[`),
-since rows the driver cannot read say nothing about what that side deleted. On
-add/add merges (both sides created the page) `created` joins the take-ours set,
+one side deleted while the other left it alone, so a merge of readable rows
+keeps both sides' additions and brings back neither side's deletions. The driver
+does not repair rows that carry formatter escape damage (`\[\[`): a side whose
+`_index.md` link rows are escaped can lose its added rows and row edits in the
+merge, so repair that side with `wiki update` on its branch before merging. A
+deletion stands only when the deleting side's rows carry no such damage, since
+rows the driver cannot read say nothing about what that side deleted. When the
+base carries no `created:` stamp (an add/add merge, where both sides created the
+page, or a hand-written or imported index), `created` joins the take-ours set,
 since both stamps come from independent update runs. A side whose frontmatter is
 undetectable is treated as unchanged from base, never as a deletion; a side that
 dropped the `***` separator its base carried cannot be split into regions, so it
@@ -45,11 +49,13 @@ body conflicts.
 
 When the whole file merges cleanly, the driver then rewrites the H1 from the
 merged `title` (else `name`) and puts the rows in the order `wiki update` writes
-them, so a clean merge of two current indexes is current as merged. It does so
-only when the wiki's own class (a trusted `.wiki/wiki.py` hook's category order
-included) leaves the current branch's index as written; an index another class
-ordered, or one whose hook cannot load or run, stays as merged, with theirs' new
-rows below ours'. A conflicted merge, or one left as merged, settles at the next
+them, so a clean merge in which each side only added, deleted, or retitled
+entries is current as merged; a row one side changed and the other deleted, or a
+row both sides changed, waits for the next `wiki update`. It does so only when
+the wiki's own class (a trusted `.wiki/wiki.py` hook's category order included)
+leaves the current branch's index as written; an index another class ordered, or
+one whose hook cannot load or run, stays as merged, with theirs' new rows below
+ours'. A conflicted merge, or one left as merged, settles at the next
 `wiki update` (which the fractal commit pipeline runs; see
 [[features/wiki_system/index_regeneration]]), which re-sorts the block from the
 merged filesystem and prunes stale rows.
@@ -63,15 +69,29 @@ root for the root's own index), so indexes outside those folders keep their
 bytes. The bytes, not the merge base, mark a merged index, so a criss-cross
 history, where git names one of two bases, hides none. An index belongs to the
 deepest declared root above it, every folder is matched literally, and an index
-in a folder its wiki excludes is skipped, as the wiki's own walk skips it.
+in a folder its wiki excludes is skipped, as the wiki's own walk skips it. An
+index whose folder encloses another declared wiki is skipped too, with a warning
+naming both: the wiki refuses to sweep across a nested root, so that index lands
+as the driver merged it.
 
 The update reads the disk, so the merge refuses an untracked file under the
 project wiki or in a folder it refreshes, naming it: indexed into the squash
-commit, it would dangle in every clean checkout. The memory wiki is the merging
-node's own, and its next commit lands what it holds. A wiki declared at the
-worktree root refuses the merge outright: it encloses every folder, so each
-refresh would walk the whole worktree, and node init refuses to spawn under one
-for the same reason.
+commit, it would dangle in every clean checkout. Untracked files are judged by
+two of the wiki's rules — the repository's ignore rules alone, so a file only a
+personal `core.excludesFile` hides still refuses, since the wiki would index it,
+and the dot rule, so a file under a dot-prefixed folder, which the walk never
+lists, neither refuses the merge nor rides the squash commit. The guard does not
+mirror the walk's other exclusions: a symlink, or a file the wiki's
+`exclude.patterns` matches, still refuses though the refresh would skip it,
+which is safe, and committing or moving the file clears the refusal. The refresh
+stages only tracked files it updated, indexes it created, and a root's `.wiki/`
+state. The memory wiki is the merging node's own, and its next commit lands what
+it holds. A refresh step that fails restores the target like a conflict; the
+reset keeps untracked files, so the merge also removes each index and `.wiki/`
+file the refresh created and had not yet staged, and the retry lands instead of
+refusing it as an untracked file. A wiki declared at the worktree root refuses
+the merge outright: it encloses every folder, so each refresh would walk the
+whole worktree, and node init refuses to spawn under one for the same reason.
 
 ## The parent's reconciliation job
 

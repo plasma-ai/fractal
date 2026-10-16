@@ -116,7 +116,8 @@ column. Several qualifiers can stand at once, ``;``-joined:
   the latest run advanced with no recorded row.
 - ``PAUSED: billing`` composes the same way, on ``active`` nodes only — the
   newest launches carry the dead-credits signature (three or more instant,
-  zero-cost failures) and the loop's billing breaker is backing off.
+  zero-cost failures that the loop did not judge provider outages) and the
+  loop's billing breaker is backing off.
 
 Transitions at a glance
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -242,12 +243,12 @@ the command line instead of inside a dying tmux pane. Start also refuses:
   tree-wide latch);
 - a launch from inside a draining run — a seat of a ``--continue --drain``
   run, detected by the ``_DRAIN`` export, the run's durable ``drain``
-  signal, or the seat's recorded process group ("Cannot start a node from
-  a draining run (--drain forbids re-arms)"); ``node init`` (a spawn, or a
-  whole new tree via ``fractal init``), ``node update``, and
-  ``node resume`` refuse the same way. The guard binds the acting seat, not
-  the target — an operator's ``node resume`` of a parked drain run
-  relaunches it, and the relaunch keeps draining;
+  signal, or descent from the seat's recorded agent invocation ("Cannot
+  start a node from a draining run (--drain forbids re-arms)");
+  ``node init`` (a spawn, or a whole new tree via ``fractal init``),
+  ``node update``, and ``node resume`` refuse the same way. The guard
+  binds the acting seat, not the target — an operator's ``node resume``
+  of a parked drain run relaunches it, and the relaunch keeps draining;
 - a fresh start when a foreign tmux session already holds this node's
   session name (another fractal sharing the repository basename — rename a
   repository directory, never kill the foreign session); a headless fresh
@@ -394,13 +395,21 @@ session while parked is normal**, and crash reconciliation deliberately
 never touches a paused node.
 
 The abort takes the agent's whole process tree, not just its process group:
-agent CLIs run tool commands in groups (or sessions) of their own, and those
-die with the agent. ``kill`` and a step deadline reap the same way. Anything
-still alive after the forced kill is named in the command's output, and so is
-any other process working in the node's worktree, which is reported but left
-running. If the first read of the process table fails, the abort falls back to
-TERMing every recorded group except the caller's own, so a self-pause run from a
-tool shell in a group of its own can still abort its own step.
+agent CLIs run tool commands in groups (or sessions) of their own, and every
+one still linked to the agent dies with it. ``kill`` and a step deadline reap
+the same way. Anything still alive after the forced kill is named in the
+command's output, and so is any other process working in the node's worktree
+that is not a node's loop, which is reported but left running. That includes a
+job an earlier tool call left behind under a session leader that has since
+exited (``validate.sh &`` under a ``setsid`` shell that already returned):
+nothing links it to the agent any more, so it is named, never ended. Each line
+names its node. A git operation the abort left unfinished in the worktree — a
+merge, a rebase, an ``index.lock`` — is named too, so it is finished or aborted
+before the node is merged. An agent that pauses its own node aborts nothing:
+its step finishes with every tool it started, and the loop parks at its next
+checkpoint. Only if the first read of the process table fails does the abort
+fall back to TERMing every recorded group except the caller's own, so a
+self-pause from a tool shell in a group of its own then aborts its own step.
 
 While parked, a node:
 
@@ -417,14 +426,24 @@ Landing a paused node
 ``fractal node merge <node>`` on a paused node lands its *committed* work in
 its merge target and leaves it ``paused``: its run, iteration, and step rows
 are untouched, so ``fractal resume`` adopts the same run afterwards. The
-frozen step's uncommitted work stays in the node's worktree. The merge-base
-advance carries that state the way ``git checkout`` moves a branch; if the
-advance would change a path the node holds dirty or staged, or write over an
-untracked or ignored file, the whole merge refuses and names the paths, and a
-failure after the squash commit rolls back both the target and the node. The
-target must still be settled (a depth-1 node lands into its user branch even
-during a tree-wide pause); a live node, or a child landing into a live or
-paused parent, still refuses. ``--message`` sets the squash commit's text, so
+frozen step's uncommitted work stays in the node's worktree. A step frozen
+inside a git operation — a merge, squash merge, cherry-pick, or revert
+stopped on a conflict, a rebase stopped part-way, or the ``index.lock`` of a
+git command still running or killed — refuses the merge before anything
+changes: finish or abort the operation, by resuming the node or by hand in
+its worktree, and merge again. The merge-base advance carries the frozen state
+the way ``git checkout`` moves a branch; if the advance would change a path
+the node holds dirty or staged, or write over an untracked or ignored file,
+the whole merge refuses and names the paths, and a failure after the squash
+commit, or an interrupt before the node's branch moves, rolls back both the
+target and the node and exits 1 (a ``--continue`` keeps the operator's
+resolution staged for the re-run, and a file something else wrote in the
+node's worktree during the merge is left as found and named); an interrupt
+once the node's branch has moved lands the merge and exits 0, since the branch
+moves only after the node's worktree update succeeded. The target must still
+be settled (a depth-1 node lands into its user branch even during a tree-wide
+pause); a live node, or a child landing into a live or paused parent, still
+refuses. ``--message`` sets the squash commit's text, so
 a descriptive message needs no amend (an amended squash orphans the advance).
 
 The pause latch

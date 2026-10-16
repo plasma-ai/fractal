@@ -33,23 +33,26 @@ _ROUTING_KEYS = (
     'ANTHROPIC_MODEL',
 )
 
-#: Opening of the user turn claude injects to auto-continue a reply cut off at
-#: the output cap (its wording past these words varies by version).
+# the opening of the user turn claude injects to auto-continue a reply cut
+# off at the output cap (its wording past these words varies by version)
 _CONTINUATION_PREFIX = 'Output token limit hit'
 
-#: Content block types of a reply that is still thinking.
+# the content block types of a reply that is still thinking
 _THINKING_BLOCKS = frozenset({'thinking', 'redacted_thinking'})
 
-# Claude Code's provider-outage shapes, as its failed result frame names
-# them once its own API retries are spent: an `API Error: <status>` line
-# (529 overloaded, a 5xx, a 429 rate limit), the API's error types, or the
-# overloaded/unavailable wording
+# Claude Code's provider-outage shapes, as its failed result frame names them
+# once its own API retries are spent: an `API Error: <status>` line (529
+# overloaded, a 5xx, a 429 rate limit), its own `API Error:` text for a
+# response stream that broke off (a lost connection, a server error, a stall),
+# the API's error types, or the overloaded or service-unavailable wording
 _UNAVAILABLE = re.compile(
     r'API Error:\s*(?:Repeated\s+)?(?:429|5\d\d)\b'
+    r'|API Error:\s*(?:Connection lost|Server error mid-response)'
+    r'|API Error:\s*The response (?:stopped arriving|stalled)'
     r'|\b(?:overloaded|rate_limit|api)_error\b'
     r'|\boverloaded\b'
     r'|\bservice unavailable\b',
-    re.IGNORECASE,
+    flags=re.IGNORECASE,
 )
 
 # the openrouter route authenticates on the key alone
@@ -84,6 +87,9 @@ class ClaudeParser(StreamParser):
         # the agent ended its turn (an end_turn stop or a result) and no new
         # reply has started -- only then is a wake-up its own
         self._turn_ended = False
+        # a top-level thinking block is open -- the stream shows nothing of a
+        # think in progress, so it holds the idle clock until it completes
+        self._thinking = False
 
     def feed(self: ClaudeParser, line: str) -> list[StreamEvent]:
         """Parse one claude stream line into normalized events."""
@@ -118,21 +124,29 @@ class ClaudeParser(StreamParser):
         if message_type == 'stream_event':
             event = message.get('event') or {}
             event_type = event.get('type')
-            # the raw API events track the top-level reply's id, its blocks,
-            # and its stop: a max_tokens stop is the cap's primary signal,
-            # landing before claude requests the continuation
-            # ... and the idle clock: a new reply has the agent acting, a tool
-            # call or a turn's end has it waiting, a text block has it acting
+            # the raw API events track the top-level reply for the thinking
+            # cap (its id, blocks and stop: a max_tokens stop is the primary
+            # signal, landing before claude requests the continuation) and
+            # for the idle clock (a new reply, a text block or a think's end
+            # acts; a tool call, a think's start or a turn's end waits)
             if top_level:
                 if event_type == 'message_start':
                     self._track_reply((event.get('message') or {}).get('id'))
                     self._turn_ended = False
+                    self._thinking = False
                     events.append(StreamEvent(kind='acting'))
                 elif event_type == 'content_block_start':
                     block = event.get('content_block') or {}
                     self._reply_blocks.add(block.get('type'))
+                    if block.get('type') in _THINKING_BLOCKS:
+                        self._thinking = True
+                        events.append(StreamEvent(kind='waiting'))
                     events += self._block_progress(block)
+                elif event_type == 'content_block_stop' and self._thinking:
+                    self._thinking = False
+                    events.append(StreamEvent(kind='acting'))
                 elif event_type == 'message_delta':
+                    self._thinking = False
                     delta = event.get('delta') or {}
                     if delta.get('stop_reason') == 'max_tokens':
                         events += self._thinking_cap()
@@ -216,6 +230,11 @@ class ClaudeParser(StreamParser):
                         )
                 # one reply spans a frame per content block under one id
                 self._track_reply(inner.get('id'))
+                # claude writes a block's frame as the block completes, so a
+                # frame landing while a think is open ends that think
+                if self._thinking:
+                    self._thinking = False
+                    events.append(StreamEvent(kind='acting'))
                 for block in inner.get('content') or []:
                     if isinstance(block, dict):
                         self._reply_blocks.add(block.get('type'))
@@ -314,6 +333,8 @@ class ClaudeParser(StreamParser):
             self._reply_blocks = set()
             self._reply_capped = False
             self._pending.clear()
+            # a reply after a result spends past the figure the result settled
+            self.final = False
 
     def _thinking_cap(self: ClaudeParser) -> list[StreamEvent]:
         """Report the tracked reply's thinking cap, once, if it only thought.
@@ -565,13 +586,16 @@ class ClaudeAgent(Agent):
         started: str,
         ended: str,
     ) -> Optional[float]:
-        """Price the launch's window from claude's own session transcript.
+        """Price the launch's window from claude's own session transcripts.
 
         Claude writes each reply to the transcript as it streams, so a
         launch killed before its result frame still left each reply's
         final usage on disk, where the stream priced only each reply's
-        first frame. An absent or unreadable transcript, or a window with
-        no priced usage, logs the reason and returns ``None``.
+        first frame. A sub-agent's replies sit in a transcript of their own
+        in the session's ``subagents`` folder, read beside the session's;
+        one that cannot be read is skipped with the reason logged. An
+        absent or unreadable session transcript, or a window with no
+        priced usage, logs the reason and returns ``None``.
         """
         try:
             found = self.transcript(session)
@@ -580,16 +604,31 @@ class ClaudeAgent(Agent):
             return None
         if not found['exists']:
             self.log(
-                f'launch unpriced: no transcript for session {session}',
-                logging.WARNING,
+                message=f'launch unpriced: no transcript for session {session}',
+                level=logging.WARNING,
             )
             return None
-        cost = _transcript_cost(found['content'], started=started, ended=ended)
+        # read each sub-agent's transcript beside the session's -- one pass
+        # over them all keeps a reply counted once across files, and a
+        # newline between files keeps a torn tail off the next file's record
+        contents = [found['content']]
+        subagents = pathlib.Path(found['path']).with_suffix('') / 'subagents'
+        for path in sorted(subagents.glob('agent-*.jsonl')):
+            try:
+                contents.append(path.read_text(encoding='utf-8', errors='replace'))
+            except OSError as e:
+                self.log(
+                    message='launch partly unpriced: sub-agent transcript'
+                    f' unreadable: {e}',
+                    level=logging.WARNING,
+                )
+        content = '\n'.join(contents)
+        cost = _transcript_cost(content, started=started, ended=ended)
         if cost is None:
             self.log(
-                f'launch unpriced: no priced usage in session {session}'
+                message=f'launch unpriced: no priced usage in session {session}'
                 f' between {started} and {ended}',
-                logging.WARNING,
+                level=logging.WARNING,
             )
         return cost
 
@@ -598,7 +637,7 @@ class ClaudeAgent(Agent):
         return _rates(model)
 
     def _unavailable(self: ClaudeAgent, detail: str) -> bool:
-        """Match Claude Code's overloaded, erroring, or rate-limited API."""
+        """Match claude's provider-outage shapes."""
         return _UNAVAILABLE.search(detail) is not None
 
     def tracks_cost(self: ClaudeAgent, model: Optional[str] = None) -> bool:
@@ -643,7 +682,7 @@ def _rates(model: str) -> Optional[dict[str, Any]]:
     return None
 
 
-def _is_continuation(message: dict[str, Any]) -> bool:
+def _is_continuation(message: dict[str, Any], /) -> bool:
     """Return whether a user frame is claude's output-cap continuation.
 
     Matched on the text alone: the flag claude stamps on its injected turns
@@ -656,7 +695,8 @@ def _is_continuation(message: dict[str, Any]) -> bool:
         return content.startswith(_CONTINUATION_PREFIX)
     for block in content or []:
         if isinstance(block, dict) and block.get('type') == 'text':
-            return (block.get('text') or '').startswith(_CONTINUATION_PREFIX)
+            text = block.get('text') or ''
+            return text.startswith(_CONTINUATION_PREFIX)
     return False
 
 
@@ -665,14 +705,14 @@ def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[floa
 
     Claude splits a reply across lines, one per content block under the
     reply's message id, each carrying the reply's usage as it stood when
-    written; the last line of an id is its final usage. Sidechain
-    (sub-agent) replies written into the same transcript count at their
-    own model. Each id is priced at its own model, and an unpriced model
-    drops out of the sum, never the rest; ``None`` when nothing in the
-    window priced.
+    written; the last line of an id is its final usage. The content joins
+    the session's transcript with its sub-agents' (sidechain replies, at
+    their own model), and an id seen in more than one file counts once.
+    Each id is priced at its own model, and an unpriced model drops out of
+    the sum, never the rest; ``None`` when nothing in the window priced.
 
     Args:
-        content: The transcript's raw JSONL text.
+        content: The transcripts' raw JSONL text, joined by newlines.
         started: The window's opening instant (ISO 8601 UTC).
         ended: The window's closing instant (ISO 8601 UTC).
 
@@ -681,7 +721,9 @@ def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[floa
     closed = dt.datetime.fromisoformat(ended)
     # keep the final usage per message id (later lines overwrite earlier)
     replies: dict[str, tuple[dict[str, Any], Optional[str]]] = {}
-    for line in content.splitlines():
+    # a newline alone ends a record -- splitlines would also split at the
+    # U+2028 and U+0085 claude leaves raw inside a record's strings
+    for line in content.split('\n'):
         # tolerate malformed lines and a torn tail (the file may be mid-write)
         try:
             entry = json.loads(line)

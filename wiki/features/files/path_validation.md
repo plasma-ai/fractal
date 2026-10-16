@@ -62,4 +62,5 @@ The listing and the validators agree by construction: a listing never names an
 entry a read or download would reject, so a consumer can fetch anything it was
 shown. Reads are non-mutating and allowed regardless of lifecycle state; writes
 and upload commits additionally refuse on a paused node, whose frozen work
-admits only resume, kill, and chat.
+admits only resume, kill, chat, and merge (committed work only; the node stays
+paused).

@@ -46,6 +46,10 @@ STEP_PGID_FILE = '.step_pgid'
 
 #: run-row reason the crash heal stamps on a dead loop's rows
 CRASH_REASON = 'crashed: loop runtime gone, healed by reconcile'
+#: step-row reason prefix of a stuck launch its steer closed
+STEER_REASON_PREFIX = 'steered: '
+#: step-row reason prefix of a failed launch its agent named a provider outage
+UNAVAILABLE_REASON_PREFIX = 'provider unavailable: '
 
 #: lifecycle status set shared by the node status file and the record rows
 STATUSES = (

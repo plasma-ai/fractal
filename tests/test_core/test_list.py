@@ -524,14 +524,21 @@ def test_list_flags_stale_active_rows(
 
 
 @pytest.mark.parametrize(
-    argnames=('frontmatter', 'last'),
-    argvalues=[('', '20m!'), ('---\ntimeout: 1h\n---\n', '20m')],
-    ids=['node-step-timeout', 'own-timeout'],
+    argnames=('step_timeout', 'frontmatter', 'recorded', 'last'),
+    argvalues=[
+        ('10m', '', None, '20m!'),
+        ('10m', '---\ntimeout: 1h\n---\n', None, '20m'),
+        (3600, '', None, '20m!'),
+        ('10m', '', 3600, '20m'),
+    ],
+    ids=['node-step-timeout', 'own-timeout', 'numeric-step-timeout', 'recorded'],
 )
 def test_list_stale_flag_waits_out_the_active_steps_timeout(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    step_timeout: object,
     frontmatter: str,
+    recorded: Optional[int],
     last: str,
 ) -> None:
     """The stale flag measures quiet time against the active step's ceiling.
@@ -539,10 +546,13 @@ def test_list_stale_flag_waits_out_the_active_steps_timeout(
     A step file's ``timeout:`` line bounds that step in place of the node's
     ``step_timeout``, so a node quiet past the node value but inside its
     active step's own longer timeout is working, not stale; a step without
-    one keeps the node value.
+    one keeps the node value. The launch records the ceiling it enforces on
+    its row, and a recorded ceiling wins over the file. A hand-edited
+    ``step_timeout`` with no unit suffix reads as no step limit, so the row
+    still lists, judged against the staleness floor alone.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
-    child.config.set('step_timeout', '10m')
+    child.config.set('step_timeout', step_timeout)
     steps_dir = child.node_dir / 'steps'
     for existing in steps_dir.glob('*.md'):
         existing.unlink()
@@ -552,12 +562,14 @@ def test_list_stale_flag_waits_out_the_active_steps_timeout(
     )
     run_id = child.record.runs(limit=1)[0]['run_id']
     iter_id = child.record.iter_start(run_id=run_id, iter=1)
-    child.record.step_start(
+    step_id = child.record.step_start(
         iter_id=iter_id,
         run_id=run_id,
         step=1,
         step_name='EXECUTE',
     )
+    if recorded is not None:
+        child.record.step_timeout(step_id=step_id, seconds=recorded)
     # push every activity instant on the child past the node step_timeout
     stamp = _past_timestamp(20 * 60)
     child.db.update({'created_at': stamp}, 'events', where={'node': child.branch})

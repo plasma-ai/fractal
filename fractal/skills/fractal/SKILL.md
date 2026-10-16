@@ -531,13 +531,14 @@ Once the node is running, briefly explain how to interact with it:
   the brake holds until `fractal resume`). Paused state is durable: it survives
   a reboot or a filesystem copy of the repo to another machine. A paused node
   holds its spawn slot and blocks its parent's finish-drain; only `resume`,
-  `kill`, and `chat` act on it (ask a paused node what it was doing —
-  `chat --current` forks the interrupted claude, grok, opencode, or omp session,
-  and the TUI's chat does so by default; a codex node gets a fresh session).
-  Note the distinction: `resume` continues a *paused* run in place, while
-  `start --continue` opens a *fresh* run (worktree restored — uncommitted
-  project files need `--clean`, and a budget-ended run refuses without an
-  explicit `--max-cost`) on a stopped/exited node.
+  `kill`, `chat`, and `merge` (committed work only; the node stays paused) act
+  on it (ask a paused node what it was doing — `chat --current` forks the
+  interrupted claude, grok, opencode, or omp session, and the TUI's chat does so
+  by default; a codex node gets a fresh session). Note the distinction: `resume`
+  continues a *paused* run in place, while `start --continue` opens a *fresh*
+  run (worktree restored — uncommitted project files need `--clean`, and a
+  budget-ended run refuses without an explicit `--max-cost`) on a stopped/exited
+  node.
 
 - **Worktree:** The node runs in a git worktree at
   `<repo>/.worktrees/<branch>/`. The user's repo is untouched. When done, from

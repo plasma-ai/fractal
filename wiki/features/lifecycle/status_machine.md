@@ -62,9 +62,10 @@ metadata states the reason before the operation raises.
   refusing over a recorded process group whose identity cannot be verified, and
   over a record naming no group yet (a launch's claim in flight) with guidance
   to retry once its pid lands or remove an abandoned record.
-- **`paused`** accepts only `resume`, `kill`, and `chat`. Everything else
-  refuses; a paused node holds its spawn slot and blocks ancestor finish-drains
-  until resumed or killed.
+- **`paused`** accepts only `resume`, `kill`, `chat`, and `merge` (committed
+  work only; the node stays paused). Everything else refuses; a paused node
+  holds its spawn slot and blocks ancestor finish-drains until resumed or
+  killed.
 - **`idle`** is the parked, startable state: `start` runs it, `retire` hides it,
   `delete` removes it, and `kill` stamps it `killed` — a booting spawn is
   reaped, a never-started one can never activate.

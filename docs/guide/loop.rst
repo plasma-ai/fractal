@@ -162,6 +162,10 @@ The joined text is rendered in one pass with ``$VAR`` / ``${VAR}``
 substitution matching GNU ``envsubst``: unknown placeholders and ``$$`` pass
 through verbatim, so ordinary shell text in a step file survives rendering.
 
+A steered relaunch (see `Stuck steps`_) is the one launch built otherwise:
+its whole prompt is the package's ``modes/STALL.md`` alone, rendered with the
+same variables, since its resumed session already holds the step.
+
 On the iteration a resume re-enters, the prompt also ends with an
 unread-inbox digest, appended after rendering (so it is never substituted):
 the twenty highest-priority unread ``inbox`` messages as metadata only —
@@ -323,9 +327,13 @@ model re-dispatches once — see below). These config keys control it:
      - Extra attempts a failed launch gets; ``0`` disables retries.
    * - ``step_retry_backoff``
      - ``10s``
-     - Delay before each retry. Slept in one-second increments, polling
-       pause (parks the run), stop, finish, and the subtree cost ceiling —
-       a failed step never buys another attempt once the budget is spent.
+     - Delay before each retry, and the base a provider outage's wait
+       doubles from (see `Provider outages`_). Slept in one-second
+       increments, polling pause (parks the run), stop, finish, and the
+       subtree cost ceiling — a failed step never buys another attempt once
+       the budget is spent. A wait (this one, the billing breaker's, or an
+       outage's) ends at the run or iteration deadline, and the launch it
+       was holding books the timeout.
 
 Every attempt books its own step row, so cost and duration are attributed
 accurately per attempt; retry rows carry a ``retry`` marker in their
@@ -357,9 +365,10 @@ A launch that fails in under 10 seconds with zero recorded cost never
 reached paid inference — the signature of an API billing or credit refusal.
 Three such failures in a row trip the loop's billing breaker. Every agent
 launch counts toward the streak, the before-step SYNC included; a
-cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, or
-one that spent real money is not billing-shaped and resets the streak to
-zero (which also disarms an armed breaker), and so is a step refused before
+cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, one
+that spent real money, or one its agent names as a provider outage (see
+below) is not billing-shaped and resets the streak to zero (which also
+disarms an armed breaker), and so is a step refused before
 its launch — a cost cap over a model the price table cannot price, or a
 per-step agent or provider that cannot run — since it bought no inference.
 Paused and budget-skipped steps bought no launch and leave the streak
@@ -385,13 +394,15 @@ them. While an active node's newest launches carry this signature,
 Provider outages
 ~~~~~~~~~~~~~~~~
 
-A failed launch whose agent names its provider as unavailable waits out the
-outage instead of retrying on the fixed backoff. Each agent backend reads its
+A failed launch whose agent names its provider as unavailable retries on a
+doubling wait instead of the fixed backoff. Each agent backend reads its
 own CLI's error text: the failed result frame, the stream's error frames, and
 the stderr capture.
 
 - **Claude**: an ``API Error:`` with a 429 or 5xx status (529 overloaded
-  included), the API's ``overloaded_error``, ``api_error``, or
+  included), Claude Code's own ``API Error:`` for a response stream that
+  broke off (a lost connection, a server error, or a stall, before or
+  mid-response), the API's ``overloaded_error``, ``api_error``, or
   ``rate_limit_error`` types, or the words "overloaded" or "service
   unavailable".
 - **Codex**: its give-up after its own reconnects (the last ``Reconnecting...
@@ -407,9 +418,23 @@ holds), announced as ``retrying in 20s (provider unavailable)``. The streak
 counts every launch, the before-step SYNC included, and spans steps and
 iterations. Any completed launch resets it; any other failed or timed-out
 launch breaks it. Only the wait changes: ``step_retries`` still bounds the
-attempts, the wait polls the same signals as a retry backoff, and an armed
-billing breaker's clock takes precedence. No config key tunes the doubling or
-the cap.
+attempts, and the wait polls the same signals as a retry backoff. A named
+outage is never billing-shaped, however fast and unpriced its failure: it is
+the provider's weather, not the account's credits, so it paces on this streak
+and never arms the billing breaker. Its failed step row's reason leads with
+``provider unavailable:``, and ``fractal node list`` never counts such a row
+toward ``PAUSED: billing``. No config key tunes the doubling or the cap.
+
+An outage that outlasts the retries (or meets ``step_retries: 0``) fails the
+iteration as usual, but the streak stands: the next step's first launch waits
+the same doubling clock before it goes out, announced as ``=== Provider
+unavailable — N consecutive failure(s); probing again in Ns ===``, and so does
+the work step after a SYNC that met the outage too. The launch after the wait
+is the probe that clears or extends the streak. The wait polls the same
+signals as a retry backoff; a stop, finish, or spent subtree ceiling ends the
+iteration, booking the gated step and the never-run tail as ``stopped`` rows
+with ``outage gate interrupted`` in their metadata, as the billing breaker's
+gate does.
 
 Stuck steps
 ~~~~~~~~~~~
@@ -428,26 +453,31 @@ Two triggers mark a Claude launch as **stuck**, and both take the same path:
 - **No action for 30 minutes.** A watchdog times the agent's own idle span,
   counted only while the agent holds control. The clock runs from the
   launch, from a result that answers the agent's last pending tool call,
-  from each visible text block, and from each wake-up after its turn ends
-  (Claude Code's background-task notice, a new reply). It pauses while a
-  tool call (a sub-agent included) awaits its result, and when the agent
-  ends its turn, since Claude Code then waits on background work such as a
-  long build. An API retry's backoff does not count. Thinking never counts
-  as an action, and sub-agent frames never touch the clock. At 30 minutes
-  the watchdog ends the agent the way the step deadline does.
+  from each visible text block, from the end of each thinking block, and
+  from each wake-up after its turn ends (Claude Code's background-task
+  notice, a new reply). It pauses while a tool call (a sub-agent included)
+  awaits its result, and when the agent ends its turn, since Claude Code
+  then waits on background work such as a long build. It also pauses while
+  a thinking block is open: the stream shows nothing of a think in
+  progress, and a long one can take most of the half hour. A think that
+  hangs is left to Claude Code's own stream timeout and the step deadline.
+  An API retry's backoff does not count, and sub-agent frames never touch
+  the clock. At 30 minutes the watchdog ends the agent the way the step
+  deadline does.
 
 The first stuck launch in an attempt **steers** the step. The stuck row
 closes ``stopped`` with ``steered: thinking cap`` or ``steered: no action for
 30 minutes`` in its metadata. The step is then relaunched on a row of its
 own (marked ``steer``) as a resume of the same session, in detached mode
-too. The relaunch's whole prompt is the package's ``modes/STALL.md``: write
-what you have to your plan file now, then take the next concrete action. The
-steer is not a retry and does not use ``step_retries``, and the step's own
-timeout still counts from the attempt's first launch. Like a retry, the
-steer first polls the signals: a pause parks the step instead (the stuck row
-closes ``stopped``, and resume re-enters the step), and a stop, a finish, or
-a spent subtree ceiling abandons it, closing the row ``failed`` with
-``<trigger>; steer abandoned``.
+too. The relaunch's whole prompt is the package's ``modes/STALL.md``, which
+tells the agent that its last launch went too long without an action and asks
+it to write down what it has (in its plan file when the iteration has one),
+then take the next concrete action. The steer is not a retry and does not use
+``step_retries``, and the step's own timeout still counts from the attempt's
+first launch. Like a retry, the steer first polls the signals: a pause parks
+the step instead (the stuck row closes ``stopped``, and resume re-enters the
+step), and a stop, a finish, or a spent subtree ceiling abandons it, closing
+the row ``failed`` with ``<trigger>; steer abandoned``.
 
 A second stuck launch after the steer, by either trigger, is a **stall**. The
 step closes ``exited`` with ``stalled: <trigger>, after a steer``, naming the
@@ -457,8 +487,7 @@ fails with ``<step> stalled: ...``, and the loop moves on to the next
 iteration. The loop also posts a ``step stalled: <step>`` notice to the
 node's outbox, which the parent follows, naming the node, step, iteration,
 and trigger. The SYNC step is never steered. The watchdog runs only for
-Claude: the other agents' streams do not yet mark when each tool call
-completes.
+Claude, the one agent whose stream marks when each tool call completes.
 
 Time limits
 -----------
@@ -493,7 +522,8 @@ A deadline that has already passed before launch records the step as timed
 out without spawning anything.
 
 Enforcement is in-process: at the limit the loop sends ``SIGTERM`` to the
-agent's whole process group, waits a 10-second grace, then ``SIGKILL``\ s any
+agent's whole process tree (every group in its session or below it, other
+nodes' loops spared), waits a 10-second grace, then ``SIGKILL``\ s any
 survivor. An agent that shuts down cleanly within the grace is still recorded
 as timed out — the limit was reached.
 
@@ -510,8 +540,9 @@ How the walls interact:
 - ``setup.sh`` is unbounded — the walls gate step launches only.
 
 A step that times out fails the iteration and records
-``<step> timed out (<limit>s)``; an iteration that times out with no launch
-to blame records plain ``timed out``.
+``<step> timed out (<limit>s)``, naming the effective ceiling (a steered
+launch names the step's whole timeout, which its stuck launch shared); an
+iteration that times out with no launch to blame records plain ``timed out``.
 
 Cost ceilings
 -------------
@@ -643,8 +674,10 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``--ignore-scope`` or ``--force``.
 2. **Refreshes and lints.** ``wiki update`` runs on the project wiki and the
    node's memory wiki, then ``scripts/lint.sh`` runs; either failing fails
-   the commit with the tool's output. Skipped with ``--force`` or ``--init``
-   (the baseline wiki lints dirty by design).
+   the commit with the tool's output. Skipped with ``--force`` or ``--init``:
+   neither may block a backstop save or a baseline, the setup save a node
+   starts from, which carries only fractal's own setup — project content
+   takes an ordinary, linted commit.
 3. **Stages.** Scoped staging of the scope roots, node directory, and wiki
    (the whole worktree when unscoped), always excluding runtime artifacts
    (``**/.venv``, ``**/.db``, ``**/.db-*``, ``**/.status``, ``**/.paused``,
@@ -657,29 +690,33 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    those directories, the tool state ``.wiki/`` and ``.gitkeep``. Anything
    else a node parks there — a key, a ``.env`` file, an archive, a
    dot-directory, any other file at the root — is withheld by name and
-   reported (``Warning: N estate file(s) are not node records and were NOT
-   staged: ...``), on the plain add and the ignore-rule force-add alike;
-   what the node directory already tracks keeps committing. Node records
-   that only a machine-local ignore layer holds out (a foreign
-   ``.git/info/exclude`` line, ``core.excludesFile``) are force-added by
-   explicit path and reported (``Force-staged N node record(s) held out by
-   an ignore rule: ...``); fractal's own exclude block and repo
-   ``.gitignore`` files keep their hold, and records they hold surface
-   through step 4's ignore-rule warning instead. ``--check`` applies the
-   same law, so a refused untracked file under the node directory never
-   counts as uncommitted.
+   reported, on the plain add (``Warning: N estate file(s) are not node
+   records and were NOT staged: ...``) and the ignore-rule force-add
+   (``Warning: N ignored estate file(s) are not node records and were NOT
+   force-staged: ...``) alike; what the node directory already tracks keeps
+   committing. Node records that only a machine-local ignore layer holds out
+   (a foreign ``.git/info/exclude`` line, ``core.excludesFile``) are
+   force-added by explicit path and reported (``Force-staged N node
+   record(s) held out by an ignore rule: ...``); repo ``.gitignore`` files
+   keep their hold, and records they hold surface through step 4's
+   ignore-rule warning instead, while records held by fractal's own exclude
+   block (its ``tmp/`` and ``__pycache__/`` lines among them) or by a
+   self-ignoring directory stay silent and are not counted in ``Held out``.
+   ``--check`` applies the same law, so a refused untracked file under the
+   node directory never counts as uncommitted.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
    rules and staged files of 10 MB or more. The ignore warning names the first
    ten eaten paths, each with the rule that ate it as ``git check-ignore -v``
    reports it (source file, line, and pattern), and counts the rest
    (``Warning: N path(s) skipped by ignore rules (repository or host rules,
-   not node-record refusals): eaten.log (.gitignore:3:*.log), ...``); it is
-   separate from step 3's estate refusal. Rule sources outside the repository
-   carry no machine path: the shared exclude reads ``.git/info/exclude`` and
-   the host's global ignore file ``core.excludesFile``. Whenever either
-   warning fired, the command's last line repeats the counts (``Held out: N
-   estate file(s) not staged; N path(s) ignored``, non-zero parts only), after
-   any hook or gate output and on a no-op commit too.
+   not node-record refusals): eaten.log (.gitignore:3:*.log), ...``); it
+   leaves out every estate file step 3 left unstaged, which step 3's warnings
+   name. Rule sources outside the repository carry no machine path: the shared
+   exclude reads ``.git/info/exclude`` and the host's global ignore file
+   ``core.excludesFile``. Whenever step 3 left an estate file unstaged or the
+   ignore warning fired, the command's last line repeats the counts (``Held
+   out: N estate file(s) not staged; N path(s) ignored``, non-zero parts
+   only), after any hook or gate output and on a no-op commit too.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
    caller's run/iteration/step lineage. "Nothing staged" is a tolerated
    no-op.
@@ -692,13 +729,20 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    pre-existing lint failure is surfaced as a notice and tolerated); other
    node-data pages keep byte-identity. A rewrite that breaks either gate is
    restored to its authored bytes and the commit fails with remediation
-   guidance.
+   guidance. Node records pass through the repository's hooks like any
+   staged file, so a hook that rewrites one — a formatter reflowing a ``.py``
+   record, or trailing-whitespace stripping a ``.patch`` record's
+   single-space context lines — fails each ordinary commit that stages it,
+   until the iteration's backstop commit, which bypasses hooks, lands the
+   record as written. A hooked repository should keep rewriting hooks off
+   ``.fractal/`` (for example ``exclude: ^\.fractal/`` in its pre-commit
+   config).
 7. **Pushes** ``origin <branch>`` unless the ``local`` config key is true. A
    missing ``origin`` remote is a skipped-push notice, not an error.
 
 Options: ``--init`` labels the commit ``init`` instead of an iteration (the
 baseline commit) and skips the message-shape check, the wiki refresh, lint,
-and the ``commit`` event -- so a node's baseline carries only its own seed and
+and the ``commit`` event — so a node's baseline carries only its own seed and
 init's ``.gitattributes`` edit, refusing any other change, which an ordinary
 commit carries through the lint; ``--check`` exits 1 if uncommitted changes exist
 instead of committing; ``--ignore-scope`` commits out-of-scope changes but
@@ -772,7 +816,23 @@ Step rows land with these statuses:
      - — (``awaiting approval`` when parked in an approval wait)
    * - failed
      - ``failed``
-     - the launch reason, e.g. ``agent error (exit N): <stderr tail>``
+     - the launch reason, e.g. ``agent error (exit N): <stderr tail>``,
+       prefixed ``provider unavailable:`` when the agent named a provider
+       outage (see `Provider outages`_)
+   * - stuck, then steered (see `Stuck steps`_)
+     - ``stopped``
+     - ``steered: <trigger>``, or ``<trigger>; paused before the steer`` when
+       a pause lands first
+   * - stuck, steer abandoned by a stop, finish, or spent subtree ceiling
+     - ``failed``
+     - ``<trigger>; steer abandoned``
+   * - stuck again after the steer (a stall)
+     - ``exited``
+     - ``stalled: <trigger>, after a steer``
+   * - steered relaunch
+     - as above
+     - suffixed ``; steer`` (``steer`` alone when there is no other reason;
+       a stall's reason already names the steer)
    * - retry attempt
      - as above
      - suffixed ``; retry``

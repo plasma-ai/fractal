@@ -118,6 +118,6 @@ does not answer within the preflight timeout (`_PREFLIGHT_TIMEOUT`) is cancelled
 — TERM, a short grace (`_PREFLIGHT_GRACE`), then KILL on the probe's whole
 process tree, including tools codex started in groups or sessions of their own
 (see [[features/lifecycle/script_delegation|script_delegation]]). The probe is a
-paid invocation — one short turn at the configured model — and its usage is
-unpriced: it lands in no step row, so the run's recorded spend and every cost
-cap leave it out (see [[features/cost/measurement|measurement]]).
+paid invocation — one short turn at the configured model — and its spend stays
+off the ledger: it lands in no step row, so the run's recorded spend and every
+cost cap leave it out (see [[features/cost/measurement|measurement]]).

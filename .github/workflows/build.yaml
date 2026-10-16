@@ -60,12 +60,19 @@ jobs:
         run: uv build shim --out-dir dist
       - name: Check distribution metadata
         run: uvx twine check dist/*
-      - name: Check wheel contains node seed
+      - name: Check wheel and sdist ship every tracked package file
         run: |
-          listing=$(unzip -l dist/plasma_fractal-*.whl)
-          for path in fractal/_node/NODE.md fractal/_node/steps/ fractal/_scripts/ fractal/_assets/git/exclude fractal/core/schema.sql fractal/tui/app.tcss fractal/skills/; do
-            grep -qF "$path" <<< "$listing" || { echo "::error::wheel lacks $path"; exit 1; }
-          done
+          export LC_ALL=C
+          tracked=$(git ls-files fractal | sort)
+          # the sdist nests every path under its top folder
+          missing=$(
+            comm -23 <(echo "$tracked") <(unzip -Z1 dist/plasma_fractal-*.whl | sort) | sed 's/^/::error::wheel lacks /'
+            comm -23 <(echo "$tracked") <(tar -tzf dist/plasma_fractal-*.tar.gz | sed 's|^[^/]*/||' | sort) | sed 's/^/::error::sdist lacks /'
+          )
+          if [[ -n "$missing" ]]; then
+            echo "$missing"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: dist

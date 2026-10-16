@@ -185,6 +185,9 @@ silently no-ops. Per key:
    * - ``max_cost``, ``max_iter_cost``, ``max_step_cost``, ``reserve_budget``
      - The next iteration's pricing, and live at every budget boundary
        probe.
+   * - ``max_depth``, ``max_children``, ``max_descendants``
+     - At once for the spawn gate, which reads them from the file at every
+       spawn; the next step's prompt and environment.
    * - ``scope``, ``local``
      - The next commit (read per commit).
    * - ``clone_dirs``
@@ -432,7 +435,8 @@ loop-side default is noted.
        Re-read each iteration, so retunes land mid-run.
    * - ``step_retry_backoff``
      - ``null`` → ``10s``
-     - Delay before each retry of a failed step launch.
+     - Delay before each retry of a failed step launch, and the base a
+       provider outage's retry wait doubles from.
    * - ``interval``
      - ``null``
      - Fixed iteration cadence (an iteration starts every ``interval``).

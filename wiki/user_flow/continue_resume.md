@@ -136,12 +136,16 @@ seat who it is and a seat can move. `_DRAIN` is the seat's own environment;
 actor, which survives an env scrub but still falls back to the node owning the
 working directory — so a seat that steps into a sibling worktree resolves to a
 real but *wrong* node, and one that steps outside every worktree resolves to
-none and fails open. `Node.drain_lineage` closes both: the loop makes each agent
-invocation its own session leader and records the id (`.step_pgid`), every
-command that seat runs stays in that session — even one the agent CLI starts in
-its own process group — and the tree asks which of its open draining runs owns
-this process's session. No `env -u` or `cd` rewrites a session; only a
-deliberate `setsid` leaves it. The handle is identity-checked like the orphan
-reap's, so a stale record naming a recycled id never refuses an unrelated
-caller, and a caller in any other session — an operator's shell — acts normally
-while the drain runs.
+none and fails open. `Node.drain_lineage` closes both: the loop records each
+agent invocation's pid (`.step_pgid`), every command that seat runs descends
+from it — whether the agent CLI starts the command in a process group or a
+session of its own, as Claude Code does — and the tree asks whether one of its
+open draining runs recorded this process or one of its ancestors. No `env -u` or
+`cd` rewrites ancestry. A command whose parent chain was cut (a double fork, or
+an intermediate that exited) is reparented out of the agent's tree: it still
+matches while it stays in the agent's session, but under a CLI that starts each
+command in a session of its own it escapes the lineage check, while `_DRAIN` and
+`Node.drain_bound` still apply to it. The handle is identity-checked like the
+orphan reap's, so a stale record naming a recycled id never refuses an unrelated
+caller, and a caller outside every seat's lineage — an operator's shell — acts
+normally while the drain runs.

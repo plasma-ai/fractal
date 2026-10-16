@@ -9,7 +9,9 @@ the config-home transcript layout. Stream-level cases drive the base
 
 from __future__ import annotations
 
+import itertools
 import json
+import logging
 import os
 import pathlib
 import re
@@ -34,6 +36,7 @@ __all__ = [
     'test_parser_null_duration',
     'test_parser_marks_a_budget_stop',
     'test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply',
+    'test_parser_holds_the_idle_clock_through_a_top_level_think',
     'test_parser_tolerates_garbage_claude',
     'test_parser_tolerates_present_null_payloads_claude',
     'test_parser_ignores_a_non_numeric_result_cost',
@@ -49,6 +52,7 @@ __all__ = [
     'test_stream_detached_keeps_session_unpersisted_claude',
     'test_stream_records_full_per_invocation_cost',
     'test_stream_truncated_records_accumulated_cost',
+    'test_stream_reopens_a_settled_cost_at_a_reply_after_its_result',
     'test_stream_survives_missing_pricing_cache',
     'test_invocation_modes_build_the_pinned_argv_claude',
     'test_invocation_honors_command_model_budget_and_settings',
@@ -63,6 +67,8 @@ __all__ = [
     'test_config_model_walks_the_settings_chain',
     'test_seed_config_disables_fast_mode_claude',
     'test_transcript_resolves_the_config_home_slug',
+    'test_settle_cost_adds_each_readable_sub_agent_transcript',
+    'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
 ]
 
 # claude pricing with all four Anthropic bucket rates distinct, so a bucket
@@ -90,6 +96,21 @@ _USAGE_SECOND = {
     'output_tokens': 100,
 }
 _USAGE_SECOND_COST = 50 * 3e-6 + 100 * 1.5e-5
+
+# a killed launch's window and a transcript stamp inside it
+_OPENED = '2026-01-01T00:00:00.000Z'
+_WRITTEN = '2026-01-01T00:00:01.000Z'
+_CLOSED = '2026-01-01T00:00:02.000Z'
+
+# a live claude 2.1.300 capture (trimmed, session as @SESSION@): a turn's
+# result on line 18, then claude's wake-up on a background task's notice and
+# a new reply (from line 23) closed by its own result on line 33
+_BACKGROUND_WAIT = (
+    pathlib.Path(__file__).parents[1]
+    / 'test_core'
+    / 'streams'
+    / 'claude_background_wait.jsonl'
+)
 
 # claude's give-up after its last continuation: a synthetic error reply, then
 # an is_error result whose subtype still reads success
@@ -518,6 +539,84 @@ def test_parser_reports_a_thinking_cap_only_for_a_thinking_only_reply(
     assert 'output token maximum' in (result.message or '')
 
 
+@pytest.mark.parametrize(
+    argnames=('frames', 'clock'),
+    argvalues=[
+        # claude 2.1.300 writes the block's frame, then forwards its stop
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', None),
+                ('thinking', 'msg_1', None),
+                ('thinking_stop', 'msg_1', None),
+            ],
+            [['waiting'], ['acting'], []],
+            id='frame-first',
+        ),
+        # the stop ends the think when it lands first
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', None),
+                ('thinking_stop', 'msg_1', None),
+                ('thinking', 'msg_1', None),
+            ],
+            [['waiting'], ['acting'], []],
+            id='stop-first',
+        ),
+        # a new reply, or the reply's own end, closes a think left open
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', None),
+                ('start', 'msg_2', None),
+                ('thinking_stop', 'msg_2', None),
+            ],
+            [['waiting'], ['acting'], []],
+            id='new-reply',
+        ),
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', None),
+                ('stop', 'msg_1', None),
+                ('thinking_stop', 'msg_1', None),
+            ],
+            [['waiting'], [], []],
+            id='reply-end',
+        ),
+        # a sub-agent's think never touches the clock
+        pytest.param(
+            [
+                ('thinking_start', 'msg_1', 'toolu_1'),
+                ('thinking', 'msg_1', 'toolu_1'),
+                ('thinking_stop', 'msg_1', 'toolu_1'),
+            ],
+            [[], [], []],
+            id='sidechain',
+        ),
+    ],
+)
+def test_parser_holds_the_idle_clock_through_a_top_level_think(
+    frames: list[tuple[str, Optional[str], Optional[str]]],
+    clock: list[list[str]],
+) -> None:
+    """A top-level think waits from its block's start until the block completes.
+
+    The stream shows nothing of a think in progress, so its block start
+    pauses the idle clock and its completion -- the block's assistant
+    frame or its raw stop, whichever lands first -- restarts it.
+    """
+    parser = ClaudeParser()
+    # each entry is (frame kind, message id, parent tool-use id)
+    lines = _lines([_reply_frame(*entry) for entry in frames])
+    events = [
+        [
+            event.kind
+            for event in parser.feed(line)
+            if event.kind in ('acting', 'waiting')
+        ]
+        for line in lines
+    ]
+    assert events == clock
+
+
 def test_parser_tolerates_garbage_claude() -> None:
     """Malformed, non-object, and unknown lines yield nothing, never raise."""
     parser = ClaudeParser()
@@ -871,6 +970,34 @@ def test_stream_truncated_records_accumulated_cost(
     ]
     row = node.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
+
+
+@pytest.mark.parametrize(
+    argnames=('count', 'final'),
+    argvalues=[
+        # the turn's result settles the launch's cost
+        pytest.param(18, True, id='result'),
+        # the wake-up's reply spends past the settled figure
+        pytest.param(25, False, id='wake-up-reply'),
+        # until its own result settles the cost again
+        pytest.param(33, True, id='wake-up-result'),
+    ],
+)
+def test_stream_reopens_a_settled_cost_at_a_reply_after_its_result(
+    node_with_db: Node,
+    count: int,
+    final: bool,
+) -> None:
+    """A reply after a result leaves the stream's cost an estimate again.
+
+    Claude Code outlives a turn's result while background work runs, then
+    wakes the agent for a new reply, so a launch killed inside that reply
+    must still read as unsettled for the loop to price it.
+    """
+    backend = ClaudeAgent(node_with_db, 'claude')
+    with _BACKGROUND_WAIT.open(encoding='utf-8') as file:
+        lines = list(itertools.islice(file, count))
+    assert backend.stream(lines).final is final
 
 
 def test_stream_survives_missing_pricing_cache(
@@ -1294,6 +1421,44 @@ def test_rates_falls_back_through_the_openrouter_chain_claude(
             True,
             id='rate-limit',
         ),
+        # Claude Code's own text (2.1.300) for a response stream that broke
+        # off: a lost connection, a server error, or a stall
+        pytest.param(
+            'API Error: Connection lost mid-response. The response above may be'
+            ' incomplete.',
+            True,
+            id='connection-lost',
+        ),
+        pytest.param(
+            'API Error: Connection lost before a response was produced. Try again.',
+            True,
+            id='connection-lost-before-response',
+        ),
+        pytest.param(
+            'API Error: Server error mid-response. The response above may be'
+            ' incomplete.',
+            True,
+            id='server-error-mid-response',
+        ),
+        pytest.param(
+            'API Error: The response stopped arriving. The response above may be'
+            ' incomplete.',
+            True,
+            id='response-stopped',
+        ),
+        pytest.param(
+            'API Error: The response stalled before a response was produced. Try'
+            ' again.',
+            True,
+            id='response-stalled',
+        ),
+        # the host's own fault, not the provider's
+        pytest.param(
+            'API Error: Your computer went to sleep mid-response. The response'
+            ' above may be incomplete.',
+            False,
+            id='host-asleep',
+        ),
         pytest.param(
             "API Error: Claude's response exceeded the 128000 output token maximum.",
             False,
@@ -1319,7 +1484,7 @@ def test_unavailable_names_the_provider_outage_shapes_claude(
     detail: str,
     unavailable: bool,
 ) -> None:
-    """Only an overloaded, erroring, or rate-limited API reads as an outage."""
+    """Only an overloaded, failing, rate-limited, or cut-off API reads as an outage."""
     backend = ClaudeAgent(node_with_db, 'claude')
     assert backend.unavailable(detail) is unavailable
 
@@ -1416,6 +1581,68 @@ def test_transcript_resolves_the_config_home_slug(
     assert relocated['content'] == '{"type": "relocated"}\n'
 
 
+def test_settle_cost_adds_each_readable_sub_agent_transcript(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A killed launch's settle prices its session's and its sub-agents' replies.
+
+    Claude keeps each sub-agent's replies in a transcript of its own beside
+    the session's. A record cut off mid-write never swallows the next
+    file's first one, and a file the read cannot open is skipped with a
+    warning while the rest still price.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    caplog.set_level(logging.WARNING)
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude')
+    session = str(uuid.uuid4())
+    (step_id,) = _steps(node, 1)
+    node.record.step_session('claude', step_id=step_id, model=None, session=session)
+    transcript = pathlib.Path(backend.transcript(session)['path'])
+    subagents = transcript.with_suffix('') / 'subagents'
+    subagents.mkdir(parents=True)
+    # the session's reply, then a record the kill cut off mid-write
+    torn = _transcript_line('msg_main', _USAGE_FIRST) + '{"type": "assist'
+    transcript.write_text(torn, encoding='utf-8')
+    side = _transcript_line('msg_side', _USAGE_SECOND)
+    (subagents / 'agent-a.jsonl').write_text(side, encoding='utf-8')
+    # a sub-agent transcript the read cannot open (a directory in its place)
+    (subagents / 'agent-b.jsonl').mkdir()
+    backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED)
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
+    (warning,) = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert warning.startswith('launch partly unpriced: sub-agent transcript')
+    assert 'agent-b.jsonl' in warning
+
+
+def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply's final line prices whole though its text holds line separators.
+
+    Claude leaves U+2028 and U+0085 raw inside a record's strings, so only a
+    newline ends a record.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    early = _transcript_line('msg_a', {'output_tokens': 10})
+    final = _transcript_line(
+        'msg_a',
+        {'output_tokens': 900},
+        text='one\u2028two\u0085three',
+    )
+    cost = claude._transcript_cost(early + final, started=_OPENED, ended=_CLOSED)
+    assert cost == pytest.approx(900 * 1.5e-5)
+
+
 # ------ helpers
 
 
@@ -1452,7 +1679,8 @@ def _reply_frame(
     ``kind`` names an assistant frame's content block (``thinking``/
     ``text``/``tool_use``; ``stop_reason`` always null), a raw API event
     (``start`` for ``message_start``, ``<block>_start`` for a
-    ``content_block_start``, ``stop`` for a ``max_tokens``
+    ``content_block_start`` and ``<block>_stop`` for its
+    ``content_block_stop``, ``stop`` for a ``max_tokens``
     ``message_delta``), or ``continuation`` for claude's injected turn
     (``unflagged_continuation`` without its ``isSynthetic`` flag,
     ``reasoning_continuation`` in another version's wording,
@@ -1481,6 +1709,9 @@ def _reply_frame(
     if kind == 'stop':
         delta = {'stop_reason': 'max_tokens', 'stop_sequence': None}
         return _stream_event({'type': 'message_delta', 'delta': delta}, parent=parent)
+    if kind.endswith('_stop'):
+        event = {'type': 'content_block_stop', 'index': 0}
+        return _stream_event(event, parent=parent)
     if kind.endswith('_start'):
         block = {'type': kind.removesuffix('_start')}
         event = {'type': 'content_block_start', 'index': 0, 'content_block': block}
@@ -1540,6 +1771,25 @@ def _continuation_frame(*, parent: Optional[str] = None) -> dict[str, Any]:
         'session_id': 'sess-1',
         'isSynthetic': True,
     }
+
+
+def _transcript_line(message_id: str, usage: dict[str, int], *, text: str = '') -> str:
+    """Return one claude transcript line of a reply, stamped inside the window.
+
+    Written the way claude writes it: non-ASCII text raw, never escaped.
+    """
+    entry = {
+        'type': 'assistant',
+        'timestamp': _WRITTEN,
+        'message': {
+            'model': 'claude-fable-5',
+            'id': message_id,
+            'role': 'assistant',
+            'content': [{'type': 'text', 'text': text}],
+            'usage': usage,
+        },
+    }
+    return json.dumps(entry, ensure_ascii=False) + '\n'
 
 
 def _feed(parser: ClaudeParser, line: str) -> list[Any]:

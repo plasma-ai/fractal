@@ -1,31 +1,34 @@
 """Pause/resume semantics and the tree pause latch.
 
-Covers the paused state's guard matrix (only resume/kill legal), the
-parent-first pause and leaf-first resume fan-out, pausing-node
-withdrawal, and the user-node latch that blocks spawns, starts, and
-targeted resumes tree-wide.
+Covers the paused state's guard matrix (only resume, kill, merge, and
+chat legal), the parent-first pause and leaf-first resume fan-out,
+pausing-node withdrawal, and the user-node latch that blocks spawns,
+starts, and targeted resumes tree-wide.
 """
 
 from __future__ import annotations
 
+import logging
 import pathlib
+from typing import Optional
 
 import pytest
 
 from fractal.core.node import Node
-from tests._helpers import _stub_run_script
+from tests._helpers import _git, _stub_run_script
 
 from .conftest import _spawn_parent_child
 
 __all__ = [
     'test_pause_rejects_non_active',
     'test_pause_signals_and_decorates',
-    'test_paused_rejects_all_but_resume_and_kill',
+    'test_paused_rejects_all_but_resume_kill_merge_and_chat',
     'test_kill_reaps_a_paused_node',
     'test_reconcile_leaves_paused_untouched',
     'test_resume_requires_paused',
     'test_resume_withdraws_a_pausing_node',
     'test_pause_fans_out_top_down_and_resume_leaf_first',
+    'test_abort_names_a_git_operation_left_in_progress',
     'test_pause_latch_blocks_spawn_and_start',
     'test_pause_latch_blocks_targeted_resume',
     'test_tree_pause_latches_depth_one',
@@ -65,7 +68,9 @@ def test_pause_signals_and_decorates(
     assert [event['status'] for event in events] == ['completed']
 
 
-def test_paused_rejects_all_but_resume_and_kill(node_with_db: Node) -> None:
+def test_paused_rejects_all_but_resume_kill_merge_and_chat(
+    node_with_db: Node,
+) -> None:
     """A paused node admits only resume, kill, merge, and (fork-only) chat.
 
     Delete/retire would act on the frozen mid-step worktree, and start
@@ -224,6 +229,59 @@ def test_pause_fans_out_top_down_and_resume_leaf_first(
         'main.parent.kid',
         'main.parent',
     ]
+
+
+@pytest.mark.parametrize('verb', ['pause', 'kill'])
+@pytest.mark.parametrize(
+    argnames='marker',
+    argvalues=[
+        # a merge cut short leaves its head beside the staged result
+        'MERGE_HEAD',
+        # a rebase cut short leaves its state folder
+        'rebase-merge',
+        # a git command killed mid-write leaves the index locked
+        'index.lock',
+        # nothing left in progress
+        None,
+    ],
+    ids=['merge', 'rebase', 'index-lock', 'clean'],
+)
+def test_abort_names_a_git_operation_left_in_progress(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    verb: str,
+    marker: Optional[str],
+) -> None:
+    """Pause and kill name a git operation the abort left in the worktree.
+
+    An agent killed mid-merge leaves the merge in its node's worktree, where
+    a later merge of the node trips over it. Planted where git keeps it for
+    the child's linked worktree, each kind of leftover draws exactly one
+    warning naming it, whatever the abort found in flight; a clean
+    worktree draws none.
+    """
+    _, child = _spawn_parent_child(git_repo, monkeypatch)
+    _stub_run_script(monkeypatch, Node)
+    if marker is not None:
+        relpath = _git(child.worktree, 'rev-parse', '--git-path', marker).stdout
+        path = child.worktree / relpath.strip()
+        if marker == 'rebase-merge':
+            path.mkdir()
+        else:
+            path.write_text('0' * 40 + '\n', encoding='utf-8')
+    caplog.set_level(logging.WARNING)
+    getattr(child, verb)(reason='brake')
+    named = [
+        record.getMessage()
+        for record in caplog.records
+        if 'git operation in progress' in record.getMessage()
+    ]
+    expected = [
+        f'Warning: {child.worktree} has a git operation in progress ({marker});'
+        ' finish or abort it before merging this node'
+    ]
+    assert named == (expected if marker is not None else [])
 
 
 # ------ tree latch

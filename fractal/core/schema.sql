@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS steps (
     agent      TEXT,
     model      TEXT,
     effort     TEXT,
+    timeout    INTEGER,
     session    TEXT,
     status     TEXT    NOT NULL,
     exit_code  INTEGER,

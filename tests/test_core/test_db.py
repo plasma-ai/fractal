@@ -17,7 +17,7 @@ from fractal.core.db import Database
 __all__ = [
     'test_schema_tables_exist',
     'test_init_stamps_schema_version',
-    'test_connect_lifts_a_version_one_database',
+    'test_connect_lifts_an_older_database',
     'test_two_writers_lift_the_same_database_once',
     'test_failed_lift_leaves_the_database_at_its_version',
     'test_activity_start_rows_snapshot_the_launch',
@@ -88,45 +88,56 @@ def test_init_stamps_schema_version(database: Database) -> None:
     ``init`` stamps ``PRAGMA user_version`` so the version step on connect
     can tell an older database from a current one.
     """
-    assert _version(database) == 2
+    assert _version(database) == 3
 
 
-def test_connect_lifts_a_version_one_database(database: Database) -> None:
-    """A database stamped at version 1 gains the step effort column on connect.
+@pytest.mark.parametrize(
+    argnames=('version', 'added'),
+    argvalues=[(1, ['effort', 'timeout']), (2, ['timeout'])],
+    ids=['version-1', 'version-2'],
+)
+def test_connect_lifts_an_older_database(
+    database: Database,
+    version: int,
+    added: list[str],
+) -> None:
+    """A database stamped at an older version gains the later step columns on connect.
 
-    The lift happens on the first handle of either mode, a second handle
-    finds nothing to do, and a column already present (a database altered
-    out of band) is stamped past rather than refused.
+    Each step past the stamp runs in turn: the step row's ``effort``
+    column lifts version 1, its ``timeout`` column version 2. The lift
+    happens on the first handle of either mode, a second handle finds
+    nothing to do, and a column already present (a database altered out
+    of band) is stamped past rather than refused.
     """
-    _downgrade(database)
-    assert 'effort' not in _step_columns(database)
+    _downgrade(database, version)
+    assert not set(added) & set(_step_columns(database))
     # a read-only handle lifts it like a writable one
     database.connect(read_only=True).close()
-    assert _version(database) == 2
-    assert 'effort' in _step_columns(database)
+    assert _version(database) == 3
+    assert set(added) <= set(_step_columns(database))
     # a lifted database is left alone
     database.connect().close()
-    assert _version(database) == 2
+    assert _version(database) == 3
     # a column added out of band is stamped past
-    _downgrade(database)
+    _downgrade(database, version)
     connection = database.connect(read_only=True)
     connection.close()
-    assert _version(database) == 2
+    assert _version(database) == 3
     connection = sqlite3.connect(f'{database.path}')
-    connection.execute('PRAGMA user_version = 1')
+    connection.execute(f'PRAGMA user_version = {version}')
     connection.commit()
     connection.close()
     database.connect().close()
-    assert _version(database) == 2
-    assert [name for name in _step_columns(database) if name == 'effort'] == ['effort']
+    assert _version(database) == 3
+    assert [name for name in _step_columns(database) if name in added] == added
 
 
 def test_two_writers_lift_the_same_database_once(database: Database) -> None:
     """Two processes opening a version-1 database at once both succeed.
 
     The step runs inside an immediate transaction, so the writers serialize
-    on the lock and the second re-reads the version under it: one column,
-    one stamp, no error from either side.
+    on the lock and the second re-reads the version under it: one column
+    per step, one stamp each, no error from either side.
     """
     _downgrade(database)
     code = (
@@ -143,8 +154,9 @@ def test_two_writers_lift_the_same_database_once(database: Database) -> None:
     ]
     outcomes = [writer.communicate(timeout=60) for writer in writers]
     assert [writer.returncode for writer in writers] == [0, 0], outcomes
-    assert _version(database) == 2
-    assert [name for name in _step_columns(database) if name == 'effort'] == ['effort']
+    assert _version(database) == 3
+    added = ['effort', 'timeout']
+    assert [name for name in _step_columns(database) if name in added] == added
 
 
 def test_failed_lift_leaves_the_database_at_its_version(
@@ -177,7 +189,7 @@ def test_failed_lift_leaves_the_database_at_its_version(
                 os.chmod(sidecar, 0o644)
     # the next writable handle lifts it
     database.connect().close()
-    assert _version(database) == 2
+    assert _version(database) == 3
 
 
 def _version(database: Database) -> int:
@@ -199,12 +211,18 @@ def _step_columns(database: Database) -> list[str]:
         connection.close()
 
 
-def _downgrade(database: Database) -> None:
-    """Put a current database back at version 1 without the effort column."""
+def _downgrade(database: Database, version: int = 1) -> None:
+    """Put a current database back at ``version``, dropping the columns it predates.
+
+    Version 1 predates the step row's ``effort`` and ``timeout`` columns,
+    version 2 only its ``timeout`` column.
+    """
+    columns = ['effort', 'timeout'] if version == 1 else ['timeout']
     connection = sqlite3.connect(f'{database.path}')
     try:
-        connection.execute('ALTER TABLE steps DROP COLUMN effort')
-        connection.execute('PRAGMA user_version = 1')
+        for column in columns:
+            connection.execute(f'ALTER TABLE steps DROP COLUMN {column}')
+        connection.execute(f'PRAGMA user_version = {version}')
         connection.commit()
     finally:
         connection.close()
