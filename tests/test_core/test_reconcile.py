@@ -12,16 +12,24 @@ and kill's stale-active behavior.
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import signal
 import subprocess
 import time
-from typing import NoReturn, Optional
+from typing import Any, NoReturn, Optional
 
 import pytest
 
-from fractal.constants import CRASH_REASON, HEADLESS_FILE, PGID_FILE, SOCKET_FILE
+import fractal.util.process
+from fractal.constants import (
+    CRASH_REASON,
+    HEADLESS_FILE,
+    PGID_FILE,
+    SOCKET_FILE,
+    STEP_PGID_FILE,
+)
 from fractal.core.node import Node, _recorded_group
 from tests._helpers import _stub_run_script
 
@@ -50,6 +58,7 @@ __all__ = [
     'test_kill_unchanged_on_stale_active',
     'test_reap_orphan_reaps_only_the_recorded_group',
     'test_reap_orphan_spares_a_group_with_unknown_identity',
+    'test_reap_orphan_kills_the_recorded_group_when_the_reap_breaks',
 ]
 
 
@@ -971,3 +980,41 @@ def test_reap_orphan_spares_a_group_with_unknown_identity(
     assert signals == [(4242, 0)]
     assert not pgid_file.exists()
     assert not node_with_db.db.read('events', where={'event': 'orphan'})
+
+
+def test_reap_orphan_kills_the_recorded_group_when_the_reap_breaks(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A broken process-tree reap still ends a dead loop's recorded group.
+
+    The heal falls back to KILLing the recorded groups alone: the agent's
+    group dies, a warning names the failure, the record is dropped, and
+    the reap is audited like any other.
+    """
+
+    def broken(*args: Any, **kwargs: Any) -> NoReturn:
+        raise RuntimeError('ps is gone')
+
+    monkeypatch.setattr(fractal.util.process, 'reap', broken)
+    caplog.set_level(logging.WARNING)
+    # a live group standing in for the dead loop's agent, recorded after
+    # its start so the identity check reads it as the recorded group
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    step_pgid = node_with_db.node_dir / STEP_PGID_FILE
+    try:
+        step_pgid.write_text(f'{leader.pid}\n', encoding='utf-8')
+        node_with_db._reap_orphan()
+        status = leader.wait(timeout=5)
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        leader.wait()
+    assert status == -signal.SIGKILL
+    assert 'process-tree reap failed (ps is gone)' in caplog.text
+    assert not step_pgid.exists()
+    events = node_with_db.db.read('events', where={'event': 'orphan'})
+    assert [event['metadata'] for event in events] == [f'reaped pgid {leader.pid}']

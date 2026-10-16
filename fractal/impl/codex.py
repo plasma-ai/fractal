@@ -11,7 +11,6 @@ import os
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -474,37 +473,15 @@ class CodexAgent(Agent):
             # TERM the probe's whole tree (codex runs tools in groups of their
             # own; other nodes' loops spared) and KILL any survivor after a
             # short grace, since a TERM-trapping grandchild holding the pipe
-            # would block the reap below; the first line is the short reason
-            # callers persist
-            try:
-                reaped = fractal.util.process.reap(
-                    [process.pid],
-                    grace=_PREFLIGHT_GRACE,
-                    spare=self.node.loop_records,
-                )
-            except Exception as error:
-                # the reap broke: the timeout must still land on the group
-                print(
-                    f'Warning: process-tree reap failed ({error});'
-                    ' killing the probe group only',
-                    file=sys.stderr,
-                )
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            else:
-                for group in reaped.spared:
-                    print(
-                        f"Note: spared process group {group} (another node's loop)",
-                        file=sys.stderr,
-                    )
-                for survivor in reaped.survivors:
-                    print(
-                        f'Warning: pid {survivor.pid} survived the reap:'
-                        f' {survivor.command}',
-                        file=sys.stderr,
-                    )
+            # would block the communicate() drain below; the error's first
+            # line is the short reason callers persist
+            lines = fractal.util.process.reap_or_kill(
+                [process.pid],
+                grace=_PREFLIGHT_GRACE,
+                spare=self.node.loop_records,
+            )
+            for line in lines:
+                print(line, file=sys.stderr)
             process.communicate()
             raise RuntimeError(
                 'codex preflight timed out\n'

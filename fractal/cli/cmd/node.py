@@ -21,7 +21,7 @@ from fractal.cli.utils import (
     resolve_node,
     resolve_target,
 )
-from fractal.constants import STATUSES, WORKTREES_FOLDER
+from fractal.constants import PGID_FILE, STATUSES, WORKTREES_FOLDER
 from fractal.core.agent import seed_agents
 from fractal.core.commit import out_of_scope, scope_boundaries
 from fractal.core.config import parse_reserve_budget
@@ -1634,50 +1634,47 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         'File to touch just before the first signal to a recorded group.'
     )
     abort_marker = typer.Option(None, '--abort-marker', help=abort_marker_help)
-    # grace option
-    grace_help = 'Seconds between the TERM and KILL passes.'
-    grace = typer.Option(fractal.util.process.GRACE_SECONDS, '--grace', help=grace_help)
+    # outside-only flag
+    outside_only_help = 'Signal nothing when this command runs inside the tree.'
+    outside_only = typer.Option(False, '--outside-only', help=outside_only_help)
 
     @command(app, '_reap')
     def _reap(
         pgid: list[int] = pgid,
         worktree: Optional[str] = worktree,
         abort_marker: Optional[str] = abort_marker,
-        grace: float = grace,
+        outside_only: bool = outside_only,
     ) -> None:
         """Reap process groups with their trees (invoked by pause.sh and kill.sh).
 
         Names on stderr each tree member still alive after the KILL and,
         with ``--worktree``, each spared loop group the walk reached and
         each process outside the tree whose working directory lies in that
-        directory -- reported, never signaled.
+        directory, other than a node's loop -- reported, never signaled --
+        and in each line the node the worktree belongs to. Exit 1 when
+        ``--outside-only`` finds this command inside the tree (nothing
+        signaled), 0 after a reap, 2 on a command error -- pause.sh branches
+        on the exit code.
         """
         worktree_dir = pathlib.Path(worktree) if worktree else None
-        spare = resolve_node(worktree).loop_records if worktree else tuple
+        node = resolve_node(worktree) if worktree else None
+        spare = node.loop_records if node else tuple
+        owner = node.node_dir / PGID_FILE if node else None
         mark = pathlib.Path(abort_marker) if abort_marker else None
         reaped = fractal.util.process.reap(
             pgid,
-            grace=grace,
             worktree=worktree_dir,
-            spare=spare,
+            owner=owner,
             mark=mark,
+            outside_only=outside_only,
+            spare=spare,
         )
-        for group in reaped.spared:
-            typer.echo(
-                f"Note: spared process group {group} (another node's loop)",
-                err=True,
-            )
-        for process in reaped.survivors:
-            typer.echo(
-                f'Warning: pid {process.pid} survived the reap: {process.command}',
-                err=True,
-            )
-        for process in reaped.strays:
-            typer.echo(
-                f'Warning: pid {process.pid} works in the worktree outside the'
-                f' reaped tree (left running): {process.command}',
-                err=True,
-            )
+        if reaped.inside:
+            raise SystemExit(1)
+        branch = node.branch if node else None
+        lines = reaped.lines(branch=branch)
+        for line in lines:
+            typer.echo(line, err=True)
 
     return app
 

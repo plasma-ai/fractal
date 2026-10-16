@@ -34,7 +34,7 @@ import sys
 import tomllib
 import uuid
 from collections.abc import Callable, Iterator
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 
 import pytest
 
@@ -46,6 +46,7 @@ from fractal.core.node import Node
 from fractal.exceptions import AgentStreamError
 from fractal.impl import codex
 from fractal.impl.codex import CodexAgent, CodexParser
+from tests._helpers import _alive, _kill_tagged
 
 from .rollouts import resumed_thread, spawned_thread, spawning_thread
 
@@ -99,6 +100,7 @@ __all__ = [
     'test_preflight_timeout_reaps_a_term_ignoring_probe',
     'test_preflight_timeout_never_kills_a_group_term_ended',
     'test_preflight_timeout_reaps_the_probes_tool_groups',
+    'test_preflight_timeout_kills_the_probe_group_when_the_reap_breaks',
 ]
 
 # a stand-in router: run a backend's spawns as a real `sh` body, logging each
@@ -2158,14 +2160,45 @@ def test_preflight_timeout_reaps_the_probes_tool_groups(
     try:
         with pytest.raises(RuntimeError, match='timed out'):
             backend.preflight('gpt-5-codex')
-        pids = [int(path.read_text(encoding='utf-8')) for path in pid_files]
+        started = all(path.exists() for path in pid_files)
+        pids = [
+            int(path.read_text(encoding='utf-8')) for path in pid_files if path.exists()
+        ]
         alive = _alive(pids)
     finally:
-        for path in pid_files:
-            if path.exists():
-                _kill_tagged(int(path.read_text(encoding='utf-8')), token)
+        _kill_tagged(token)
 
+    # under full-suite load the probe's timeout can lapse before both tools
+    # start; a tool that never recorded says nothing about the reap -- skip
+    if not started:
+        pytest.skip('load starvation: the probe timed out before its tools started')
     assert alive == [], (alive, pids)
+
+
+def test_preflight_timeout_kills_the_probe_group_when_the_reap_breaks(
+    node_with_db: Node,
+    router: _Router,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A broken process-tree reap still ends a timed-out probe's group.
+
+    The timeout falls back to KILLing the probe's group alone and names
+    the failure, and the hung probe still reads as timed out.
+    """
+
+    def broken(*args: Any, **kwargs: Any) -> NoReturn:
+        raise RuntimeError('ps is gone')
+
+    monkeypatch.setattr(fractal.util.process, 'reap', broken)
+    monkeypatch.setattr(codex, '_PREFLIGHT_TIMEOUT', 0.2)
+    backend = CodexAgent(node_with_db, 'sh')
+    probes = router(backend, _script(hang=True))
+    with pytest.raises(RuntimeError, match='timed out'):
+        backend.preflight('gpt-5-codex')
+    ((_, probe),) = probes
+    assert probe.returncode == -signal.SIGKILL, probe.pid
+    assert 'process-tree reap failed (ps is gone)' in capsys.readouterr().err
 
 
 # ------ helpers
@@ -2434,23 +2467,3 @@ def _drive(
         process.stdout.close()
         process.stderr.close()
     return result, events
-
-
-def _alive(pids: list[int]) -> list[int]:
-    """The subset of ``pids`` still running (zombies count as dead)."""
-    table = fractal.util.process.snapshot()
-    return [pid for pid in pids if pid in table and not table[pid].zombie]
-
-
-def _kill_tagged(pid: int, token: str) -> None:
-    """SIGKILL ``pid`` only while its command line carries ``token``."""
-    result = subprocess.run(
-        ['ps', '-o', 'command=', '-p', f'{pid}'],
-        capture_output=True,
-        text=True,
-    )
-    if token in result.stdout:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass

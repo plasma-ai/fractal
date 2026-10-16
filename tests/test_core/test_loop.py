@@ -20,12 +20,13 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from typing import Any, Optional
 
 import pytest
 
 import fractal.util
+import fractal.util.process
 from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
 from fractal.core import loop as loop_module, pricing, worktree
 from fractal.core.agent import StreamEvent, StreamResult
@@ -63,6 +64,7 @@ __all__ = [
     'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_idle_clock_holds_while_the_agent_waits',
     'test_idle_clock_fires_on_a_silent_agent',
+    'test_deadline_reap_reports_on_stderr',
     'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
@@ -1529,6 +1531,37 @@ def test_idle_clock_fires_on_a_silent_agent(
         'PLAN/completed/steer',
         'EXECUTE/completed/',
     ]
+
+
+def test_deadline_reap_reports_on_stderr(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A deadline's reap names what it left on stderr, never on stdout.
+
+    Stdout carries the step's transcript and the reap's notes are
+    advisories: the idle clock ends a silent agent through a reap that
+    reports a spared group, and the note lands on stderr.
+    """
+    spared = 4242
+
+    def reap(roots: Collection[int], **kwargs: Any) -> fractal.util.process.Reaped:
+        # end the silent agent, then report a spared group as a real reap would
+        for root in roots:
+            os.killpg(root, signal.SIGKILL)
+        return fractal.util.process.Reaped(spared=(spared,))
+
+    monkeypatch.setattr(fractal.util.process, 'reap', reap)
+    silent = _claude_script(_INIT, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([silent, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    captured = capsys.readouterr()
+    note = f"Note: spared process group {spared} (another node's loop)"
+    assert note in captured.err, captured.out
+    assert note not in captured.out
 
 
 def test_launch_stamps_the_effort_on_the_step_row(

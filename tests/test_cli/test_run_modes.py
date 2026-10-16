@@ -63,6 +63,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -75,11 +76,12 @@ import pytest
 
 from fractal.core.loop import _SETUP_FAIL_CAP
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _git, _kill_tagged
 
 from .conftest import (
     _await_progress,
     _cli_env,
+    _fractal_bin,
     _loop_cmd,
     _reap_group,
     _require_tmux,
@@ -107,6 +109,7 @@ __all__ = [
     'test_pause_reaps_past_a_broken_sibling',
     'test_self_pause_finishes_the_step_unmarked',
     'test_pause_abort_marker_alone_parks_the_step',
+    'test_abort_falls_back_when_the_reap_helper_fails',
     'test_tree_latch_parks_a_booting_loop',
     'test_finish_drain_blocks_on_paused_child',
     'test_per_step_agent_override_runs_in_detached',
@@ -831,12 +834,7 @@ def test_pause_mid_step_parks_and_resume_adopts_run(repo: dict) -> None:
         # pause: signal first (the loop reclassifies the abort by it), then
         # the real pause.sh reaps the gated agent's group
         Node(worktree).record.signal_set('pause', 'take five')
-        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
-        abort = subprocess.run(
-            ['bash', f'{pause_sh}', f'{worktree}'],
-            capture_output=True,
-            text=True,
-        )
+        abort = _run_script('pause.sh', worktree)
         assert abort.returncode == 0, abort.stderr
         assert 'Aborted in-flight agent' in abort.stdout, abort.stdout
         proc.wait(timeout=60)
@@ -1109,12 +1107,7 @@ def test_pause_with_pending_finish_still_finishes_the_iteration(repo: dict) -> N
         # finish lands first, then the pause aborts the gated step mid-flight
         Node(worktree).record.signal_set('finish', 'wrap up')
         Node(worktree).record.signal_set('pause', 'brake')
-        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
-        abort = subprocess.run(
-            ['bash', f'{pause_sh}', f'{worktree}'],
-            capture_output=True,
-            text=True,
-        )
+        abort = _run_script('pause.sh', worktree)
         assert abort.returncode == 0, abort.stderr
         proc.wait(timeout=60)
     finally:
@@ -1234,7 +1227,10 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
 
     A double-forked daemon leaves the agent's session and loses its parent
     before the pause, so no walk can tie it to the invocation; the pause's
-    working-directory sweep names it in the output and leaves it alive.
+    working-directory sweep names it in the output, with the node whose
+    reap left it, and leaves it alive. The node's own loop group is no
+    stray: the launch backgrounds a sleeper in it, working in the worktree
+    too, and the sweep names the daemon alone.
     """
     steps = {
         '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_DAEMON_MARKER}\n',
@@ -1243,7 +1239,12 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
     node = _make_node(repo, 'reapstray', detached=False, sync=False, steps=steps)
     worktree = node['worktree']
 
-    proc, capture, log = _launch_finish_wait(repo, node, capture_name='reap_stray')
+    proc, capture, log = _launch_finish_wait(
+        repo=repo,
+        node=node,
+        capture_name='reap_stray',
+        prelude='sleep 600 &',
+    )
     try:
         assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
         (daemon,) = _tool_pids(capture)
@@ -1255,7 +1256,11 @@ def test_pause_names_a_worktree_stray_and_leaves_it_running(repo: dict) -> None:
         _finish_wait_result(proc, capture, log)
         _kill_tools(capture)
 
-    assert f'pid {daemon} works in the worktree' in pause.stderr, pause.stderr
+    strays = {int(pid) for pid in re.findall(r'pid (\d+) works in', pause.stderr)}
+    assert strays == {daemon}, pause.stderr
+    # the line names the node whose reap left the daemon running
+    named = f'pid {daemon} works in the worktree of main.reapstray'
+    assert named in pause.stderr, pause.stderr
     assert 'left running' in pause.stderr, pause.stderr
     assert alive == [daemon]
 
@@ -1268,7 +1273,8 @@ def test_abort_spares_another_nodes_loop_group(repo: dict, verb: str) -> None:
     launcher returns, so a walk from the agent reaches its loop. The stub
     starts a ``setsid``'d sleeper standing in for that loop, recorded in a
     sibling node's ``.pgid``, beside the plain tool sleepers: the verb
-    reaps the tools, spares the loop, and names the spared group.
+    reaps the tools, spares the loop, and names the spared group -- never
+    as a stray, though the loop works in the worktree it was started in.
     """
     steps = {
         '01-gate.md': (
@@ -1299,6 +1305,7 @@ def test_abort_spares_another_nodes_loop_group(repo: dict, verb: str) -> None:
 
     assert alive == [loop], (alive, group, loop, session)
     assert f'spared process group {loop}' in abort.stderr, abort.stderr
+    assert f'pid {loop} works in' not in abort.stderr, abort.stderr
 
 
 def test_pause_reaps_past_a_broken_sibling(repo: dict) -> None:
@@ -1337,15 +1344,19 @@ def test_pause_reaps_past_a_broken_sibling(repo: dict) -> None:
 
 
 def test_self_pause_finishes_the_step_unmarked(repo: dict) -> None:
-    """A pause run from inside the step's own tree spares the step, unmarked.
+    """A pause run from inside the step's own tree leaves that tree whole, unmarked.
 
-    The reap never signals its caller's lineage, so the agent that pauses
-    its own node is not aborted: no abort marker may land (it would
-    classify a later, unrelated failure as paused), the step finishes, and
-    the loop parks at the next checkpoint.
+    The agent that pauses its own node is not aborted, and neither is any
+    tool it started: both tool sleepers keep running, no abort marker may
+    land (it would classify a later, unrelated failure as paused), the
+    confirmation claims no abort of the caller's own agent, the step
+    finishes, and the loop parks at the next checkpoint.
     """
     steps = {
-        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_SELF_PAUSE_MARKER}\n',
+        '01-gate.md': (
+            f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}'
+            f' {_SELF_PAUSE_MARKER}\n'
+        ),
         '02-commit.md': '# Commit\n\nCommit step.\n',
     }
     node = _make_node(repo, 'selfpause', detached=False, sync=False, steps=steps)
@@ -1357,12 +1368,18 @@ def test_self_pause_finishes_the_step_unmarked(repo: dict) -> None:
         assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
         output = (capture / 'self_pause.out').read_text(encoding='utf-8')
         assert (capture / 'self_pause.rc').read_text().strip() == '0', output
+        tools = _tool_pids(capture)
+        alive = _alive_pids(tools)
         marked = (node_dir / '.pause_abort').exists()
         (capture / 'gate_release').touch()
         proc.wait(timeout=60)
     finally:
         _, result = _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
 
+    assert len(tools) == 2, tools
+    assert sorted(alive) == sorted(tools), (alive, tools, output)
+    assert "except the caller's own" in output, output
     assert not marked, output
     assert result.returncode == 0, result.stdout
     assert _run(worktree, 'node', 'status').stdout.strip() == 'paused', result.stdout
@@ -1400,12 +1417,7 @@ def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
     proc, capture, log = _launch_finish_wait(repo, node, capture_name='mark_pause')
     try:
         assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
-        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
-        abort = subprocess.run(
-            ['bash', f'{pause_sh}', f'{worktree}'],
-            capture_output=True,
-            text=True,
-        )
+        abort = _run_script('pause.sh', worktree)
         assert abort.returncode == 0, abort.stderr
         tools = _tool_pids(capture)
         alive = _alive_pids(tools)
@@ -1431,6 +1443,69 @@ def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
     assert alive == [], (alive, tools)
     assert steps_rows == ['1,paused'], (steps_rows, result.stdout)
     assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize('script', ['pause.sh', 'kill.sh'])
+def test_abort_falls_back_when_the_reap_helper_fails(repo: dict, script: str) -> None:
+    """Pause and kill still end the step when ``fractal node _reap`` cannot run.
+
+    A shim fails ``node _reap`` with the CLI's error exit. ``pause.sh`` then
+    marks the abort and ends the step group itself, so with no pause signal
+    set the loop records the step paused on the mark alone and parks;
+    ``kill.sh``'s own teardown ends both recorded groups and drops their
+    records.
+    """
+    verb = script.removesuffix('.sh')
+    name = f'fallback{verb}'
+    node = _make_node(repo, name, detached=False, sync=False, steps=_GATE_STEPS)
+    worktree = node['worktree']
+    node_dir = node['node_dir']
+    # a fractal whose reap helper breaks and whose every other call runs
+    shim = repo['root'] / f'shim_{verb}'
+    shim.mkdir()
+    fractal_shim = shim / 'fractal'
+    fractal_shim.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ "${1:-} ${2:-}" == "node _reap" ]]; then exit 2; fi\n'
+        f'exec "{_fractal_bin()}" "$@"\n',
+        encoding='utf-8',
+    )
+    fractal_shim.chmod(0o755)
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name=name)
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        step_pgid = int((node_dir / '.step_pgid').read_text(encoding='utf-8'))
+        loop_pgid = int((node_dir / '.pgid').read_text(encoding='utf-8'))
+        abort = _run_script(script, worktree, bindir=shim)
+        proc.wait(timeout=60)
+    finally:
+        _, result = _finish_wait_result(proc, capture, log)
+
+    assert abort.returncode == 0, abort.stderr
+    if script == 'pause.sh':
+        # the loop outlives the abort and parks the step on the mark alone
+        assert 'Aborted in-flight agent' in abort.stdout, abort.stdout
+        steps_rows = _query_column(
+            worktree,
+            "SELECT step || ',' || status FROM steps"
+            f" WHERE node = 'main.{name}' ORDER BY step_id",
+        )
+        assert steps_rows == ['1,paused'], (steps_rows, result.stdout)
+        assert result.returncode == 0, result.stdout
+        groups = [step_pgid]
+    else:
+        assert 'Killed node' in abort.stdout, abort.stdout
+        assert not (node_dir / '.pgid').exists()
+        assert not (node_dir / '.step_pgid').exists()
+        groups = [step_pgid, loop_pgid]
+    # kill delivery is asynchronous: wait for the signaled groups to empty
+    gone = _await_progress(
+        check=lambda: not any(_group_alive(group) for group in groups),
+        progress=lambda: None,
+        deadline=time.monotonic() + 15,
+    )
+    assert gone, [group for group in groups if _group_alive(group)]
 
 
 def test_tree_latch_parks_a_booting_loop(repo: dict) -> None:
@@ -3230,6 +3305,11 @@ def test_step_timeout_reaps_the_agents_tool_groups(repo: dict) -> None:
     finally:
         _kill_tools(capture)
 
+    # under full-suite load the step's ceiling can lapse before the stub
+    # starts both tools; the hang marker, touched once both recorded, tells
+    # that starvation (nothing to reap -- skip) from a tool outliving the reap
+    if not (capture / 'init_hung').exists():
+        pytest.skip('load starvation: the stub never started both tools')
     assert 'timed out' in result.stdout, result.stdout
     assert len(tools) == 2, (tools, result.stdout)
     assert alive == [], (alive, tools)
@@ -4041,6 +4121,15 @@ def _alive_pids(pids: list[int]) -> list[int]:
     return alive
 
 
+def _group_alive(pgid: int) -> bool:
+    """Whether process group ``pgid`` still answers a null signal."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _tool_pids(capture: pathlib.Path) -> list[int]:
     """The pids the stub's tool modes recorded, in role order."""
     return [
@@ -4050,22 +4139,13 @@ def _tool_pids(capture: pathlib.Path) -> list[int]:
 
 
 def _kill_tools(capture: pathlib.Path) -> None:
-    """SIGKILL each recorded tool pid still carrying the capture dir in its argv.
+    """SIGKILL every process still carrying the capture dir in its argv.
 
-    The tool argv names its capture dir (unique per launch), so a pid
-    recycled to an unrelated process is never signaled.
+    The tool argv names its capture dir (unique per launch), so a tool that
+    never recorded its pid is found too, and a pid recycled to an unrelated
+    process is never signaled.
     """
-    for pid in _tool_pids(capture) if capture.exists() else []:
-        result = subprocess.run(
-            ['ps', '-o', 'command=', '-p', f'{pid}'],
-            capture_output=True,
-            text=True,
-        )
-        if f'{capture}' in result.stdout:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+    _kill_tagged(f'{capture}')
 
 
 def test_gate_teardown_reaps_full_process_group(repo: dict) -> None:
@@ -4295,6 +4375,31 @@ def _resume_loop(
     return _collect_calls(capture), result
 
 
+def _run_script(
+    script: str,
+    worktree: pathlib.Path,
+    *,
+    bindir: Optional[pathlib.Path] = None,
+) -> subprocess.CompletedProcess:
+    """Run this checkout's ``_scripts/<script>`` on ``worktree``, bounded.
+
+    The scripts shell back into ``fractal``, so the hermetic env resolves it
+    to this checkout; ``bindir`` goes first on ``PATH`` to shadow a command.
+    """
+    script_path = _worktree_root() / 'fractal' / '_scripts' / script
+    env = _cli_env()
+    if bindir is not None:
+        path = env['PATH']
+        env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    return subprocess.run(
+        ['bash', f'{script_path}', f'{worktree}'],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+
+
 def _path_without_timeout(bindir: pathlib.Path, tmp: pathlib.Path) -> str:
     """A ``PATH`` resolving every tool except ``timeout`` (a default-macOS host).
 
@@ -4497,13 +4602,16 @@ def _launch_finish_wait(
     *,
     capture_name: str,
     stub_cost: str = '0.001',
+    prelude: Optional[str] = None,
 ) -> tuple[subprocess.Popen, pathlib.Path, pathlib.Path]:
     """Start the loop for a gated finish-wait; return ``(proc, capture, log)``.
 
     Drives the loop via ``Popen`` (the finish-wait scenarios arrange conditions
     while the gated step blocks the loop) with output teed to ``log`` so the wait
-    banners are observable mid-run. The caller releases the gate
-    (``capture/gate_release``) and finalizes with ``_finish_wait_result``.
+    banners are observable mid-run. A ``prelude`` runs in the launch's shell,
+    which then execs the loop, so what it starts shares the loop's process
+    group. The caller releases the gate (``capture/gate_release``) and
+    finalizes with ``_finish_wait_result``.
     """
     root = repo['root']
     worktree = node['worktree']
@@ -4517,6 +4625,8 @@ def _launch_finish_wait(
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
     cmd = _loop_cmd(worktree)
+    if prelude is not None:
+        cmd = ['bash', '-c', f'{prelude} exec "$@"', 'bash', *cmd]
     # tee combined output to a file (not a PIPE): the wait blocks the loop, so the
     # log must be readable mid-run; the parent closes its handle right after spawn
     # (the child keeps the dup'd fd) so nothing has to be drained to keep it alive

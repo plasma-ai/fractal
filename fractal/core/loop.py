@@ -9,7 +9,6 @@ import os
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -2956,28 +2955,13 @@ class Loop:
             # tool commands run in groups of their own, and a TERM-trapping
             # survivor holding the stdout pipe must still draw the KILL or
             # the reader blocks on it
-            try:
-                reaped = fractal.util.process.reap(
-                    [process.pid],
-                    grace=_KILL_GRACE_SECONDS,
-                    spare=node.loop_records,
-                )
-            except Exception as error:
-                # the reap broke: the deadline must still land on the group
-                print(
-                    f'Warning: process-tree reap failed ({error});'
-                    ' killing the step group only',
-                    file=sys.stderr,
-                )
-                _killpg(process.pid, signal.SIGKILL)
-                return
-            for group in reaped.spared:
-                print(f"Note: spared process group {group} (another node's loop)")
-            for survivor in reaped.survivors:
-                print(
-                    f'Warning: pid {survivor.pid} survived the reap: {survivor.command}',
-                    file=sys.stderr,
-                )
+            lines = fractal.util.process.reap_or_kill(
+                [process.pid],
+                grace=_KILL_GRACE_SECONDS,
+                spare=node.loop_records,
+            )
+            for line in lines:
+                print(line, file=sys.stderr)
 
         timer: Optional[threading.Timer] = None
         if self._step_limit_seconds > 0:
@@ -3051,30 +3035,13 @@ class Loop:
             # the whole tree (other nodes' loops spared) so a blocked writer
             # cannot outlive its step
             if process.poll() is None:
-                try:
-                    reaped = fractal.util.process.reap(
-                        [process.pid],
-                        grace=_STREAM_ERROR_GRACE_SECONDS,
-                        spare=node.loop_records,
-                    )
-                except Exception as reap_error:
-                    print(
-                        f'Warning: process-tree reap failed ({reap_error});'
-                        ' killing the step group only',
-                        file=sys.stderr,
-                    )
-                    _killpg(process.pid, signal.SIGKILL)
-                else:
-                    for group in reaped.spared:
-                        print(
-                            f"Note: spared process group {group} (another node's loop)"
-                        )
-                    for survivor in reaped.survivors:
-                        print(
-                            f'Warning: pid {survivor.pid} survived the reap:'
-                            f' {survivor.command}',
-                            file=sys.stderr,
-                        )
+                lines = fractal.util.process.reap_or_kill(
+                    [process.pid],
+                    grace=_STREAM_ERROR_GRACE_SECONDS,
+                    spare=node.loop_records,
+                )
+                for line in lines:
+                    print(line, file=sys.stderr)
         finally:
             watchdog_done.set()
             # a truncated stream (no result frame) ends mid-line with no summary
@@ -5136,14 +5103,6 @@ def _span(seconds: int) -> str:
     if seconds >= 60 and seconds % 60 == 0:
         return f'{seconds // 60} minutes'
     return f'{seconds}s'
-
-
-def _killpg(pgid: int, sig: signal.Signals) -> None:
-    """Signal a process group, ignoring one that is gone or not ours."""
-    try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 def _one_line(text: str) -> str:

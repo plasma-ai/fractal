@@ -256,7 +256,11 @@ def prunable(repo_dir: pathlib.Path) -> bool:
     return any(line.startswith('prunable ') for line in (output or '').splitlines())
 
 
-def in_progress(path: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+def in_progress(
+    path: pathlib.Path,
+    *,
+    check: bool = True,
+) -> list[tuple[str, pathlib.Path]]:
     """Return the git operations left unfinished in a worktree.
 
     One ``git rev-parse --git-path`` probe resolves every marker in
@@ -265,20 +269,24 @@ def in_progress(path: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
 
     Args:
         path: The worktree's top-level directory.
+        check: Raise ``RuntimeError`` on non-zero exit.
 
     Returns:
         Each unfinished operation's description and marker path, in
-        :data:`OPERATION_MARKERS` order.
+        :data:`OPERATION_MARKERS` order, or none on non-zero exit when
+        ``check`` is ``False``.
 
     Raises:
-        RuntimeError: If git cannot resolve the markers, so a caller guarding
-            on the answer fails closed.
+        RuntimeError: If git cannot resolve the markers and ``check`` is set,
+            so a caller guarding on the answer fails closed.
 
     """
     cmd = ['rev-parse']
     for marker in OPERATION_MARKERS:
         cmd.extend(['--git-path', marker])
-    output = run(cmd, cwd=path)
+    output = run(cmd, cwd=path, check=check)
+    if output is None:
+        return []
     result = []
     for marker, resolved in zip(OPERATION_MARKERS, output.splitlines(), strict=True):
         # git answers relative to the worktree it ran in, else absolute
