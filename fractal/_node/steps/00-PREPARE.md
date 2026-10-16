@@ -36,14 +36,15 @@ across `.fractal/` directories.
 
 After merging, assess each child's trajectory: on track, stuck, or off-task?
 
-**After any merge**, the merge driver takes yours for each `_index.md` link
-block, dropping the other branch's link rows -- the indexes refresh mechanically
-(`fractal commit` and the squash-merge into your parent both regenerate them
-from the merged filesystem). Consolidation is where **stale cross-links get
-reconciled:** children link only to pages that existed when they wrote, so once
-siblings are merged together run `wiki lint --path=$WIKI_DIR` and repair or
-prune the now-resolvable (or still-dangling) sibling links. Fixing stale links
-and missing descriptions is the parent's job at merge.
+**After any merge**, the merge driver resolves each `_index.md` link block
+itself -- both branches' new rows kept, a row one side deleted left out -- and
+the indexes refresh mechanically (`fractal commit` and the squash-merge into
+your parent both regenerate them from the merged filesystem). Consolidation is
+where **stale cross-links get reconciled:** children link only to pages that
+existed when they wrote, so once siblings are merged together run
+`wiki lint --path=$WIKI_DIR` and repair or prune the now-resolvable (or
+still-dangling) sibling links. Fixing stale links and missing descriptions is
+the parent's job at merge.
 
 **Announce integration.** When a merge brought in *materially new* work -- not a
 no-op/"Already up to date" merge, nor inherited scaffolding or `_index.md`

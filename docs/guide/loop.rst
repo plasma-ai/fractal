@@ -162,6 +162,10 @@ The joined text is rendered in one pass with ``$VAR`` / ``${VAR}``
 substitution matching GNU ``envsubst``: unknown placeholders and ``$$`` pass
 through verbatim, so ordinary shell text in a step file survives rendering.
 
+A steered relaunch (see `Stuck steps`_) is the one launch built otherwise:
+its whole prompt is the package's ``modes/STALL.md`` alone, rendered with the
+same variables, since its resumed session already holds the step.
+
 On the iteration a resume re-enters, the prompt also ends with an
 unread-inbox digest, appended after rendering (so it is never substituted):
 the twenty highest-priority unread ``inbox`` messages as metadata only —
@@ -323,9 +327,11 @@ model re-dispatches once — see below). These config keys control it:
      - Extra attempts a failed launch gets; ``0`` disables retries.
    * - ``step_retry_backoff``
      - ``10s``
-     - Delay before each retry. Slept in one-second increments, polling
-       pause (parks the run), stop, finish, and the subtree cost ceiling —
-       a failed step never buys another attempt once the budget is spent.
+     - Delay before each retry, and the base a provider outage's wait
+       doubles from (see `Provider outages`_). Slept in one-second
+       increments, polling pause (parks the run), stop, finish, and the
+       subtree cost ceiling — a failed step never buys another attempt once
+       the budget is spent.
 
 Every attempt books its own step row, so cost and duration are attributed
 accurately per attempt; retry rows carry a ``retry`` marker in their
@@ -385,8 +391,8 @@ them. While an active node's newest launches carry this signature,
 Provider outages
 ~~~~~~~~~~~~~~~~
 
-A failed launch whose agent names its provider as unavailable waits out the
-outage instead of retrying on the fixed backoff. Each agent backend reads its
+A failed launch whose agent names its provider as unavailable retries on a
+doubling wait instead of the fixed backoff. Each agent backend reads its
 own CLI's error text: the failed result frame, the stream's error frames, and
 the stderr capture.
 
@@ -440,14 +446,15 @@ The first stuck launch in an attempt **steers** the step. The stuck row
 closes ``stopped`` with ``steered: thinking cap`` or ``steered: no action for
 30 minutes`` in its metadata. The step is then relaunched on a row of its
 own (marked ``steer``) as a resume of the same session, in detached mode
-too. The relaunch's whole prompt is the package's ``modes/STALL.md``: write
-what you have to your plan file now, then take the next concrete action. The
-steer is not a retry and does not use ``step_retries``, and the step's own
-timeout still counts from the attempt's first launch. Like a retry, the
-steer first polls the signals: a pause parks the step instead (the stuck row
-closes ``stopped``, and resume re-enters the step), and a stop, a finish, or
-a spent subtree ceiling abandons it, closing the row ``failed`` with
-``<trigger>; steer abandoned``.
+too. The relaunch's whole prompt is the package's ``modes/STALL.md``, which
+tells the agent that its last launch went too long without an action and asks
+it to write down what it has (in its plan file when the iteration has one),
+then take the next concrete action. The steer is not a retry and does not use
+``step_retries``, and the step's own timeout still counts from the attempt's
+first launch. Like a retry, the steer first polls the signals: a pause parks
+the step instead (the stuck row closes ``stopped``, and resume re-enters the
+step), and a stop, a finish, or a spent subtree ceiling abandons it, closing
+the row ``failed`` with ``<trigger>; steer abandoned``.
 
 A second stuck launch after the steer, by either trigger, is a **stall**. The
 step closes ``exited`` with ``stalled: <trigger>, after a steer``, naming the
@@ -457,8 +464,7 @@ fails with ``<step> stalled: ...``, and the loop moves on to the next
 iteration. The loop also posts a ``step stalled: <step>`` notice to the
 node's outbox, which the parent follows, naming the node, step, iteration,
 and trigger. The SYNC step is never steered. The watchdog runs only for
-Claude: the other agents' streams do not yet mark when each tool call
-completes.
+Claude, the one agent whose stream marks when each tool call completes.
 
 Time limits
 -----------
@@ -493,7 +499,8 @@ A deadline that has already passed before launch records the step as timed
 out without spawning anything.
 
 Enforcement is in-process: at the limit the loop sends ``SIGTERM`` to the
-agent's whole process group, waits a 10-second grace, then ``SIGKILL``\ s any
+agent's whole process tree (every group in its session or below it, other
+nodes' loops spared), waits a 10-second grace, then ``SIGKILL``\ s any
 survivor. An agent that shuts down cleanly within the grace is still recorded
 as timed out — the limit was reached.
 
@@ -663,9 +670,11 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    that only a machine-local ignore layer holds out (a foreign
    ``.git/info/exclude`` line, ``core.excludesFile``) are force-added by
    explicit path and reported (``Force-staged N node record(s) held out by
-   an ignore rule: ...``); fractal's own exclude block and repo
-   ``.gitignore`` files keep their hold, and records they hold surface
-   through step 4's ignore-rule warning instead. ``--check`` applies the
+   an ignore rule: ...``); repo ``.gitignore`` files keep their hold, and
+   records they hold surface through step 4's ignore-rule warning instead,
+   while records held by fractal's own exclude block (its ``tmp/`` and
+   ``__pycache__/`` lines among them) or by a self-ignoring directory stay
+   silent and are not counted in ``Held out``. ``--check`` applies the
    same law, so a refused untracked file under the node directory never
    counts as uncommitted.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
@@ -692,13 +701,20 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    pre-existing lint failure is surfaced as a notice and tolerated); other
    node-data pages keep byte-identity. A rewrite that breaks either gate is
    restored to its authored bytes and the commit fails with remediation
-   guidance.
+   guidance. Node records pass through the repository's hooks like any
+   staged file, so a hook that rewrites one — a formatter reflowing a ``.py``
+   record, or trailing-whitespace stripping a ``.patch`` record's
+   single-space context lines — fails each ordinary commit that stages it,
+   until the iteration's backstop commit, which bypasses hooks, lands the
+   record as written. A hooked repository should keep rewriting hooks off
+   ``.fractal/`` (for example ``exclude: ^\.fractal/`` in its pre-commit
+   config).
 7. **Pushes** ``origin <branch>`` unless the ``local`` config key is true. A
    missing ``origin`` remote is a skipped-push notice, not an error.
 
 Options: ``--init`` labels the commit ``init`` instead of an iteration (the
 baseline commit) and skips the message-shape check, the wiki refresh, lint,
-and the ``commit`` event -- so a node's baseline carries only its own seed and
+and the ``commit`` event — so a node's baseline carries only its own seed and
 init's ``.gitattributes`` edit, refusing any other change, which an ordinary
 commit carries through the lint; ``--check`` exits 1 if uncommitted changes exist
 instead of committing; ``--ignore-scope`` commits out-of-scope changes but
@@ -773,6 +789,20 @@ Step rows land with these statuses:
    * - failed
      - ``failed``
      - the launch reason, e.g. ``agent error (exit N): <stderr tail>``
+   * - stuck, then steered (see `Stuck steps`_)
+     - ``stopped``
+     - ``steered: <trigger>``, or ``<trigger>; paused before the steer`` when
+       a pause lands first
+   * - stuck, steer abandoned by a stop, finish, or spent subtree ceiling
+     - ``failed``
+     - ``<trigger>; steer abandoned``
+   * - stuck again after the steer (a stall)
+     - ``exited``
+     - ``stalled: <trigger>, after a steer``
+   * - steered relaunch
+     - as above
+     - suffixed ``; steer`` (``steer`` alone when there is no other reason;
+       a stall's reason already names the steer)
    * - retry attempt
      - as above
      - suffixed ``; retry``

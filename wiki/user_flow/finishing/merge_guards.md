@@ -25,12 +25,12 @@ interleaving their index writes.
 
 ## Paused nodes
 
-A paused node merges without leaving `paused`: it runs no loop and no agent, so
-its branch is quiescent, and its run, iteration, and step rows stay open for
-`fractal resume` to adopt. A resume relaunches the loop only under the merge
-lock, so it waits for a running merge, and the merge re-reads the node's status
-once it holds the lock, refusing a node that left `paused` while it waited; a
-commit the node gains during the merge anyway (a hand commit) refuses the merge
+A paused node merges without leaving `paused`: it runs no loop and no agent, and
+its run, iteration, and step rows stay open for `fractal resume` to adopt. A
+resume relaunches the loop only under the merge lock, so it waits for a running
+merge, and the merge re-reads the node's status once it holds the lock, refusing
+a node that left `paused` while it waited; a commit the node gains during the
+merge anyway (a hand commit) refuses the merge
 (`<node> moved during the merge`), since the advance would revert it.
 
 Only committed work lands. A frozen step that stopped inside a git operation — a
@@ -108,13 +108,15 @@ merge-base advances, the event closes as completed, and the command prints
 during the advance finishes the node's worktree update or rolls it back, and
 warns only when an advance was underway; one during a no-op merge's bookkeeping
 prints that arm's own summary (`Nothing to merge: ...`) with no advance warning.
-An interrupted `--continue` leaves the staged squash in place to re-run, unless
-its commit had already landed — then it is finished the same way, or, for a
-paused node whose carried advance was cut short, rolled back with the resolution
-still staged. Every "restored" verdict is judged by the target's state — clean
-and out of the squash — not by git's exit code; when the target is not restored,
-the error names the `git -C <target worktree> reset --hard HEAD` to run before
-merging again.
+A paused node is the exception: its carried advance is part of the merge, so an
+interrupt during it rolls the whole merge back (see [[#Paused nodes]]), closes
+the event `failed`, and exits 1. An interrupted `--continue` leaves the staged
+squash in place to re-run, unless its commit had already landed — then it is
+finished the same way, or, for a paused node whose carried advance was cut
+short, rolled back with the resolution still staged. Every "restored" verdict is
+judged by the target's state — clean and out of the squash — not by git's exit
+code; when the target is not restored, the error names the
+`git -C <target worktree> reset --hard HEAD` to run before merging again.
 
 ## Footprint
 

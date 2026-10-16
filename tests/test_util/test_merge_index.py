@@ -54,11 +54,12 @@ def test_clean_merge_unions_above_and_merges_below(
     """A clean merge unions the link rows and three-way-merges below.
 
     Ours adds a row, theirs adds another and deletes one ours left alone, and
-    theirs also appends a line below. The result must be byte-identical to the
-    index ``wiki update`` writes for the merged rows -- both additions, the
-    deletion kept, each row in sorted order -- plus the three-way-merged below,
-    proving the recombination introduces no drift, no side's addition is
-    dropped, and no side's deletion rides back in.
+    theirs also appends a line below. The merged link block must hold exactly
+    the merged rows -- both additions once each, the deletion kept, each row
+    in sorted order -- above the three-way-merged below, proving no side's
+    addition is dropped and no side's deletion rides back in. The row spacing
+    is the wiki's own rendering, which the real-cycle test below checks
+    against ``wiki update`` itself.
     """
     below_base = 'Manual line 1.\nManual line 2.\n'
     below_theirs = 'Manual line 1.\nManual line 2.\nTheirs line 3.\n'
@@ -71,15 +72,12 @@ def test_clean_merge_unions_above_and_merges_below(
         ),
         theirs=_index(('[[a|a]]: alpha', '[[b|b]]: beta'), below_theirs),
     )
-    # update renders each row with a blank line after it
-    expected = (
-        '---\nname: w\n---\n\n# w\n\n'
-        '[[a|a]]: alpha\n\n[[b|b]]: beta\n\n[[c|c]]: gamma\n\n'
-        f'***\n{below_theirs}'
-    )
     assert result.returncode == 0
     assert not result.unmerged
-    assert result.text == expected
+    above, _, below = result.text.partition('\n***\n')
+    rows = [line for line in above.splitlines() if line.startswith('[[')]
+    assert rows == ['[[a|a]]: alpha', '[[b|b]]: beta', '[[c|c]]: gamma']
+    assert below == below_theirs
 
 
 def test_above_unions_divergent_link_blocks(
@@ -429,8 +427,9 @@ def test_union_above_carries_both_links_and_update_prunes_stale_rows(
     view*: the post-merge ``wiki update`` regenerates it from the merged
     filesystem and prunes whatever rows went stale, so a deleted page's row
     cannot ride a later merge back in. This drives the real cycle: ours and
-    theirs each add a distinct page, the merged index carries both links, and
-    after deleting a page its row is pruned by the next update.
+    theirs each add a distinct page, the merged index carries both links and
+    is already current as merged (``wiki update --check`` finds nothing to
+    rewrite), and after deleting a page its row is pruned by the next update.
     """
     # fresh repo with the index driver wired
     repo = tmp_path / 'repo'
@@ -473,6 +472,14 @@ def test_union_above_carries_both_links_and_update_prunes_stale_rows(
     assert merged.count('[[b|b]]') == 1  # theirs' link unioned once
     assert '[[c|c]]' in merged  # ours' link kept
     assert (wiki_dir / 'b.md').is_file()
+    # each side only added a page, so the clean merge is current as merged
+    check = subprocess.run(
+        ['wiki', 'update', '--check', '--path', f'{wiki_dir}'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check.returncode == 0, (check.stdout, check.stderr)
     # the post-merge wiki update regenerates the block from ground truth
     _wiki(wiki_dir, 'update')
     settled = index.read_text(encoding='utf-8')

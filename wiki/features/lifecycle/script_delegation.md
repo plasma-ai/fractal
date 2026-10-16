@@ -166,18 +166,19 @@ is the caller's own or an ancestor's, `pause.sh` reports the agent kept, the
 step finishes with every tool it started, the loop parks at the next checkpoint,
 and the pause confirmation says the caller's own agent was not aborted. The reap
 never signals another node's loop group, nor walks through one: a node the agent
-launches (`fractal node start` runs the child's loop in a new session) stays a
-child of the agent's tool until its launcher returns, so the reap spares every
-group recorded in another registered node's `.pgid`, everything in a session one
-of its processes leads, and everything below it, and names each spared group it
-reached — but never a root group, the group being reaped, so a crashed node's
-stale record whose pid now leads the step's group spares nothing. The record
-list comes from the registry by path alone (no git, so a sibling whose worktree
-no longer resolves is skipped, never fatal), and both the list and the records
-are rebuilt before every signal round, so a launch that lands mid-reap is
-honored. It signals only groups found through the recorded group's session or
-tree. And when the first process table cannot be read, it falls back to
-signaling the recorded groups alone (minus the caller's own group, not its
+launches headless (`fractal node start` runs the child's loop in a new session)
+stays a child of the agent's tool while its launcher runs — a tmux launch forks
+the loop from the tmux server, outside the agent's tree — so the reap spares
+every group recorded in another registered node's `.pgid`, everything in a
+session one of its processes leads, and everything below it, and names each
+spared group it reached — but never a root group, the group being reaped, so a
+crashed node's stale record whose pid now leads the step's group spares nothing.
+The record list comes from the registry by path alone (no git, so a sibling
+whose worktree no longer resolves is skipped, never fatal), and both the list
+and the records are rebuilt before every signal round, so a launch that lands
+mid-reap is honored. It signals only groups found through the recorded group's
+session or tree. And when the first process table cannot be read, it falls back
+to signaling the recorded groups alone (minus the caller's own group, not its
 ancestors', which no table names -- so a self-pause from a tool shell in a group
 of its own can hit the step group, as `pause.sh`'s own fallback does); when a
 later read fails, it keeps signaling the groups it already knows, minus the

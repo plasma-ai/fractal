@@ -454,7 +454,8 @@ in-flight agent invocation is aborted, and the loops park with status
 tmux session — that is its normal state, not a crash. While a node (or the
 whole tree, via ``fractal pause``) is paused, spawning and starting refuse
 anywhere beneath it; the only legal verbs on a paused node are ``resume``,
-``kill``, and ``chat``.
+``kill``, ``chat``, and ``merge`` (committed work only; the node stays
+paused).
 
 ``resume`` relaunches the parked subtree leaf-first. Each loop adopts its open
 run — same budgets and iteration count, the interrupted step re-entered

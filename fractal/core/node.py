@@ -728,12 +728,13 @@ class Node:
         never the last word for a guard. A seat that unsets ``_NODE`` and
         steps into a *sibling* worktree resolves to a real but wrong
         node; one that steps outside every worktree resolves to no actor
-        and would fail open. Each guard closes that from its own side
+        and would fail open. Each guard answers that from its own side
         rather than here: the drain adds process-lineage attribution
         (:meth:`drain_lineage` -- the recorded agent's session, which
-        moving cannot rewrite), and the mailbox seal sits on the
-        owner-only channel rule, which asks what a caller may read rather
-        than who it claims to be.
+        moving cannot rewrite, though a tool command the agent CLI runs in
+        a session of its own is outside it), and the mailbox seal sits on
+        the owner-only channel rule, which asks what a caller may read
+        rather than who it claims to be.
 
         Returns:
             The acting node, or ``None`` outside any node context.
@@ -784,14 +785,16 @@ class Node:
         the environment and steps into a sibling worktree resolves to a
         real but WRONG node the drain never binds; one that steps outside
         every worktree resolves to no node and fails open. Neither is a
-        lie the seat can tell about its *session*: the loop spawns each
+        lie a process can tell about its *session*: the loop spawns each
         agent invocation as its own session leader and records the id
-        (``.step_pgid``), and every command that seat runs stays in that
-        session, even one the agent CLI starts in its own process group
-        (only a deliberate ``setsid`` leaves it). Ask the tree which of
-        its open runs drain, then whether this process sits in one of
-        their seats -- attribution by lineage, which no ``env -u`` or
-        ``cd`` rewrites.
+        (``.step_pgid``). Ask the tree which of its open runs drain, then
+        whether this process sits in one of their seats' sessions --
+        attribution by lineage, which no ``env -u`` or ``cd`` rewrites.
+        The session holds the agent and whatever it starts in a process
+        group of its own, but not a tool command the agent CLI runs in a
+        session of its own (Claude Code runs every one so): such a command
+        never matches here, and one that scrubs ``_DRAIN`` and ``_NODE``
+        and leaves its worktree escapes every drain source.
 
         Identity-checked like the reap's (:func:`_recorded_group`), so a
         stale handle naming a recycled id never refuses an unrelated
@@ -837,15 +840,16 @@ class Node:
     def loop_records(self: Node) -> list[pathlib.Path]:
         """Return the loop group record of every other node in this tree.
 
-        A process-tree reap spares the groups these record: a node launched
-        from this node's agent stays a child of that agent until its
-        launcher returns, so a walk from the agent would otherwise take a
-        healthy loop at boot. Paths, not ids -- the reap re-reads them
-        before every signal round, catching a record written mid-reap.
-        Pure path arithmetic from each registry row's branch (no git), and
-        never raises: the reap runs on a deadline thread and inside pause,
-        so an unreadable registry answers none and an unreadable entry is
-        skipped.
+        A process-tree reap spares the groups these record: a node this
+        node's agent launches headless stays a child of the agent's tool
+        while its launcher runs (a tmux launch forks the loop from the tmux
+        server, outside the agent's tree), so a walk from the agent would
+        otherwise take a healthy loop at boot. Paths, not ids -- the reap
+        re-reads them before every signal round, catching a record written
+        mid-reap. Pure path arithmetic from each registry row's branch (no
+        git), and never raises: the reap runs on a deadline thread and
+        inside pause, so an unreadable registry answers none and an
+        unreadable entry is skipped.
 
         Returns:
             The ``.pgid`` record path of each registered node, this node's
@@ -1003,8 +1007,9 @@ class Node:
         """Validate a template charter's fill-sheet before any spend.
 
         The stale-seed gate: it refuses a stale pin, a stale docket row, or
-        a truncated charter before the node's opening seat spends on it.
-        Checks, all pre-worktree:
+        a truncated charter before a seat spends on it -- at init before the
+        worktree exists, at reseed before any seed file is rewritten.
+        Checks:
 
         - ``--pin`` (when given) resolves to a commit;
         - the charter carries its two authored sections (a truncated seed
@@ -3796,7 +3801,8 @@ class Node:
         """Pause the node and its active descendants (parent-first).
 
         Signals ``pause`` then aborts each node's in-flight agent invocation
-        (``pause.sh`` reaps the recorded step process group), so every loop
+        (``pause.sh`` reaps the in-flight agent's whole process tree and
+        names survivors and other processes in the worktree), so every loop
         reclassifies the abort and parks: it exits with status ``paused``,
         leaving its run and iteration rows open for :meth:`resume` to adopt.
         An agent that runs the pause itself is never aborted: its step
@@ -4148,20 +4154,20 @@ class Node:
         amended squash orphans the merge-base advance recorded against it).
 
         A paused node merges without leaving ``paused``: it runs no loop and
-        no agent, so its branch is quiescent, and its run, iteration, and step
-        rows stay open for :meth:`resume` to adopt. A resume relaunches the
-        loop only under the merge lock, and the merge re-reads the node's
-        status once it holds that lock, refusing a node that changed status
-        while it waited; a commit the node gains during the merge anyway
-        refuses it, since the advance would revert that commit. Only
-        committed work lands; the advance carries the frozen step's
-        uncommitted state the way ``git checkout`` moves a branch, refusing
-        the whole merge when it would touch a dirty path or an untracked or
-        ignored file, and rolling the target and the node back when anything
-        fails after the commit. A frozen step stopped inside a git operation
-        -- a merge, squash merge, cherry-pick, revert, or rebase, or a git
-        command still running or killed with its ``index.lock`` held --
-        refuses the merge before anything changes.
+        no agent, and its run, iteration, and step rows stay open for
+        :meth:`resume` to adopt. A resume relaunches the loop only under the
+        merge lock, and the merge re-reads the node's status once it holds
+        that lock, refusing a node that changed status while it waited; a
+        commit the node gains during the merge anyway refuses it, since the
+        advance would revert that commit. Only committed work lands; the
+        advance carries the frozen step's uncommitted state the way
+        ``git checkout`` moves a branch, refusing the whole merge when it
+        would touch a dirty path or an untracked or ignored file, and rolling
+        the target and the node back when anything fails after the commit (a
+        continue keeps its staged resolution). A frozen step stopped inside a
+        git operation -- a merge, squash merge, cherry-pick, revert, or
+        rebase, or a git command still running or killed with its
+        ``index.lock`` held -- refuses the merge before anything changes.
 
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
@@ -7014,7 +7020,8 @@ def _draining(node: Node) -> bool:
     of those still ask the seat who it is, and a seat that moves can
     answer wrongly -- so the last source asks the operating system
     instead: whether this process sits in a draining seat's recorded
-    session (:meth:`Node.drain_lineage`).
+    session (:meth:`Node.drain_lineage`), which a tool command the agent
+    CLI runs in a session of its own is outside.
 
     Args:
         node: Any node of the tree the verb acts on -- the drain that

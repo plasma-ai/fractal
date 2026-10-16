@@ -232,7 +232,10 @@ def commit(app: typer.Typer) -> typer.Typer:
     message_help = 'Short description for the commit message (required unless --check).'
     message = typer.Argument(None, help=message_help)
     # init flag
-    init_help = 'Baseline commit ("init" instead of "iteration <run>.<iter>").'
+    init_help = (
+        'Baseline commit ("init" instead of "iteration <run>.<iter>"; a child node'
+        ' commits only its seed).'
+    )
     init = typer.Option(False, '--init', help=init_help)
     # check flag
     check_help = 'Exit 1 if uncommitted changes exist instead of committing.'

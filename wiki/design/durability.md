@@ -26,14 +26,15 @@ Every design choice below serves that round-trip guarantee.
 A paused node stops executing and nothing else. Its run and iteration rows stay
 open for resume to adopt; it keeps its spawn slot in the tree's limits; it
 blocks an ancestor's finish-drain the same way an active child would; and only
-resume, kill, and chat are legal on it. The alternative — treating pause as a
-lightweight exit — would make the freeze lossy: closed rows would force resume
-to fabricate a fresh run (new budget arming, reset iteration numbers), a
-released slot would let a sibling spawn into space the frozen node still owns,
-and an ancestor draining "done" children over a paused one would complete over
-work that is merely suspended. Pause is a promise the tree makes to the future
-resume, and the promise only holds if the rest of the system keeps behaving as
-though the node were still there — because it is.
+resume, kill, chat, and merge (committed work only; the node stays paused) are
+legal on it. The alternative — treating pause as a lightweight exit — would make
+the freeze lossy: closed rows would force resume to fabricate a fresh run (new
+budget arming, reset iteration numbers), a released slot would let a sibling
+spawn into space the frozen node still owns, and an ancestor draining "done"
+children over a paused one would complete over work that is merely suspended.
+Pause is a promise the tree makes to the future resume, and the promise only
+holds if the rest of the system keeps behaving as though the node were still
+there — because it is.
 
 The ordering of the fan-outs encodes the same promise. Pause sweeps parent-first
 — the inverse of every other signal — so a parent is never left running long

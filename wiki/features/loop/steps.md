@@ -80,10 +80,10 @@ modes. SYNC also runs on each poll timeout while the loop waits for children to
 finish (only while an iteration is live) and while a step waits for operator
 approval; each pass gets its own step row, and these waiting passes record any
 outcome but a pause as completed. A failed before-step SYNC is non-fatal — the
-loop notes it and continues into the step — but a SYNC that times out fails the
-iteration: the loop force-commits the work in progress and closes the iteration
-as timed out. A pause landing during SYNC parks the node before the step's own
-agent ever launches.
+loop notes it and continues into the step — but a before-step SYNC that times
+out fails the iteration: the loop force-commits the work in progress and closes
+the iteration as timed out. A pause landing during SYNC parks the node before
+the step's own agent ever launches.
 
 ## Checkpoints between steps
 

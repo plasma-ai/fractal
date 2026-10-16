@@ -147,37 +147,30 @@ a `.` cache dir, which would clone the whole checkout.
   the very file the guard checks.
 - `fractal node update <node>` is the supported retune path for a running child:
   it updates the registry row and the child's `config.json` together (title,
-  cost caps, reserve, step timeout, and tree limits), and the loop picks the new
-  caps up at its next iteration.
+  cost caps, reserve, step timeout, and tree limits), and each retuned key lands
+  at its own boundary below -- the cost caps and reserve at the next iteration's
+  pricing and every budget probe, the step timeout at the next iteration, and
+  the tree limits at once for the spawn gate and at the child's next step.
 
-The three init-fixed keys -- `root`, `user`, `project` -- can never be changed,
-and the operator-facing `config set` refuses even their first write.
-
-## When changes take effect
-
-The loop enforces the caps in `config.json`, so a retune or direct config edit
-reaches a running loop without a restart -- the registry row is back-filled from
-the config with a warning (config wins over a stale registry row). The cost caps
-are re-read at run start, at each iteration top, and by the budget boundary
-probes themselves, so a cap granted mid-iteration reaches the very next probe;
-`max_iters`, `step_timeout`, and `wait` are re-read at each iteration top. A
-malformed live edit warns and keeps the prior value rather than crashing the
-run. Everything else is pinned when a run launches and holds for that run -- the
-mode-composition and agent-preference keys (`sync`, `detached`, `meta`, `agent`,
-`provider`, `model`, `effort`), the run and iteration time budgets and pacing
-(`timeout`, `iter_timeout`, `interval`, `sleep`), and the retry knobs
-(`step_retries`, `step_retry_backoff`) -- and applies from the next
-`fractal node start`.
+The four init-fixed keys -- `root`, `user`, `project`, `wiki` -- can never be
+changed, and the operator-facing `config set` refuses even their first write.
 
 ## When edits take effect
 
-Config is a live steering surface with per-key boundaries: `max_iters` at the
-next iteration's stop gate; `iter_timeout`/`step_timeout`/`wait` at the next
-iteration; `interval`/`sleep` at the next between-iterations sleep call; the
-cost caps at the next iteration's pricing (and live at every budget probe);
-`scope`/`local` per commit; `sealed` at the next radio read; the spawn limits
-(`max_depth`, `max_children`, `max_descendants`) at the next step's prompt and
-environment. The boot-pinned set — `timeout`, `agent`, `provider`, `model`,
-`effort`, `detached`, `sync`, `meta`, `step_retries`, `step_retry_backoff` —
-reaches the next start/resume, never a run in flight. Malformed mid-run edits
-warn and keep the prior value.
+The loop enforces the values in `config.json`, so a retune or a direct config
+edit reaches a running loop without a restart, and the registry row is
+back-filled from the config with a warning (config wins over a stale registry
+row). Each key has its own boundary: `max_iters` at the next iteration's stop
+gate; `iter_timeout`/`step_timeout`/`wait` at the next iteration;
+`interval`/`sleep` at the next between-iterations sleep call; the cost caps
+(`max_cost`, `max_iter_cost`, `max_step_cost`, `reserve_budget`) at the next
+iteration's pricing and live at every budget probe, so a cap granted
+mid-iteration reaches the very next probe; `scope`/`local` per commit;
+`clone_dirs` at the next child spawn; `sealed` at the next radio read; `blind`
+at the next start and the next child spawn; and the spawn limits (`max_depth`,
+`max_children`, `max_descendants`) at once for the spawn gate, which reads them
+from `config.json` at every spawn, and at the next step's prompt and
+environment. The boot-pinned set -- `timeout`, `agent`, `provider`, `model`,
+`effort`, `detached`, `sync`, `meta`, `step_retries`, `step_retry_backoff` --
+reaches the next start or resume, never a run in flight. A malformed mid-run
+edit warns and keeps the prior value rather than crashing the run.

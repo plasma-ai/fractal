@@ -1700,9 +1700,10 @@ def _spend_unmetered(
     cache as it stands; the loop's first preflight is what fetches it.
     """
     # resolve the effective agent the way init does: the flag, else the nearest
-    # ancestor's default walked from the calling node (_NODE) the child nests
-    # under -- not the repo-root target resolve_init returned (they differ once
-    # an agent spawns its own children)
+    # ancestor's default walked from the node the child nests under
+    # (resolve_init_parent: the calling node, else a .worktrees/ path's node) --
+    # not the repo-root target resolve_init returned (they differ once an agent
+    # spawns its own children)
     parent = node.resolve_init_parent(path)
     # a template preset can cap, re-agent, route, or pin what the flags left
     # unset, and --inherit config can re-agent, route, or pin -- the child's

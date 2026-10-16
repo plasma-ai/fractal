@@ -19,7 +19,9 @@ assembly, owned by `fractal/core/render.py`, concatenates three layers joined by
 blank lines: the node's `NODE.md` charter, the step file's body with its
 frontmatter stripped, and every active mode document. One merged variable map
 both selects the active modes and substitutes the assembled text in a single
-pass.
+pass. On the iteration a resume re-enters, the loop appends an unread-inbox
+digest after rendering, to SYNC's prompt too, so the digest is never
+substituted.
 
 ## Substitution grammar
 
@@ -39,18 +41,19 @@ Jinja braces in a seeded file are not evaluated again.
 Static variables are derived from the node itself and shared by every renderer:
 the path set (`REPO_DIR`, `PROJECT_DIR`, `SCOPE_DIR`, `WORKTREE_DIR`,
 `NODE_DIR`, `PLANS_DIR`, `MEMORY_DIR`, `WIKI_DIR`), `CURRENT_BRANCH`, the config
-limits (`MAX_DEPTH`, `MAX_CHILDREN`, `MAX_DESCENDANTS`; `-1` when unset, which
-the spawn gate treats as unlimited), and the config-derived mode flags
-(`DETACHED_MODE`, `META_MODE` with `META_TARGET`). The loop re-derives the map
-from live config for every step, both for the prompt and for the environment it
-exports into the seat, so a mid-run limit edit reaches the next step. Only the
-mode flags stay pinned to their boot values, so a mid-run config edit cannot
-flip the run's mode composition; the exported environment also pins
-`FRACTAL_HEADLESS`, the run's launch backend (`true`/`false`), so a seat's
-`fractal node start` inherits the backend: the CLI's backend resolution reads
-the seat-exported `FRACTAL_HEADLESS` when the flag is absent. `SCOPE_DIR`
-space-joins the scope roots when several are configured, and the project and
-wiki paths nest under the project prefix for a sub-project node.
+limits (`MAX_DEPTH`, `MAX_CHILDREN`, `MAX_DESCENDANTS`; `-1` when unset, meaning
+unlimited: the spawn gate skips an unset cap, and `-1` is display-only, accepted
+by no setter), and the config-derived mode flags (`DETACHED_MODE`, `META_MODE`
+with `META_TARGET`). The loop re-derives the map from live config for every
+step, both for the prompt and for the environment it exports into the seat, so a
+mid-run limit edit reaches the next step. Only the mode flags stay pinned to
+their boot values, so a mid-run config edit cannot flip the run's mode
+composition; the exported environment also pins `FRACTAL_HEADLESS`, the run's
+launch backend (`true`/`false`), so a seat's `fractal node start` inherits the
+backend: the CLI's backend resolution reads the seat-exported `FRACTAL_HEADLESS`
+when the flag is absent. `SCOPE_DIR` space-joins the scope roots when several
+are configured, and the project and wiki paths nest under the project prefix for
+a sub-project node.
 
 Run-scoped variables have no static derivation -- the caller supplies them as
 overrides, and overrides always win over the derived map. The loop passes its

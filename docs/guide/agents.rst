@@ -287,10 +287,10 @@ probe, and a resume boot records no ``pause`` event over it.
 The ``codex`` probe leads its own process group, recorded in the node's
 ``.step_pgid`` for the probe's lifetime so ``kill`` reaps it by the same
 handle as a step; a probe that does not answer within the preflight
-timeout is cancelled — TERM, a short grace, then KILL on the whole group.
-The probe is a paid invocation — one short turn at the configured model —
-and its usage is unpriced: it lands in no step row, so the run's recorded
-spend and every cost cap leave it out.
+timeout is cancelled — TERM, a short grace, then KILL on the probe's whole
+process tree. The probe is a paid invocation — one short turn at the
+configured model — and its spend stays off the ledger: it lands in no step
+row, so the run's recorded spend and every cost cap leave it out.
 
 Costs
 -----
@@ -302,10 +302,12 @@ invocation once its process exits cleanly, so an interrupted ``codex``
 step records no cost. A ``claude`` step that ends without its result frame
 is priced again from Claude Code's own session transcript: each reply
 written during the launch counts at its final token usage and its own
-model, and the sum replaces the streamed figure when it is higher. The
-figure is priced from recorded usage rather than Claude's own bill; with no
-readable transcript the step keeps the streamed figure (or none) and the
-agent logs why. Read spend with the cost commands (full surfaces in
+model, and the sum replaces the streamed figure when it is higher.
+Sub-agent transcripts, which Claude Code keeps in separate files, are not
+read, so a killed step's sub-agent spend is left out. The figure is priced
+from recorded usage rather than Claude's own bill; with no readable
+transcript the step keeps the streamed figure (or none) and the agent logs
+why. Read spend with the cost commands (full surfaces in
 :doc:`/cli/node`):
 
 .. code-block:: console

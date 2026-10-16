@@ -155,16 +155,22 @@ touched wiki root that linted clean before the rewrite still lints clean after
 it (a pre-existing lint failure is surfaced as a notice and tolerated, mirroring
 the pipeline's own lint step); every other node-data page keeps byte-identity,
 so any hook rewrite there is refused. A rewrite that breaks a gate is restored
-to its authored bytes and fails the commit with remediation guidance. The commit
-event is logged from a single emit point keyed on the new sha, so the retry
-never double-logs (no event for `--init`, whose baseline has no run lineage),
-and a failed event insert warns rather than blocking the save. A `--force`
-commit -- the loop's backstop save -- passes `--no-verify` so a failing or
-mutating hook can neither block nor rewrite the save, and folds the record
-pass's notices and the staged-sweep warnings plus a capped diffstat into its
-body so the backstop describes what it saved (and what it deliberately overrode
-or refused) from git history alone. `--check` commits nothing and errors if
-uncommitted changes exist -- counting only work the stage could commit, so the
-stage's own excludes and the estate content law both ride along: dirt no pass
-may ever stage would otherwise read as permanently dirty and fire the backstop
-every iteration over a file that can never clear.
+to its authored bytes and fails the commit with remediation guidance. Node
+records pass through the repository's hooks like any staged file, so a hook that
+rewrites one -- a formatter reflowing a `.py` record, or trailing-whitespace
+stripping a `.patch` record's single-space context lines -- fails each ordinary
+commit that stages it, until the iteration's backstop commit, which bypasses
+hooks, lands the record as written. A hooked repository should keep rewriting
+hooks off `.fractal/` (for example `exclude: ^\.fractal/` in its pre-commit
+config), as the failure message says. The commit event is logged from a single
+emit point keyed on the new sha, so the retry never double-logs (no event for
+`--init`, whose baseline has no run lineage), and a failed event insert warns
+rather than blocking the save. A `--force` commit -- the loop's backstop save --
+passes `--no-verify` so a failing or mutating hook can neither block nor rewrite
+the save, and folds the record pass's notices and the staged-sweep warnings plus
+a capped diffstat into its body so the backstop describes what it saved (and
+what it deliberately overrode or refused) from git history alone. `--check`
+commits nothing and errors if uncommitted changes exist -- counting only work
+the stage could commit, so the stage's own excludes and the estate content law
+both ride along: dirt no pass may ever stage would otherwise read as permanently
+dirty and fire the backstop every iteration over a file that can never clear.

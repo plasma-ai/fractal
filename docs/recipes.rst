@@ -89,7 +89,8 @@ While the tree is latched, spawning (``fractal node init``) and
 worktree keeps its uncommitted files as the frozen mid-step state that resume
 continues from. A paused node has no tmux session — that is its normal
 parked state, not a crash — and the only verbs it accepts are ``resume``,
-``kill``, and ``chat``.
+``kill``, ``chat``, and ``merge`` (committed work only; the node stays
+paused).
 
 Check what is parked, then release the tree:
 

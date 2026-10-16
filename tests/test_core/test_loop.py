@@ -917,8 +917,9 @@ def test_midrun_limit_edits_reach_the_next_step_env(
     loop = EditingLoop(loop_node)
     assert loop.run() == 0
     (first, _, _), (env, prompt, session) = loop.seen
-    # the boot step carried the boot limits
+    # the boot step carried the boot limits, an unset cap as -1
     assert first['MAX_CHILDREN'] == '4'
+    assert first['MAX_DEPTH'] == '-1'
     # the later step resumed the session only in continuous mode
     assert session == (None if detached else 'session-1')
     # the edited limits reached the env and the prompt alike
@@ -1397,7 +1398,7 @@ def test_no_progress_steers_then_stalls_without_retry(
     first, steer = agent.argvs
     session = first[first.index('--session-id') + 1]
     assert steer[steer.index('--resume') + 1] == session
-    assert 'ran out of room while still thinking' in steer[-1]
+    assert 'went too long without an action' in steer[-1]
     assert all(process.poll() is not None for process in agent.spawned)
     assert _step_rows(loop_node) == [
         'PLAN/stopped/steered: no action for 1s; unpriced',
