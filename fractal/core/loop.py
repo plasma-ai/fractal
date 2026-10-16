@@ -63,10 +63,10 @@ _KILL_GRACE_SECONDS = 10.0
 # the KILL's settle, and slack for the process-table walks between signals
 _REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS + 5.0
 
-#: Seconds of the agent's own idle time -- counted while it holds control
-#: (from its launch, a tool result, visible text, or a wake-up), paused while
-#: a tool runs or its turn has ended -- after which the loop ends the launch
-#: as stuck.
+#: Seconds of the agent's own idle time -- counted while it holds
+#: control (from its launch, a tool result, visible text, a think's
+#: end, or a wake-up), paused while a tool runs, a think is open, or
+#: its turn has ended -- after which the loop ends the launch as stuck.
 NO_PROGRESS_SECONDS = 1_800
 
 # grace between the TERM and KILL when the stream reader dies -- short, but

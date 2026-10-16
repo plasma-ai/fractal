@@ -67,8 +67,7 @@ _UNEXPLAINED = 'Rollout window saw a rollout it cannot explain: {name!r}'
 # after its own reconnects (the last `Reconnecting... N/N`, then a bare
 # `stream disconnected before completion`), a 429 or 5xx status, or the
 # overloaded/unavailable/at-capacity wording -- an earlier reconnect, which
-# carries the disconnect in parentheses, is a retry codex may still recover
-# from
+# carries the disconnect in parentheses, is a retry codex may still recover from
 _UNAVAILABLE = re.compile(
     r'(?<!\()stream disconnected before completion'
     r'|reconnecting(?:\.{3}|\u2026)\s*(\d+)/\1\b'
@@ -79,7 +78,7 @@ _UNAVAILABLE = re.compile(
     r'|\boverloaded\b'
     r'|\bat capacity\b'
     r'|experiencing high demand',
-    re.IGNORECASE,
+    flags=re.IGNORECASE,
 )
 
 # the rollout window captured before each spawn, keyed by its live process --
@@ -218,9 +217,14 @@ class CodexParser(StreamParser):
         return self._wire_usage
 
     def finish(self: CodexParser) -> list[StreamEvent]:
-        """Close the drained stream on its settled cost and wall time."""
+        """Close the drained stream on its settled cost and wall time.
+
+        The close is final only when it priced the turn; an unpriced one
+        (a non-zero exit, usage it cannot bind) leaves the cost open to
+        ``Agent.settle_cost``.
+        """
         wall = time.monotonic() - self._started
-        self.final = True
+        self.final = self.cost is not None
         return [StreamEvent(kind='result', cost=self.cost, final=True, duration=wall)]
 
 
@@ -231,6 +235,12 @@ class CodexAgent(Agent):
         Support forking once codex ships ``codex exec fork``:
         https://github.com/openai/codex/issues/11750 and
         https://github.com/openai/codex/issues/17568.
+
+        Report the agent's control (``reports_progress``) from the exec
+        stream, so the no-progress watchdog arms for codex steps.
+
+        Price a killed launch from its rollout window (``_settle_cost``),
+        so an interrupted step records its spend.
 
     """
 
@@ -410,7 +420,7 @@ class CodexAgent(Agent):
         return _rates(model)
 
     def _unavailable(self: CodexAgent, detail: str) -> bool:
-        """Match codex's reconnect give-up and its overloaded or erroring API."""
+        """Match codex's provider-outage shapes."""
         return _UNAVAILABLE.search(detail) is not None
 
     def _preflight(

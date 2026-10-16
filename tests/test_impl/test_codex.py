@@ -658,6 +658,7 @@ def test_stream_without_process_records_session_but_not_wire_cost(
     assert node.sessions.get('codex') == 'thr_abc'
     assert result.session == 'thr_abc'
     assert result.cost is None
+    assert not result.final
 
 
 def test_stream_detached_keeps_session_unpersisted_codex(node_with_db: Node) -> None:
@@ -703,6 +704,7 @@ def test_stream_prices_each_invocation_from_its_own_rollout_records(
     assert result.session == _SESSION
     assert result.model == _MODEL
     assert result.cost == pytest.approx(_FRESH_COST)
+    assert result.final
     # the resumed run prices only the record it appended (_RESUMED_USAGE)
     second = _named_step(backend, 'SECOND')
     command = _command(backend, resumed, _RESUMED_WIRE, resume=True)
@@ -1417,13 +1419,14 @@ def test_nonzero_exit_closes_unpriced_and_silent(
     backend: CodexAgent,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A process that exits non-zero closes with no cost and no diagnostic."""
+    """A process that exits non-zero closes unsettled, unpriced, and silent."""
     fresh, _ = _split(resumed_thread)
     step = _named_step(backend, 'FAILED')
     command = _command(backend, fresh, _FRESH_WIRE, exit_code=3)
     result, events = _drive(backend, command, step_id=step)
     assert result.session == _SESSION
     assert result.cost is None
+    assert not result.final
     assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
     # the loop attributes the exit; the stream just closes on wall time
     assert [event.kind for event in events] == ['session', 'text', 'result']

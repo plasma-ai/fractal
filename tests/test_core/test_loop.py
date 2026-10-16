@@ -69,6 +69,7 @@ __all__ = [
     'test_no_progress_steers_then_stalls_without_retry',
     'test_no_progress_clock_pauses_while_a_tool_runs',
     'test_thinking_never_resets_the_no_progress_clock',
+    'test_long_think_that_ends_in_an_action_is_not_stuck',
     'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
@@ -82,6 +83,7 @@ __all__ = [
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
     'test_killed_claude_launch_prices_from_its_transcript',
+    'test_killed_wake_up_after_a_result_prices_from_the_transcript',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_killed_launch_settles_after_dropping_its_group_handle',
     'test_a_settle_never_lowers_the_streamed_figure',
@@ -280,8 +282,9 @@ _BACKGROUND_WAIT = (
     pathlib.Path(__file__).parent / 'streams' / 'claude_background_wait.jsonl'
 )
 
-# claude stream-json frames for the scripted stand-in (SID: the launch's
-# session); thinking streams as raw partial-message deltas, never an action
+# claude stream-json frames for the scripted stand-in (SID: the
+# launch's session); a thinking block's start holds the clock until
+# the block completes, while thinking deltas alone are never an action
 _INIT = {'type': 'system', 'subtype': 'init', 'session_id': 'SID'}
 _TOOL_START = {
     'type': 'stream_event',
@@ -337,6 +340,22 @@ _THINKING = {
         'type': 'content_block_delta',
         'delta': {'type': 'thinking_delta', 'thinking': 'hmm'},
     },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_START = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_start',
+        'index': 0,
+        'content_block': {'type': 'thinking', 'thinking': '', 'signature': ''},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_STOP = {
+    'type': 'stream_event',
+    'event': {'type': 'content_block_stop', 'index': 0},
     'parent_tool_use_id': None,
     'session_id': 'SID',
 }
@@ -441,9 +460,10 @@ class ScriptedClaude(ClaudeAgent):
     becomes the launch's session), in the production spawn shape: its own
     process group, a text stdout pipe; its argv and the env it was handed
     are kept. With ``transcripts``, each launch first appends its next
-    batch of entries to the session's transcript, stamped at the spawn
-    unless an entry carries its own stamp. Every settled cost flush is
-    kept with its finality.
+    batch of entries to the session's transcript, or to a sub-agent's own
+    transcript beside it for an entry naming one (``subagent``), stamped
+    at the spawn unless an entry carries its own stamp. Every settled cost
+    flush is kept with its finality.
     """
 
     def __init__(
@@ -476,11 +496,18 @@ class ScriptedClaude(ClaudeAgent):
         if self.transcripts:
             path = self._transcript(f'{invocation.session}')
             assert path is not None
-            path.parent.mkdir(parents=True, exist_ok=True)
             now = fractal.util.time.utc_now()
-            with path.open('a', encoding='utf-8') as handle:
-                for entry in self.transcripts.pop(0):
-                    handle.write(json.dumps({'timestamp': now, **entry}) + '\n')
+            for entry in self.transcripts.pop(0):
+                line = {'timestamp': now, **entry}
+                # claude keeps each sub-agent's replies in a file of its own
+                subagent = line.pop('subagent', None)
+                target = path
+                if subagent is not None:
+                    side = path.with_suffix('') / 'subagents'
+                    target = side / f'agent-{subagent}.jsonl'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open('a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(line) + '\n')
         script = self.scripts.pop(0).replace('SID', f'{invocation.session}')
         process = subprocess.Popen(
             ['bash', '-c', script],
@@ -1775,6 +1802,35 @@ def test_thinking_never_resets_the_no_progress_clock(
     ]
 
 
+def test_long_think_that_ends_in_an_action_is_not_stuck(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A thinking block open past the clock holds it until the block completes.
+
+    The stream shows nothing of a think in progress, so the clock restarts
+    from the block's own frame, and the reply goes on to act.
+    """
+    thought = json.loads(json.dumps(_THINKING_REPLY))
+    thought['message']['id'] = _MESSAGE_START['event']['message']['id']
+    script = _claude_script(
+        _INIT,
+        _MESSAGE_START,
+        _THINKING_START,
+        'sleep 3',
+        thought,
+        _THINKING_STOP,
+        _TOOL_START,
+        _TOOL_RESULT,
+        _TEXT,
+        _RESULT,
+    )
+    agent = scripted_claude([script, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+
+
 def test_thinking_cap_then_no_progress_stalls_the_step(
     loop_node: Node,
     scripted_claude: Callable[[list[str]], ScriptedClaude],
@@ -2270,15 +2326,16 @@ def test_killed_claude_launch_prices_from_its_transcript(
     scripted_claude: Callable[..., ScriptedClaude],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A launch killed before its result frame books its transcript's usage.
+    """A launch killed before its result frame books its transcripts' usage.
 
     The stalled PLAN launch's stream priced each reply from its first
-    frame; claude's transcript holds each reply's final usage -- split
-    across lines that grow -- plus a sub-agent reply at its own model, so
-    the step books their sum as an estimate. Entries stamped outside the
-    launch window and an unpriced model stay out of the sum. The steered
-    relaunch, whose result frame names its cost, keeps that figure over
-    its own transcript entries.
+    frame; claude's session transcript holds each reply's final usage --
+    split across lines that grow -- and a sub-agent's own transcript
+    beside it holds that agent's reply at its own model, so the step books
+    their sum as an estimate. Entries stamped outside the launch window
+    and an unpriced model stay out of the sum. The steered relaunch, whose
+    result frame names its cost, keeps that figure over its own transcript
+    entries.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
     # the reply's first frame on the stream, then the transcript's lines
@@ -2304,6 +2361,7 @@ def test_killed_claude_launch_prices_from_its_transcript(
             usage=sidechain,
             model='claude-haiku-5',
             isSidechain=True,
+            subagent='x',
         ),
         _assistant_entry('msg_mystery', outside, model='mystery-model'),
         _assistant_entry('msg_late', outside, timestamp='2999-01-01T00:00:00.000Z'),
@@ -2323,6 +2381,63 @@ def test_killed_claude_launch_prices_from_its_transcript(
 
     # each reply's final usage, the sub-agent's at its own model's rates
     settled = _price(final) + _price(second) + _price(sidechain, 'claude-haiku-5')
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == [
+        pytest.approx(settled),
+        _RESULT['total_cost_usd'],
+        _RESULT['total_cost_usd'],
+    ]
+    # the settled figure is an estimate; the result frames are authoritative
+    assert agent.flushed[-3:] == [
+        (pytest.approx(settled), False),
+        (_RESULT['total_cost_usd'], True),
+        (_RESULT['total_cost_usd'], True),
+    ]
+
+
+def test_killed_wake_up_after_a_result_prices_from_the_transcript(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch killed in a wake-up after its turn's result still settles.
+
+    Claude Code outlives a turn's result while background work runs, then
+    wakes the agent for a new reply that spends past the figure the result
+    settled; killed inside that reply, the launch books its transcript's
+    sum as an estimate.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    # the reply's first frame on the stream, then the transcript's lines
+    first = {'input_tokens': 100, 'output_tokens': 10}
+    final = {**first, 'output_tokens': 900}
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_1', first),
+        _RESULT,
+        _TASK_NOTICE,
+        _MESSAGE_START,
+        _assistant_frame('msg_2', first),
+        'exec sleep 30',
+    )
+    written = [
+        _assistant_entry('msg_1', first),
+        _assistant_entry('msg_2', first),
+        _assistant_entry('msg_2', final),
+    ]
+    agent = scripted_claude(
+        [stalled, _claude_script(_INIT, _RESULT), _claude_script(_INIT, _RESULT)],
+        [written],
+    )
+    ScriptedLoop(loop_node, agent).run()
+
+    settled = (100 * 3e-6 + 10 * 1.5e-5) + (100 * 3e-6 + 900 * 1.5e-5)
     assert _step_rows(loop_node) == [
         'PLAN/stopped/steered: no action for 1s',
         'PLAN/completed/steer',

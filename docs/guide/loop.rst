@@ -400,7 +400,9 @@ own CLI's error text: the failed result frame, the stream's error frames, and
 the stderr capture.
 
 - **Claude**: an ``API Error:`` with a 429 or 5xx status (529 overloaded
-  included), the API's ``overloaded_error``, ``api_error``, or
+  included), Claude Code's own ``API Error:`` for a response stream that
+  broke off (a lost connection, a server error, or a stall, before or
+  mid-response), the API's ``overloaded_error``, ``api_error``, or
   ``rate_limit_error`` types, or the words "overloaded" or "service
   unavailable".
 - **Codex**: its give-up after its own reconnects (the last ``Reconnecting...
@@ -450,13 +452,17 @@ Two triggers mark a Claude launch as **stuck**, and both take the same path:
 - **No action for 30 minutes.** A watchdog times the agent's own idle span,
   counted only while the agent holds control. The clock runs from the
   launch, from a result that answers the agent's last pending tool call,
-  from each visible text block, and from each wake-up after its turn ends
-  (Claude Code's background-task notice, a new reply). It pauses while a
-  tool call (a sub-agent included) awaits its result, and when the agent
-  ends its turn, since Claude Code then waits on background work such as a
-  long build. An API retry's backoff does not count. Thinking never counts
-  as an action, and sub-agent frames never touch the clock. At 30 minutes
-  the watchdog ends the agent the way the step deadline does.
+  from each visible text block, from the end of each thinking block, and
+  from each wake-up after its turn ends (Claude Code's background-task
+  notice, a new reply). It pauses while a tool call (a sub-agent included)
+  awaits its result, and when the agent ends its turn, since Claude Code
+  then waits on background work such as a long build. It also pauses while
+  a thinking block is open: the stream shows nothing of a think in
+  progress, and a long one can take most of the half hour. A think that
+  hangs is left to Claude Code's own stream timeout and the step deadline.
+  An API retry's backoff does not count, and sub-agent frames never touch
+  the clock. At 30 minutes the watchdog ends the agent the way the step
+  deadline does.
 
 The first stuck launch in an attempt **steers** the step. The stuck row
 closes ``stopped`` with ``steered: thinking cap`` or ``steered: no action for

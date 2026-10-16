@@ -21,11 +21,11 @@ may include breaking changes, each listed under a Breaking heading.
 ### Added
 
 - A no-progress watchdog for Claude steps: 30 minutes of the agent's own idle
-  time, counted only while it holds control (paused while a tool runs, after its
-  turn ends while Claude Code waits on background work, and through an API
-  retry's backoff; thinking never counts as an action), marks the launch stuck
-  exactly like a thinking cap — the first steers the step, a second stalls it —
-  with the step row naming which trigger fired. Codex is not watched.
+  time, counted only while it holds control (paused while a tool runs, while it
+  thinks, after its turn ends while Claude Code waits on background work, and
+  through an API retry's backoff), marks the launch stuck exactly like a
+  thinking cap — the first steers the step, a second stalls it — with the step
+  row naming which trigger fired. Codex is not watched.
 - `fractal node merge` lands a paused node's committed work into its merge
   target without leaving `paused`: the run, iteration, and step rows stay open
   for `fractal resume`, and the frozen step's uncommitted state stays in the
@@ -94,13 +94,15 @@ may include breaking changes, each listed under a Breaking heading.
 
 - A failed step whose agent names its provider as unavailable retries on a
   doubling wait: Claude's `API Error:` with a 429 or 5xx status (529 overloaded
-  included) or an overloaded, server, or rate-limit error, and codex's give-up
-  after its reconnects, a 429 or 5xx status, or a model-at-capacity refusal. The
-  first retry waits `step_retry_backoff`, each consecutive one doubles it to a
-  one-hour cap (`retrying in 20s (provider unavailable)`), and a completed
-  launch resets the streak. `step_retries` still bounds the attempts; other
-  failures keep the fixed backoff. An outage that outlasts the retries still
-  fails the iteration, but the next step's first launch waits the same clock
+  included), an overloaded, server, or rate-limit error, or Claude Code's own
+  `API Error:` for a response stream that broke off (a lost connection, a server
+  error, or a stall), and codex's give-up after its reconnects, a 429 or 5xx
+  status, or a model-at-capacity refusal. The first retry waits
+  `step_retry_backoff`, each consecutive one doubles it to a one-hour cap
+  (`retrying in 20s (provider unavailable)`), and a completed launch resets the
+  streak. `step_retries` still bounds the attempts; other failures keep the
+  fixed backoff. An outage that outlasts the retries still fails the iteration,
+  but the next step's first launch waits the same clock
   (`=== Provider unavailable — N consecutive failure(s); probing again in Ns ===`),
   so the outage paces the iterations after it too, with `step_retries` 0
   included. A named outage never arms the billing breaker, however fast and
@@ -182,13 +184,15 @@ may include breaking changes, each listed under a Breaking heading.
 - A Claude step killed before its result frame (a deadline, a stall or thinking
   cap, a pause, a dead stream) is priced from Claude Code's own session
   transcript instead of keeping only the stream's partial figure, which was
-  often none. Each reply the session's transcript records during the launch
-  counts once, at its final token usage and its own model, and the sum is booked
-  as a non-final figure when it is higher than the streamed one. Sub-agent
-  transcripts, which Claude Code keeps in separate files, are not read, so a
-  killed step's sub-agent spend is left out. With no readable transcript the
-  step keeps the streamed figure (or `NULL`) and the agent logs
-  `launch unpriced: <reason>`.
+  often none. A reply Claude Code starts after a result, waking the agent once
+  background work ends, reopens the figure, so a step killed in that wake-up is
+  priced the same way. Each reply written during the launch counts once, at its
+  final token usage and its own model, including the sub-agent replies Claude
+  Code keeps in transcripts of their own beside the session's; the sum is booked
+  as a non-final figure when it is higher than the streamed one. With no
+  readable transcript the step keeps the streamed figure (or `NULL`) and the
+  agent logs `launch unpriced: <reason>`; a sub-agent transcript it cannot read
+  is left out with `launch partly unpriced: <reason>`.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the

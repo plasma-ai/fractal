@@ -223,11 +223,12 @@ class StreamEvent:
     ``'acting'`` and ``'waiting'`` mark the agent's own control, for an
     agent that ``reports_progress``: acting when it takes control (its
     launch's first reply, a result answering its last pending tool call,
-    visible text, a wake-up after a turn ends), waiting when it hands
-    control off (a tool call, a turn's end). A ``'waiting'`` carrying a
-    ``duration`` (seconds) is a pause of that length, such as an API
-    retry's backoff, not a hand-off. Thinking and sub-agent frames carry
-    neither.
+    visible text, a thinking block's end, a wake-up after a turn ends),
+    waiting when it hands control off (a tool call, a turn's end) or opens
+    a thinking block, whose progress the stream does not show. A
+    ``'waiting'`` carrying a ``duration`` (seconds) is a pause of that
+    length, such as an API retry's backoff, not a hand-off. Thinking
+    deltas and sub-agent frames carry neither.
     """
 
     # NOTE: fields cluster by the event kind that populates them rather than
