@@ -1418,7 +1418,8 @@ if command -v wiki &>/dev/null; then
             # NOTE: the phrase is plasma-wiki's Wiki._resolve_folder refusal,
             #   which exits 2 like every wiki error -- a reworded message turns
             #   this skip into a refused merge, safe but blocking, and
-            #   test_merge_skips_an_index_in_a_folder_its_wiki_excludes pins it
+            #   test_merge_skips_an_index_in_a_folder_its_wiki_excludes's
+            #   pattern-untracked-file case pins it
             wiki update --check --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} \
                 >/dev/null 2>"$TMP_DIR/wiki-err" || true
             grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err" && continue

@@ -1543,21 +1543,40 @@ def test_merge_refuses_a_wiki_declared_at_the_worktree_root(
     assert (repo / 'notes.md').read_text(encoding='utf-8') == bare
 
 
-@pytest.mark.parametrize('stray', [False, True], ids=['clean', 'untracked-file'])
+@pytest.mark.parametrize(
+    argnames=('folder', 'patterns', 'stray'),
+    argvalues=[
+        # a dot folder, which the wiki's walk never lists
+        ('.notes', [], False),
+        # an untracked file there is no stray at all
+        ('.notes', [], True),
+        # a folder the wiki's exclude.patterns names, holding a stray the
+        # guard lists, so only the excluded-folder probe lets the merge land
+        ('notes', ['notes'], True),
+    ],
+    ids=['dot-folder', 'dot-folder-untracked-file', 'pattern-untracked-file'],
+)
 def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
     tmp_path: pathlib.Path,
+    folder: str,
+    patterns: list[str],
     stray: bool,
 ) -> None:
     """An index in a folder its wiki excludes lands as the merge left it.
 
-    The wiki's own walk skips a dot folder, and a refresh scoped to one is
-    refused, so the merge skips such an index rather than failing: both
-    sides' edits land, and an untracked file there refuses nothing.
+    The wiki's own walk skips a dot folder and a folder its
+    ``exclude.patterns`` names, and a refresh scoped to either is refused,
+    so the merge skips such an index rather than failing: both sides' edits
+    land, and an untracked file there refuses nothing and stays untracked.
     """
     repo = _init_tree(tmp_path / 'excludedrepo')
     corpus = repo / 'library'
     _declare_wiki(corpus)
-    notes = corpus / '.notes'
+    settings = {'exclude': {'patterns': patterns}} if patterns else {}
+    (corpus / '.wiki' / 'settings.json').write_text(
+        f'{json.dumps(settings)}\n', encoding='utf-8'
+    )
+    notes = corpus / folder
     notes.mkdir()
     body = 'first line\n' + 'filler line\n' * 6 + 'last line\n'
     head = '---\nname: notes\ndesc: Excluded notes.\n---\n# notes\n\n***\n\n'
@@ -1571,7 +1590,7 @@ def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
         worktrees[name] = repo / '.worktrees' / f'main.{name}'
     # the siblings edit opposite ends of the excluded index's authored body
     for name, old in (('one', 'first line'), ('two', 'last line')):
-        index = worktrees[name] / 'library' / '.notes' / '_index.md'
+        index = worktrees[name] / 'library' / folder / '_index.md'
         index.write_text(
             index.read_text(encoding='utf-8').replace(old, f'{old}, edited by {name}'),
             encoding='utf-8',
@@ -1585,11 +1604,12 @@ def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
         result = _script('merge.sh', repo, f'{worktrees[name]}')
         assert result.returncode == 0, (result.stdout, result.stderr)
 
-    merged = _git(repo, 'show', 'main:library/.notes/_index.md').stdout
+    merged = _git(repo, 'show', f'main:library/{folder}/_index.md').stdout
     assert 'first line, edited by one' in merged, merged
     assert 'last line, edited by two' in merged, merged
-    status = _git(repo, 'status', '--porcelain').stdout.strip()
-    assert status == ('?? library/.notes/scratch.txt' if stray else ''), status
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+    expected = f'?? library/{folder}/scratch.txt' if stray else ''
+    assert status.strip() == expected, status
 
 
 @pytest.mark.parametrize(
