@@ -421,8 +421,9 @@ launch breaks it. Only the wait changes: ``step_retries`` still bounds the
 attempts, and the wait polls the same signals as a retry backoff. A named
 outage is never billing-shaped, however fast and unpriced its failure: it is
 the provider's weather, not the account's credits, so it paces on this streak
-and never arms the billing breaker. No config key tunes the doubling or the
-cap.
+and never arms the billing breaker. Its failed step row's reason leads with
+``provider unavailable:``, and ``fractal node list`` never counts such a row
+toward ``PAUSED: billing``. No config key tunes the doubling or the cap.
 
 An outage that outlasts the retries (or meets ``step_retries: 0``) fails the
 iteration as usual, but the streak stands: the next step's first launch waits
@@ -815,7 +816,9 @@ Step rows land with these statuses:
      - — (``awaiting approval`` when parked in an approval wait)
    * - failed
      - ``failed``
-     - the launch reason, e.g. ``agent error (exit N): <stderr tail>``
+     - the launch reason, e.g. ``agent error (exit N): <stderr tail>``,
+       prefixed ``provider unavailable:`` when the agent named a provider
+       outage (see `Provider outages`_)
    * - stuck, then steered (see `Stuck steps`_)
      - ``stopped``
      - ``steered: <trigger>``, or ``<trigger>; paused before the steer`` when

@@ -181,6 +181,11 @@ may include breaking changes, each listed under a Breaking heading.
   judgement, and the merge-base advance all take that commit, so a commit the
   node makes during the merge skips the advance with a warning instead of being
   reverted by it.
+- `fractal node list` no longer shows `PAUSED: billing` for a run of instant,
+  unpriced failures the loop judged provider outages, such as codex's
+  model-at-capacity refusals: the failed step row's reason now leads with
+  `provider unavailable:`, and that verdict breaks the census's billing streak
+  as it breaks the loop's own breaker.
 - A wait the loop holds a launch through — a retry backoff, a provider outage's
   doubling wait, the billing breaker's — ends at the run or iteration deadline
   instead of sleeping past it by up to its one-hour cap; the launch it was

@@ -157,6 +157,7 @@ __all__ = [
     'test_a_success_resets_the_provider_unavailable_backoff',
     'test_non_provider_failures_keep_the_fixed_backoff',
     'test_a_fast_outage_never_arms_the_billing_breaker',
+    'test_the_census_reads_the_loops_outage_verdict',
     'test_an_outage_past_the_retries_holds_the_next_launch',
     'test_an_interrupted_outage_hold_books_the_consumed_steps',
     'test_the_outage_streak_moves_only_on_what_launches_say',
@@ -5708,6 +5709,42 @@ def test_a_fast_outage_never_arms_the_billing_breaker(
     assert 'PAUSED: billing' not in out
 
 
+@pytest.mark.parametrize(
+    argnames=('unavailable', 'billing'),
+    argvalues=[(True, False), (False, True)],
+    ids=['outage', 'dead-credits'],
+)
+def test_the_census_reads_the_loops_outage_verdict(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    unavailable: bool,
+    billing: bool,
+) -> None:
+    """The node listing's billing flag follows the loop's outage verdict.
+
+    Three instant unpriced failures carry the dead-credits signature on
+    their rows alone, so the failed row records the verdict when the
+    agent named its provider unavailable: an outage never shows
+    ``PAUSED: billing`` in ``node list``, and the same failures without
+    the verdict still do.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=2, step_retry_backoff='1s')
+    failure = StepResult(
+        status='failed',
+        exit_code=1,
+        reason='agent error (exit 1): API Error: 529 overloaded',
+        unavailable=unavailable,
+    )
+    loop = MockLoop(loop_node, results=[failure] * 3)
+    assert loop.run() == 0
+    # the census reads an active node's newest launches
+    loop_node.status_set('active')
+    assert ('PAUSED: billing' in loop_node.status_detail()) == billing
+
+
 def test_an_outage_past_the_retries_holds_the_next_launch(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -5758,7 +5795,7 @@ def test_an_interrupted_outage_hold_books_the_consumed_steps(
     assert loop.run() == 0
     assert loop.launched == ['step 1 of 2 (PLAN)']
     assert _step_rows(loop_node) == [
-        'PLAN/failed/agent error',
+        'PLAN/failed/provider unavailable: agent error',
         'EXECUTE/stopped/failed on PLAN',
         'PLAN/stopped/outage gate interrupted',
         'EXECUTE/stopped/outage gate interrupted',

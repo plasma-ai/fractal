@@ -135,13 +135,16 @@ because an outage belongs to the provider, not to one step. A completed launch
 resets it, and any other failure breaks it. The retry count still bounds the
 attempts. A named outage never counts toward the billing breaker, however
 instant and unpriced its failure, since it is the provider's weather rather than
-the account's credits. Once the retries run out the iteration fails, but the
-streak stands: like the billing breaker's gate, an outage gate holds the next
-step's first launch on the same doubling clock, and holds the work step again
-after a SYNC that met the outage, so an outage paces the iterations after it too
-(with no retries at all, this hold is its only pacing). The gate never repeats
-its hold when no SYNC ran, since nothing launched to extend the streak, and an
-interrupted hold books the consumed steps `stopped` as the billing gate does.
+the account's credits. Its failed row's reason leads with
+`provider unavailable:` so `fractal node list`, which reads the billing
+signature off the step rows alone, never shows such a run as `PAUSED: billing`.
+Once the retries run out the iteration fails, but the streak stands: like the
+billing breaker's gate, an outage gate holds the next step's first launch on the
+same doubling clock, and holds the work step again after a SYNC that met the
+outage, so an outage paces the iterations after it too (with no retries at all,
+this hold is its only pacing). The gate never repeats its hold when no SYNC ran,
+since nothing launched to extend the streak, and an interrupted hold books the
+consumed steps `stopped` as the billing gate does.
 
 ## Stuck steps
 

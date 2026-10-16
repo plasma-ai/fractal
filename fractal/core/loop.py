@@ -24,6 +24,7 @@ from fractal.constants import (
     SOCKET_FILE,
     STEER_REASON_PREFIX,
     STEP_PGID_FILE,
+    UNAVAILABLE_REASON_PREFIX,
 )
 from fractal.exceptions import AgentStreamError, _Abort, _ThinkingCap
 
@@ -2280,6 +2281,10 @@ class Loop:
                             step_reason = 'awaiting approval'
                     elif step_status == 'failed':
                         step_reason = result.reason or 'agent error'
+                        # the outage verdict leads the reason, so the census
+                        # never reads an instant unpriced outage as billing
+                        if result.unavailable:
+                            step_reason = f'{UNAVAILABLE_REASON_PREFIX}{step_reason}'
                     elif step_status == 'completed':
                         # a drop marks its own attempt's row -- the durable
                         # fact `node list` composes into its detail column
@@ -3495,6 +3500,9 @@ class Loop:
                 sync_reason = 'over budget'
             elif result.status == 'failed':
                 sync_status, sync_exit_code = 'failed', 1
+                # the outage verdict leads the reason, as on a work step's row
+                if result.unavailable:
+                    sync_reason = f'{UNAVAILABLE_REASON_PREFIX}{result.reason}'
             else:
                 sync_status, sync_exit_code = 'completed', 0
         else:
