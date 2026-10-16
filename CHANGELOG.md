@@ -99,7 +99,12 @@ may include breaking changes, each listed under a Breaking heading.
   first retry waits `step_retry_backoff`, each consecutive one doubles it to a
   one-hour cap (`retrying in 20s (provider unavailable)`), and a completed
   launch resets the streak. `step_retries` still bounds the attempts; other
-  failures keep the fixed backoff.
+  failures keep the fixed backoff. An outage that outlasts the retries still
+  fails the iteration, but the next step's first launch waits the same clock
+  (`=== Provider unavailable — N consecutive failure(s); probing again in Ns ===`),
+  so the outage paces the iterations after it too, with `step_retries` 0
+  included. A named outage never arms the billing breaker, however fast and
+  unpriced its failure.
 - A node's record directories admit `.py`, `.diff`, and `.patch` files — plain
   text like the seeded `.sh` scripts — so a Python checker under `memory/` or
   `scripts/`, or a patch kept under `plans/`, commits instead of being withheld
@@ -170,6 +175,10 @@ may include breaking changes, each listed under a Breaking heading.
   judgement, and the merge-base advance all take that commit, so a commit the
   node makes during the merge skips the advance with a warning instead of being
   reverted by it.
+- A wait the loop holds a launch through — a retry backoff, a provider outage's
+  doubling wait, the billing breaker's — ends at the run or iteration deadline
+  instead of sleeping past it by up to its one-hour cap; the launch it was
+  holding books the timeout.
 - A Claude step killed before its result frame (a deadline, a stall or thinking
   cap, a pause, a dead stream) is priced from Claude Code's own session
   transcript instead of keeping only the stream's partial figure, which was
@@ -213,11 +222,12 @@ may include breaking changes, each listed under a Breaking heading.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives the template variables (the paths, the branch, and the spawn
-  limits such as `$MAX_CHILDREN`) from live config instead of exporting their
-  boot values for the whole run. Of those, only the mode flags
-  (`$DETACHED_MODE`, `$META_MODE`, `$META_TARGET`) stay pinned to their boot
-  values, as does `$FRACTAL_HEADLESS`, and the prompt now takes `$META_TARGET`
-  from the same pinned set.
+  limits such as `$MAX_CHILDREN`) from live config once, for its prompt and its
+  environment alike, instead of exporting their boot values for the whole run. A
+  config read that fails at that point fails the step, never the run. Of those
+  variables, only the mode flags (`$DETACHED_MODE`, `$META_MODE`,
+  `$META_TARGET`) stay pinned to their boot values, as does `$FRACTAL_HEADLESS`,
+  and the prompt now takes `$META_TARGET` from the same pinned set.
 - `node merge` regenerates the indexes the merge driver merged in every wiki
   root, not only the project wiki: in each folder declaring a tracked
   `.wiki/settings.json`, an `_index.md` whose staged bytes match neither side's

@@ -110,12 +110,15 @@ The loop brackets every step with lifecycle and budget checks:
 
 Only a failed launch retries; timed out, paused, and skipped are deliberate
 outcomes that never retry. The extra-attempt count and the backoff before each
-retry are node configuration, and a count of zero disables retries. Every
-attempt books its own step row, so cost and duration attribute honestly to the
-attempt that spent them. A step with `requires_approval` arms an approval gate
-on each attempt's row; a failure retry follows a failed attempt whose wait never
-ran, and a model-drop re-dispatch (below) produces new work, so its fresh demand
-is deliberate — an approval never transfers between attempts.
+retry are node configuration, and a count of zero disables retries. No wait the
+loop holds a launch through (a retry backoff, the billing breaker's, an
+outage's) runs past the run or iteration deadline: it ends there, and the launch
+it was holding books the timeout. Every attempt books its own step row, so cost
+and duration attribute honestly to the attempt that spent them. A step with
+`requires_approval` arms an approval gate on each attempt's row; a failure retry
+follows a failed attempt whose wait never ran, and a model-drop re-dispatch
+(below) produces new work, so its fresh demand is deliberate — an approval never
+transfers between attempts.
 
 A failure the agent backend names as its provider being unavailable waits out
 the outage instead of the fixed backoff: an overloaded, erroring, or
@@ -128,8 +131,16 @@ frame. The first retry waits the configured backoff, and each consecutive outage
 failure doubles it up to the billing breaker's one-hour cap. The streak counts
 every launch, SYNC included, and spans steps and iterations, because an outage
 belongs to the provider, not to one step. A completed launch resets it, and any
-other failure breaks it. The retry count still bounds the attempts, and an armed
-billing breaker's clock wins.
+other failure breaks it. The retry count still bounds the attempts. A named
+outage never counts toward the billing breaker, however instant and unpriced its
+failure, since it is the provider's weather rather than the account's credits.
+Once the retries run out the iteration fails, but the streak stands: like the
+billing breaker's gate, an outage gate holds the next step's first launch on the
+same doubling clock, and holds the work step again after a SYNC that met the
+outage, so an outage paces the iterations after it too (with no retries at all,
+this hold is its only pacing). The gate never repeats its hold when no SYNC ran,
+since nothing launched to extend the streak, and an interrupted hold books the
+consumed steps `stopped` as the billing gate does.
 
 ## Stuck steps
 

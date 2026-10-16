@@ -130,19 +130,23 @@ step prices its own rows alone.
 A Claude launch that ends without its result frame -- killed by a deadline, a
 stall or thinking cap, a pause, or a dead stream -- carries only the stream's
 running estimate, which prices each reply from its first frame (or nothing, when
-the kill cut a reply off before its frame). Once the process exits, the loop
-calls `Agent.settle_cost` with the launch's window (its spawn instant to its
-exit), and the claude backend prices that window from Claude Code's own session
+the kill cut a reply off before its frame). Once the process exits and the loop
+has dropped the launch's `.step_pgid` handle (a pause or kill landing during the
+transcript read must never signal the dead group's recycled id), it calls
+`Agent.settle_cost` with the launch's window (its spawn instant to its exit),
+and the claude backend prices that window from Claude Code's own session
 transcript, resolved through `Agent.transcript`: every `assistant` entry stamped
 inside the window, sidechain (sub-agent) entries written into the same file
 included, deduplicated by message id keeping the **last** line -- Claude splits
 a reply across lines, one per content block, and each line carries the reply's
 usage as it stood when written, so the last is the final usage. Each reply is
 priced at its own model; an unpriced model (or a zeroed gateway figure) drops
-out without voiding the rest. The sum lands through `record_cost` with
-`final=False` when it exceeds the recorded figure -- both undercount a killed
-launch, so the higher is the closer. An absent or unreadable transcript, or a
-window with no priced usage, leaves the row as it was and logs
+out without voiding the rest. The sum lands as a `final=False` figure when it
+exceeds the recorded one -- both undercount a killed launch, so the higher is
+the closer -- and lands as-is: it is the launch's own spend, so a thread-scope
+backend's settle against the session's earlier steps, which `record_cost`
+applies to a streamed thread total, never touches it. An absent or unreadable
+transcript, or a window with no priced usage, leaves the row as it was and logs
 `launch unpriced: <reason>` at warning level on the agent's logger. Sub-agent
 transcripts Claude Code keeps in separate files are not read. The ledger has no
 estimate column: `fractal node cost` reports the figure like any other.

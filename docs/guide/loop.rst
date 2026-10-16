@@ -331,7 +331,9 @@ model re-dispatches once — see below). These config keys control it:
        doubles from (see `Provider outages`_). Slept in one-second
        increments, polling pause (parks the run), stop, finish, and the
        subtree cost ceiling — a failed step never buys another attempt once
-       the budget is spent.
+       the budget is spent. A wait (this one, the billing breaker's, or an
+       outage's) ends at the run or iteration deadline, and the launch it
+       was holding books the timeout.
 
 Every attempt books its own step row, so cost and duration are attributed
 accurately per attempt; retry rows carry a ``retry`` marker in their
@@ -363,9 +365,10 @@ A launch that fails in under 10 seconds with zero recorded cost never
 reached paid inference — the signature of an API billing or credit refusal.
 Three such failures in a row trip the loop's billing breaker. Every agent
 launch counts toward the streak, the before-step SYNC included; a
-cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, or
-one that spent real money is not billing-shaped and resets the streak to
-zero (which also disarms an armed breaker), and so is a step refused before
+cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, one
+that spent real money, or one its agent names as a provider outage (see
+below) is not billing-shaped and resets the streak to zero (which also
+disarms an armed breaker), and so is a step refused before
 its launch — a cost cap over a model the price table cannot price, or a
 per-step agent or provider that cannot run — since it bought no inference.
 Paused and budget-skipped steps bought no launch and leave the streak
@@ -413,9 +416,22 @@ holds), announced as ``retrying in 20s (provider unavailable)``. The streak
 counts every launch, the before-step SYNC included, and spans steps and
 iterations. Any completed launch resets it; any other failed or timed-out
 launch breaks it. Only the wait changes: ``step_retries`` still bounds the
-attempts, the wait polls the same signals as a retry backoff, and an armed
-billing breaker's clock takes precedence. No config key tunes the doubling or
-the cap.
+attempts, and the wait polls the same signals as a retry backoff. A named
+outage is never billing-shaped, however fast and unpriced its failure: it is
+the provider's weather, not the account's credits, so it paces on this streak
+and never arms the billing breaker. No config key tunes the doubling or the
+cap.
+
+An outage that outlasts the retries (or meets ``step_retries: 0``) fails the
+iteration as usual, but the streak stands: the next step's first launch waits
+the same doubling clock before it goes out, announced as ``=== Provider
+unavailable — N consecutive failure(s); probing again in Ns ===``, and so does
+the work step after a SYNC that met the outage too. The launch after the wait
+is the probe that clears or extends the streak. The wait polls the same
+signals as a retry backoff; a stop, finish, or spent subtree ceiling ends the
+iteration, booking the gated step and the never-run tail as ``stopped`` rows
+with ``outage gate interrupted`` in their metadata, as the billing breaker's
+gate does.
 
 Stuck steps
 ~~~~~~~~~~~
@@ -517,8 +533,9 @@ How the walls interact:
 - ``setup.sh`` is unbounded — the walls gate step launches only.
 
 A step that times out fails the iteration and records
-``<step> timed out (<limit>s)``; an iteration that times out with no launch
-to blame records plain ``timed out``.
+``<step> timed out (<limit>s)``, naming the effective ceiling (a steered
+launch names the step's whole timeout, which its stuck launch shared); an
+iteration that times out with no launch to blame records plain ``timed out``.
 
 Cost ceilings
 -------------

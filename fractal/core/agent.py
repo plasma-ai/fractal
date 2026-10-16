@@ -210,10 +210,9 @@ class StreamEvent:
 
     ``kind`` is one of: ``'session' | 'text' | 'tool' | 'tool_result' |
     'cost' | 'result' | 'error' | 'thinking_cap' | 'acting' | 'waiting'``.
-    Fields are populated
-    per kind; absent facts stay ``None`` (a result with no cost fact reads
-    ``$?``). Consumers (renderer, TUI bubbles, record verbs) branch on
-    ``kind`` only -- never on the provider.
+    Fields are populated per kind; absent facts stay ``None`` (a result
+    with no cost fact reads ``$?``). Consumers (renderer, TUI bubbles,
+    record verbs) branch on ``kind`` only -- never on the provider.
 
     A ``'thinking_cap'`` (carrying ``session``) reports a top-level reply
     that hit the output-token cap while still thinking -- no text and no
@@ -288,7 +287,7 @@ def _sanitize_event(event: StreamEvent) -> StreamEvent:
 class StreamResult:
     """Outcome of one streamed invocation."""
 
-    # NOTE: field order mirrors StreamEvent's session/model/cost/budget_stopped
+    # NOTE: field order mirrors StreamEvent's session/model/cost/final/budget_stopped
     #   run, so both sides of the parser boundary read the same top to bottom
     session: Optional[str]
     model: Optional[str]
@@ -975,6 +974,9 @@ class Agent:
         window from it through ``_settle_cost``; the figure lands as an
         estimate (``final=False``), and only above the recorded one --
         each undercounts a killed launch, so the higher is the closer.
+        The figure is the launch's own spend, so it lands as-is whatever
+        the cost scope, never settled against the session's earlier steps
+        as a thread total is.
 
         Args:
             step_id: The launch's step row, stamped with its session.
@@ -988,10 +990,15 @@ class Agent:
         cost = self._settle_cost(rows[0]['session'], started=started, ended=ended)
         if cost is None:
             return
+        # a launch can't have negative spend (as in record_cost)
+        cost = max(0.0, cost)
         recorded = rows[0]['cost']
         if recorded is not None and recorded >= cost:
             return
-        self.record_cost(step_id, cost, final=False)
+        # book the launch's own figure past record_cost's thread settle,
+        # firing the record event with exactly what lands
+        self.on_record_cost(cost=cost, final=False)
+        self._record_cost(step_id, cost, final=False)
 
     def _settle_cost(
         self: Agent,
@@ -1004,7 +1011,8 @@ class Agent:
 
         Default returns ``None`` (the stream's figure stands). Override in
         a backend whose provider persists per-message usage, returning the
-        launch's own spend (per invocation) or ``None`` with the reason
+        launch's own spend (per invocation, whatever the backend's
+        ``cost_scope`` -- never a thread total) or ``None`` with the reason
         logged::
 
             def _settle_cost(self, session, *, started, ended):

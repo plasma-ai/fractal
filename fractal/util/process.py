@@ -22,9 +22,9 @@ GRACE_SECONDS = 5.0
 # the wait after the rounds still signals any later group, so a few suffice
 _ROUNDS = 5
 
-# seconds the KILL pass waits before naming survivors: a KILL cannot be
-# caught, so this covers only its delivery and the process table catching up
-_SETTLE_SECONDS = 1.0
+#: Seconds the KILL pass waits before naming survivors: a KILL cannot be
+#: caught, so this covers only its delivery and the process table catching up.
+SETTLE_SECONDS = 1.0
 
 # seconds between process-table snapshots while waiting on a group: each
 # runs ps, so the poll stays coarse beside a grace of seconds
@@ -387,7 +387,7 @@ def _reap(
     # TERM pass, then the KILL pass over every group still alive
     if grace > 0:
         tree.signal_pass(signal.SIGTERM, wait=grace)
-    tree.signal_pass(signal.SIGKILL, wait=_SETTLE_SECONDS)
+    tree.signal_pass(signal.SIGKILL, wait=SETTLE_SECONDS)
     live = tree.live()
     survivors = tuple(
         tree.table[pid]

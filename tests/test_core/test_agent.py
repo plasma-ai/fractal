@@ -59,6 +59,7 @@ __all__ = [
     'test_spawn_decodes_stdout_leniently',
     'test_record_cost_settles_thread_scope_cumulative_totals',
     'test_record_cost_clamps_a_negative_call_scope_figure',
+    'test_settle_cost_books_the_launch_figure_whatever_the_scope',
     'test_transcript_validates_and_gates_the_fallback',
     'test_preflight_checks_the_binary',
     'test_seed_agents_tolerates_an_absent_package_seed',
@@ -644,6 +645,48 @@ def test_record_cost_clamps_a_negative_call_scope_figure(
     row = node.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == 0.0
     assert [event.cost for event in backend.calls] == [0.0]
+
+
+def test_settle_cost_books_the_launch_figure_whatever_the_scope(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settled figure is the killed launch's own spend, booked as-is.
+
+    ``_settle_cost`` prices the launch's window alone, never a cumulative
+    thread total, so a thread-scope backend's earlier steps on the
+    session must not be subtracted from it, as they are from a streamed
+    total.
+    """
+    node = node_with_db
+    backend = TrackingAgent(node, 'sample')
+    monkeypatch.setattr(backend, 'cost_scope', 'thread')
+    monkeypatch.setattr(backend, '_settle_cost', lambda session, **kwargs: 1.0)
+    run_id = node.record.run_start()
+    iter_id = node.record.iter_start(run_id=run_id, iter=1)
+    earlier, killed = (
+        node.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=step,
+            step_name='EXECUTE',
+        )
+        for step in (1, 2)
+    )
+    for step_id in (earlier, killed):
+        node.record.step_session(
+            'sample',
+            step_id=step_id,
+            model=None,
+            session='thread-1',
+        )
+    node.record.step_cost(step_id=earlier, cost=0.6)
+    now = fractal.util.time.utc_now()
+    backend.settle_cost(killed, started=now, ended=now)
+    row = node.db.read('steps', where={'step_id': killed})[0]
+    assert row['cost'] == pytest.approx(1.0)
+    # the hook and the event both see the booked figure
+    assert [event.cost for event in backend.calls] == [pytest.approx(1.0)]
 
 
 def test_transcript_validates_and_gates_the_fallback(node_with_db: Node) -> None:
