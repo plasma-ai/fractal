@@ -6373,15 +6373,24 @@ def test_drain_lineage_recognizes_the_seat_commands(
             leader.communicate()
 
 
+@pytest.mark.parametrize(
+    argnames='error',
+    argvalues=[
+        pytest.param(OSError('ps cannot run'), id='cannot-run'),
+        pytest.param(RuntimeError("ps failed (exit 1): ''"), id='fails'),
+    ],
+)
 def test_drain_lineage_survives_an_unreadable_process_table(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
 ) -> None:
     """A failed process-table read leaves the session to answer alone.
 
     The ancestry walk reads the whole process table through ``ps``; when
-    that read fails, the check still answers rather than raising, and a
-    caller in the recorded agent's session is still the seat.
+    ``ps`` cannot run or exits non-zero, the check still answers rather
+    than raising, and a caller in the recorded agent's session is still
+    the seat.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
     child.record.signal_set('drain', 'continue --drain')
@@ -6390,7 +6399,7 @@ def test_drain_lineage_survives_an_unreadable_process_table(
     step_pgid.write_text(f'{os.getsid(0)}\n', encoding='utf-8')
 
     def unreadable() -> dict[int, Any]:
-        raise OSError('ps cannot run')
+        raise error
 
     monkeypatch.setattr('fractal.util.process.snapshot', unreadable)
     assert parent.drain_lineage() is True

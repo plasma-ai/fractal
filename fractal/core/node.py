@@ -838,7 +838,7 @@ class Node:
         lineage: set[int] = set()
         try:
             table = fractal.util.process.snapshot()
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, RuntimeError):
             pass
         else:
             lineage.update(fractal.util.process._lineage(os.getpid(), table))
