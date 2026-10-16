@@ -612,6 +612,7 @@ TARGET_TREE=""
 CARRY_ERROR=""
 CHILD_MOVED=false
 UNRESTORED=""
+FOREIGN=""
 carry_prepare() {
     if ! CHILD_HEAD=$(git -C "$WORKTREE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null) \
         || ! CHILD_TIP=$(git -C "$WORKTREE_DIR" rev-parse HEAD 2>/dev/null) \
@@ -728,8 +729,8 @@ carry_advance() {
     fi
     ADVANCING=false
 }
-# restored means a moved child back at CHILD_OLD with every path the advance
-# changes as it was, and the target at its pre-merge HEAD: clean and out of
+# restored means a moved child back at CHILD_OLD with every path the forward
+# update wrote returned, and the target at its pre-merge HEAD: clean and out of
 # the squash after a fresh merge, and after a --continue holding the squash
 # message the re-run reads
 carry_restored() {
@@ -743,6 +744,92 @@ carry_restored() {
     else
         target_restored
     fi
+}
+# build the private indexes carry_return judges the disk by: one holding
+# CHILD_OLD's entry, one the advance's, for each path the advance changes
+carry_judges() {
+    : >"$TMP_DIR/carry-old-info"
+    : >"$TMP_DIR/carry-new-info"
+    # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
+    # name is never C-quoted by core.quotePath into a path that exists nowhere
+    while IFS= read -r -d '' CARRY_META && IFS= read -r -d '' CARRY_PATH; do
+        read -r OLD_MODE NEW_MODE OLD_SHA NEW_SHA _ <<<"${CARRY_META#:}"
+        [[ "$OLD_MODE" == 000000 ]] \
+            || printf '%s %s\t%s\0' "$OLD_MODE" "$OLD_SHA" "$CARRY_PATH" >>"$TMP_DIR/carry-old-info"
+        [[ "$NEW_MODE" == 000000 ]] \
+            || printf '%s %s\t%s\0' "$NEW_MODE" "$NEW_SHA" "$CARRY_PATH" >>"$TMP_DIR/carry-new-info"
+    done <"$TMP_DIR/carry-paths"
+    GIT_INDEX_FILE="$TMP_DIR/carry-old-judge" git -C "$WORKTREE_DIR" update-index -z \
+        --index-info <"$TMP_DIR/carry-old-info" \
+        && GIT_INDEX_FILE="$TMP_DIR/carry-new-judge" git -C "$WORKTREE_DIR" update-index -z \
+            --index-info <"$TMP_DIR/carry-new-info"
+}
+# whether path $1 holds the entry $2 ("<mode> <sha>", empty for no path) that
+# private index $3 records: the porcelain diff compares content, as git add
+# would store it, wherever the stat data says nothing
+carry_holds() {
+    if [[ -z "$2" ]]; then
+        [[ ! -e "$WORKTREE_DIR/$1" && ! -L "$WORKTREE_DIR/$1" ]]
+    else
+        GIT_INDEX_FILE="$3" git -C "$WORKTREE_DIR" diff --quiet --no-ext-diff --no-textconv \
+            -- ":(literal)$1" 2>/dev/null
+    fi
+}
+# return path $2, whose diff-tree record from CHILD_OLD to the advance is $1,
+# to CHILD_OLD wherever it still holds what the forward update wrote: the
+# index entry and the disk are each judged by content -- CHILD_OLD's stays,
+# the advance's is the update's own write and goes back, and anything else
+# was written by someone else during the merge, so it is left as found and
+# named in FOREIGN (a write of the advance's own bytes cannot be told apart
+# and returns like the update's); UNRESTORED names a path that cannot go back
+carry_return() {
+    read -r OLD_MODE NEW_MODE OLD_SHA NEW_SHA _ <<<"${1#:}"
+    OLD_ENTRY=""
+    [[ "$OLD_MODE" == 000000 ]] || OLD_ENTRY="$OLD_MODE $OLD_SHA"
+    NEW_ENTRY=""
+    [[ "$NEW_MODE" == 000000 ]] || NEW_ENTRY="$NEW_MODE $NEW_SHA"
+    CARRY_LEFT=false
+    # the index entry, picked out by its exact path (a literal pathspec
+    # also matches the entries under a directory of that name)
+    if ! git -C "$WORKTREE_DIR" ls-files -s -z -- ":(literal)$2" >"$TMP_DIR/carry-entry"; then
+        UNRESTORED+="$2, "
+        return 0
+    fi
+    INDEX_ENTRY=""
+    while IFS= read -r -d '' LISTED_ENTRY; do
+        [[ "${LISTED_ENTRY#*$'\t'}" == "$2" ]] || continue
+        INDEX_ENTRY=${LISTED_ENTRY%%$'\t'*}
+        INDEX_ENTRY=${INDEX_ENTRY% *}
+    done <"$TMP_DIR/carry-entry"
+    if [[ "$INDEX_ENTRY" == "$NEW_ENTRY" && "$INDEX_ENTRY" != "$OLD_ENTRY" ]]; then
+        # a mode-0 entry removes the path from the index
+        if ! printf '%s %s\t%s\0' "$OLD_MODE" "$OLD_SHA" "$2" \
+            | git -C "$WORKTREE_DIR" update-index -z --index-info; then
+            UNRESTORED+="$2, "
+            return 0
+        fi
+    elif [[ "$INDEX_ENTRY" != "$OLD_ENTRY" ]]; then
+        CARRY_LEFT=true
+    fi
+    # the disk, written by restore alone so the index stays as judged above
+    if carry_holds "$2" "$OLD_ENTRY" "$TMP_DIR/carry-old-judge"; then
+        :
+    elif carry_holds "$2" "$NEW_ENTRY" "$TMP_DIR/carry-new-judge"; then
+        if [[ -z "$OLD_ENTRY" ]]; then
+            # 2>/dev/null: a path rm cannot remove is named by the check below
+            rm -f -- "$WORKTREE_DIR/$2" 2>/dev/null || true
+        else
+            git -C "$WORKTREE_DIR" restore --source="$CHILD_OLD" --worktree --quiet \
+                -- ":(literal)$2" || true
+        fi
+        if ! carry_holds "$2" "$OLD_ENTRY" "$TMP_DIR/carry-old-judge"; then
+            UNRESTORED+="$2, "
+            return 0
+        fi
+    else
+        CARRY_LEFT=true
+    fi
+    [[ "$CARRY_LEFT" != true ]] || FOREIGN+="$2, "
 }
 # undo a carried merge after the target committed: the reverse two-tree update
 # returns the child's index and worktree to CHILD_OLD with its dirt intact (a
@@ -761,42 +848,32 @@ carry_rollback() {
         git -C "$WORKTREE_DIR" read-tree -m -u "$ADVANCE_HEAD" "$CHILD_OLD" \
             2>"$TMP_DIR/carry-reverse-err" || true
         # a forward update cut short leaves advance content the reverse update
-        # keeps, since its index entries still match CHILD_OLD, so each path
-        # the advance changes is judged by its state and returned to CHILD_OLD
-        # -- carry_prepare proved every one clean there, or absent; the paths
+        # keeps, since its index entries still match CHILD_OLD, and a failed
+        # one may have met a write made in the paused worktree after
+        # carry_prepare's check (nothing locks it against chat or a hand
+        # edit), which a forced restore would destroy -- so each path the
+        # advance changes is judged by its content (carry_return); the paths
         # it adds go first, so a file can come back where a directory stood
-        if ! git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=A \
-            "$CHILD_OLD" "$ADVANCE_HEAD" >"$TMP_DIR/carry-added" \
-            || ! git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=a \
-                "$CHILD_OLD" "$ADVANCE_HEAD" >"$TMP_DIR/carry-changed"; then
+        if ! git -C "$WORKTREE_DIR" diff-tree -r -z --no-renames \
+            "$CHILD_OLD" "$ADVANCE_HEAD" >"$TMP_DIR/carry-paths" \
+            || ! carry_judges; then
             UNRESTORED="the paths the advance changes (listing them failed), "
+        else
+            # read NUL-delimited so a path with spaces stays one
+            # entry and a non-ASCII name is never C-quoted by
+            # core.quotePath into a path that exists nowhere
+            while IFS= read -r -d '' CARRY_META && IFS= read -r -d '' CARRY_PATH; do
+                [[ "$CARRY_META" == *" A" ]] || continue
+                carry_return "$CARRY_META" "$CARRY_PATH"
+            done <"$TMP_DIR/carry-paths"
+            # read NUL-delimited so a path with spaces stays one
+            # entry and a non-ASCII name is never C-quoted by
+            # core.quotePath into a path that exists nowhere
+            while IFS= read -r -d '' CARRY_META && IFS= read -r -d '' CARRY_PATH; do
+                [[ "$CARRY_META" != *" A" ]] || continue
+                carry_return "$CARRY_META" "$CARRY_PATH"
+            done <"$TMP_DIR/carry-paths"
         fi
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
-        while IFS= read -r -d '' CARRY_PATH; do
-            git -C "$WORKTREE_DIR" update-index --force-remove -- "$CARRY_PATH" || true
-            # 2>/dev/null: a path rm cannot remove is named by the check below
-            rm -f -- "$WORKTREE_DIR/$CARRY_PATH" 2>/dev/null || true
-            if [[ -e "$WORKTREE_DIR/$CARRY_PATH" || -L "$WORKTREE_DIR/$CARRY_PATH" ]] \
-                || [[ -n "$(git -C "$WORKTREE_DIR" ls-files -- ":(literal)$CARRY_PATH")" ]]; then
-                UNRESTORED+="$CARRY_PATH, "
-            fi
-        done <"$TMP_DIR/carry-added"
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
-        while IFS= read -r -d '' CARRY_PATH; do
-            if git -C "$WORKTREE_DIR" diff --cached --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH" \
-                && git -C "$WORKTREE_DIR" diff --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH"; then
-                continue
-            fi
-            git -C "$WORKTREE_DIR" checkout -q "$CHILD_OLD" -- ":(literal)$CARRY_PATH" || true
-            if ! git -C "$WORKTREE_DIR" diff --cached --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH" \
-                || ! git -C "$WORKTREE_DIR" diff --quiet "$CHILD_OLD" -- ":(literal)$CARRY_PATH"; then
-                UNRESTORED+="$CARRY_PATH, "
-            fi
-        done <"$TMP_DIR/carry-changed"
     fi
     if [[ "$CONTINUE" != true ]]; then
         TARGET_RESET=--hard
@@ -809,6 +886,11 @@ carry_rollback() {
         git -C "$PARENT_WORKTREE_DIR" reset --soft "$TARGET_BEFORE" || true
         cp "$TMP_DIR/squash-msg" "$SQUASH_MSG_FILE" || true
     fi
+    FOREIGN_NOTE=""
+    if [[ -n "$FOREIGN" ]]; then
+        FOREIGN_NOTE="; left as found in $BRANCH's worktree, since something else wrote"
+        FOREIGN_NOTE+=" them during the merge: ${FOREIGN%, }"
+    fi
     if ! carry_restored; then
         # the reverse update's own refusal says why the child did not move back
         [[ ! -s "$TMP_DIR/carry-reverse-err" ]] || cat "$TMP_DIR/carry-reverse-err" >&2
@@ -819,12 +901,14 @@ carry_rollback() {
         fi
         echo "Error: $*; the merge could NOT be fully rolled back -- run" \
             "'git -C $PARENT_Q reset $TARGET_RESET $TARGET_BEFORE' to restore" \
-            "$PARENT_BRANCH$CHILD_CHECK, before merging again" >&2
+            "$PARENT_BRANCH$CHILD_CHECK, before merging again$FOREIGN_NOTE" >&2
     elif [[ "$CONTINUE" == true ]]; then
         echo "Error: $*; the merge was rolled back and $BRANCH's worktree restored;" \
-            "the staged squash is left in place -- fix and re-run with --continue" >&2
+            "the staged squash is left in place -- fix and re-run with" \
+            "--continue$FOREIGN_NOTE" >&2
     else
-        echo "Error: $*; the merge was rolled back and both worktrees restored" >&2
+        echo "Error: $*; the merge was rolled back and both worktrees" \
+            "restored$FOREIGN_NOTE" >&2
     fi
     exit 1
 }

@@ -33,13 +33,15 @@ may include breaking changes, each listed under a Breaking heading.
   `git checkout` moves a branch; an advance that would touch a dirty path or an
   untracked or ignored file refuses the whole merge by name, and a failure after
   the squash commit rolls back both the target and the node (a `--continue`
-  keeps the operator's resolution staged for the re-run). A step frozen inside a
-  git operation (a conflicted merge, squash, cherry-pick, or revert, a rebase
-  stopped part-way, or a git command's `index.lock`) refuses the merge before
-  anything changes, naming the operation. `fractal resume` waits for a running
-  merge before relaunching a paused node, saying once that it waits, and a
-  commit the node makes during the merge refuses it. A live node, or a child
-  landing into a live or paused parent, still refuses.
+  keeps the operator's resolution staged for the re-run); the rollback returns
+  only what the merge wrote, leaving and naming a file something else wrote in
+  the paused worktree during the merge. A step frozen inside a git operation (a
+  conflicted merge, squash, cherry-pick, or revert, a rebase stopped part-way,
+  or a git command's `index.lock`) refuses the merge before anything changes,
+  naming the operation. `fractal resume` waits for a running merge before
+  relaunching a paused node, saying once that it waits, and a commit the node
+  makes during the merge refuses it. A live node, or a child landing into a live
+  or paused parent, still refuses.
 - `fractal node merge --message=<text>` sets the squash commit's text in place
   of `merge <branch>`, so a descriptive message needs no amend (an amended
   squash orphans the merge-base advance recorded against it).

@@ -31,6 +31,7 @@ __all__ = [
     'test_paused_no_op_continue_refusal_keeps_the_squash_message',
     'test_paused_merge_rolls_back_both_sides_after_the_commit',
     'test_paused_merge_names_what_a_failed_rollback_left',
+    'test_paused_merge_rollback_keeps_a_write_made_during_the_merge',
     'test_paused_merge_lands_when_interrupted_after_the_branch_moved',
     'test_paused_merge_refuses_when_a_carry_check_fails',
     'test_paused_no_op_merge_advances_past_a_restored_path',
@@ -652,6 +653,88 @@ def test_paused_merge_names_what_a_failed_rollback_left(
     # the target is back, and the node keeps its frozen step and pause
     assert _git(git_repo, 'rev-parse', 'HEAD').stdout.strip() == head
     assert _git(node.worktree, 'rev-parse', 'HEAD').stdout.strip() == child_old
+    assert node.status() == 'paused'
+    _assert_frozen(node)
+    merges = node.db.read('events', where={'event': 'merge'})
+    assert [event['status'] for event in merges] == ['failed']
+
+
+@pytest.mark.parametrize(
+    argnames=('written', 'cut_short', 'status'),
+    argvalues=[
+        # an edit to the file the advance changes, which the update refuses
+        ('shared.txt', False, ' M shared.txt'),
+        # a new file where the advance adds one, which the update refuses
+        ('sib.txt', False, '?? sib.txt'),
+        # an edit over a file an update cut short had already written
+        ('shared.txt', True, ' M shared.txt'),
+    ],
+    ids=['changed-path', 'added-path', 'after-cut-short'],
+)
+def test_paused_merge_rollback_keeps_a_write_made_during_the_merge(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    written: str,
+    cut_short: bool,
+    status: str,
+) -> None:
+    """A rollback keeps a write made in the paused worktree during the merge.
+
+    Nothing locks a paused worktree against a chat or a hand edit, so a file
+    the advance changes can be written after the merge judged the move safe,
+    and the worktree update then fails over it. The rollback returns only
+    what the update itself wrote: the other write survives byte for byte
+    and the error names it, while the target, the node's branch and index,
+    and every other path go back to their pre-merge state.
+    """
+    _, node = _paused_child(git_repo)
+    _land_sibling(git_repo)
+    before = _snapshot(git_repo, node)
+    foreign = 'written during the merge\n'
+    fired = tmp_path_factory.mktemp('fired') / 'forward'
+    real_git = shutil.which('git')
+    # the write lands as the forward update starts; an update cut short has
+    # written the sibling's files first, and a whole one runs and refuses
+    body = (
+        f'if [[ " $* " == *" read-tree -m -u "[0-9a-f]* && ! -e "{fired}" ]]; then\n'
+        f'    touch "{fired}"\n'
+    )
+    if cut_short:
+        body += (
+            f'    cp "{git_repo}/sib.txt" "{git_repo}/shared.txt" "{node.worktree}/"\n'
+            f'    printf "{foreign.strip()}\\n" > "{node.worktree / written}"\n'
+            '    exit 130\n'
+        )
+    else:
+        body += (
+            f'    printf "{foreign.strip()}\\n" > "{node.worktree / written}"\n'
+            f'    exec "{real_git}" "$@"\n'
+        )
+    body += 'fi\n'
+    _shim(monkeypatch, tmp_path_factory, 'git', body)
+
+    with pytest.raises(
+        RuntimeError, match='rolled back and both worktrees restored'
+    ) as raised:
+        node.merge()
+
+    # the write survives and is named...
+    error = f'{raised.value}'
+    assert f"left as found in {node.branch}'s worktree" in error, error
+    assert error.endswith(f'during the merge: {written}'), error
+    assert (node.worktree / written).read_text(encoding='utf-8') == foreign
+    # ...and everything else is as it was: the target whole, the node's
+    # branch and index, its frozen step, and the advance's other path
+    assert _state(git_repo) == before[:3]
+    head, index, entries = _state(node.worktree)
+    assert (head, index) == before[3:5]
+    expected = [*before[5].splitlines(), status]
+    assert sorted(entries.splitlines()) == sorted(expected), entries
+    if written == 'shared.txt':
+        assert not (node.worktree / 'sib.txt').exists()
+    else:
+        assert (node.worktree / 'shared.txt').read_text(encoding='utf-8') == SHARED
     assert node.status() == 'paused'
     _assert_frozen(node)
     merges = node.db.read('events', where={'event': 'merge'})
