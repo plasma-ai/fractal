@@ -1,9 +1,9 @@
 """Pause/resume semantics and the tree pause latch.
 
-Covers the paused state's guard matrix (only resume/kill legal), the
-parent-first pause and leaf-first resume fan-out, pausing-node
-withdrawal, and the user-node latch that blocks spawns, starts, and
-targeted resumes tree-wide.
+Covers the paused state's guard matrix (only resume, kill, merge, and
+chat legal), the parent-first pause and leaf-first resume fan-out,
+pausing-node withdrawal, and the user-node latch that blocks spawns,
+starts, and targeted resumes tree-wide.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .conftest import _spawn_parent_child
 __all__ = [
     'test_pause_rejects_non_active',
     'test_pause_signals_and_decorates',
-    'test_paused_rejects_all_but_resume_and_kill',
+    'test_paused_rejects_all_but_resume_kill_merge_and_chat',
     'test_kill_reaps_a_paused_node',
     'test_reconcile_leaves_paused_untouched',
     'test_resume_requires_paused',
@@ -65,7 +65,9 @@ def test_pause_signals_and_decorates(
     assert [event['status'] for event in events] == ['completed']
 
 
-def test_paused_rejects_all_but_resume_and_kill(node_with_db: Node) -> None:
+def test_paused_rejects_all_but_resume_kill_merge_and_chat(
+    node_with_db: Node,
+) -> None:
     """A paused node admits only resume, kill, merge, and (fork-only) chat.
 
     Delete/retire would act on the frozen mid-step worktree, and start

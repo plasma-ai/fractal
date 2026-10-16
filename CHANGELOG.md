@@ -21,8 +21,14 @@ may include breaking changes, each listed under a Breaking heading.
   node's worktree. The merge-base advance carries that state the way
   `git checkout` moves a branch; an advance that would touch a dirty path or an
   untracked or ignored file refuses the whole merge by name, and a failure after
-  the squash commit rolls back both the target and the node. A live node, or a
-  child landing into a live or paused parent, still refuses.
+  the squash commit rolls back both the target and the node (a `--continue`
+  keeps the operator's resolution staged for the re-run). A step frozen inside a
+  git operation (a conflicted merge, squash, cherry-pick, or revert, a rebase
+  stopped part-way, or a git command's `index.lock`) refuses the merge before
+  anything changes, naming the operation. `fractal resume` waits for a running
+  merge before relaunching a paused node, and a commit the node makes during the
+  merge refuses it. A live node, or a child landing into a live or paused
+  parent, still refuses.
 - `fractal node merge --message=<text>` sets the squash commit's text in place
   of `merge <branch>`, so a descriptive message needs no amend (an amended
   squash orphans the merge-base advance recorded against it).
@@ -155,6 +161,11 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- `node merge` reads the merging node's tip once, before the squash: the squash,
+  its collision and `--continue` provenance checks, the wiki-root refresh's
+  judgement, and the merge-base advance all take that commit, so a commit the
+  node makes during the merge skips the advance with a warning instead of being
+  reverted by it.
 - A Claude step killed before its result frame (a deadline, a stall or thinking
   cap, a pause, a dead stream) is priced from Claude Code's own session
   transcript instead of keeping only the stream's partial figure, which was
@@ -193,23 +204,27 @@ may include breaking changes, each listed under a Breaking heading.
   the whole run. Only the mode flags (`$DETACHED_MODE`, `$META_MODE`,
   `$META_TARGET`) and `$FRACTAL_HEADLESS` stay pinned to their boot values, and
   the prompt now takes `$META_TARGET` from the same pinned set.
-- `node merge`'s refresh of the other wiki roots judges an index merged when its
-  staged bytes match neither side's, so a criss-cross merge base no longer hides
-  one; matches every folder literally, so a glob character in a folder name
-  never refuses or stages a sibling's files; and skips an index in a folder its
-  wiki excludes instead of failing the merge. A wiki declared at the worktree
-  root refuses the merge by name, since every refresh would walk the whole
-  worktree and leave the target dirty.
 - `node merge` regenerates the indexes the merge driver merged in every wiki
   root, not only the project wiki: in each folder declaring a tracked
-  `.wiki/settings.json`, an `_index.md` changed on both sides since the merge
-  base gets a `wiki update` scoped to its folder before validation and rides the
-  squash commit. Two siblings that add pages to one folder of a corpus wiki no
-  longer land its index out of order, failing a whole-root
-  `wiki update --check`; an index outside those folders keeps its bytes. The
-  refresh reads the disk, so the merge refuses an untracked file under the
-  project wiki or in a refreshed folder, naming it, instead of indexing it into
-  the squash commit, where its row would dangle in every clean checkout.
+  `.wiki/settings.json`, an `_index.md` whose staged bytes match neither side's
+  (a criss-cross merge base hides none) gets a `wiki update` scoped to its
+  folder, the whole root for a root's own index, before validation, and rides
+  the squash commit. A merged index the driver cannot finish — one not in its
+  wiki class's form, one whose `.wiki/wiki.py` hook fails, a conflict resolved
+  by hand, or a page committed without its row — lands current, while an index
+  outside those folders keeps its bytes. Every folder is matched literally, so a
+  glob character in a folder name never refuses or stages a sibling's files; an
+  index in a folder its wiki excludes is skipped instead of failing the merge,
+  and so, with a warning, is an index whose folder encloses another declared
+  wiki, which the wiki refuses to sweep. The refresh reads the disk, so the
+  merge refuses an untracked file under the project wiki or in a refreshed
+  folder, naming it, instead of indexing it into the squash commit, where its
+  row would dangle in every clean checkout. Strays are judged by the wiki's own
+  rules: a file only a personal `core.excludesFile` hides refuses too, and one
+  under a dot-prefixed folder, which the wiki never indexes, neither refuses the
+  merge nor rides the squash commit. A wiki declared at the worktree root
+  refuses the merge by name, since every refresh would walk the whole worktree
+  and leave the target dirty.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The

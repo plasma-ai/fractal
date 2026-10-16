@@ -9,6 +9,20 @@ from typing import Literal, Optional
 
 __all__ = []
 
+#: Git's markers of an operation left unfinished in a worktree, each mapped to
+#: what it names: a merge, cherry-pick, or revert stopped on a conflict (or a
+#: squash staged but never committed), a rebase stopped part-way, and the index
+#: lock a running git command holds and a killed one leaves behind.
+OPERATION_MARKERS = {
+    'MERGE_HEAD': 'a merge in progress',
+    'SQUASH_MSG': 'a squash merge in progress',
+    'CHERRY_PICK_HEAD': 'a cherry-pick in progress',
+    'REVERT_HEAD': 'a revert in progress',
+    'rebase-merge': 'a rebase in progress',
+    'rebase-apply': 'a rebase in progress',
+    'index.lock': 'a running git process or a stale index.lock',
+}
+
 
 @typing.overload
 def run(
@@ -240,3 +254,35 @@ def prunable(repo_dir: pathlib.Path) -> bool:
     cmd = ['worktree', 'list', '--porcelain']
     output = run(cmd, cwd=repo_dir, check=False)
     return any(line.startswith('prunable ') for line in (output or '').splitlines())
+
+
+def in_progress(path: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+    """Return the git operations left unfinished in a worktree.
+
+    One ``git rev-parse --git-path`` probe resolves every marker in
+    :data:`OPERATION_MARKERS` -- a linked worktree keeps them in its own git
+    dir -- and each marker present on disk names its operation.
+
+    Args:
+        path: The worktree's top-level directory.
+
+    Returns:
+        Each unfinished operation's description and marker path, in
+        :data:`OPERATION_MARKERS` order.
+
+    Raises:
+        RuntimeError: If git cannot resolve the markers, so a caller guarding
+            on the answer fails closed.
+
+    """
+    cmd = ['rev-parse']
+    for marker in OPERATION_MARKERS:
+        cmd.extend(['--git-path', marker])
+    output = run(cmd, cwd=path)
+    result = []
+    for marker, resolved in zip(OPERATION_MARKERS, output.splitlines(), strict=True):
+        # git answers relative to the worktree it ran in, else absolute
+        marker_path = path / resolved
+        if marker_path.exists():
+            result.append((OPERATION_MARKERS[marker], marker_path))
+    return result

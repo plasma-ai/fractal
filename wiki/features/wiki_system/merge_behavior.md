@@ -63,15 +63,23 @@ root for the root's own index), so indexes outside those folders keep their
 bytes. The bytes, not the merge base, mark a merged index, so a criss-cross
 history, where git names one of two bases, hides none. An index belongs to the
 deepest declared root above it, every folder is matched literally, and an index
-in a folder its wiki excludes is skipped, as the wiki's own walk skips it.
+in a folder its wiki excludes is skipped, as the wiki's own walk skips it. An
+index whose folder encloses another declared wiki is skipped too, with a warning
+naming both: the wiki refuses to sweep across a nested root, so that index lands
+as the driver merged it.
 
 The update reads the disk, so the merge refuses an untracked file under the
 project wiki or in a folder it refreshes, naming it: indexed into the squash
-commit, it would dangle in every clean checkout. The memory wiki is the merging
-node's own, and its next commit lands what it holds. A wiki declared at the
-worktree root refuses the merge outright: it encloses every folder, so each
-refresh would walk the whole worktree, and node init refuses to spawn under one
-for the same reason.
+commit, it would dangle in every clean checkout. Untracked files are judged by
+the wiki's own rules — the repository's ignore rules alone, so a file only a
+personal `core.excludesFile` hides still refuses, since the wiki would index it
+— and a file under a dot-prefixed folder, which the walk never lists, neither
+refuses the merge nor rides the squash commit: the refresh stages only tracked
+files it updated, indexes it created, and a root's `.wiki/` state. The memory
+wiki is the merging node's own, and its next commit lands what it holds. A wiki
+declared at the worktree root refuses the merge outright: it encloses every
+folder, so each refresh would walk the whole worktree, and node init refuses to
+spawn under one for the same reason.
 
 ## The parent's reconciliation job
 
