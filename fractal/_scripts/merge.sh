@@ -1403,9 +1403,9 @@ if command -v wiki &>/dev/null; then
         # of the untracked files now there, stage the indexes the refresh
         # created and its tool-owned .wiki/ state -- a file the walk never
         # lists stays out of the squash
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
         while IFS= read -r -d '' CREATED; do
             wiki_owned "$CREATED" "$INDEX_REL" || continue
             [[ "$CREATED" == */_index.md || "$CREATED" == "$INDEX_REL/.wiki/"* ]] || continue
@@ -1477,11 +1477,11 @@ if command -v wiki &>/dev/null; then
         fi
         SUBTREE=${FOLDER#"$OWNER"}
         SUBTREE=${SUBTREE#/}
-        # every pathspec names the folder literally, so a glob character in a
-        # folder name never matches a sibling; the strays are listed by the
-        # wiki's own ignore rules, as under the project wiki (mirrors
-        # plasma-wiki's Wiki._check_ignore)
-        # the listing is also what a failure keeps (drop_refresh_residue)
+        # every pathspec names the folder literally, so a glob character
+        # in a folder name never matches a sibling; the strays are
+        # listed by the wiki's own ignore rules, as under the project
+        # wiki (mirrors plasma-wiki's Wiki._check_ignore), and the
+        # listing is also what a failure keeps (drop_refresh_residue)
         LISTED_FILE="$TMP_DIR/wiki-listed-${#REFRESH_FOLDERS[@]}"
         if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
             --others --exclude-standard -- ":(literal)$FOLDER" >"$LISTED_FILE"; then
@@ -1490,9 +1490,9 @@ if command -v wiki &>/dev/null; then
         REFRESH_FOLDERS+=("$FOLDER")
         REFRESH_OWNERS+=("$OWNER")
         STRAYS=""
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
         while IFS= read -r -d '' STRAY; do
             wiki_owned "$STRAY" "$OWNER" || continue
             STRAYS+="$STRAY, "
@@ -1527,9 +1527,9 @@ if command -v wiki &>/dev/null; then
             fail_target "staging the refreshed wiki indexes under $FOLDER_DIR" \
                 "after merging $BRANCH failed"
         fi
-        # read NUL-delimited so a path with spaces stays one entry and a
-        # non-ASCII name is never C-quoted by core.quotePath into a path that
-        # exists nowhere
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
         while IFS= read -r -d '' CREATED; do
             wiki_owned "$CREATED" "$OWNER" || continue
             [[ "$CREATED" == */_index.md || "$CREATED" == "$OWNER/.wiki/"* ]] || continue

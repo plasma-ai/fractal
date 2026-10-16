@@ -3852,8 +3852,9 @@ class Node:
         # catches children spawned mid-fan-out; best-effort per node
         # (mirrors kill), each attempted exactly once
         outcomes: list[str] = []
-        if not self.is_user and (outcome := self._pause(reason)) is not None:
-            outcomes.append(outcome)
+        if not self.is_user:
+            if (outcome := self._pause(reason)) is not None:
+                outcomes.append(outcome)
         attempted = set()
         while True:
             pending = [
