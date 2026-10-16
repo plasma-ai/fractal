@@ -1812,9 +1812,11 @@ def test_merge_restores_the_target_when_a_wiki_refresh_step_fails(
 
     The refresh runs after the squash is staged, so a declaration read, a
     listing, or a staging step git cannot complete refuses the merge like a
-    conflict -- the step named, no commit, the target's tracked state reset,
-    and the child unadvanced -- instead of exiting under ``set -e`` with the
-    squash left staged for the target's next commit.
+    conflict -- the step named, no commit, the target reset, and the child
+    unadvanced -- instead of exiting under ``set -e`` with the squash left
+    staged for the target's next commit. An index the refresh created
+    before the failure goes too, so the retry lands instead of refusing it
+    as an untracked file the refresh would index.
     """
     repo = _init_tree(tmp_path / 'stepfailrepo')
     _declare_wiki(repo / 'library', 'cards')
@@ -1844,9 +1846,12 @@ def test_merge_restores_the_target_when_a_wiki_refresh_step_fails(
     assert subject in refused.stderr, refused.stderr
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     assert _git(repo, 'rev-parse', 'main.two').stdout == child
-    # the restore judges the target by its tracked state, as merge.sh does
-    status = _git(repo, 'status', '--porcelain', '--untracked-files=no').stdout
+    # nothing of the abandoned merge is left, untracked files included...
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
     assert status == '', status
+    # ...so the same merge lands once the step can run
+    retry = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert retry.returncode == 0, (retry.stdout, retry.stderr)
 
 
 def test_failed_merge_restore_removes_the_staged_child_additions(

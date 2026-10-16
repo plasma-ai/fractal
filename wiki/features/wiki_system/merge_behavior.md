@@ -79,10 +79,13 @@ personal `core.excludesFile` hides still refuses, since the wiki would index it
 — and a file under a dot-prefixed folder, which the walk never lists, neither
 refuses the merge nor rides the squash commit: the refresh stages only tracked
 files it updated, indexes it created, and a root's `.wiki/` state. The memory
-wiki is the merging node's own, and its next commit lands what it holds. A wiki
-declared at the worktree root refuses the merge outright: it encloses every
-folder, so each refresh would walk the whole worktree, and node init refuses to
-spawn under one for the same reason.
+wiki is the merging node's own, and its next commit lands what it holds. A
+refresh step that fails restores the target like a conflict; the reset keeps
+untracked files, so the merge also removes each index and `.wiki/` file the
+refresh created and had not yet staged, and the retry lands instead of refusing
+it as an untracked file. A wiki declared at the worktree root refuses the merge
+outright: it encloses every folder, so each refresh would walk the whole
+worktree, and node init refuses to spawn under one for the same reason.
 
 ## The parent's reconciliation job
 

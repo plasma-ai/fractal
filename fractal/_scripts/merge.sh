@@ -414,26 +414,82 @@ clear_squash_markers() {
         rm -rf -- "$MARKER"
     done
 }
+# each folder the wiki refresh regenerates, its wiki root, and the untracked
+# files listed there before its wiki update: reset --hard keeps untracked
+# files, so an index or .wiki/ state a failed refresh created would outlive
+# the restore and refuse the retry as a stray -- a failure drops each such
+# path its folder's listing lacks and leaves every file listed before;
+# RESIDUE names what could not be dropped (wiki_owned, defined with the
+# refresh, runs only once a folder is listed)
+REFRESH_FOLDERS=()
+REFRESH_OWNERS=()
+RESIDUE=""
+drop_refresh_residue() {
+    RESIDUE=""
+    REFRESH_I=0
+    while [[ "$REFRESH_I" -lt ${#REFRESH_FOLDERS[@]} ]]; do
+        REFRESH_FOLDER=${REFRESH_FOLDERS[$REFRESH_I]}
+        REFRESH_OWNER=${REFRESH_OWNERS[$REFRESH_I]}
+        LISTED=()
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
+        while IFS= read -r -d '' LISTED_PATH; do
+            LISTED+=("$LISTED_PATH")
+        done <"$TMP_DIR/wiki-listed-$REFRESH_I"
+        REFRESH_I=$((REFRESH_I + 1))
+        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+            --others --exclude-standard -- ":(literal)$REFRESH_FOLDER" >"$TMP_DIR/wiki-residue"; then
+            RESIDUE+="the indexes the refresh created under $REFRESH_FOLDER (listing them failed), "
+            continue
+        fi
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
+        while IFS= read -r -d '' CREATED; do
+            wiki_owned "$CREATED" "$REFRESH_OWNER" || continue
+            [[ "$CREATED" == */_index.md || "$CREATED" == "$REFRESH_OWNER/.wiki/"* ]] || continue
+            CREATED_NEW=true
+            # safe under set -u even on bash 3.2: an empty array reads as unset
+            for LISTED_PATH in ${LISTED[@]+"${LISTED[@]}"}; do
+                if [[ "$LISTED_PATH" == "$CREATED" ]]; then
+                    CREATED_NEW=false
+                    break
+                fi
+            done
+            [[ "$CREATED_NEW" == true ]] || continue
+            # 2>/dev/null: a path rm cannot remove is named by the check below
+            rm -f -- "$PARENT_WORKTREE_DIR/$CREATED" 2>/dev/null || true
+            if [[ -e "$PARENT_WORKTREE_DIR/$CREATED" || -L "$PARENT_WORKTREE_DIR/$CREATED" ]]; then
+                RESIDUE+="$CREATED, "
+            fi
+        done <"$TMP_DIR/wiki-residue"
+    done
+}
 # fail after the squash is staged: record the event, restore or preserve the
 # target, and exit -- a fresh merge owns the staged state and resets it away,
 # while a --continue's staged state is the operator's own conflict
-# resolution, which a reset --hard would destroy; arguments are joined with
-# spaces into the message, so long messages split across lines like echo's
+# resolution, which a reset --hard would destroy; either way the untracked
+# files a failed refresh created go; arguments are joined with spaces into
+# the message, so long messages split across lines like echo's
 fail_target() {
     end_merge_event failed
     if [[ "$CONTINUE" != true ]]; then
         # -q: drop reset's HEAD-is-now line so the
         # Error: below is the single user-facing line
         git -C "$PARENT_WORKTREE_DIR" reset -q --hard HEAD || true
-        if target_restored; then
+        drop_refresh_residue
+        if [[ -z "$RESIDUE" ]] && target_restored; then
             echo "Error: $*; the parent worktree has been restored" >&2
         else
             echo "Error: $*; the parent worktree could NOT be restored -- run" \
-                "'git -C $PARENT_Q reset --hard HEAD' before merging again" >&2
+                "'git -C $PARENT_Q reset --hard HEAD'${RESIDUE:+ and remove ${RESIDUE%, }}" \
+                "before merging again" >&2
         fi
     else
+        drop_refresh_residue
         echo "Error: $*; the staged squash is left in place --" \
-            "fix and re-run with --continue" >&2
+            "fix${RESIDUE:+, remove ${RESIDUE%, },} and re-run with --continue" >&2
     fi
     exit 1
 }
@@ -945,12 +1001,14 @@ if [[ "$CONTINUE" != true ]]; then
         # -q: drop reset's HEAD-is-now line so the
         # Error: below is the single user-facing line
         git -C "$PARENT_WORKTREE_DIR" reset -q --hard HEAD || true
-        if target_restored; then
+        drop_refresh_residue
+        if [[ -z "$RESIDUE" ]] && target_restored; then
             echo "Error: merge of $BRANCH was interrupted;" \
                 "the parent worktree has been restored" >&2
         else
             echo "Error: merge of $BRANCH was interrupted; the parent worktree could NOT be" \
-                "restored -- run 'git -C $PARENT_Q reset --hard HEAD' before merging again" >&2
+                "restored -- run 'git -C $PARENT_Q reset --hard HEAD'" \
+                "${RESIDUE:+and remove ${RESIDUE%, } }before merging again" >&2
         fi
         exit 1
     }
@@ -1224,15 +1282,19 @@ if command -v wiki &>/dev/null; then
                 "after merging $BRANCH failed"
         fi
         [[ -n "$TRACKED" ]] || continue
+        # the wiki indexes by the repository's own ignore rules alone, with
+        # core.excludesFile pinned out (mirrors plasma-wiki's
+        # Wiki._check_ignore), so the strays are listed by them too: a file
+        # only a personal ignore hides would still get a row; the listing is
+        # also what a failure keeps (drop_refresh_residue)
+        LISTED_FILE="$TMP_DIR/wiki-listed-${#REFRESH_FOLDERS[@]}"
+        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+            --others --exclude-standard -- ":(literal)$INDEX_REL" >"$LISTED_FILE"; then
+            fail_target "listing the untracked files under $INDEX_DIR failed"
+        fi
+        REFRESH_FOLDERS+=("$INDEX_REL")
+        REFRESH_OWNERS+=("$INDEX_REL")
         if [[ "$INDEX_DIR" == "$WIKI_DIR" ]]; then
-            # the wiki indexes by the repository's own ignore rules alone, with
-            # core.excludesFile pinned out (mirrors plasma-wiki's
-            # Wiki._check_ignore), so the strays are listed by them too: a file
-            # only a personal ignore hides would still get a row
-            if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
-                --others --exclude-standard -- ":(literal)$INDEX_REL" >"$TMP_DIR/wiki-strays"; then
-                fail_target "listing the untracked files under $INDEX_DIR failed"
-            fi
             STRAYS=""
             # read NUL-delimited so a path with spaces stays one entry and a
             # non-ASCII name is never C-quoted by core.quotePath into a path
@@ -1240,7 +1302,7 @@ if command -v wiki &>/dev/null; then
             while IFS= read -r -d '' STRAY; do
                 wiki_owned "$STRAY" "$INDEX_REL" || continue
                 STRAYS+="$STRAY, "
-            done <"$TMP_DIR/wiki-strays"
+            done <"$LISTED_FILE"
             if [[ -n "$STRAYS" ]]; then
                 fail_target "untracked files under $INDEX_DIR would be indexed by the" \
                     "squash of $BRANCH: ${STRAYS%, }; commit them or move them" \
@@ -1335,10 +1397,14 @@ if command -v wiki &>/dev/null; then
         # folder name never matches a sibling; the strays are listed by the
         # wiki's own ignore rules, as under the project wiki (mirrors
         # plasma-wiki's Wiki._check_ignore)
+        # the listing is also what a failure keeps (drop_refresh_residue)
+        LISTED_FILE="$TMP_DIR/wiki-listed-${#REFRESH_FOLDERS[@]}"
         if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
-            --others --exclude-standard -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-strays"; then
+            --others --exclude-standard -- ":(literal)$FOLDER" >"$LISTED_FILE"; then
             fail_target "listing the untracked files under $FOLDER_DIR failed"
         fi
+        REFRESH_FOLDERS+=("$FOLDER")
+        REFRESH_OWNERS+=("$OWNER")
         STRAYS=""
         # read NUL-delimited so a path with spaces stays one entry and a
         # non-ASCII name is never C-quoted by core.quotePath into a path that
@@ -1346,7 +1412,7 @@ if command -v wiki &>/dev/null; then
         while IFS= read -r -d '' STRAY; do
             wiki_owned "$STRAY" "$OWNER" || continue
             STRAYS+="$STRAY, "
-        done <"$TMP_DIR/wiki-strays"
+        done <"$LISTED_FILE"
         if [[ -n "$STRAYS" ]]; then
             # a folder its wiki excludes is never refreshed, strays or not
             # NOTE: the phrase is plasma-wiki's Wiki._resolve_folder refusal,

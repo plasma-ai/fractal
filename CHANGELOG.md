@@ -176,6 +176,9 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- A `node merge` whose wiki refresh fails after creating an index removes that
+  index along with the rest of the squash, so the retry lands instead of
+  refusing it as an untracked file under the wiki.
 - `node merge` reads the merging node's tip once, before the squash: the squash,
   its collision and `--continue` provenance checks, the wiki-root refresh's
   judgement, and the merge-base advance all take that commit, so a commit the
