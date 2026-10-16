@@ -37,9 +37,9 @@ may include breaking changes, each listed under a Breaking heading.
   git operation (a conflicted merge, squash, cherry-pick, or revert, a rebase
   stopped part-way, or a git command's `index.lock`) refuses the merge before
   anything changes, naming the operation. `fractal resume` waits for a running
-  merge before relaunching a paused node, and a commit the node makes during the
-  merge refuses it. A live node, or a child landing into a live or paused
-  parent, still refuses.
+  merge before relaunching a paused node, saying once that it waits, and a
+  commit the node makes during the merge refuses it. A live node, or a child
+  landing into a live or paused parent, still refuses.
 - `fractal node merge --message=<text>` sets the squash commit's text in place
   of `merge <branch>`, so a descriptive message needs no amend (an amended
   squash orphans the merge-base advance recorded against it).

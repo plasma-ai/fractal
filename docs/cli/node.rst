@@ -462,7 +462,9 @@ run — same budgets and iteration count, the interrupted step re-entered
 (resuming the recorded agent session when one exists) — and run and iteration
 deadlines are credited for the paused span. A node still parking gets its
 pending pause withdrawn instead. Resuming refuses when the node is not paused
-or when an ancestor is still paused.
+or when an ancestor is still paused. A relaunch waits for a merge in progress
+anywhere in the repository, since a paused node's merge rewrites its worktree,
+and says so once before it waits.
 
 .. code-block:: console
 
@@ -506,14 +508,15 @@ Integration and teardown
 .. code-block:: console
 
    $ fractal node merge [NODE] [--continue] [--ignore-scope]
-         [--validate <script>] [--delete] [--force|-f]
+         [--validate <script>] [--message <text>] [--delete] [--force|-f]
 
 Squash-merge the node's branch into its merge target — the configured
 ``base`` when set, else the dotted parent. One squash commit lands on the
 target; the node's full history stays on its own branch. Merging refuses on
-the user node, when the node itself is ``active`` or ``paused``, and when the
-*target* is ``active`` or ``paused`` (except from inside the target's own
-loop, its normal child-merge path). Non-fatal warnings ride stderr.
+the user node, when the node itself is ``active``, and when the *target* is
+``active`` or ``paused`` (except from inside the target's own loop, its
+normal child-merge path). A ``paused`` node merges its committed work and
+stays paused (see :doc:`/guide/lifecycle`). Non-fatal warnings ride stderr.
 
 Before committing, the merge holds the squash to the node's commit scope: the
 staged paths outside ``.fractal/`` are judged by the node's ``scope`` roots
@@ -677,6 +680,11 @@ overwrites it.
    merge (``Nothing to merge``) skips it. An absolute path, a ``..``
    component, a symlink script, or a path escaping the target worktree is
    refused.
+
+``--message <text>``
+   Commit the squash with ``<text>`` instead of the default
+   ``merge <branch>``, verbatim, so a descriptive message needs no amend (an
+   amended squash orphans the merge-base advance recorded against it).
 
 ``--delete``
    Delete the node (worktree, branch, and whole subtree) after a successful

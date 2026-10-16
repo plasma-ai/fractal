@@ -433,12 +433,14 @@ changes: finish or abort the operation, by resuming the node or by hand in
 its worktree, and merge again. The merge-base advance carries the frozen state
 the way ``git checkout`` moves a branch; if the advance would change a path
 the node holds dirty or staged, or write over an untracked or ignored file,
-the whole merge refuses and names the paths, and a failure or interrupt after
-the squash commit rolls back both the target and the node and exits 1 (a
-``--continue`` keeps the operator's resolution staged for the re-run). The
-target must still be settled (a depth-1 node lands into its user branch even
-during a tree-wide pause); a live node, or a child landing into a live or
-paused parent, still refuses. ``--message`` sets the squash commit's text, so
+the whole merge refuses and names the paths, and a failure after the squash
+commit, or an interrupt before the node's branch moves, rolls back both the
+target and the node and exits 1 (a ``--continue`` keeps the operator's
+resolution staged for the re-run); an interrupt once the node's branch has
+moved lands the merge and exits 0, since the branch moves only after the
+node's worktree update succeeded. The target must still be settled (a depth-1
+node lands into its user branch even during a tree-wide pause); a live node,
+or a child landing into a live or paused parent, still refuses. ``--message`` sets the squash commit's text, so
 a descriptive message needs no amend (an amended squash orphans the advance).
 
 The pause latch

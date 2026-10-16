@@ -28,10 +28,11 @@ interleaving their index writes.
 A paused node merges without leaving `paused`: it runs no loop and no agent, and
 its run, iteration, and step rows stay open for `fractal resume` to adopt. A
 resume relaunches the loop only under the merge lock, so it waits for a running
-merge, and the merge re-reads the node's status once it holds the lock, refusing
-a node that left `paused` while it waited; a commit the node gains during the
-merge anyway (a hand commit) refuses the merge
-(`<node> moved during the merge`), since the advance would revert it.
+merge (saying so once before it waits, since a merge's validation can run long),
+and the merge re-reads the node's status once it holds the lock, refusing a node
+that left `paused` while it waited; a commit the node gains during the merge
+anyway (a hand commit) refuses the merge (`<node> moved during the merge`),
+since the advance would revert it.
 
 Only committed work lands. A frozen step that stopped inside a git operation — a
 merge, squash merge, cherry-pick, or revert stopped on a conflict, a rebase
