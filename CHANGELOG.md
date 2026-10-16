@@ -231,7 +231,9 @@ may include breaking changes, each listed under a Breaking heading.
   finish or abort before the node is merged. A pause the agent runs from inside
   its own tree ends nothing: the step finishes with every tool it started, the
   loop parks at its next checkpoint, and the confirmation says the caller's own
-  agent was not aborted.
+  agent was not aborted. `fractal node _reap` reports that case with its own
+  exit 3, so a helper that cannot run at all (a broken install's failed import
+  exits 1) still ends the step through the pause's own TERM of its group.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives the template variables (the paths, the branch, and the spawn

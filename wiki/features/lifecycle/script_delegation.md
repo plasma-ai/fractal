@@ -161,7 +161,7 @@ Four rails bound the reap. It never signals pid 0 or 1, the caller's own group,
 or the group of any of the caller's ancestors, so a reap run from inside the
 tree lives to finish. A pause goes further: run from inside the agent's own tree
 (an agent pausing its own node, or running a tree-wide pause), it signals
-nothing at all — `fractal node _reap --outside-only` exits 1 when a root group
+nothing at all — `fractal node _reap --outside-only` exits 3 when a root group
 is the caller's own or an ancestor's, `pause.sh` reports the agent kept, the
 step finishes with every tool it started, the loop parks at the next checkpoint,
 and the pause confirmation says the caller's own agent was not aborted. The reap
@@ -185,8 +185,11 @@ later read fails, it keeps signaling the groups it already knows, minus the
 protected and spared ones, probing them by signal instead of re-walking; the
 loop, the crash heal, and codex's preflight warn and fall back to a plain group
 KILL if the reap itself breaks; when `fractal node _reap` itself cannot run (any
-status but the self-pause's exit 1), `pause.sh` and `kill.sh` fall back to their
-own group-only teardown, so a helper failure never fails the pause or kill.
+status but the self-pause's exit 3), `pause.sh` and `kill.sh` fall back to their
+own group-only teardown, so a helper failure never fails the pause or kill. The
+self-pause exit is 3 because nothing else exits with it: an uncaught Python
+error, a broken install's failed import included, exits 1, and a CLI error 2, so
+a helper that cannot run is never read as a deliberate self-pause.
 
 ## Launch environment
 

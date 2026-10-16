@@ -1,6 +1,6 @@
 """Script-internal behavior of the node lifecycle shells (``_scripts/``).
 
-Drives ``fractal/_scripts/{init,start,resume,kill,merge,delete}.sh`` against repos
+Drives ``fractal/_scripts/{init,start,resume,kill,pause,merge,delete}.sh`` against repos
 built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 
 - **``init.sh`` worktree resolution** parses ``git worktree list --porcelain``
@@ -38,6 +38,10 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   ``.pgid``/``.step_pgid`` groups without consulting tmux at all, so a
   same-named session from another repo sharing the basename survives the kill
   and the node's own loop is the one reaped.
+- **``pause.sh`` reap verdict** reads only the reap helper's distinct
+  inside-the-tree exit as a self-pause that signals nothing; any other failure,
+  a broken install's import error included, is a helper that could not run, and
+  the script falls back to its own TERM of the step group.
 - **``delete.sh`` per-backend running guard** blocks the teardown on a bare
   tmux session-name match only for a tmux node; a headless node owns no
   session, so a same-named session from another repo sharing the basename
@@ -251,6 +255,7 @@ import pathlib
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from typing import Optional
 
@@ -273,6 +278,7 @@ __all__ = [
     'test_headless_handoff_failure_records_no_backend',
     'test_tmux_relaunch_failure_keeps_the_backend_record',
     'test_kill_reaps_only_the_recorded_group_for_a_headless_node',
+    'test_pause_signals_only_on_a_reap_helper_verdict',
     'test_delete_running_guard_is_per_backend',
     'test_merge_preserves_a_target_edit_that_lands_during_the_merge',
     'test_merge_re_merges_an_iterating_child_without_conflict',
@@ -901,6 +907,60 @@ def test_kill_reaps_only_the_recorded_group_for_a_headless_node(
         assert not pgid_file.exists()
         # tmux was never consulted -- the collision session survives
         assert not capture.exists()
+    finally:
+        _reap_group(leader)
+
+
+# ------ pause.sh: the reap helper's verdict
+
+
+@pytest.mark.parametrize(
+    argnames=('helper', 'aborted'),
+    argvalues=[
+        # a broken install: the interpreter dies on an import, exiting 1
+        (f'exec "{sys.executable}" -c "import _fractal_not_installed"', True),
+        # the helper's own inside-the-tree verdict
+        ('exit 3', False),
+    ],
+    ids=['import-failure', 'inside-the-tree'],
+)
+def test_pause_signals_only_on_a_reap_helper_verdict(
+    tmp_path: pathlib.Path,
+    helper: str,
+    aborted: bool,
+) -> None:
+    """``pause.sh`` keeps the agent only on the reap's inside-the-tree exit.
+
+    A pause run inside the agent's own tree must signal nothing, and the
+    reap helper says so with an exit no other failure produces; a helper
+    that cannot run at all -- a broken install whose import fails exits 1,
+    as any uncaught Python error does -- must still end the step, through
+    the script's own marked TERM of the recorded step group.
+    """
+    repo = _init_tree(tmp_path / 'pauserepo')
+    node_dir = repo / '.fractal' / 'main'
+    bindir = tmp_path / 'pause-bin'
+    bindir.mkdir()
+    shim = bindir / 'fractal'
+    shim.write_text(f'#!/bin/sh\n{helper}\n', encoding='utf-8')
+    shim.chmod(0o755)
+    env = _cli_env()
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    # a live step group, as the loop records it around a launch
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    (node_dir / '.step_pgid').write_text(f'{leader.pid}\n', encoding='utf-8')
+    try:
+        result = _script('pause.sh', repo, f'{repo}', env=env)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        if aborted:
+            assert 'Aborted in-flight agent' in result.stdout, result.stdout
+            assert leader.wait(timeout=10) == -signal.SIGTERM
+            assert (node_dir / '.pause_abort').exists()
+        else:
+            assert 'Kept in-flight agent' in result.stdout, result.stdout
+            assert leader.poll() is None
+            assert not (node_dir / '.pause_abort').exists()
     finally:
         _reap_group(leader)
 
