@@ -207,7 +207,8 @@ detached tmux session, or in an independent process group with
    * - ``--continue``
      - Re-arm a settled node (``completed``, ``stopped``, ``exited``, or
        ``killed``) for further iterations. The launch restores the worktree
-       and the loop opens a fresh run.
+       (leaving it as found when a git operation is in progress there, for
+       the first step's prompt to name) and the loop opens a fresh run.
    * - ``--clean``
      - Requires ``--continue``. Acknowledges that the continue's worktree
        restore discards uncommitted project files; without it a dirty
@@ -407,9 +408,10 @@ one still linked to the agent dies with it. ``kill`` and a step deadline reap
 the same way. Anything still alive after the forced kill is named in the
 command's output. A git operation the abort left unfinished in the worktree —
 a merge, a rebase, an ``index.lock`` — is named too, so it is finished or
-aborted before the node is merged. An agent that pauses its own node aborts
-nothing: its step finishes with every tool it started, and the loop parks at
-its next checkpoint. Only if the first read of the process table fails does the
+aborted before the node is merged; the resumed step's prompt opens by naming
+it as well. An agent that pauses its own node aborts nothing: its step
+finishes with every tool it started, and the loop parks at its next
+checkpoint. Only if the first read of the process table fails does the
 abort fall back to TERMing every recorded group except the caller's own, so a
 self-pause from a tool shell in a group of its own then aborts its own step.
 

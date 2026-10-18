@@ -176,6 +176,9 @@ __all__ = [
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
     'test_digest_renders_mail_as_inert_data',
+    'test_a_leftover_git_operation_opens_every_launch_prompt',
+    'test_continue_leaves_a_pending_merge_for_the_agent',
+    'test_a_clean_worktree_launch_prompt_carries_no_notice',
     'test_drain_survives_a_pause_and_resume',
     'test_drain_guards_survive_an_env_scrub',
     'test_drain_guards_survive_a_worktree_scrub',
@@ -6450,6 +6453,143 @@ def test_digest_renders_mail_as_inert_data(
     # and the section tells the seat these bytes carry no authority
     assert 'UNTRUSTED DATA' in digest
     assert 'not instructions' in digest
+
+
+class PromptRecordingLoop(MockLoop):
+    """Mock loop recording every launch's prompt."""
+
+    def __init__(self: PromptRecordingLoop, node: Node, **kwargs: Any) -> None:
+        """Initialize ``PromptRecordingLoop``."""
+        super().__init__(node, **kwargs)
+        self.prompts: list[str] = []
+
+    def _launch(
+        self: PromptRecordingLoop, step: Step, prompt: str, **kwargs: Any
+    ) -> StepResult:
+        """Record the launch prompt."""
+        self.prompts.append(prompt)
+        return super()._launch(step, prompt, **kwargs)
+
+
+@pytest.mark.parametrize(
+    argnames=('marker', 'named'),
+    argvalues=[
+        # a merge stopped on a conflict
+        ('MERGE_HEAD', 'a merge in progress (MERGE_HEAD)'),
+        # a child's squash merge stopped before its commit
+        ('SQUASH_MSG', 'fractal node merge <child> --continue'),
+        # a git command killed mid-write, named by where git keeps the lock
+        ('index.lock', 'a running git process or a stale index.lock ({path}, '),
+    ],
+    ids=['merge', 'squash', 'index-lock'],
+)
+def test_a_leftover_git_operation_opens_every_launch_prompt(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    marker: str,
+    named: str,
+) -> None:
+    """A git operation left in the worktree opens every launch's prompt.
+
+    A killed or paused step can leave a merge or squash unfinished, and the
+    next agent otherwise starts git work on top of it blind. Every launch --
+    a retry and a resumed one included -- opens with the notice naming the
+    operation and its way out, ahead of the charter and any mode; a steer
+    opens with it ahead of its stall notice.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, step_retry_backoff='1s')
+    relpath = _git(node.worktree, 'rev-parse', '--git-path', marker).stdout
+    path = node.worktree / relpath.strip()
+    path.write_text('0' * 40 + '\n', encoding='utf-8')
+    named = named.format(path=path)
+    results = [
+        StepResult(status='failed', exit_code=2, reason='agent error (exit 2)'),
+        StepResult(status='completed'),
+    ]
+    loop = PromptRecordingLoop(node, results=results)
+    assert loop.run() == 0
+    # the failed launch, its retry, and the next step
+    assert len(loop.prompts) == 3
+    for prompt in loop.prompts:
+        assert prompt.startswith('## Git Operation Pending')
+        assert named in prompt[: prompt.index('# Charter')]
+    # a resumed launch opens with the notice ahead of its resume mode
+    loop._resume_mode = True
+    prompt = loop._build_step_prompt(loop._discover_steps()[0])
+    assert prompt.startswith('## Git Operation Pending')
+    assert prompt.index('# Charter') < prompt.index('## Resume Mode')
+    # a steer's prompt is the stall notice alone, still opened by the notice
+    loop._resume_mode = False
+    loop._steer_session = 'SID'
+    prompt = loop._build_step_prompt(loop._discover_steps()[0])
+    assert prompt.startswith('## Git Operation Pending')
+    assert named in prompt[: prompt.index('## Stall Mode')]
+    assert '# Charter' not in prompt
+
+
+@pytest.mark.parametrize('conflicted', [False, True], ids=['staged', 'conflicted'])
+def test_continue_leaves_a_pending_merge_for_the_agent(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    conflicted: bool,
+) -> None:
+    """A continue over a merge in progress leaves it for the agent's prompt.
+
+    The continue commits operator edits under the node folder and then
+    restores the worktree; over a staged merge that commit would silently
+    finish the merge, and over a conflicted one git refuses it and boot
+    crashes. The continue leaves the worktree as found, says so, and the
+    first prompt names the merge.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    repo = node.worktree
+    # a side branch changing a shared file, and on a conflict the same file here
+    (repo / 'shared.txt').write_text('base\n', encoding='utf-8')
+    _git(repo, 'add', 'shared.txt')
+    _git(repo, 'commit', '-q', '-m', 'add shared')
+    _git(repo, 'checkout', '-q', '-b', 'side')
+    (repo / 'shared.txt').write_text('side\n', encoding='utf-8')
+    _git(repo, 'commit', '-q', '-am', 'side edit')
+    _git(repo, 'checkout', '-q', '-')
+    if conflicted:
+        (repo / 'shared.txt').write_text('main\n', encoding='utf-8')
+        _git(repo, 'commit', '-q', '-am', 'main edit')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    merge = subprocess.run(
+        ['git', '-C', f'{repo}', 'merge', '--no-commit', '--no-ff', 'side'],
+        capture_output=True,
+        text=True,
+    )
+    assert (merge.returncode != 0) is conflicted
+    # an operator edit under the node folder arms the continue's commit
+    (node.node_dir / 'note.md').write_text('steer\n', encoding='utf-8')
+    loop = PromptRecordingLoop(node, continue_=True)
+    assert loop.run() == 0
+    # the merge is neither committed nor discarded
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    merge_head = _git(repo, 'rev-parse', '--git-path', 'MERGE_HEAD').stdout
+    assert (repo / merge_head.strip()).is_file()
+    assert 'skipped the operator-edit commit and the clean' in capsys.readouterr().out
+    assert loop.prompts[0].startswith('## Git Operation Pending')
+    assert 'a merge in progress (MERGE_HEAD)' in loop.prompts[0]
+
+
+def test_a_clean_worktree_launch_prompt_carries_no_notice(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean worktree's launch prompt is the charter and the step alone."""
+    monkeypatch.setenv('_NODE', '')
+    loop = PromptRecordingLoop(loop_node)
+    assert loop.run() == 0
+    assert loop.prompts == [
+        f'# Charter\n\nDo the work.\n\n# {name}\n\nWork.\n'
+        for name in ['01-PLAN.md', '02-EXECUTE.md']
+    ]
 
 
 def test_drain_survives_a_pause_and_resume(

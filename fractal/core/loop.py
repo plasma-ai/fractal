@@ -124,6 +124,20 @@ _UNAVAILABLE_BACKOFF_CAP_SECONDS = _BILLING_BACKOFF_CAP_SECONDS
 # (<pin>-1-20250805) reads as the different model it is
 _SNAPSHOT_WIDTHS = ((8,), (4, 2, 2))
 
+# the way out of a leftover git operation whose generic finish-or-abort is not
+# enough, keyed by its marker: a child's squash merge finishes through fractal's
+# own tail and aborts without the MERGE_HEAD `git merge --abort` needs, and git
+# holds index.lock only while it runs, so whether a lock is stale is the
+# agent's to check
+_GIT_PENDING_HINTS = {
+    'SQUASH_MSG': (
+        'a child merge stopped before its commit; resolve and stage its'
+        ' conflicts, then finish it with `fractal node merge <child> --continue`,'
+        ' or abort it with `git reset --merge`'
+    ),
+    'index.lock': 'remove it only once no git process runs in this worktree',
+}
+
 
 class Step:
     """One discovered step file.
@@ -521,6 +535,7 @@ class Loop:
         self._modes_dir = node._package_dir / '_node' / 'modes'
         self._sync_file = self._modes_dir / 'SYNC.md'
         self._stall_file = self._modes_dir / 'STALL.md'
+        self._git_pending_file = self._modes_dir / 'GIT_PENDING.md'
         # whether any step will need the pricing cache (resolved in preflight)
         self._needs_pricing = False
         # armed caps with a non-enforcing agent and no timeout have no
@@ -1249,11 +1264,26 @@ class Loop:
         """Restore the worktree for a continue launch.
 
         Continue-mode cleanup: commit operator seed edits --no-verify,
-        clean, re-arm budgets, preserve config.json.
+        clean, re-arm budgets, preserve config.json. A worktree holding a
+        git operation in progress is left as found.
         """
         node = self.node
         worktree = node.worktree
         node_dir = node.node_dir
+        # a git operation left in progress is the agent's to finish or abort
+        # (its first prompt names it): the commit below would silently finish
+        # a staged merge or crash boot on a conflicted one, and the restore
+        # would discard the operation's state; a probe that cannot answer
+        # names nothing
+        if operations := fractal.util.git.in_progress(worktree, check=False):
+            named = ', '.join(
+                f'{operation} ({marker.name})' for operation, marker in operations
+            )
+            print(
+                'Continuing: skipped the operator-edit commit and the clean:'
+                f' the worktree has {named}, which the first step prompt names'
+            )
+            return
         # commit operator steering edits before the checkout/clean below
         # reverts them (--no-verify, unguarded: failing loud beats destroying
         # them); the excludes-scoped -uall probe keeps runtime artifacts from
@@ -2711,7 +2741,8 @@ class Loop:
         through as overrides -- the boot-pinned DETACHED/META flags and
         meta target included, so a mid-run config edit cannot flip a run's
         mode composition. A steer renders ``STALL.md`` alone: its resumed
-        session already holds the step.
+        session already holds the step. A git operation left unfinished in
+        the worktree opens either prompt with ``GIT_PENDING.md``.
         """
         # refresh the cost budget so each step's context reflects spend so far
         self._build_cost_budget()
@@ -2732,16 +2763,49 @@ class Loop:
             'DRAIN_MODE': 'true' if self._drain else 'false',
         }
         variables = {**self._step_vars, **overrides}
+        notice = self._git_pending_notice(variables)
         if self._steer_session is not None:
             text = self._stall_file.read_text(encoding='utf-8')
-            return render.render(text, variables)
+            return f'{notice}{render.render(text, variables)}'
         prompt = self.node.build_prompt(f'{step.path}', overrides=variables)
         # a resumed iteration replays a frozen plan -- the harness re-reads
         # the inbox at every attached seat, so directives that arrived after
         # the plan froze are in context before any replayed decision executes
         if self._resume_mode and (digest := self._inbox_digest()):
             prompt = f'{prompt}\n{digest}'
-        return prompt
+        return f'{notice}{prompt}'
+
+    def _git_pending_notice(self: Loop, variables: dict[str, str]) -> str:
+        """Render the leftover-git-operation notice a prompt opens with, or ``''``.
+
+        Probed at every launch: a killed, paused, or stuck step can stop
+        inside a merge, squash, cherry-pick, revert, or rebase, or with
+        ``index.lock`` held, and the next launch would otherwise run git on
+        top of it. A probe that cannot answer names nothing.
+        """
+        operations = fractal.util.git.in_progress(self.node.worktree, check=False)
+        if not operations:
+            return ''
+        lines = []
+        for operation, marker in operations:
+            line = f'- {operation} ({marker.name})'
+            # a linked worktree's lock lives in its own git dir, never the
+            # main checkout's .git/index.lock, so the lock is named by its
+            # resolved path; a lock its git command just dropped has no age
+            if marker.name == 'index.lock':
+                try:
+                    age = time.time() - marker.stat().st_mtime
+                except OSError:
+                    line = f'- {operation} ({marker})'
+                else:
+                    age_label = fractal.util.duration.format_age(max(0.0, age))
+                    line = f'- {operation} ({marker}, {age_label} old)'
+            if hint := _GIT_PENDING_HINTS.get(marker.name):
+                line = f'{line}: {hint}'
+            lines.append(line)
+        text = self._git_pending_file.read_text(encoding='utf-8')
+        notice = render.render(text, {**variables, 'GIT_OPERATIONS': '\n'.join(lines)})
+        return f'{notice}\n'
 
     def _inbox_digest(self: Loop) -> str:
         """Render the unread inbox for a resumed seat's prompt, or ``''``.

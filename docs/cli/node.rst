@@ -337,7 +337,9 @@ launch time.
    Re-arm a settled node (``completed``, ``stopped``, ``exited``, or
    ``killed``) for further iterations. The launch restores the worktree; a
    dirty worktree refuses and lists the uncommitted project files that would
-   be discarded.
+   be discarded. A worktree holding a git operation in progress (a merge,
+   rebase, ``index.lock``, ...) is left as found, and the first step's prompt
+   names the operation.
 
 ``--clean``
    With ``--continue``: acknowledge discarding uncommitted project files
