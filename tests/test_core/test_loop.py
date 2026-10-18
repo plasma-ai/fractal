@@ -73,6 +73,14 @@ __all__ = [
     'test_long_think_that_ends_in_an_action_is_not_stuck',
     'test_thinking_cap_then_no_progress_stalls_the_step',
     'test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session',
+    'test_thinking_cap_steers_one_effort_lower',
+    'test_lowered_effort_ends_with_the_steer',
+    'test_cap_at_the_floor_steers_at_the_same_effort',
+    'test_idle_watchdog_steer_keeps_the_effort',
+    'test_lowered_steer_that_caps_again_stalls',
+    'test_claude_step_in_a_codex_node_steers_on_the_claude_ladder',
+    'test_project_settings_override_the_ladder',
+    'test_invalid_effort_setting_fails_boot',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
     'test_the_steer_runs_on_what_the_stuck_launch_left',
     'test_a_capped_or_idle_sync_runs_to_its_result',
@@ -1923,6 +1931,276 @@ def test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session(
     session = first[first.index('--session-id') + 1]
     assert steer[steer.index('--resume') + 1] == session
     assert 'ran out of room while still thinking' in steer[-1]
+
+
+@pytest.mark.parametrize(
+    argnames=('source', 'effort', 'lowered'),
+    argvalues=[
+        pytest.param('step', 'max', 'xhigh', id='frontmatter'),
+        pytest.param('node', 'xhigh', 'high', id='node'),
+        pytest.param('agent', 'xhigh', 'high', id='agent-default'),
+    ],
+)
+def test_thinking_cap_steers_one_effort_lower(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    capsys: pytest.CaptureFixture[str],
+    source: str,
+    effort: str,
+    lowered: str,
+) -> None:
+    """A thinking-capped step's steer relaunches one effort level lower.
+
+    The step's effort is its own ``effort:``, else the node's, else the
+    agent's configured default. The steer resumes the capped session at
+    the next level down and its row records that level, while the capped
+    row and the steering banner read as for any steer.
+    """
+    if source == 'step':
+        step = loop_node.node_dir / 'steps' / '01-PLAN.md'
+        step.write_text(f'---\neffort: {effort}\n---\n# PLAN\n', encoding='utf-8')
+    elif source == 'node':
+        _configure(loop_node, effort=effort)
+    else:
+        settings = loop_node.node_dir / '.claude' / 'settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'effortLevel': effort}), encoding='utf-8')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    first, steer, _ = agent.argvs
+    # the agent applies its own default itself, so only a pin rides the flag
+    pinned = None if source == 'agent' else effort
+    assert _effort(first) == pinned
+    assert _effort(steer) == lowered
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
+    ]
+    assert _step_efforts(loop_node)[:2] == [pinned, lowered]
+    out = capsys.readouterr().out
+    assert '(PLAN): thinking cap; steering (' in out
+    assert f'\n  (effort {effort} -> {lowered} for the steer)\n' in out
+
+
+def test_lowered_effort_ends_with_the_steer(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """The lowered level lasts for the steer alone.
+
+    The next step, and the capped step's next iteration, run at the
+    step's own effort again.
+    """
+    _configure(loop_node, effort='max', max_iters=2)
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    done = [_claude_script(_INIT, _RESULT) for _ in range(4)]
+    agent = scripted_claude([capped, *done])
+    ScriptedLoop(loop_node, agent).run()
+    efforts = ['max', 'xhigh', 'max', 'max', 'max']
+    assert [_effort(argv) for argv in agent.argvs] == efforts
+    assert _step_efforts(loop_node) == efforts
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+        'PLAN/completed/',
+        'EXECUTE/completed/',
+    ]
+
+
+@pytest.mark.parametrize('effort', ['high', 'medium', 'turbo'])
+def test_cap_at_the_floor_steers_at_the_same_effort(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    capsys: pytest.CaptureFixture[str],
+    effort: str,
+) -> None:
+    """A capped step at or below the floor, or off the ladder, steers unchanged.
+
+    The floor means never lower than it, not never steer: the steer
+    relaunches at the step's own effort, as for any steer.
+    """
+    _configure(loop_node, effort=effort)
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert [_effort(argv) for argv in agent.argvs] == [effort] * 3
+    assert _step_efforts(loop_node) == [effort] * 3
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
+    ]
+    assert '(effort ' not in capsys.readouterr().out
+
+
+def test_idle_watchdog_steer_keeps_the_effort(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A launch the no-action watchdog ends steers at the step's own effort."""
+    _configure(loop_node, effort='max')
+    silent = _claude_script(_INIT, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([silent, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert [_effort(argv) for argv in agent.argvs] == ['max'] * 3
+    assert _step_efforts(loop_node) == ['max'] * 3
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/completed/steer',
+    ]
+    assert '(effort ' not in capsys.readouterr().out
+
+
+def test_lowered_steer_that_caps_again_stalls(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A lowered steer that caps again stalls the step, with no third launch."""
+    _configure(loop_node, effort='max')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    agent = scripted_claude([capped, capped])
+    ScriptedLoop(loop_node, agent).run()
+    assert [_effort(argv) for argv in agent.argvs] == ['max', 'xhigh']
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/exited/stalled: thinking cap, after a steer; unpriced',
+        'EXECUTE/stopped/failed on PLAN',
+    ]
+
+
+def test_claude_step_in_a_codex_node_steers_on_the_claude_ladder(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A Claude step in a Codex node lowers on Claude's ladder, not the node's.
+
+    Codex declares no ladder, but the capped step runs Claude through its
+    own ``agent:`` frontmatter, so its ``xhigh`` steer relaunches at
+    ``high``.
+    """
+    # the step's agent must be installed; a stand-in binary satisfies the
+    # check, and the scripted agent runs every launch
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'claude').write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+    (bindir / 'claude').chmod(0o755)
+    monkeypatch.setenv('PATH', f'{bindir}{os.pathsep}{os.environ["PATH"]}')
+    _configure(loop_node, agent='codex')
+    step = loop_node.node_dir / 'steps' / '01-PLAN.md'
+    content = '---\nagent: claude\neffort: xhigh\n---\n# PLAN\n'
+    step.write_text(content, encoding='utf-8')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    first, steer, _ = agent.argvs
+    assert _effort(first) == 'xhigh'
+    assert _effort(steer) == 'high'
+    assert _step_efforts(loop_node)[:2] == ['xhigh', 'high']
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
+    ]
+
+
+def test_project_settings_override_the_ladder(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """The root branch's committed settings set an agent's ladder for the run.
+
+    The loop reads the ladder at boot from the settings file as committed
+    on the tree's root branch, so neither an uncommitted edit nor a commit
+    landing after the boot changes the run's ladder. Here the project's
+    ladder lowers ``high`` (the agent's own floor) to ``low``.
+    """
+    _configure(loop_node, effort='high')
+    ladder = {'levels': ['low', 'high', 'max'], 'floor': 'low'}
+    _commit_settings(loop_node, {'effort_ladder': {'claude': ladder}})
+    settings = loop_node.worktree / '.fractal' / '.settings.json'
+    unchanged = {'effort_ladder': {'claude': {**ladder, 'floor': 'high'}}}
+    settings.write_text(json.dumps(unchanged), encoding='utf-8')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    loop = ScriptedLoop(loop_node, agent)
+    _commit_settings(loop_node, unchanged)
+    loop.run()
+    assert [_effort(argv) for argv in agent.argvs] == ['high', 'low', 'high']
+    assert _step_efforts(loop_node) == ['high', 'low', 'high']
+
+
+@pytest.mark.parametrize(
+    argnames=('ladders', 'match'),
+    argvalues=[
+        pytest.param(['high'], 'map agent names', id='not-an-object'),
+        pytest.param({'claude': {'levels': ['high']}}, 'exactly', id='no-floor'),
+        pytest.param(
+            {'claude': {'levels': ['high'], 'floor': 'high', 'ceiling': 'max'}},
+            'exactly',
+            id='extra-key',
+        ),
+        pytest.param(
+            {'claude': {'levels': 'high', 'floor': 'high'}},
+            'non-empty strings',
+            id='levels-string',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['high', ''], 'floor': 'high'}},
+            'non-empty strings',
+            id='empty-level',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['high', 'high'], 'floor': 'high'}},
+            'unique',
+            id='duplicate',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['high'], 'floor': 'max'}},
+            'one of its levels',
+            id='floor-off-ladder',
+        ),
+        pytest.param(
+            {'claude': {'levels': [], 'floor': 'high'}},
+            'one of its levels',
+            id='no-levels',
+        ),
+        pytest.param(
+            {'Claude': {'levels': ['high', 'max'], 'floor': 'high'}},
+            'no registered agent',
+            id='misspelled-agent',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['max', 'xhigh', 'high'], 'floor': 'max'}},
+            'lowest first',
+            id='highest-first',
+        ),
+    ],
+)
+def test_invalid_effort_setting_fails_boot(
+    loop_node: Node,
+    ladders: Any,
+    match: str,
+) -> None:
+    """An invalid committed effort ladder fails the loop's boot, naming the file.
+
+    Beyond its shape, a ladder must name a registered agent, and a ladder
+    built only from levels its agent declares must list them in the
+    agent's own order, lowest first -- a misspelled name would otherwise
+    keep the default ladder, and a reversed one would raise the effort.
+    """
+    _commit_settings(loop_node, {'effort_ladder': ladders})
+    with pytest.raises(ValueError, match=match) as excinfo:
+        MockLoop(loop_node)
+    assert '.fractal/.settings.json' in str(excinfo.value)
+    assert loop_node.branch in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
@@ -7438,6 +7716,27 @@ def _step_rows(node: Node) -> list[str]:
         f'{row["step_name"]}/{row["status"]}/{row["metadata"] or ""}'
         for row in sorted(rows, key=lambda row: row['step_id'])
     ]
+
+
+def _effort(argv: tuple[str, ...]) -> Optional[str]:
+    """Return a claude launch's ``--effort`` value, or ``None`` without one."""
+    if '--effort' not in argv:
+        return None
+    return argv[argv.index('--effort') + 1]
+
+
+def _step_efforts(node: Node) -> list[Optional[str]]:
+    """Return the effort column of the node's step rows, oldest first."""
+    rows = node.db.read('steps', where={'node': node.branch})
+    return [row['effort'] for row in sorted(rows, key=lambda row: row['step_id'])]
+
+
+def _commit_settings(node: Node, settings: dict[str, Any]) -> None:
+    """Commit the project's ``.fractal/.settings.json`` on the node's branch."""
+    path = node.worktree / '.fractal' / '.settings.json'
+    path.write_text(json.dumps(settings), encoding='utf-8')
+    _git(node.worktree, 'add', '-f', '.fractal/.settings.json')
+    _git(node.worktree, 'commit', '-q', '-m', 'project settings')
 
 
 def _configure(node: Node, **values: Any) -> None:

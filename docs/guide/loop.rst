@@ -492,6 +492,19 @@ the step instead (the stuck row closes ``stopped``, and resume re-enters the
 step), and a stop, a finish, or a spent subtree ceiling abandons it, closing
 the row ``failed`` with ``<trigger>; steer abandoned``.
 
+A thinking cap's steer runs one effort level lower. The step's effort is its
+own ``effort:`` frontmatter, else the node's ``effort`` key, else the agent's
+configured default (Claude's ``effortLevel``). Claude's levels, lowest first,
+are ``low``, ``medium``, ``high``, ``xhigh``, and ``max``, with a floor of
+``high``: a ``max`` step steers at ``xhigh``, and an ``xhigh`` step at
+``high``. The lowered level lasts only for the steer. The steer's row records
+it in its ``effort`` column, and the pane prints a line such as
+``(effort xhigh -> high for the steer)`` under the step header. A step at or
+below the floor, or at a level off the ladder, steers at its own effort. The
+no-action watchdog's steer always keeps the step's effort, and Codex never
+lowers. A project can set an agent's levels and floor (see
+:doc:`/configuration`).
+
 A second stuck launch after the steer, by either trigger, is a **stall**. The
 step closes ``exited`` with ``stalled: <trigger>, after a steer``, naming the
 second trigger, and like a timeout it never retries. The steps after it are

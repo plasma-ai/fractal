@@ -30,6 +30,7 @@ __all__ = [
     'test_list_live_trusts_real_state',
     'test_list_live_relabels_crashed_active',
     'test_list_live_reads_booting_idle_as_active',
+    'test_list_judges_the_boot_window_with_one_tmux_listing',
     'test_list_live_confirms_relabels_on_recorded_socket',
     'test_list_heals_a_bare_loop_on_a_blind_host',
     'test_list_renders_config_caps_over_stale_registry',
@@ -177,6 +178,38 @@ def test_list_live_reads_booting_idle_as_active(
     monkeypatch.setattr('fractal.util.tmux.probe', frozenset)
     live = {row['node']: row['status'] for row in parent.list(live=True)}
     assert live[child.branch] == 'idle'
+
+
+def test_list_judges_the_boot_window_with_one_tmux_listing(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decorated listing judges every row's boot window with one tmux listing.
+
+    The census runs often over many idle nodes, so the ``starting`` verdict
+    and its ``detail`` share one session listing instead of a probe per
+    row. An undecorated listing -- the one short-name resolution reads --
+    never looks, so its rows read ``starting`` as unknown, never as false.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    # the boot window: .status still 'idle', the tmux session already live
+    child.status_set('idle')
+    calls: list[Optional[str]] = []
+
+    def probe(socket: Optional[str] = None) -> frozenset[str]:
+        calls.append(socket)
+        return frozenset({child.tmux_session})
+
+    monkeypatch.setattr('fractal.util.tmux.probe', probe)
+    rows = {row['node']: row for row in parent.list(decorated=True)}
+    row = rows[child.branch]
+    assert (row['status'], row['detail'], row['starting']) == ('idle', 'starting', True)
+    assert len(calls) == 1, calls
+    # an undecorated listing never looks
+    calls.clear()
+    rows = {row['node']: row for row in parent.list()}
+    assert rows[child.branch]['starting'] is None
+    assert calls == []
 
 
 def test_list_live_confirms_relabels_on_recorded_socket(

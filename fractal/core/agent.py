@@ -29,6 +29,7 @@ __all__ = [
     'resolve',
     'register',
     'supported',
+    'lower_effort',
     'Invocation',
     'StreamEvent',
     'StreamResult',
@@ -105,6 +106,36 @@ def command_base(command: str) -> str:
         )
     base_word, *_ = command.split()
     return base_word
+
+
+def lower_effort(effort: str, *, levels: tuple[str, ...], floor: str) -> str:
+    """Return the effort one level below ``effort``, never below ``floor``.
+
+    Args:
+        effort: The effort to lower.
+        levels: The agent's effort levels, lowest first (empty never lowers).
+        floor: The lowest level a lowering may reach.
+
+    Returns:
+        The next level down, or ``effort`` itself when it is at or below
+        ``floor`` or is not one of ``levels``.
+
+    Examples:
+        >>> levels = ('low', 'medium', 'high', 'xhigh', 'max')
+        >>> lower_effort('max', levels=levels, floor='high')
+        'xhigh'
+        >>> lower_effort('high', levels=levels, floor='high')
+        'high'
+        >>> lower_effort('extreme', levels=levels, floor='high')
+        'extreme'
+
+    """
+    if effort not in levels or floor not in levels:
+        return effort
+    index = levels.index(effort)
+    if index <= levels.index(floor):
+        return effort
+    return levels[index - 1]
 
 
 def resolve(name: str, *, root: Optional[pathlib.Path] = None) -> type[Agent]:
@@ -377,6 +408,11 @@ class Agent:
     # empty/None means the vendor-native endpoint; a listed route is
     # validated at the spawn verbs
     providers: tuple[str, ...] = ()
+    # the effort levels a thinking-capped step's steer lowers through, lowest
+    # first (empty never lowers), and the lowest level a lowering reaches;
+    # the project's committed settings override both per agent
+    effort_levels: tuple[str, ...] = ()
+    effort_floor: str = ''
 
     __parser__: type[StreamParser] = StreamParser
 
@@ -1047,6 +1083,21 @@ class Agent:
             def _config_model(self):
                 path = self.config_dir / self.config_file
                 return json.loads(path.read_text(encoding='utf-8')).get('model')
+        """
+        return None
+
+    def config_effort(self: Agent) -> Optional[str]:
+        """Return the effort this agent's own per-node config defaults to."""
+        return self._config_effort()
+
+    def _config_effort(self: Agent) -> Optional[str]:
+        """Hook for parsing the provider config file. Default returns ``None``.
+
+        Override in a backend to read the configured default::
+
+            def _config_effort(self):
+                path = self.config_dir / self.config_file
+                return json.loads(path.read_text(encoding='utf-8')).get('effort')
         """
         return None
 

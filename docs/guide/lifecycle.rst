@@ -80,9 +80,10 @@ Display decorations
 ~~~~~~~~~~~~~~~~~~~
 
 ``fractal node status`` composes the bare status with a qualifier in
-parentheses — ``active (pausing)``, ``exited (<reason>)`` — while
-``fractal node list`` keeps its ``status`` column bare and carries the same
-qualifier in a separate ``detail`` column, with a typed ``end_reason`` column
+parentheses — ``idle (starting)``, ``active (pausing)``,
+``exited (<reason>)`` — while ``fractal node list`` keeps its ``status``
+column bare and carries the same qualifier in a separate ``detail`` column,
+with a typed ``end_reason`` column
 (``goal_met``, ``run_exhausted``, ``final_iteration_failed``, ``cost_budget``,
 ``timeout``, ``setup_abort``, ``crashed``, ``other``, or empty — ``null`` in
 ``--json``
@@ -90,6 +91,12 @@ qualifier in a separate ``detail`` column, with a typed ``end_reason`` column
 status stays bare, and ``list --status`` filters match the bare ``status``
 column. Several qualifiers can stand at once, ``;``-joined:
 
+- ``idle (starting)`` — the boot window: ``start`` has launched the loop and
+  its runtime is live, but the loop has not yet stamped ``active`` after
+  preflight. The status stays ``idle``; the listing marks the row with
+  ``starting`` (``true`` only here, ``null`` when the listing could not
+  look), and ``--live`` reads the row as ``active`` with ``detail``
+  ``starting``.
 - ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)`` — a
   pause, stop, or finish signal is pending on an active node.
 - ``exited (<reason>)`` — the latest run row recorded why it ended; a crash
@@ -399,19 +406,29 @@ The abort takes the agent's whole process tree, not just its process group:
 agent CLIs run tool commands in groups (or sessions) of their own, and every
 one still linked to the agent dies with it. ``kill`` and a step deadline reap
 the same way. Anything still alive after the forced kill is named in the
-command's output, and so is any other process working in the node's worktree
-that is not a node's loop, which is reported but left running. That includes a
-job an earlier tool call left behind under a session leader that has since
-exited (``validate.sh &`` under a ``setsid`` shell that already returned):
-nothing links it to the agent any more, so it is named, never ended. Each line
-names its node. A git operation the abort left unfinished in the worktree — a
-merge, a rebase, an ``index.lock`` — is named too, so it is finished or aborted
-before the node is merged; the resumed step's prompt opens by naming it as
-well. An agent that pauses its own node aborts nothing:
-its step finishes with every tool it started, and the loop parks at its next
-checkpoint. Only if the first read of the process table fails does the abort
-fall back to TERMing every recorded group except the caller's own, so a
+command's output. A git operation the abort left unfinished in the worktree —
+a merge, a rebase, an ``index.lock`` — is named too, so it is finished or
+aborted before the node is merged; the resumed step's prompt opens by naming
+it as well. An agent that pauses its own node aborts nothing: its step
+finishes with every tool it started, and the loop parks at its next
+checkpoint. Only if the first read of the process table fails does the
+abort fall back to TERMing every recorded group except the caller's own, so a
 self-pause from a tool shell in a group of its own then aborts its own step.
+
+A step that ends normally ends no process: any background job outlives its
+step unless the agent ends it. The loop reaps only a step it cuts short — a
+step deadline, the no-progress watchdog, a stream failure, or the crash heal —
+and that reap lands while the step still runs, so it reaches every process
+still linked to the agent. It misses an orphan outside the agent's session: a
+process that left the session and whose parent has since exited, so no parent
+chain leads back to the agent. That covers a double-forked daemon and a job an
+earlier tool call backgrounded under a session leader that has since exited
+(``validate.sh &`` under a ``setsid`` shell that already returned). A job that
+a finished step left behind is outside every later reap. ``pause`` with a step
+in flight and ``kill`` with a recorded process group name such a job in their
+sweep of the node's worktree: any process working there that is not a node's
+loop is reported but left running, each line naming its node. An orphan
+working elsewhere is not named at all. End such a job by hand.
 
 While parked, a node:
 

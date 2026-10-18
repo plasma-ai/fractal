@@ -501,6 +501,20 @@ row, and is surfaced as a notice on a later ``start --continue``.
 
    $ fractal node kill parser --reason "runaway loop"
 
+``pause`` (with a step in flight) and ``kill`` (with a recorded process group)
+also sweep the node's worktree: each process working there outside the reaped
+tree, other than a node's loop, is named on stderr (``Warning: pid <pid> works
+in the worktree of <branch> outside the reaped tree (left running):
+<command>``) and never signaled. The sweep is the only place a leftover job
+comes to light. A step that ends normally ends no process, so any background
+job outlives its step unless the agent ends it, and a job a finished step left
+behind is outside every later reap. The reaps that cut a step short — a step
+deadline, the no-progress watchdog, a stream failure, the crash heal — land
+while the step still runs, and they miss an orphan outside the agent's
+session: a process that left the session and lost its parent, such as a
+double-forked daemon or a job backgrounded under a ``setsid`` shell that has
+since exited. No other command names such a job; end it by hand.
+
 Integration and teardown
 ------------------------
 
@@ -777,12 +791,15 @@ Inspection
 
    $ fractal node status [NODE]
 
-Print the node's current status, possibly decorated: ``active (pausing)``,
-``active (stopping)``, or ``active (finishing)`` when a signal is pending,
-and ``exited (<reason>)`` when the latest run recorded why it ended. The read
-is self-reconciling — a crashed node, ``active`` on record with its loop
-runtime (the tmux session, or a headless or bare loop's recorded process
-group) provably gone, is healed to ``exited`` first.
+Print the node's current status, possibly decorated: ``idle (starting)``
+between ``start`` and the loop's ``active`` stamp after preflight, while the
+loop runtime is already live; ``active (pausing)``, ``active (stopping)``, or
+``active (finishing)`` when a signal is pending; and ``exited (<reason>)``
+when the latest run recorded why it ended. The status itself stays ``idle``
+through that boot window. The read is self-reconciling — a crashed node,
+``active`` on record with its loop runtime (the tmux session, or a headless or
+bare loop's recorded process group) provably gone, is healed to ``exited``
+first.
 
 .. code-block:: console
 
@@ -831,12 +848,13 @@ output.
 List a node's **descendants** — the listing never includes the target's own
 row (use ``status`` for that). Columns, in order: ``status``, ``detail``,
 ``node``, ``title``, ``max_cost``, ``spend``, ``max_depth``, ``max_children``,
-``max_descendants``, ``last``, ``end_reason``.
+``max_descendants``, ``last``, ``end_reason``, ``starting``.
 
 ``status`` is always the bare lifecycle word; every qualifier rides
-``detail``, which composes (``;``-joined) any of: a pending signal
-(``pausing``/``stopping``/``finishing``), an ``exited`` run's recorded end
-reason, ``run exhausted: <reason>`` on a ``completed`` run that ended on its
+``detail``, which composes (``;``-joined) any of: ``starting`` for a node in
+its boot window (a live loop runtime, ``active`` not yet stamped), a pending
+signal (``pausing``/``stopping``/``finishing``), an ``exited`` run's recorded
+end reason, ``run exhausted: <reason>`` on a ``completed`` run that ended on its
 iteration cap and ``final iteration failed`` on a drained finish whose last
 iteration died (a clean drained finish stays bare), ``orphaned`` for a
 registered node whose worktree is gone, ``model drop`` for an unresolved
@@ -849,7 +867,12 @@ a closed vocabulary naming a settled row's landing: ``goal_met``,
 closed by the crash heal, whose ``detail`` reads ``crashed: loop runtime gone,
 healed by reconcile``), ``final_iteration_failed``, or ``other`` (recorded but
 unmapped) on an ``exited`` row; null when no reason is recorded (a run that
-never landed) and on every other status. ``spend``
+never landed) and on every other status. ``starting`` is on every row: true
+only in the boot window, where the row's ``status`` stays ``idle`` (``active``
+under ``--live``) and ``detail`` reads ``starting``; false otherwise; and null
+(unknown) when the listing could not look — tmux gave no answer and the node
+records no runtime of its own — so null never means "not starting". One tmux
+listing judges every row. ``spend``
 is the current run's subtree cost at the scope ``max_cost`` is enforced at,
 blank for a node that has never run. Blank limit columns mean unlimited.
 ``last`` is the age of each node's newest activity, with a ``!`` suffix
@@ -877,7 +900,8 @@ unbracketed.
 ``--live``
    Trust each child's real state: relabel a crashed active node — its loop
    runtime (the tmux session, or a headless or bare loop's recorded process
-   group) provably gone — as ``exited``, a booting idle node as ``active``,
+   group) provably gone — as ``exited``, a booting idle node as ``active``
+   with a ``starting`` detail (so a finishing ancestor's drain waits for it),
    and drop nodes whose worktree is gone. This view is read-only; the plain
    listing instead persists the crash heal and flags worktree-less rows as
    ``orphan`` (or ``<status> (orphaned)`` when settled).
