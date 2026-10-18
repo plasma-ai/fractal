@@ -279,12 +279,16 @@ may include breaking changes, each listed under a Breaking heading.
   recorded, with no estimate for the missing part, and its row's metadata gains
   `; partly unpriced`; the loop prints a `Warning:` line, and
   `fractal node cost spent` and `breakdown` disclose how many such steps they
-  count. A launch killed while a tool runs, and a workflow sub-agent ending on
-  its `StructuredOutput` result, are whole, and a launch whose result frame
-  named its cost counts only what follows the result. A reply the loop ends at
-  the output cap books the usage the stream recorded for it, so a thinking-cap
-  kill reads as whole unless the stream reported no usage. A killed Codex step
-  still records no cost.
+  count. Anything else the figure leaves out marks it too: a malformed usage
+  count or tool id, an unreadable sub-agent transcript, and, with no result
+  frame, a missing session transcript or a failed settle. A launch killed while
+  a tool runs (some of a reply's parallel calls still out), and a workflow
+  sub-agent ending on a clean `StructuredOutput` result, are whole, and a launch
+  whose result frame named its cost counts only what follows the result, booked
+  once from the transcript rather than also from the stream. A reply the loop
+  ends at the output cap books the usage the stream recorded for it, so a
+  thinking-cap kill reads as whole unless the stream reported no usage. A killed
+  Codex step still records no cost.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the

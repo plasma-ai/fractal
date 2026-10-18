@@ -175,27 +175,45 @@ with `launch partly unpriced: <reason>`. The ledger has no estimate column:
 `fractal node cost` reports the figure like any other.
 
 A launch's record can **leave part of a reply out**, so its figure is partial.
-The settle reads that from how any of its transcripts ends its window:
+The rule is that anything left out of the figure marks the step. The settle
+reads it from each transcript it opens:
 
-- on a `user` turn that no reply follows (a tool result, a prompt, Claude's
-  continuation past the output cap, or `[Request interrupted by user]`): the
-  reply's request was in flight when the launch died;
-- on a reply whose final line has a null `stop_reason`: the line was written
-  before the reply completed. A killed reply ends this way, and so can a
-  completed sub-agent whose last line Claude Code wrote mid-stream (seen on
-  2.1.286 to 2.1.296): its final text is there, but its usage is partial, its
-  `output_tokens` a handful on a full answer. Both leave part of a reply's spend
-  out of the record.
+- a reply whose final line has a null `stop_reason`, anywhere in the window: the
+  line was written before the reply completed. A killed reply ends this way, and
+  so can a completed sub-agent whose last line Claude Code wrote mid-stream
+  (seen on 2.1.286 to 2.1.299): its final text is there, but its usage is
+  partial, its `output_tokens` a handful on a full answer;
+- a window whose last turn is a `user` turn whose reply's request was in flight:
+  a prompt, Claude's continuation past the output cap,
+  `[Request interrupted by user]`, or the result of the newest reply's **last**
+  open tool call. Claude writes each result of a parallel call as its own user
+  turn, so a result while other calls of the same reply still run is a kill
+  during a tool call;
+- an entry it cannot read whole: a reply's usage or a tool id of the wrong
+  shape, or a usage count that is not a number (`_usage_cost` prices it as
+  nothing and says so, rather than raising);
+- a sub-agent transcript it cannot read, and, on a launch with no result figure,
+  a missing or unreadable session transcript or a settle that raises (the loop
+  marks the last itself).
 
-Two endings are whole. A kill during a tool call ends on the completed reply
-that called the tool. A workflow sub-agent ends by design on the result of its
-`StructuredOutput` call (a user turn whose `tool_result`s all answer
-`StructuredOutput` calls seen earlier in the same transcript), with no reply
-after it. Entries of types other than `user` and `assistant` are Claude's
-bookkeeping and never end a window. With `after`, the result frame's figure
-already covers the spend before it, so only a window whose last turn is stamped
-after that instant counts; a completed launch with a partial line or an
-interrupted sub-agent before its result reads as whole.
+Some endings are whole. A kill during a tool call ends on the completed reply
+that called the tool, or on the results of some of its calls. A workflow
+sub-agent ends by design on the result of its `StructuredOutput` call (a user
+turn whose `tool_result`s all answer `StructuredOutput` calls seen earlier in
+the same transcript), with no reply after it -- unless the result is an error,
+after which the agent retries. Entries of types other than `user` and
+`assistant` are Claude's bookkeeping and never end a window. With `after`, the
+result frame's figure already covers the spend before it, so only a partial
+reply, an unanswered last turn or a malformed entry stamped after that instant
+counts; a completed launch with a partial line or an interrupted sub-agent
+before its result reads as whole, and a missing session transcript leaves out no
+spend the settle knows of.
+
+Past a result frame the transcript is the one source for further spend: the
+parser stops pricing sub-agent frames once its figure is final (only a new
+top-level reply reopens it), since Claude Code also streams a background
+sub-agent's replies with `parent_tool_use_id` set, and the settle adds them from
+the transcript.
 
 The step books what was recorded, with no estimate for the missing part:
 `_settle_cost` returns a `Settlement` (`cost`, `cut_off`), `Agent.settle_cost`
@@ -220,9 +238,11 @@ top-level reply's usage from its `message_start`, overlaid with the closing
 `message_delta`'s usage, and when the delta reported a figure the `thinking_cap`
 event carries the reply in the transcript's message shape. The loop passes it to
 the settle as `replies`, which closes the session transcript's window with it at
-that usage -- so the step books it and reads as whole. Only a delta with no
-usage leaves the step partly unpriced. A cut-off Codex step stays `NULL`: its
-usage window accepts exactly one completed turn and it has no settle path.
+that usage -- so the step books it and reads as whole, unless Claude wrote the
+reply and a turn after it (its continuation, a few milliseconds later), which
+then ends the window as written. Only a delta with no usage leaves the reply
+itself unpriced. A cut-off Codex step stays `NULL`: its usage window accepts
+exactly one completed turn and it has no settle path.
 
 ## Rollups and the per-run subtree
 
