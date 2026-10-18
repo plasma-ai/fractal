@@ -727,7 +727,15 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``core.excludesFile``. Whenever step 3 left an estate file unstaged or the
    ignore warning fired, the command's last line repeats the counts (``Held
    out: N estate file(s) not staged; N path(s) ignored``, non-zero parts
-   only), after any hook or gate output and on a no-op commit too.
+   only), after any hook or gate output and on a no-op commit too. A third
+   warning names each staged addition at the worktree root whose top-level
+   name matches an entry of the node's own folder, when the project had no
+   top-level path of that name at the node's base (its fork commit) —
+   ``plans/x.md`` beside ``.fractal/<node>/plans``, say — since a node file
+   was likely written at the worktree root by mistake (``Warning: staged root
+   path(s) shadow entries of the node's own folder; ...`` then one
+   ``plans/x.md (shadows .fractal/<node>/plans)`` line per path). Those paths
+   are staged and committed, so they are not counted in ``Held out``.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
    caller's run/iteration/step lineage. "Nothing staged" is a tolerated
    no-op.

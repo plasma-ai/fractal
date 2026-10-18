@@ -98,6 +98,12 @@ may include breaking changes, each listed under a Breaking heading.
   covers retried, resumed, and steered launches too; a squash merge points at
   `fractal node merge <child> --continue`, and a clean worktree's prompt is
   unchanged.
+- `fractal commit` warns, without refusing, when it stages a new path at the
+  worktree root whose top-level name matches an entry of the node's own folder
+  (`plans/x.md` beside `.fractal/<node>/plans`) and the project had no top-level
+  path of that name when the node started. The warning names each path and the
+  entry it shadows, as a node file likely written at the worktree root by
+  mistake; a force commit folds it into its body.
 
 ### Changed
 
