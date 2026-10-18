@@ -1715,8 +1715,12 @@ def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(
         {'output_tokens': 900},
         text='one\u2028two\u0085three',
     )
-    cost = claude._transcript_cost(early + final, started=_OPENED, ended=_CLOSED)
-    assert cost == pytest.approx(900 * 1.5e-5)
+    replies, _ = claude._transcript_window(
+        early + final,
+        started=_OPENED,
+        ended=_CLOSED,
+    )
+    assert replies['msg_a'][0] == {'output_tokens': 900}
 
 
 # ------ helpers
@@ -1849,10 +1853,18 @@ def _continuation_frame(*, parent: Optional[str] = None) -> dict[str, Any]:
     }
 
 
-def _transcript_line(message_id: str, usage: dict[str, int], *, text: str = '') -> str:
+def _transcript_line(
+    message_id: str,
+    usage: dict[str, Any],
+    *,
+    text: str = '',
+    stop_reason: Optional[str] = 'end_turn',
+) -> str:
     """Return one claude transcript line of a reply, stamped inside the window.
 
-    Written the way claude writes it: non-ASCII text raw, never escaped.
+    Written the way claude writes it: non-ASCII text raw, never escaped. A
+    ``stop_reason`` of ``None`` is a line written before its reply
+    completed.
     """
     entry = {
         'type': 'assistant',
@@ -1862,6 +1874,7 @@ def _transcript_line(message_id: str, usage: dict[str, int], *, text: str = '') 
             'id': message_id,
             'role': 'assistant',
             'content': [{'type': 'text', 'text': text}],
+            'stop_reason': stop_reason,
             'usage': usage,
         },
     }

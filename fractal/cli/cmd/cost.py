@@ -170,6 +170,15 @@ def cost_spent(app: typer.Typer) -> typer.Typer:
                     f'{unpriced} unpriced step{s} (NULL cost) excluded',
                     err=True,
                 )
+            # and the steps whose figure leaves out a reply cut off mid-way
+            partly = node.cost.partly_unpriced(**kwargs, max_depth=max_depth)
+            if partly:
+                s = 's' if partly != 1 else ''
+                typer.echo(
+                    f'{partly} partly unpriced step{s} (cut off mid-reply)'
+                    ' counted at recorded spend',
+                    err=True,
+                )
 
     return app
 
@@ -250,6 +259,18 @@ def cost_breakdown(app: typer.Typer) -> typer.Typer:
             s = 's' if unpriced != 1 else ''
             typer.echo(
                 f'{unpriced} unpriced step{s} (NULL cost) excluded',
+                err=True,
+            )
+        # and the steps whose figure leaves out a reply cut off mid-way
+        partly = node.cost.partly_unpriced(
+            run_id=run_id,
+            max_depth=max_depth,
+        )
+        if partly:
+            s = 's' if partly != 1 else ''
+            typer.echo(
+                f'{partly} partly unpriced step{s} (cut off mid-reply)'
+                ' counted at recorded spend',
                 err=True,
             )
 

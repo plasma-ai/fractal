@@ -32,6 +32,7 @@ __all__ = [
     'Invocation',
     'StreamEvent',
     'StreamResult',
+    'Settlement',
     'StreamParser',
     'Agent',
     'seed_agents',
@@ -300,6 +301,16 @@ class StreamResult:
     #   step row keeps only the last, so a mid-stream substitution that
     #   recovers before the stream ends is visible here alone
     models: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class Settlement:
+    """A launch's spend as its provider's own usage record prices it."""
+
+    # USD, the launch's own spend (None = the record priced nothing)
+    cost: Optional[float]
+    # the record shows a reply cut off mid-way, whose spend it never holds
+    cut_off: bool = False
 
 
 class StreamParser:
@@ -966,7 +977,7 @@ class Agent:
         started: str,
         ended: str,
         after: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Price a launch's spend past its recorded figure.
 
         A launch killed before its closing cost fact (a deadline, a stall,
@@ -993,32 +1004,37 @@ class Agent:
             after: The instant the launch's result frame named its cost
                 (ISO 8601 UTC), or ``None`` when none did.
 
+        Returns:
+            Whether the record shows a reply cut off mid-way: the step
+            books the spend recorded, which leaves that reply out.
+
         """
         rows = self.node.db.read('steps', where={'step_id': step_id}, limit=1)
         if not rows or rows[0]['session'] is None:
-            return
-        cost = self._settle_cost(
+            return False
+        settled = self._settle_cost(
             rows[0]['session'],
             started=started,
             ended=ended,
             after=after,
         )
-        if cost is None:
-            return
+        if settled.cost is None:
+            return settled.cut_off
         # a launch can't have negative spend (as in record_cost)
-        cost = max(0.0, cost)
+        cost = max(0.0, settled.cost)
         recorded = rows[0]['cost']
         if after is not None:
             # the result's figure plus the spend past it
             if not cost:
-                return
+                return settled.cut_off
             cost += recorded or 0.0
         elif recorded is not None and recorded >= cost:
-            return
+            return settled.cut_off
         # book the launch's own figure past record_cost's thread settle,
         # firing the record event with exactly what lands
         self.on_record_cost(cost=cost, final=False)
         self._record_cost(step_id, cost, final=False)
+        return settled.cut_off
 
     def _settle_cost(
         self: Agent,
@@ -1027,22 +1043,26 @@ class Agent:
         started: str,
         ended: str,
         after: Optional[str] = None,
-    ) -> Optional[float]:
+    ) -> Settlement:
         """Hook for pricing a launch's window from the provider's own record.
 
-        Default returns ``None`` (the stream's figure stands). Override in
-        a backend whose provider persists per-message usage, returning the
+        Default prices nothing (the stream's figure stands). Override in a
+        backend whose provider persists per-message usage, returning the
         launch's own spend (per invocation, whatever the backend's
-        ``cost_scope`` -- never a thread total) or ``None`` with the reason
-        logged; with ``after``, only the spend completing after that
+        ``cost_scope`` -- never a thread total), or no cost with the
+        reason logged, and whether the record shows a reply cut off
+        mid-way; with ``after``, only the spend completing after that
         instant::
 
             def _settle_cost(self, session, *, started, ended, after=None):
                 since = after or started
                 usage = provider.usage(session, since=since, until=ended)
-                return _compute_cost(usage, self.model)
+                return Settlement(
+                    cost=_compute_cost(usage, self.model),
+                    cut_off=usage.interrupted,
+                )
         """
-        return None
+        return Settlement(cost=None)
 
     def tracks_cost(self: Agent, model: Optional[str] = None) -> bool:
         """Return whether spend will be recorded.

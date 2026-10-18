@@ -487,6 +487,9 @@ class Loop:
         # must see a substitution the stream recovered from; empty for an
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
+        # this launch's record shows a reply cut off mid-way, so its booked
+        # figure leaves that reply out
+        self._step_partly_unpriced = False
         self._step_limit_seconds = 0
         self._step_ceiling_seconds = 0
         self._step_timeout_effective = self._step_timeout_seconds
@@ -2107,6 +2110,7 @@ class Loop:
                                     status='stopped',
                                     exit_code=0,
                                     metadata=steer_reason,
+                                    partly_unpriced=self._step_partly_unpriced,
                                 )
                             except Exception:
                                 pass
@@ -2314,6 +2318,7 @@ class Loop:
                             status=step_status,
                             exit_code=step_exit_code,
                             metadata=step_reason,
+                            partly_unpriced=self._step_partly_unpriced,
                         )
                         # a step that never reached its launch spent nothing:
                         # stamp the knowable zero so NULL cost stays reserved
@@ -2477,6 +2482,8 @@ class Loop:
         # spent nothing, so its row's cost is a knowable zero -- NULL cost stays
         # reserved for unknowable spend (a kill before the first stream flush)
         self._step_launched = False
+        # nor can a launch that never ran have been cut off mid-reply
+        self._step_partly_unpriced = False
 
         def close(result: StepResult) -> StepResult:
             """Fire the terminal pairing for this step's attribution."""
@@ -3133,7 +3140,7 @@ class Loop:
         if self._step_id is not None:
             after = settled_at if result is not None and result.final else None
             try:
-                agent.settle_cost(
+                self._step_partly_unpriced = agent.settle_cost(
                     step_id=self._step_id,
                     started=launched,
                     ended=fractal.util.time.utc_now(),
@@ -3142,6 +3149,12 @@ class Loop:
             except Exception as error:
                 print(
                     f'Warning: pricing the ended launch failed ({error})',
+                    file=sys.stderr,
+                )
+            if self._step_partly_unpriced:
+                print(
+                    'Warning: the launch was cut off mid-reply; its step'
+                    ' books the spend recorded (partly unpriced)',
                     file=sys.stderr,
                 )
 
@@ -3474,6 +3487,9 @@ class Loop:
         # against the node default, or erased with it)
         saved_model = self._step_model
         saved_served = self._step_served
+        # and its own cut-off verdict over the awaited step's, which that
+        # step's close books
+        saved_partly = self._step_partly_unpriced
         print()
         print(f'--- SYNC ({label}) ---')
         self._step_label = f'SYNC ({label})'
@@ -3536,6 +3552,7 @@ class Loop:
                     status=sync_status,
                     exit_code=sync_exit_code,
                     metadata=sync_reason,
+                    partly_unpriced=self._step_partly_unpriced,
                 )
                 # a sync that never reached its launch spent nothing: stamp the
                 # knowable zero so NULL cost stays reserved for unknowable spend
@@ -3557,6 +3574,7 @@ class Loop:
         self._step_launched = saved_launched
         self._step_model = saved_model
         self._step_served = saved_served
+        self._step_partly_unpriced = saved_partly
         return result, duration, sync_step_id
 
     def _wait_for_children(self: Loop, context: str) -> bool:

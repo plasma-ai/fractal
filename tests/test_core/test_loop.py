@@ -88,6 +88,8 @@ __all__ = [
     'test_killed_claude_launch_prices_from_its_transcript',
     'test_killed_wake_up_after_a_result_prices_from_the_transcript',
     'test_background_spend_after_the_result_is_booked',
+    'test_cut_off_mid_reply_books_recorded_spend_partly_unpriced',
+    'test_kill_during_a_tool_call_is_fully_priced',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_killed_launch_settles_after_dropping_its_group_handle',
     'test_a_settle_never_lowers_the_streamed_figure',
@@ -2615,6 +2617,120 @@ def test_background_spend_after_the_result_is_booked(
     booked = min(rows, key=lambda row: row['step_id'])
     late = _price(background, 'claude-haiku-5')
     assert booked['cost'] == pytest.approx(_RESULT['total_cost_usd'] + late)
+
+
+@pytest.mark.parametrize(
+    argnames='cut',
+    argvalues=[
+        # the reply's request was in flight after a tool result
+        pytest.param('tool result', id='tool-result'),
+        # the reply was written before it completed
+        pytest.param('unfinished reply', id='unfinished-reply'),
+        # a sub-agent's reply was in flight
+        pytest.param('sub-agent', id='sub-agent'),
+    ],
+)
+def test_cut_off_mid_reply_books_recorded_spend_partly_unpriced(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    cut: str,
+) -> None:
+    """A launch killed inside a reply books what was recorded, marked partly unpriced.
+
+    No record holds the cut reply's spend, so the step books the replies
+    its transcripts recorded, with no estimate for the cut one, and its
+    row says the figure is partial -- whichever transcript the cut reply
+    belonged to. A cost flush landing after the close keeps the marker,
+    since the cut reply stays unpriced. The pane warns.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    called = {'input_tokens': 100, 'output_tokens': 900}
+    side = {'input_tokens': 2_000, 'output_tokens': 700}
+    if cut == 'tool result':
+        killed = [
+            _assistant_entry('msg_a', called, stop_reason='tool_use'),
+            _user_entry(),
+        ]
+        recorded = _price(called)
+    elif cut == 'unfinished reply':
+        killed = [_assistant_entry('msg_a', called, stop_reason=None)]
+        recorded = _price(called)
+    else:
+        killed = [
+            _assistant_entry('msg_a', called),
+            _assistant_entry(
+                message_id='msg_side',
+                usage=side,
+                model='claude-haiku-5',
+                stop_reason='tool_use',
+                isSidechain=True,
+                subagent='x',
+            ),
+            _user_entry(isSidechain=True, subagent='x'),
+        ]
+        recorded = _price(called) + _price(side, 'claude-haiku-5')
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1}),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[killed, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; partly unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed_row = min(rows, key=lambda row: row['step_id'])
+    assert killed_row['cost'] == pytest.approx(recorded)
+    # a late flush leaves the marker standing
+    loop_node.record.step_cost(step_id=killed_row['step_id'], cost=recorded)
+    assert _step_rows(loop_node)[0].endswith('; partly unpriced')
+    err = capsys.readouterr().err
+    assert 'Warning: the launch was cut off mid-reply' in err
+
+
+def test_kill_during_a_tool_call_is_fully_priced(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch killed while a tool runs books its replies, with no marker.
+
+    Its last reply called the tool and completed, so its transcript holds
+    every reply the launch paid for, and the ledger reads the figure as
+    whole.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='1s')
+    first = {'input_tokens': 100, 'output_tokens': 900}
+    called = {'input_tokens': 300, 'output_tokens': 50}
+    written = [
+        _assistant_entry('msg_a', first, stop_reason='tool_use'),
+        _user_entry(),
+        _assistant_entry('msg_b', called, stop_reason='tool_use'),
+    ]
+    # the open call holds the idle clock, so only the deadline ends it
+    script = _claude_script(_INIT, _TOOL_START, 'exec sleep 30')
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[written, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first_row, *_ = _step_rows(loop_node)
+    assert first_row == 'PLAN/exited/timed out'
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(first) + _price(called))
+    assert loop_node.cost.partly_unpriced(run_id=killed['run_id']) == 0
 
 
 def test_killed_claude_launch_without_a_transcript_stays_unpriced(
@@ -7346,9 +7462,14 @@ def _assistant_entry(
     usage: dict[str, int],
     *,
     model: str = 'claude-fable-5',
+    stop_reason: Optional[str] = 'end_turn',
     **fields: Any,
 ) -> dict[str, Any]:
-    """Return a claude transcript line of one reply's content block."""
+    """Return a claude transcript line of one reply's content block.
+
+    A ``stop_reason`` of ``None`` is a line written before its reply
+    completed.
+    """
     return {
         'type': 'assistant',
         'isSidechain': False,
@@ -7358,7 +7479,23 @@ def _assistant_entry(
             'model': model,
             'role': 'assistant',
             'content': [{'type': 'text', 'text': ''}],
+            'stop_reason': stop_reason,
             'usage': usage,
+        },
+    }
+
+
+def _user_entry(**fields: Any) -> dict[str, Any]:
+    """Return a claude transcript line of a user turn: a tool's result."""
+    return {
+        'type': 'user',
+        'isSidechain': False,
+        **fields,
+        'message': {
+            'role': 'user',
+            'content': [
+                {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': ''}
+            ],
         },
     }
 

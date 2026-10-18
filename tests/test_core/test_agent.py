@@ -23,6 +23,7 @@ from fractal.core import agent
 from fractal.core.agent import (
     Agent,
     Invocation,
+    Settlement,
     StreamEvent,
     StreamParser,
     StreamResult,
@@ -661,7 +662,11 @@ def test_settle_cost_books_the_launch_figure_whatever_the_scope(
     node = node_with_db
     backend = TrackingAgent(node, 'sample')
     monkeypatch.setattr(backend, 'cost_scope', 'thread')
-    monkeypatch.setattr(backend, '_settle_cost', lambda session, **kwargs: 1.0)
+    monkeypatch.setattr(
+        backend,
+        '_settle_cost',
+        lambda session, **kwargs: Settlement(cost=1.0),
+    )
     run_id = node.record.run_start()
     iter_id = node.record.iter_start(run_id=run_id, iter=1)
     earlier, killed = (
