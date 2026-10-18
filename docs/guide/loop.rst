@@ -166,6 +166,17 @@ A steered relaunch (see `Stuck steps`_) is the one launch built otherwise:
 its whole prompt is the package's ``modes/STALL.md`` alone, rendered with the
 same variables, since its resumed session already holds the step.
 
+Every launch — a retry, a resumed step, a steer, and SYNC included — first
+checks the node's worktree for a git operation left unfinished: a merge, a
+squash merge, a cherry-pick, a revert, a rebase, or a held ``index.lock``.
+When it finds one, the prompt opens with the package's
+``modes/GIT_PENDING.md``, which names each operation and says to finish or
+abort it before any other git operation. A squash merge points at
+``fractal node merge <child> --continue``. git holds ``index.lock`` only
+while a command runs, so the notice names the lock without judging whether
+it is stale and says to remove it only once no git process runs in the
+worktree. A clean worktree adds nothing to the prompt.
+
 On the iteration a resume re-enters, the prompt also ends with an
 unread-inbox digest, appended after rendering (so it is never substituted):
 the twenty highest-priority unread ``inbox`` messages as metadata only —

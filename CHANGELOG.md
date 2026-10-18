@@ -91,6 +91,13 @@ may include breaking changes, each listed under a Breaking heading.
   racing it serialize, the second finds it done; a step that fails leaves the
   database at version 1, readable as before). Steps recorded before the lift
   read a blank effort.
+- Every step launch checks the node's worktree for a git operation left
+  unfinished — a merge, squash merge, cherry-pick, revert, rebase, or held
+  `index.lock` — and, when it finds one, opens the prompt with a notice naming
+  each and saying to finish or abort it before any other git operation. This
+  covers retried, resumed, and steered launches too; a squash merge points at
+  `fractal node merge <child> --continue`, and a clean worktree's prompt is
+  unchanged.
 
 ### Changed
 

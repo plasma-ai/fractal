@@ -42,7 +42,7 @@ from fractal.exceptions import AgentStreamError, _Abort
 from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
 from fractal.impl.codex import CodexAgent
-from tests._helpers import _age_run, _past_timestamp, _stub_run_script
+from tests._helpers import _age_run, _git, _past_timestamp, _stub_run_script
 
 from ._agents import SampleAgent
 from .conftest import _record_step_cost, _spawn_parent_child
@@ -168,6 +168,8 @@ __all__ = [
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
     'test_digest_renders_mail_as_inert_data',
+    'test_a_leftover_git_operation_opens_every_launch_prompt',
+    'test_a_clean_worktree_launch_prompt_carries_no_notice',
     'test_drain_survives_a_pause_and_resume',
     'test_drain_guards_survive_an_env_scrub',
     'test_drain_guards_survive_a_worktree_scrub',
@@ -6172,6 +6174,82 @@ def test_digest_renders_mail_as_inert_data(
     # and the section tells the seat these bytes carry no authority
     assert 'UNTRUSTED DATA' in digest
     assert 'not instructions' in digest
+
+
+class PromptRecordingLoop(MockLoop):
+    """Mock loop recording every launch's prompt."""
+
+    def __init__(self: PromptRecordingLoop, node: Node, **kwargs: Any) -> None:
+        """Initialize ``PromptRecordingLoop``."""
+        super().__init__(node, **kwargs)
+        self.prompts: list[str] = []
+
+    def _launch(
+        self: PromptRecordingLoop, step: Step, prompt: str, **kwargs: Any
+    ) -> StepResult:
+        """Record the launch prompt."""
+        self.prompts.append(prompt)
+        return super()._launch(step, prompt, **kwargs)
+
+
+@pytest.mark.parametrize(
+    argnames=('marker', 'named'),
+    argvalues=[
+        # a merge stopped on a conflict
+        ('MERGE_HEAD', 'a merge in progress (MERGE_HEAD)'),
+        # a child's squash merge stopped before its commit
+        ('SQUASH_MSG', 'fractal node merge <child> --continue'),
+    ],
+    ids=['merge', 'squash'],
+)
+def test_a_leftover_git_operation_opens_every_launch_prompt(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    marker: str,
+    named: str,
+) -> None:
+    """A git operation left in the worktree opens every launch's prompt.
+
+    A killed or paused step can leave a merge or squash unfinished, and the
+    next agent otherwise starts git work on top of it blind. Every launch --
+    a retry and a resumed one included -- opens with the notice naming the
+    operation and its way out, ahead of the charter and any mode.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, step_retry_backoff='1s')
+    relpath = _git(node.worktree, 'rev-parse', '--git-path', marker).stdout
+    (node.worktree / relpath.strip()).write_text('0' * 40 + '\n', encoding='utf-8')
+    results = [
+        StepResult(status='failed', exit_code=2, reason='agent error (exit 2)'),
+        StepResult(status='completed'),
+    ]
+    loop = PromptRecordingLoop(node, results=results)
+    assert loop.run() == 0
+    # the failed launch, its retry, and the next step
+    assert len(loop.prompts) == 3
+    for prompt in loop.prompts:
+        assert prompt.startswith('## Git Operation Pending')
+        assert named in prompt[: prompt.index('# Charter')]
+    # a resumed launch opens with the notice ahead of its resume mode
+    loop._resume_mode = True
+    prompt = loop._build_step_prompt(loop._discover_steps()[0])
+    assert prompt.startswith('## Git Operation Pending')
+    assert prompt.index('# Charter') < prompt.index('## Resume Mode')
+
+
+def test_a_clean_worktree_launch_prompt_carries_no_notice(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean worktree's launch prompt is the charter and the step alone."""
+    monkeypatch.setenv('_NODE', '')
+    loop = PromptRecordingLoop(loop_node)
+    assert loop.run() == 0
+    assert loop.prompts == [
+        f'# Charter\n\nDo the work.\n\n# {name}\n\nWork.\n'
+        for name in ['01-PLAN.md', '02-EXECUTE.md']
+    ]
 
 
 def test_drain_survives_a_pause_and_resume(

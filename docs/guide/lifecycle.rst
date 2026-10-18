@@ -405,7 +405,8 @@ exited (``validate.sh &`` under a ``setsid`` shell that already returned):
 nothing links it to the agent any more, so it is named, never ended. Each line
 names its node. A git operation the abort left unfinished in the worktree — a
 merge, a rebase, an ``index.lock`` — is named too, so it is finished or aborted
-before the node is merged. An agent that pauses its own node aborts nothing:
+before the node is merged; the resumed step's prompt opens by naming it as
+well. An agent that pauses its own node aborts nothing:
 its step finishes with every tool it started, and the loop parks at its next
 checkpoint. Only if the first read of the process table fails does the abort
 fall back to TERMing every recorded group except the caller's own, so a
