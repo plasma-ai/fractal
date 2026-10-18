@@ -4017,7 +4017,8 @@ def test_drain_wait_sync_failure_keeps_completed_with_note(repo: dict) -> None:
     silently swallowing it would hide a rotting node (e.g. expired
     credentials failing every wait SYNC), so the row's metadata records
     ``sync failed (exit N)`` -- and the stderr snapshot lands under
-    ``tmp/err/`` like any failed launch.
+    ``tmp/err/`` like any failed launch. No transcript prices the failed
+    launch, so its unknown spend is marked ``unpriced`` too.
     """
     node = _make_node(repo, 'fwsyncfail', detached=False, sync=True, steps=_GATE_STEPS)
     worktree = node['worktree']
@@ -4046,7 +4047,7 @@ def test_drain_wait_sync_failure_keeps_completed_with_note(repo: dict) -> None:
         calls, result = _finish_wait_result(proc, capture, log)
 
     # every drain-wait SYNC row (step 0) keeps the lenient completed/0 close,
-    # with the failure named in its metadata
+    # with the failure and its unpriced spend named in its metadata
     rows = (
         _run(
             worktree,
@@ -4061,7 +4062,8 @@ def test_drain_wait_sync_failure_keeps_completed_with_note(repo: dict) -> None:
         .splitlines()[1:]
     )
     assert rows, (calls, result.stdout)
-    assert all(row == 'completed/0/sync failed (exit 7)' for row in rows), rows
+    note = 'completed/0/sync failed (exit 7); unpriced'
+    assert all(row == note for row in rows), rows
     # the failed SYNC's stderr snapshot lands like any failed launch's
     run_id = (
         _run(

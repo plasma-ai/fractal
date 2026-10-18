@@ -10,6 +10,7 @@ launches with stubbed agents -- lives in ``test_cli/test_run_modes.py``.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -108,6 +109,8 @@ __all__ = [
     'test_a_settle_never_lowers_the_streamed_figure',
     'test_a_failed_settle_leaves_the_killed_launch_as_booked',
     'test_every_kill_prices_the_launch_from_its_transcript',
+    'test_resumed_launch_books_only_its_own_spend',
+    'test_unsettled_result_figure_books_the_launch_record_instead',
     'test_agent_launch_failure_books_a_failed_step',
     'test_setup_tolerates_non_utf8_output',
     'test_unsupported_provider_frontmatter_refuses_the_step',
@@ -466,6 +469,11 @@ _RATE_KEYS = {
     'cache_read_input_tokens': 'cache_read_input_token_cost',
     'cache_creation_input_tokens': 'cache_creation_input_token_cost',
 }
+
+# one live claude session's saved totals across continuous steps: each
+# launch's result frame named the session's total so far, and the launch's
+# own spend is the growth
+_SAVED_TOTALS = (0.5483, 0.6520, 0.7091, 0.7663)
 
 
 def _echo(frame: dict[str, Any]) -> str:
@@ -3462,6 +3470,172 @@ def test_every_kill_prices_the_launch_from_its_transcript(
     rows = loop_node.db.read('steps', where={'node': loop_node.branch})
     killed = min(rows, key=lambda row: row['step_id'])
     assert killed['cost'] == pytest.approx(_price(usage))
+
+
+@pytest.mark.parametrize(
+    argnames=('mode', 'saves', 'outcomes'),
+    argvalues=[
+        # a second step continues the first's session
+        pytest.param(
+            'continuous',
+            True,
+            ['PLAN/completed/', 'EXECUTE/completed/'],
+            id='continuous',
+        ),
+        # a SYNC before each step continues the session too
+        pytest.param(
+            'sync',
+            True,
+            [
+                'SYNC/completed/',
+                'PLAN/completed/',
+                'SYNC/completed/',
+                'EXECUTE/completed/',
+            ],
+            id='sync',
+        ),
+        # a resumed step stalls, and its steer resumes the session again
+        pytest.param(
+            'steer',
+            True,
+            [
+                'PLAN/completed/',
+                'EXECUTE/stopped/steered: no action for 1s',
+                'EXECUTE/completed/steer',
+            ],
+            id='steer',
+        ),
+        # an older claude saves no total, so each result is the launch's own
+        pytest.param(
+            'continuous',
+            False,
+            ['PLAN/completed/', 'EXECUTE/completed/'],
+            id='no-saved-total',
+        ),
+    ],
+)
+def test_resumed_launch_books_only_its_own_spend(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    saves: bool,
+    outcomes: list[str],
+) -> None:
+    """A launch resuming a Claude session books its own spend, not the session's.
+
+    Claude Code saves a session's running total to its transcript as each
+    launch exits, and a resume counts on from it, so a result frame names
+    the session's total so far. Each step books that figure less the total
+    saved before its launch: the first launch books its result whole, and
+    a continuous step, a steer and a SYNC that resume book their growth --
+    no running total reaches the ledger. A resumed launch killed before its
+    result is priced from its own transcript window, as any killed launch
+    is. With no saved total, each result names the launch's own spend and
+    books whole.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, sync=mode == 'sync')
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    totals = _SAVED_TOTALS[: len(outcomes)]
+    spends = [totals[0], *(late - early for early, late in itertools.pairwise(totals))]
+    # each result names the session's total so far when claude saves one at
+    # exit, else the launch's own spend
+    scripts = []
+    for total, spend in zip(totals, spends):
+        if saves:
+            result = {**_RESULT, 'total_cost_usd': total}
+            saved = _save_cost_state(session, total)
+            scripts.append(_claude_script(_INIT, result, saved))
+        else:
+            scripts.append(_claude_script(_INIT, {**_RESULT, 'total_cost_usd': spend}))
+    transcripts = None
+    if mode == 'steer':
+        # the resumed step stalls after one reply, its total so far saved
+        reply = {'input_tokens': 100, 'output_tokens': 900}
+        scripts[1] = _claude_script(
+            _INIT,
+            _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1}),
+            _save_cost_state(session, totals[1]),
+            'exec sleep 30',
+        )
+        transcripts = [[], [_assistant_entry('msg_a', reply)], []]
+        spends[1] = _price(reply)
+    agent = scripted_claude(scripts, transcripts)
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == outcomes
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == pytest.approx(spends)
+    # every result figure flushed as the launch's own spend
+    results = [
+        spend for spend, outcome in zip(spends, outcomes) if 'stopped' not in outcome
+    ]
+    assert [cost for cost, final in agent.flushed if final] == pytest.approx(results)
+
+
+@pytest.mark.parametrize(
+    argnames=('saved', 'figure', 'priced'),
+    argvalues=[
+        # a zeroed result frame names less than the session saved
+        pytest.param(_SAVED_TOTALS[0], 0.0, True, id='below-the-saved-total'),
+        # the saved total is no number
+        pytest.param(f'{_SAVED_TOTALS[0]}', _SAVED_TOTALS[1], True, id='unreadable'),
+        # a zeroed result frame, and a transcript that prices nothing either
+        pytest.param(_SAVED_TOTALS[0], 0.0, False, id='nothing-priced'),
+    ],
+)
+def test_unsettled_result_figure_books_the_launch_record_instead(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    saved: Any,
+    figure: float,
+    priced: bool,
+) -> None:
+    """A resumed launch's result figure its saved total cannot settle is refused.
+
+    With the session's saved total unreadable, or above the figure the
+    result names, the figure is never booked, whole or less the total: the
+    step books what its own transcript window prices, as a killed launch
+    does, marked partly unpriced. A window that prices nothing leaves the
+    completed step's cost unknown, marked unpriced and counted as such.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    first = _claude_script(
+        _INIT,
+        {**_RESULT, 'total_cost_usd': _SAVED_TOTALS[0]},
+        _save_cost_state(session, saved),
+    )
+    # the resumed launch streams its reply's first frame, then the result
+    reply = {'input_tokens': 100, 'output_tokens': 900}
+    frames: list[Any] = [_INIT]
+    written: list[dict[str, Any]] = []
+    if priced:
+        frames.append(
+            _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1})
+        )
+        written.append(_assistant_entry('msg_a', reply))
+    resumed = _claude_script(*frames, {**_RESULT, 'total_cost_usd': figure})
+    agent = scripted_claude([first, resumed], [[], written])
+    ScriptedLoop(loop_node, agent).run()
+    marker = 'partly unpriced' if priced else 'unpriced'
+    assert _step_rows(loop_node) == ['PLAN/completed/', f'EXECUTE/completed/{marker}']
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    resumed_row = max(rows, key=lambda row: row['step_id'])
+    if priced:
+        assert resumed_row['cost'] == pytest.approx(_price(reply))
+    else:
+        assert resumed_row['cost'] is None
+        assert loop_node.cost.unpriced(run_id=resumed_row['run_id']) == 1
+    # only the first launch's result figure ever reached the ledger
+    assert [cost for cost, final in agent.flushed if final] == [_SAVED_TOTALS[0]]
+    err = capsys.readouterr().err
+    assert "Warning: the launch's result figure could not be settled" in err
 
 
 def test_agent_launch_failure_books_a_failed_step(
@@ -8186,6 +8360,42 @@ def _append_entry(path: pathlib.Path, entry: dict[str, Any]) -> str:
         "    handle.write(json.dumps(entry) + '\\n')\n"
     )
     return shlex.join([sys.executable, '-c', code, f'{path}', json.dumps(entry)])
+
+
+def _save_cost_state(path: pathlib.Path, total: Any) -> str:
+    """Return the shell command saving a session's total, as claude does at exit.
+
+    The record is real-shaped (claude 2.1.300): the session's running total
+    and the per-model usage behind it, under its session (``SID``).
+    """
+    state = {
+        'type': 'cost-state',
+        'sessionId': 'SID',
+        'totalCostUSD': total,
+        'totalAPIDuration': 5780,
+        'totalAPIDurationWithoutRetries': 5779,
+        'totalToolDuration': 227,
+        'totalLinesAdded': 0,
+        'totalLinesRemoved': 0,
+        'totalDuration': 5972,
+        'startTime': 1792304015631,
+        'modelUsage': {
+            'claude-fable-5': {
+                'inputTokens': 154,
+                'outputTokens': 5933,
+                'thinkingTokens': 5437,
+                'cacheReadInputTokens': 359431,
+                'cacheCreationInputTokens': 23408,
+                'webSearchRequests': 0,
+                'costUSD': total,
+            },
+        },
+        'hasUnknownModelCost': False,
+    }
+    folder = shlex.quote(f'{path.parent}')
+    target = shlex.quote(f'{path}')
+    line = shlex.quote(json.dumps(state))
+    return f"mkdir -p {folder}; printf '%s\\n' {line} >> {target}"
 
 
 def _assistant_entry(

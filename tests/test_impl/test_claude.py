@@ -55,6 +55,7 @@ __all__ = [
     'test_stream_records_full_per_invocation_cost',
     'test_stream_truncated_records_accumulated_cost',
     'test_stream_reopens_a_settled_cost_at_a_reply_after_its_result',
+    'test_stream_books_a_resumed_launchs_figures_less_its_baseline',
     'test_stream_survives_missing_pricing_cache',
     'test_invocation_modes_build_the_pinned_argv_claude',
     'test_invocation_honors_command_model_budget_and_settings',
@@ -74,6 +75,7 @@ __all__ = [
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
     'test_settle_marks_a_record_missing_part_of_a_reply',
     'test_settle_marks_an_entry_it_cannot_read_whole',
+    'test_cost_baseline_is_the_total_a_resume_restores',
 ]
 
 # claude pricing with all four Anthropic bucket rates distinct, so a bucket
@@ -961,10 +963,11 @@ def test_stream_detached_keeps_session_unpersisted_claude(node_with_db: Node) ->
 
 
 def test_stream_records_full_per_invocation_cost(node_with_db: Node) -> None:
-    """Claude's figure is per-invocation, so it lands as-is (no delta).
+    """A figure streamed with no baseline lands as-is (no ledger delta).
 
     Even with a prior step sharing the session, the cost is not reduced --
-    a cumulative-delta subtraction would be wrong for ``'call'`` scope.
+    ``'call'`` scope never settles against sibling rows; what a resumed
+    launch's figure carries over comes off through its baseline instead.
     """
     node = node_with_db
     backend = ClaudeAgent(node, 'claude')
@@ -984,7 +987,8 @@ def test_stream_records_full_per_invocation_cost(node_with_db: Node) -> None:
     backend.stream(_lines(frames), step_id=step_id)
     row = node.db.read('steps', where={'step_id': step_id})[0]
     # recorded as-is (0.05), NOT 0.05 - 0.10 (a cumulative-delta subtraction
-    # would be wrong here -- claude's figure is per-invocation)
+    # would be wrong here -- a baseline is the session's saved total, never
+    # the ledger's rows)
     assert row['cost'] == pytest.approx(0.05)
 
 
@@ -1044,6 +1048,71 @@ def test_stream_reopens_a_settled_cost_at_a_reply_after_its_result(
     with _BACKGROUND_WAIT.open(encoding='utf-8') as file:
         lines = list(itertools.islice(file, count))
     assert backend.stream(lines).final is final
+
+
+@pytest.mark.parametrize(
+    argnames=('baseline', 'totals', 'settled'),
+    argvalues=[
+        # the saved total comes off each result's running total
+        pytest.param(0.5, (0.55, 0.58), True, id='settled'),
+        # an unreadable saved total refuses every figure
+        pytest.param(None, (0.55, 0.58), False, id='unreadable'),
+        # a zeroed figure below the saved total refuses it and every later one
+        pytest.param(0.5, (0.0, 0.58), False, id='below-the-baseline'),
+    ],
+)
+def test_stream_books_a_resumed_launchs_figures_less_its_baseline(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    baseline: Optional[float],
+    totals: tuple[float, float],
+    settled: bool,
+) -> None:
+    """A resumed launch's result figures book less the total its session saved.
+
+    Claude counts a resumed launch's result figure on from the session's
+    saved total, so the stream takes the baseline off each one, and a reply
+    after a result builds on the launch's own figure. A figure the baseline
+    cannot settle is refused, and every later one with it: the result
+    names no cost and says so, and the running figure stays the stream's
+    own estimate.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    node = node_with_db
+    backend = _TrackingClaudeAgent(node, 'claude')
+    (step_id,) = _steps(node, 1)
+    first, second = totals
+    frames = [
+        {'type': 'system', 'subtype': 'init', 'session_id': 's'},
+        {'type': 'assistant', 'message': {'id': 'msg_a', 'usage': _USAGE_FIRST}},
+        {'type': 'result', 'subtype': 'success', 'total_cost_usd': first},
+        # claude wakes the agent once background work ends, for a new reply
+        {'type': 'assistant', 'message': {'id': 'msg_b', 'usage': _USAGE_SECOND}},
+        {'type': 'result', 'subtype': 'success', 'total_cost_usd': second},
+    ]
+    events: list[Any] = []
+    result = backend.stream(
+        _lines(frames),
+        step_id=step_id,
+        model='claude-fable-5',
+        render=events.append,
+        baseline=baseline,
+    )
+    results = [event for event in events if event.kind == 'result']
+    if settled:
+        assert baseline is not None
+        own = first - baseline
+        assert backend.flushed == pytest.approx(
+            [_USAGE_FIRST_COST, own, own + _USAGE_SECOND_COST, second - baseline]
+        )
+        assert [event.refused for event in results] == [False, False]
+    else:
+        estimate = _USAGE_FIRST_COST + _USAGE_SECOND_COST
+        assert backend.flushed == pytest.approx([_USAGE_FIRST_COST, estimate])
+        assert [(event.cost, event.refused) for event in results] == [(None, True)] * 2
+    assert result.final is settled
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(backend.flushed[-1])
 
 
 def test_stream_survives_missing_pricing_cache(
@@ -1870,6 +1939,74 @@ def test_settle_marks_an_entry_it_cannot_read_whole(
     assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + 50 * 3e-6)
 
 
+@pytest.mark.parametrize(
+    argnames=('saved', 'provider', 'baseline'),
+    argvalues=[
+        # no transcript yet
+        pytest.param(None, None, 0.0, id='no-transcript'),
+        # an older claude saves no total
+        pytest.param([], None, 0.0, id='none-saved'),
+        # each launch saves the session's total at exit; the latest stands
+        pytest.param([('own', 0.5483), ('own', 0.6520)], None, 0.6520, id='latest'),
+        # another session's record is not the one a resume restores
+        pytest.param(
+            [('own', 0.5483), ('other', 9.0)],
+            None,
+            0.5483,
+            id='another-session',
+        ),
+        # a total that is no number cannot be read
+        pytest.param([('own', 0.5483), ('own', 'n/a')], None, None, id='unreadable'),
+        # routed, the saved usage table prices through the chain
+        pytest.param(
+            [('own', 0.5483)],
+            'openrouter',
+            _USAGE_FIRST_COST,
+            id='routed',
+        ),
+    ],
+)
+def test_cost_baseline_is_the_total_a_resume_restores(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    saved: Optional[list[tuple[str, Any]]],
+    provider: Optional[str],
+    baseline: Optional[float],
+) -> None:
+    """A resumed session carries the latest total claude saved for it.
+
+    Claude Code saves a ``cost-state`` record to the session's transcript
+    as each launch exits, and a resume restores the latest one naming the
+    session. Routed, the result figure prices the record's usage table
+    through the alias chain, so the baseline does too. A record whose
+    total cannot be read carries an unknown amount, and says why.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    caplog.set_level(logging.WARNING)
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude', provider=provider)
+    session = str(uuid.uuid4())
+    if saved is not None:
+        content = _transcript_line('msg_a', _USAGE_FIRST)
+        for owner, total in saved:
+            state = _cost_state(session if owner == 'own' else str(uuid.uuid4()), total)
+            content += json.dumps(state) + '\n'
+            content += _transcript_line('msg_b', _USAGE_SECOND)
+        transcript = pathlib.Path(backend.transcript(session)['path'])
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(content, encoding='utf-8')
+    if baseline is None:
+        assert backend.cost_baseline(session) is None
+        (warning,) = [record.getMessage() for record in caplog.records]
+        assert warning.startswith(f'cost baseline of session {session} unknown')
+    else:
+        assert backend.cost_baseline(session) == pytest.approx(baseline)
+        assert caplog.records == []
+
+
 # ------ helpers
 
 
@@ -2028,6 +2165,38 @@ def _transcript_line(
         },
     }
     return json.dumps(entry, ensure_ascii=False) + '\n'
+
+
+def _cost_state(session: str, total: Any) -> dict[str, Any]:
+    """Return the ``cost-state`` record claude saves to a transcript at exit.
+
+    Real-shaped (claude 2.1.300): the session's running total, and the
+    per-model usage behind it -- ``_USAGE_FIRST`` in the table's camel case.
+    """
+    return {
+        'type': 'cost-state',
+        'sessionId': session,
+        'totalCostUSD': total,
+        'totalAPIDuration': 5780,
+        'totalAPIDurationWithoutRetries': 5779,
+        'totalToolDuration': 227,
+        'totalLinesAdded': 0,
+        'totalLinesRemoved': 0,
+        'totalDuration': 5972,
+        'startTime': 1792304015631,
+        'modelUsage': {
+            'claude-fable-5': {
+                'inputTokens': 100,
+                'outputTokens': 200,
+                'thinkingTokens': 150,
+                'cacheReadInputTokens': 10_000,
+                'cacheCreationInputTokens': 1000,
+                'webSearchRequests': 0,
+                'costUSD': total,
+            },
+        },
+        'hasUnknownModelCost': False,
+    }
 
 
 def _tool_use(call: str, *, name: str = 'Bash') -> dict[str, Any]:

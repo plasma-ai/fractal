@@ -745,12 +745,14 @@ class Record:
         step". Cost stays NULL (``Cost.unpriced`` discloses the gap count);
         a flush that lands later strips the marker.
 
-        A launch whose record leaves part of a reply out books the spend
-        recorded: when a figure stands, its end appends ``partly
-        unpriced`` instead, at any terminal (``Cost.partly_unpriced``
-        discloses the count). A row with no figure is not partly priced,
-        so it keeps the rule above. A later flush never strips the marker,
-        since the missing part stays unpriced.
+        A launch whose record leaves part of its spend out (a reply cut
+        off, or a result figure refused) books the spend recorded: when a
+        figure stands, its end appends ``partly unpriced`` instead, at any
+        terminal (``Cost.partly_unpriced`` discloses the count). A row with
+        no figure is not partly priced: its end appends ``unpriced``, at
+        any terminal, since the launch spent with nothing recorded. A later
+        flush never strips the ``partly unpriced`` marker, since the missing
+        part stays unpriced.
 
         Args:
             step_id: Step to end.
@@ -759,8 +761,8 @@ class Record:
             metadata: Optional short, fractal-owned failure reason (e.g.
                 ``timed out``/``agent error``) for visibility in ``node
                 activity``; the metadata column is left untouched when ``None``.
-            partly_unpriced: Whether the launch's record leaves part of a
-                reply out.
+            partly_unpriced: Whether the launch's record leaves part of
+                its spend out.
 
         Returns:
             Rows transitioned -- 0 when another writer already closed it.
@@ -780,8 +782,9 @@ class Record:
         if metadata is not None:
             data['metadata'] = metadata
         # mark an abnormal end unpriced when the stream opened but no usage
-        # flushed -- burn happened with no recorded figure; a figure whose
-        # launch's record leaves part of a reply out is partly unpriced
+        # flushed -- burn happened with no recorded figure, as it did on any
+        # launch whose record leaves spend out and holds none; a figure whose
+        # launch's record leaves part of its spend out is partly unpriced
         if status != 'completed' or partly_unpriced:
             rows = self.db.read('steps', where={'step_id': step_id, 'ended_at': None})
             if rows:
@@ -790,7 +793,7 @@ class Record:
                 if row['cost'] is not None:
                     if partly_unpriced:
                         marker = 'partly unpriced'
-                elif status != 'completed' and row['session'] is not None:
+                elif row['session'] is not None:
                     marker = 'unpriced'
                 if marker is not None:
                     reason = metadata if metadata is not None else row['metadata']

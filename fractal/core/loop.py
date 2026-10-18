@@ -3054,6 +3054,20 @@ class Loop:
             except Exception:
                 pass
 
+        # a resumed session's result figure can count on from the session's
+        # earlier spend: read what it carries before the launch adds to it
+        # (an unknown baseline refuses the figure rather than book it whole)
+        baseline: Optional[float] = 0.0
+        if session is not None:
+            try:
+                baseline = agent.cost_baseline(session)
+            except Exception as error:
+                print(
+                    f'Warning: reading the session cost baseline failed ({error})',
+                    file=sys.stderr,
+                )
+                baseline = None
+
         # the launch's window opens at the spawn: a killed launch is priced
         # from the provider's record of this window alone
         launched = fractal.util.time.utc_now()
@@ -3148,20 +3162,24 @@ class Loop:
         # resumes (the reader dies at the cap, so no result carries it)
         stream_session: Optional[str] = None
         # the instant a result frame named the launch's cost -- spend the
-        # agent completes after it lies past that figure
+        # agent completes after it lies past that figure -- and whether one
+        # named a figure the baseline could not settle
         settled_at: Optional[str] = None
+        refused = False
         # the capped reply as the stream recorded it, which the cap's kill
         # can keep from the agent's own record
         capped: list[dict[str, Any]] = []
 
         def _render(event: StreamEvent) -> None:
-            nonlocal idle_since, stream_session, settled_at
+            nonlocal idle_since, stream_session, settled_at, refused
             if self._render is not None:
                 self._render(event)
             if event.session is not None:
                 stream_session = event.session
             if event.kind == 'result' and event.cost is not None:
                 settled_at = fractal.util.time.utc_now()
+            if event.kind == 'result' and event.refused:
+                refused = True
             if event.kind == 'result' and event.failed and event.message:
                 failures.append(event.message)
             if watch_cap and event.kind == 'thinking_cap':
@@ -3205,6 +3223,7 @@ class Loop:
                 model=record_model,
                 detached=self._step_detached,
                 render=_render,
+                baseline=baseline,
             )
         except Exception as error:
             stream_error = error
@@ -3239,11 +3258,12 @@ class Loop:
         # pause/kill can never signal a recycled pgid
         (node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
 
-        # a launch that ended without its authoritative cost (killed, or its
-        # stream dead before the closing figure) is priced from the provider's
-        # own usage record, read once the process has exited and flushed it;
-        # one that reached it is priced for the spend past it, since the
-        # process outlives its result while background work runs
+        # a launch that ended without its authoritative cost (killed, its
+        # stream dead before the closing figure, or that figure refused) is
+        # priced from the provider's own usage record, read once the process
+        # has exited and flushed it; one that reached it is priced for the
+        # spend past it, since the process outlives its result while
+        # background work runs
         if self._step_id is not None:
             after = settled_at if result is not None and result.final else None
             try:
@@ -3269,6 +3289,17 @@ class Loop:
                     ' unpriced)',
                     file=sys.stderr,
                 )
+            # a refused result figure leaves the step the record's own figure
+            # (the settle above, with no result to count past), which can miss
+            # spend the result held
+            if refused:
+                print(
+                    "Warning: the launch's result figure could not be settled"
+                    " against its session's earlier spend; its step books the"
+                    ' spend recorded (partly unpriced)',
+                    file=sys.stderr,
+                )
+                self._step_partly_unpriced = True
 
         session_out = result.session if result is not None else None
         cost_out = result.cost if result is not None else None
