@@ -298,7 +298,8 @@ def test_seed_guard_names_each_drifted_path(tmp_path: pathlib.Path) -> None:
     A bare "the seed trees changed" leaves the reader bisecting the suite
     for a write that may never have happened: the same drift appears when
     someone edits the tree while the tests run. The message names each
-    created, deleted, and modified file, and states both causes.
+    created, deleted, and modified file, and states both causes; a mass
+    drift names the first paths of each kind and counts the rest.
     """
     package = tmp_path / 'fractal'
     seeds = [package / '_node', package / '_scripts']
@@ -319,3 +320,9 @@ def test_seed_guard_names_each_drifted_path(tmp_path: pathlib.Path) -> None:
     # the guard cannot tell the two causes apart, so it states both
     assert 'a test wrote into the source tree' in drift, drift
     assert 'the tree was edited while the tests ran' in drift, drift
+    # a mass drift names the first paths of each kind and counts the rest
+    flood = {f'fractal/_node/gen/{index:02d}.md': 'sha' for index in range(25)}
+    drift = _tree_drift({}, flood)
+    assert 'added: fractal/_node/gen/19.md' in drift, drift
+    assert 'gen/20.md' not in drift, drift
+    assert '... and 5 more added' in drift, drift

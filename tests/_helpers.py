@@ -50,6 +50,10 @@ def _files(root: pathlib.Path) -> dict[str, bytes]:
     }
 
 
+# the most paths of one kind the seed guard's message names
+_DRIFT_CAP = 20
+
+
 def _digests(root: pathlib.Path, folders: list[pathlib.Path]) -> dict[str, str]:
     """Map every file under ``folders``, by ``root``-relative path, to its sha256."""
     return {
@@ -63,8 +67,9 @@ def _digests(root: pathlib.Path, folders: list[pathlib.Path]) -> dict[str, str]:
 def _tree_drift(before: dict[str, str], after: dict[str, str]) -> str:
     """Return the seed guard's failure message for two digest maps, ``''`` if equal.
 
-    Names every added, removed, and changed path, then both causes a drift
-    can have -- the guard cannot tell a test's write from a concurrent edit.
+    Names the added, removed, and changed paths (each kind capped at
+    ``_DRIFT_CAP``, the rest counted), then both causes a drift can have --
+    the guard cannot tell a test's write from a concurrent edit.
     """
     added = sorted(after.keys() - before.keys())
     removed = sorted(before.keys() - after.keys())
@@ -76,9 +81,11 @@ def _tree_drift(before: dict[str, str], after: dict[str, str]) -> str:
     lines = [
         'package seed trees (_assets/_node/_scripts/skills) changed during the session:'
     ]
-    lines.extend(f'  added: {path}' for path in added)
-    lines.extend(f'  removed: {path}' for path in removed)
-    lines.extend(f'  changed: {path}' for path in changed)
+    # cap each kind, so a mass drift (a reformat, a checkout) stays readable
+    for kind, paths in (('added', added), ('removed', removed), ('changed', changed)):
+        lines.extend(f'  {kind}: {path}' for path in paths[:_DRIFT_CAP])
+        if len(paths) > _DRIFT_CAP:
+            lines.append(f'  ... and {len(paths) - _DRIFT_CAP} more {kind}')
     lines.append(
         'either a test wrote into the source tree through a package path, or'
         ' the tree was edited while the tests ran (never edit it mid-run)'
