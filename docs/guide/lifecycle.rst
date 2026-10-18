@@ -93,9 +93,10 @@ column. Several qualifiers can stand at once, ``;``-joined:
 
 - ``idle (starting)`` — the boot window: ``start`` has launched the loop and
   its runtime is live, but the loop has not yet stamped ``active`` after
-  preflight. The status stays ``idle``; the listing marks the row with a
-  boolean ``starting`` (``true`` only here), and ``--live`` reads the row as
-  ``active`` with ``detail`` ``starting``.
+  preflight. The status stays ``idle``; the listing marks the row with
+  ``starting`` (``true`` only here, ``null`` when the listing could not
+  look), and ``--live`` reads the row as ``active`` with ``detail``
+  ``starting``.
 - ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)`` — a
   pause, stop, or finish signal is pending on an active node.
 - ``exited (<reason>)`` — the latest run row recorded why it ended; a crash

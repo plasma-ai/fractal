@@ -5249,8 +5249,6 @@ class Node:
     def status_detail(self: Node) -> str:
         """Return the qualifier that refines the node's status, if any.
 
-        ``starting`` for an ``idle`` node whose loop runtime is already live
-        (the boot window before the loop stamps ``active``);
         ``pausing`` / ``stopping`` / ``finishing`` when a pause/stop/finish
         signal is pending on an active node; the recorded end reason when
         the latest run row says why an ``exited`` run ended (the run row is
@@ -5271,10 +5269,6 @@ class Node:
         self._reconcile_status()
         status = self.status()
         detail = ''
-        # a started node holds 'idle' until its loop stamps 'active' after
-        # preflight, but its runtime is already live -- the boot window
-        if status == 'idle' and self._loop_alive() is True:
-            detail = 'starting'
         if status == 'active':
             if self.record.signal_get('pause') is not None:
                 detail = 'pausing'
@@ -5477,13 +5471,15 @@ class Node:
     def status_display(self: Node) -> str:
         """Return the status decorated with a pending signal or end reason.
 
-        ``idle (starting)`` / ``active (pausing)`` / ``active (stopping)`` /
-        ``active (finishing)`` / ``exited (<reason>)`` --
-        :meth:`status_detail`'s qualifier in parentheses -- else the bare
-        status. The composed form is for single-node human surfaces; the
-        tabular listing carries the two as separate ``status`` and
-        ``detail`` columns so machine consumers never parse the parentheses
-        back apart.
+        ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)``
+        / ``exited (<reason>)`` -- :meth:`status_detail`'s qualifier in
+        parentheses -- else the bare status, with ``starting`` leading the
+        qualifier of an ``idle`` node whose loop runtime is already live
+        (the boot window before the loop stamps ``active``), as in
+        ``idle (starting)``. The composed form is for single-node human
+        surfaces; the tabular listing carries the two as separate
+        ``status`` and ``detail`` columns so machine consumers never parse
+        the parentheses back apart.
 
         Returns:
             Status string, possibly with a pending-signal or end-reason
@@ -5494,6 +5490,10 @@ class Node:
         # healed one the qualifier was derived from
         detail = self.status_detail()
         status = self.status()
+        # a started node holds 'idle' until its loop stamps 'active' after
+        # preflight, but its runtime is already live -- the boot window
+        if status == 'idle' and self._loop_alive() is True:
+            detail = f'starting; {detail}' if detail else 'starting'
         return f'{status} ({detail})' if detail else status
 
     def status_set(self: Node, status: str) -> None:
@@ -5579,8 +5579,12 @@ class Node:
                 to ``exited``, and a booting ``idle`` node (live runtime,
                 the loop not yet stamped) to ``active`` with a ``starting``
                 detail (the authoritative view). Read-only -- it does not
-                persist the relabel. Every row carries a boolean
-                ``starting``, true only in that boot window, in either view.
+                persist the relabel. Every row carries ``starting``: true
+                only in that boot window, judged by one tmux listing per
+                call (``--live`` and decorated plain listings), and
+                ``None`` (unknown) where the listing does not look -- an
+                undecorated plain listing, or a host tmux gives no answer
+                for a node with no recorded runtime.
             decorated: Record each descendant's status qualifier (a
                 pending signal, an exited run's end reason, a model-drop
                 marker) in its ``detail`` and its typed end token in its
@@ -5676,6 +5680,11 @@ class Node:
         # truth the registry row's spawn-time values miss; a gone worktree
         # keeps the registry caps (the only surviving source)
         worktrees = fractal.util.git.worktree_map(self.repo_dir)
+        # one tmux listing judges every decorated plain row's boot window
+        sessions = None
+        idle = any(_base_status(row.get('status')) == 'idle' for row in rows)
+        if decorated and not live and idle:
+            sessions = fractal.util.tmux.probe()
         capped = []
         for row in rows:
             worktree_dir = worktrees.get(row['node'])
@@ -5699,11 +5708,25 @@ class Node:
                         last += '!'
             # a stored-idle node whose loop runtime is already live is in its
             # boot window (the loop stamps 'active' after preflight); --live
-            # judged its own rows above, relabeling them 'active'
-            starting = bool(row.get('starting'))
-            idle = _base_status(row.get('status')) == 'idle'
-            if idle and not live and node is not None:
-                starting = node._loop_alive() is True
+            # judged its own rows above, and an undecorated listing never looks
+            starting: Optional[bool] = None
+            if live:
+                starting = row.get('starting', False)
+            elif decorated:
+                starting = False
+                if node is not None and _base_status(row.get('status')) == 'idle':
+                    # the one listing settles a tmux loop it names; a recorded
+                    # runtime it cannot judge (headless, bare, or on another
+                    # socket) confirms through the node's own liveness law
+                    listed = (sessions is not None) and (node.tmux_session in sessions)
+                    socket = (node.node_dir / SOCKET_FILE).exists()
+                    group = (node.node_dir / PGID_FILE).exists()
+                    if listed and not node.headless:
+                        starting = True
+                    elif node.headless or socket or group:
+                        starting = node._loop_alive() is True
+                    elif sessions is None:
+                        starting = None
             # a gone worktree keeps its registry caps -- the only surviving
             # source -- and yields no spend: the live config and the ledger
             # are both reached through the node
@@ -5786,6 +5809,9 @@ class Node:
                 detail = node.status_detail()
                 if node.status() == stored:
                     decorated = {**row, 'end_reason': node.end_reason()}
+                    # the listing judged the boot window once for every row
+                    if row.get('starting'):
+                        detail = f'starting; {detail}' if detail else 'starting'
                     if detail:
                         decorated['detail'] = detail
                     return decorated

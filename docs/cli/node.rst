@@ -865,9 +865,12 @@ a closed vocabulary naming a settled row's landing: ``goal_met``,
 closed by the crash heal, whose ``detail`` reads ``crashed: loop runtime gone,
 healed by reconcile``), ``final_iteration_failed``, or ``other`` (recorded but
 unmapped) on an ``exited`` row; null when no reason is recorded (a run that
-never landed) and on every other status. ``starting`` is a boolean on every
-row, true only in the boot window: the row's ``status`` stays ``idle`` there
-(``active`` under ``--live``) and ``detail`` reads ``starting``. ``spend``
+never landed) and on every other status. ``starting`` is on every row: true
+only in the boot window, where the row's ``status`` stays ``idle`` (``active``
+under ``--live``) and ``detail`` reads ``starting``; false otherwise; and null
+(unknown) when the listing could not look — tmux gave no answer and the node
+records no runtime of its own — so null never means "not starting". One tmux
+listing judges every row. ``spend``
 is the current run's subtree cost at the scope ``max_cost`` is enforced at,
 blank for a node that has never run. Blank limit columns mean unlimited.
 ``last`` is the age of each node's newest activity, with a ``!`` suffix

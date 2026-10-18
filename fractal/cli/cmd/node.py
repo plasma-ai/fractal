@@ -1067,7 +1067,9 @@ def node_list(app: typer.Typer) -> typer.Typer:
         recorded. ``starting`` is true only for a node in its boot window
         (a live loop runtime, ``active`` not yet stamped): ``status`` stays
         ``idle`` there, or reads ``active`` under ``--live``, and ``detail``
-        says ``starting``.
+        says ``starting``. It is false otherwise, and null (unknown) where
+        the listing did not look -- tmux gave no answer and the node records
+        no runtime of its own -- so null never reads as not starting.
         ``spend`` is the current run's subtree cost, the
         scope ``max_cost`` beside it is enforced at, and is blank for a node
         that has never run. ``last`` is the age of each node's newest activity;

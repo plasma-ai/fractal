@@ -23,10 +23,11 @@ may include breaking changes, each listed under a Breaking heading.
 - `fractal node status` reads `idle (starting)` for a node in its boot window:
   between `start` and the loop's `active` stamp after preflight, while its loop
   runtime is already live. `fractal node list` carries the qualifier as a
-  `starting` detail and adds a boolean `starting` column to every row, true only
-  in that window; the plain listing keeps the stored `idle` status, and
-  `--live` keeps reading the row as `active` so drains still wait for it. The
-  stored status stays `idle`.
+  `starting` detail and adds a `starting` column to every row: true only in that
+  window, false otherwise, and null when the listing could not look (tmux gave
+  no answer for a node that records no runtime of its own). The plain listing
+  keeps the stored `idle` status, and `--live` keeps reading the row as `active`
+  so drains still wait for it. The stored status stays `idle`.
 - A no-progress watchdog for Claude steps: 30 minutes of the agent's own idle
   time, counted only while it holds control (paused while a tool runs, while it
   thinks, after its turn ends while Claude Code waits on background work, and

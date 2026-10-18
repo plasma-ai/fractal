@@ -1733,9 +1733,9 @@ def test_booting_node_reads_idle_starting(repo: dict) -> None:
     stored status stays ``idle`` while the loop's tmux session is already
     live -- the boot window. ``status`` shows ``idle (starting)``; both
     JSON listings mark the row ``starting`` with a ``starting`` detail,
-    the plain one keeping the stored ``idle`` and ``--live`` the
-    ``active`` its drains read. A never-started idle node and a stamped
-    active one are not starting. Creates and removes its own node, so the
+    the plain one keeping the stored ``idle`` and ``--all --live`` (the
+    merge helper's read) the ``active`` its drains read. A never-started
+    idle node and a stamped active one are not starting. Creates and removes its own node, so the
     shared fixture is left as found.
     """
     _require_tmux()
@@ -1747,12 +1747,13 @@ def test_booting_node_reads_idle_starting(repo: dict) -> None:
     def listed(*flags: str) -> dict:
         result = _run(root, 'node', 'list', '--json', *flags)
         assert result.returncode == 0, result.stderr
-        (row,) = [row for row in json.loads(result.stdout) if row['node'] == 'main.boot']
+        rows = json.loads(result.stdout)
+        (row,) = [row for row in rows if row['node'] == 'main.boot']
         return row
 
     # never started: no live session, so plain idle everywhere
     assert _run(worktree, 'node', 'status').stdout.strip() == 'idle'
-    for flags in ((), ('--live',)):
+    for flags in ((), ('--all', '--live')):
         row = listed(*flags)
         assert (row['status'], row['starting']) == ('idle', False), row
     # the boot window: the session start.sh names (<repo dirname> (<branch,
@@ -1762,10 +1763,10 @@ def test_booting_node_reads_idle_starting(repo: dict) -> None:
     try:
         status = _run(worktree, 'node', 'status').stdout.strip()
         plain = listed()
-        live = listed('--live')
+        live = listed('--all', '--live')
         # the loop's post-preflight stamp ends the window
         Node(worktree).status_set('active')
-        stamped = [listed(), listed('--live')]
+        stamped = [listed(), listed('--all', '--live')]
     finally:
         # settle the node before its session goes, or the read heals it exited
         Node(worktree).status_set('idle')
