@@ -254,6 +254,13 @@ class StreamEvent:
     final usage, it rides ``reply`` in the backend's own reply shape, for
     the settle to book a reply the kill may keep from the provider's record.
 
+    A ``'result'`` names the launch's own spend. When the provider counts a
+    resumed session's figure on from the session's earlier spend, the
+    parser takes that spend (its ``baseline``) off. A figure the baseline
+    cannot settle (the baseline is unreadable, or above the figure) is
+    refused: the result names no cost and sets ``refused``, and the launch
+    is priced from its provider's record instead.
+
     ``'acting'`` and ``'waiting'`` mark the agent's own control, for an
     agent that ``reports_progress``: acting when it takes control (its
     launch's first reply, a result answering its last pending tool call,
@@ -283,6 +290,8 @@ class StreamEvent:
     budget_stopped: bool = False
     # result: is_error / non-success subtype
     failed: bool = False
+    # result: the figure the baseline could not settle (cost left None)
+    refused: bool = False
     # error detail / tool-result body
     message: Optional[str] = None
     # the capped reply as the stream recorded it (kind='thinking_cap')
@@ -365,6 +374,9 @@ class StreamParser:
         self.models: list[str] = []  # every distinct stream-named served model
         self.cost: Optional[float] = None  # running figure (None = no fact yet)
         self.final: bool = False  # a result frame settled the cost
+        # a resumed session's spend before the launch, which the provider's
+        # result figure can count on from (None = unreadable)
+        self.baseline: Optional[float] = 0.0
         self.budget_stopped: bool = False
         self.errors: list[str] = []  # stream-borne errors, settled by finalization
 
@@ -770,6 +782,7 @@ class Agent:
         model: Optional[str] = None,
         detached: bool = False,
         render: Optional[Callable[[StreamEvent], None]] = None,
+        baseline: Optional[float] = 0.0,
     ) -> StreamResult:
         """Drive a parser over the agent's stdout lines.
 
@@ -796,6 +809,9 @@ class Agent:
                 step-row stamp always lands).
             render: Presentation callback receiving every parsed event
                 (CLI ANSI, TUI bubbles, loop pane).
+            baseline: The resumed session's spend before the launch
+                (``cost_baseline``), taken off a result figure that counts
+                on from it; ``None`` (unreadable) refuses the figure.
 
         Returns:
             The stream outcome, read off the drained parser state.
@@ -807,6 +823,7 @@ class Agent:
         """
         # fresh parser per call; state accumulates for attribution after draining
         parser = self.parser(model=model)
+        parser.baseline = baseline
 
         def frames() -> Iterable[list[StreamEvent]]:
             for line in lines:
@@ -1112,6 +1129,37 @@ class Agent:
                 )
         """
         return Settlement(cost=None)
+
+    def cost_baseline(self: Agent, session: str) -> Optional[float]:
+        """Return the spend a session carries into a launch that resumes it.
+
+        Read before the launch spawns. A provider that restores a resumed
+        session's running total counts its result figure on from it, so the
+        stream takes this off that figure (``stream``'s ``baseline``).
+
+        Args:
+            session: The session the launch resumes.
+
+        Returns:
+            The session's spend before the launch, ``0.0`` when it carries
+            none, or ``None`` when it cannot be read (the result figure is
+            then refused, never booked whole).
+
+        """
+        return self._cost_baseline(session)
+
+    def _cost_baseline(self: Agent, session: str) -> Optional[float]:
+        """Hook for reading a resumed session's carried spend. Default ``0.0``.
+
+        Override in a backend whose result figure counts on from the
+        session's earlier spend, returning it in the figure's own measure,
+        or ``None`` with the reason logged when it cannot be read::
+
+            def _cost_baseline(self, session):
+                state = provider.cost_state(session)
+                return state.total if state is not None else 0.0
+        """
+        return 0.0
 
     def tracks_cost(self: Agent, model: Optional[str] = None) -> bool:
         """Return whether spend will be recorded.

@@ -289,6 +289,21 @@ may include breaking changes, each listed under a Breaking heading.
   ends at the output cap books the usage the stream recorded for it, so a
   thinking-cap kill reads as whole unless the stream reported no usage. A killed
   Codex step still records no cost.
+- A Claude step that resumes a session books its own spend instead of the
+  session's running total. Claude Code 2.1.300 saves the total to the session
+  transcript (a `cost-state` record) as each launch exits and counts a resumed
+  launch's result figure on from it, so every continuous step after the first,
+  every steer, and every SYNC that resumes was overcounted by the session's
+  earlier spend. Before such a launch spawns, the loop reads the latest saved
+  total and books the result less it (through openrouter, the saved usage table
+  priced like the result's). When the session's transcript cannot be found, the
+  total cannot be read, or it is above the figure, the figure is refused: the
+  step is priced from its transcript as a killed step is, marked
+  `; partly unpriced`, and the loop prints a `Warning:` line. A transcript with
+  no saved total, as older Claude Code writes, books the result whole as before.
+  A step whose record leaves spend out and holds no figure, such as a waiting
+  SYNC whose failed launch left no transcript, is now marked `; unpriced` even
+  when it completed.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the

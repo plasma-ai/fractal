@@ -78,6 +78,12 @@ IDX=$((N - 1))
 SERVED="${WORDS[$IDX]}"
 
 [[ -n "$SID" ]] || SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+# open the session's transcript where real claude keeps it, keyed by the cwd
+# with every non-alphanumeric character dashed
+SLUG=$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')
+TRANSCRIPTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$SLUG"
+mkdir -p "$TRANSCRIPTS"
+touch "$TRANSCRIPTS/$SID.jsonl"
 printf '{"type":"system","subtype":"init","session_id":"%s","model":"%s"}\\n' \\
     "$SID" "$MODEL"
 MSG=0

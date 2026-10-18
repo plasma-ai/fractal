@@ -108,6 +108,9 @@ class ClaudeParser(StreamParser):
         # a top-level thinking block is open -- the stream shows nothing of a
         # think in progress, so it holds the idle clock until it completes
         self._thinking = False
+        # a result figure the baseline could not settle -- every later one of
+        # the launch counts on from the same total, so it is refused too
+        self._refused = False
 
     def feed(self: ClaudeParser, line: str) -> list[StreamEvent]:
         """Parse one claude stream line into normalized events."""
@@ -288,6 +291,16 @@ class ClaudeParser(StreamParser):
             # explicitly null on some result frames, and `0.001 * None` raises
             duration = 0.001 * (message.get('duration_ms') or 0.0)
             cost = self._result_cost(message)
+            # a resumed session's figure counts on from its spend before the
+            # launch, so the baseline comes off; a figure it cannot settle is
+            # refused, and the running figure stays the stream's own estimate
+            if cost is not None:
+                baseline = self.baseline
+                if self._refused or baseline is None or cost < baseline:
+                    self._refused = True
+                    cost = None
+                else:
+                    cost -= baseline
             if cost is not None:
                 self.cost = cost
                 self.final = True
@@ -316,6 +329,7 @@ class ClaudeParser(StreamParser):
                     turns=turns,
                     budget_stopped=budget_stopped,
                     failed=failed,
+                    refused=self._refused,
                     message=detail,
                 )
             )
@@ -403,8 +417,9 @@ class ClaudeParser(StreamParser):
     def _result_cost(self: ClaudeParser, message: dict[str, Any]) -> Optional[float]:
         """Hook for the result frame's cost fact.
 
-        Claude's ``total_cost_usd`` is per-invocation: each ``--resume``
-        reports its own turns, not the thread's running total.
+        Claude's ``total_cost_usd`` is the session's running total: a
+        ``--resume`` counts on from the total its transcript saved (the
+        baseline ``feed`` takes off), when it saved one.
         """
         cost = message.get('total_cost_usd')
         # guard the wire type the way the sibling backends do -- a non-numeric
@@ -438,20 +453,12 @@ class _RoutedClaudeParser(ClaudeParser):
         The stream carries no frame from a sub-agent, so the frame's
         ``modelUsage`` table, one entry per served model, is the only record
         of their tokens: each entry is priced at its own model and the close
-        is their sum. A model the chain cannot price closes ``None``, since a
-        partial sum would read as a complete figure.
+        is their sum (``_model_usage_cost``). A model the chain cannot price
+        closes ``None``, since a partial sum would read as a complete figure.
         """
         table = message.get('modelUsage')
         if isinstance(table, dict) and table:
-            total = 0.0
-            for model, entry in table.items():
-                if not isinstance(entry, dict):
-                    return None
-                cost = _compute_cost(_model_usage_tokens(entry), model)
-                if cost is None:
-                    return None
-                total += cost
-            return total
+            return _model_usage_cost(table)
         usage = message.get('usage')
         if not usage:
             return None
@@ -757,6 +764,58 @@ class ClaudeAgent(Agent):
             )
         return Settlement(cost=cost, cut_off=cut_off)
 
+    def _cost_baseline(self: ClaudeAgent, session: str) -> Optional[float]:
+        """Read the spend a resumed session carries from its transcript.
+
+        Claude Code writes a ``cost-state`` record to the session's
+        transcript as each launch exits, and a resume restores the session's
+        latest one, so the resumed launch's result figure counts on from its
+        total. A transcript holding none (none written yet, or a version that
+        writes none) carries nothing. Through openrouter the figure is the
+        result's ``modelUsage`` table priced through the alias chain, and the
+        record carries the same table, so its price is the baseline. A
+        transcript that cannot be found or read, or a record whose figure
+        cannot be read or priced, logs the reason and carries an unknown
+        amount: claude resumes a session only from its transcript, so a
+        missing one means the resolution here has lost track of claude's.
+        """
+        # an unknown baseline refuses the launch's result figure
+        unknown = f'cost baseline of session {session} unknown'
+        try:
+            found = self.transcript(session)
+        except (OSError, ValueError) as e:
+            self.log(f'{unknown}: transcript unreadable: {e}', logging.WARNING)
+            return None
+        if not found['exists']:
+            self.log(f'{unknown}: no transcript found', logging.WARNING)
+            return None
+        # a resume restores the latest record naming the session (claude, too,
+        # skips a line it cannot parse)
+        for line in reversed(found['content'].split('\n')):
+            if 'cost-state' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict) or entry.get('type') != 'cost-state':
+                continue
+            if entry.get('sessionId') != session:
+                continue
+            if self.provider == 'openrouter':
+                table = entry.get('modelUsage')
+                cost = _model_usage_cost(table) if isinstance(table, dict) else None
+            else:
+                cost = entry.get('totalCostUSD')
+            if not isinstance(cost, (int, float)):
+                self.log(
+                    message=f'{unknown}: its cost state cannot be read or priced',
+                    level=logging.WARNING,
+                )
+                return None
+            return float(cost)
+        return 0.0
+
     def _rates(self: ClaudeAgent, model: str) -> Optional[dict[str, Any]]:
         """Resolve pricing through the claude slug-alias chain."""
         return _rates(model)
@@ -986,6 +1045,23 @@ def _transcript_window(
     unanswered = last is not None and last[0]
     unanswered = unanswered and (since is None or last[1] > since)
     return replies, partial or unanswered or malformed
+
+
+def _model_usage_cost(table: dict[str, Any]) -> Optional[float]:
+    """Price a ``modelUsage`` table: each entry at its own model, summed.
+
+    An entry of the wrong shape, or a model the chain cannot price, prices
+    the table ``None``, since a partial sum would read as a complete figure.
+    """
+    total = 0.0
+    for model, entry in table.items():
+        if not isinstance(entry, dict):
+            return None
+        cost = _compute_cost(_model_usage_tokens(entry), model)
+        if cost is None:
+            return None
+        total += cost
+    return total
 
 
 def _model_usage_tokens(entry: dict[str, Any]) -> dict[str, Any]:

@@ -257,6 +257,12 @@ if [[ "$SELF" == "claude" ]]; then
     # echo session_id like real claude: the opened/resumed id, or a fresh one
     SID="${SESSION##* }"
     [[ -n "$SID" ]] || SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    # open the session's transcript where real claude keeps it, keyed by the
+    # cwd with every non-alphanumeric character dashed
+    SLUG=$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')
+    TRANSCRIPTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$SLUG"
+    mkdir -p "$TRANSCRIPTS"
+    touch "$TRANSCRIPTS/$SID.jsonl"
     printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
     # a prompt carrying SPAWN-TOOLS starts two long sleepers the way agent
     # CLIs run tool commands -- one in a process group of its own, one in a

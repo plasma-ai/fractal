@@ -127,6 +127,41 @@ metadata carries a plain string `source` (`exec`, `cli`) and names a root other
 than the step's thread as its session is taken for a sibling root, and such a
 step prices its own rows alone.
 
+A Claude result frame's figure (`total_cost_usd`, or through openrouter its
+`modelUsage` table priced through the alias chain) is the session's running
+total. Claude Code saves that total to the session transcript as a `cost-state`
+record (`totalCostUSD`, `modelUsage`, `startTime`, ...) as each launch exits,
+and a `--resume` restores the latest one naming the session and counts on from
+it, so a resumed launch's result names the session's earlier spend plus its own.
+Before spawning a launch that resumes a session -- a continuous step after the
+first, a steer, a SYNC, a resume -- the loop reads that **baseline** through
+`Agent.cost_baseline` (hook `_cost_baseline`, `0.0` by default) from the
+transcript the resume will append to: the latest record's `totalCostUSD`
+natively, its `modelUsage` priced through the chain when routed, so the baseline
+is in the figure's own measure. A transcript with no record (an older Claude
+Code, which writes none and reports each launch's own spend) carries `0.0`. The
+baseline rides `Agent.stream`'s `baseline` onto the parser
+(`StreamParser.baseline`), which takes it off every result figure of the launch;
+a reply after a result builds on the launch's own figure, and the after-result
+settle adds to it. Claude stays `cost_scope = 'call'`: nothing settles against
+the ledger's sibling rows.
+
+A figure the baseline cannot settle is **refused**, never booked whole or less
+the baseline: when the baseline cannot be read (a transcript that cannot be
+found or read -- claude resumes a session only from its transcript, so a missing
+one means fractal's resolution has lost track of claude's -- or a record whose
+total is not a number or cannot be priced, logged as
+`cost baseline of session <id> unknown: <reason>` at warning level) or the
+figure is below it (a zeroed crash result), the result event names no cost and
+sets `refused`, and every later result of the launch is refused too. The
+stream's figure stays its own running estimate and `final` stays clear, so the
+loop settles the launch from its transcript window with no `after`, as it does a
+killed launch, prints
+`Warning: the launch's result figure could not be settled against its session's earlier spend`
+and marks the step partly unpriced (below). A window that prices nothing leaves
+the cost `NULL`, marked `unpriced`. A killed launch never reaches a result
+figure, so the baseline never touches it: its settle prices its own window.
+
 A Claude launch that ends without its result frame -- killed by a deadline, a
 stall or thinking cap, a pause, or a dead stream -- carries only the stream's
 running estimate, which prices each reply from its first frame (or nothing, when
@@ -194,7 +229,10 @@ reads it from each transcript it opens:
   nothing and says so, rather than raising);
 - a sub-agent transcript it cannot read, and, on a launch with no result figure,
   a missing or unreadable session transcript or a settle that raises (the loop
-  marks the last itself).
+  marks the last itself);
+- a result figure the baseline could not settle (above), which the loop marks
+  itself: the window stands in for a figure that can hold spend no transcript
+  records.
 
 Some endings are whole. A kill during a tool call ends on the completed reply
 that called the tool, or on the results of some of its calls. A workflow
@@ -221,10 +259,11 @@ returns the verdict, and the loop prints
 `Warning: a reply's spend is missing from the launch's record` to stderr (which
 reaches `headless.log`) and passes it to `step_end`, at the steered close too,
 which appends `; partly unpriced` to the row's metadata at any terminal when the
-row holds a figure; a row with no figure is not partly priced, so an abnormal
-end marks it `; unpriced` and a completed one stays unmarked. `step_cost`'s
-strip of a stale `unpriced` marker leaves it alone, since the missing part stays
-unpriced.
+row holds a figure; a row with no figure is not partly priced, so its end marks
+it `; unpriced` instead, at any terminal -- a completed launch whose record
+leaves spend out and holds none never reads as a silent `NULL`. `step_cost`'s
+strip of a stale `unpriced` marker leaves `partly unpriced` alone, since the
+missing part stays unpriced.
 
 The settle runs after every launch and parses every line of each transcript it
 opens, before the window check (a `StructuredOutput` call can precede the
@@ -279,12 +318,12 @@ Zero and unknowable are never conflated:
 - A step the loop closes without ever reaching its launch records an explicit
   `$0` -- a knowable nothing-spent, never `NULL`.
 - `NULL` cost is reserved for unknowable spend: a launched step whose usage
-  never flushed -- a kill before the first flush that the provider's own record
-  cannot price either, a post-launch death before the stream opened, or an
-  untracked agent's rows -- or whose invocation evidence did not validate (the
-  codex attribution above; [[features/cost/budgets|budgets]] covers how armed
-  caps read such rows). Ended rows only: an open step is merely not priced
-  *yet*.
+  never flushed -- a kill before the first flush, or a refused result figure,
+  that the provider's own record cannot price either, a post-launch death before
+  the stream opened, or an untracked agent's rows -- or whose invocation
+  evidence did not validate (the codex attribution above;
+  [[features/cost/budgets|budgets]] covers how armed caps read such rows). Ended
+  rows only: an open step is merely not priced *yet*.
 - `cost spent` prints `untracked` instead of `$0.0000` when the scope has
   `NULL`-cost steps and no step recorded a real figure. Zero-cost rows are
   neutral -- they prove nothing was spent, not that spend was tracked -- so they

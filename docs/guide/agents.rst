@@ -167,10 +167,11 @@ authenticated. ``claude`` runs on the user's own config home
 auth or session storage. The node's ``settings.json`` rides the
 ``--settings`` flag and outranks worktree and user settings, so per-node
 permissions, model, and environment live there. ``claude`` reports its own
-USD spend per invocation, and it is the only backend that enforces the
-per-step budget cap in-flight (the loop passes ``--max-budget-usd``; a
-budget stop is a clean stop, not a failure). Supports the ``openrouter``
-route.
+USD spend; on a resumed session the figure counts on from the total Claude
+Code saved for the session, which fractal takes off, so each step books its
+own spend. It is the only backend that enforces the per-step budget cap
+in-flight (the loop passes ``--max-budget-usd``; a budget stop is a clean
+stop, not a failure). Supports the ``openrouter`` route.
 
 codex
 ~~~~~
@@ -311,8 +312,16 @@ way for spend after it: the replies Claude Code's background sub-agents
 complete after the result are added to the result's figure. The figure is
 priced from recorded usage rather than Claude's own bill, with one-hour
 cache writes at their own rate; with no readable transcript the step
-keeps the streamed figure (or none) and the agent logs why. Read spend
-with the cost commands (full surfaces in :doc:`/cli/node`):
+keeps the streamed figure (or none) and the agent logs why. A ``claude``
+launch that resumes a session (a continuous step, a steer, a SYNC) gets a
+result figure that counts on from the session's earlier spend: Claude Code
+saves the session's running total to its transcript as each launch exits
+and restores it on resume. Before the launch spawns, fractal reads the
+latest saved total and books the result less it. When the session's
+transcript cannot be found, the total cannot be read, or it is above the
+figure, the figure is refused and the step is priced from its transcript
+as a killed step is. Read spend with the cost commands (full surfaces in
+:doc:`/cli/node`):
 
 .. code-block:: console
 
@@ -328,14 +337,18 @@ From the user's point of view:
   a session on its row but no figure flushed is marked ``unpriced`` in
   its row metadata; a figure that flushes later strips the marker. A step
   that completed with no reported figure stores no cost and carries no
-  marker. ``cost spent`` and ``cost breakdown`` disclose on stderr how
-  many ended steps carry no recorded cost, marked or not.
+  marker, unless its record is known to leave spend out (its result figure
+  refused, say), which marks it ``unpriced`` too. ``cost spent`` and
+  ``cost breakdown`` disclose on stderr how many ended steps carry no
+  recorded cost, marked or not.
 - **A step missing part of a reply's spend is partly unpriced.** When a
   ``claude`` launch dies with a reply in flight, or a sub-agent's last
   line was written before its reply completed, the record leaves part of
   a reply's spend out: the step books what was recorded, with no
   estimate for the missing part, its row's metadata gains
-  ``; partly unpriced``, and the loop prints a ``Warning:`` line.
+  ``; partly unpriced``, and the loop prints a ``Warning:`` line. A
+  resumed ``claude`` step whose result figure was refused is marked the
+  same way, since its transcript's figure stands in for the result's.
   ``cost spent`` and ``cost breakdown`` disclose how many such steps
   their sums count at recorded spend. A launch killed while a tool runs,
   or a workflow sub-agent ending on its structured output, is whole;

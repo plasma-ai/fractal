@@ -24,9 +24,9 @@ nothing in `core/`, `cli/`, or `tui/` changes.
 Backends override only `_`-prefixed hooks and capability attributes; the public
 verbs own validation, event emission, and the settle invariants. The
 public/private pairing is uniform: the public verb (invocation, spawn,
-preflight, seeding, session and cost recording, the outage verdict, and a killed
-launch's settle) validates and emits, then delegates to its private hook, which
-the subclass implements:
+preflight, seeding, session and cost recording, the outage verdict, a resumed
+session's cost baseline, and a killed launch's settle) validates and emits, then
+delegates to its private hook, which the subclass implements:
 
 - the invocation hook builds the provider argv for a fresh, resumed, or forked
   session, spelling the model, effort, and budget overrides in the provider's
@@ -62,6 +62,13 @@ the subclass implements:
   reply) over the record's -- and returns a `Settlement` naming the cost and
   whether the record leaves part of a reply out; it defaults to no cost, leaving
   the stream's figure standing;
+- the cost-baseline hook (behind `Agent.cost_baseline`) reads, before a launch
+  that resumes a session spawns, the spend the session carries in, for a
+  provider whose result figure counts on from the session's earlier spend
+  (claude reads the latest `cost-state` record in the session transcript); the
+  loop hands it to `Agent.stream`, whose parser takes it off each result figure
+  and refuses one it cannot settle. It defaults to `0.0`, and `None` means it
+  cannot be read;
 - the transcript hook (with its fallback) locates a session's transcript file —
   the seam the project-files surface fronts (see
   [[features/files/transcripts]]);
