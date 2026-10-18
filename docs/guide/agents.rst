@@ -301,13 +301,18 @@ keeps the last figure recorded — while ``codex`` prices the whole
 invocation once its process exits cleanly, so an interrupted ``codex``
 step records no cost. A ``claude`` step that ends without its result frame
 is priced again from Claude Code's own session transcript and the
-transcripts it keeps for the session's sub-agents: each reply written
-during the launch counts at its final token usage and its own model, and
-the sum replaces the streamed figure when it is higher. The figure is
-priced from recorded usage rather than Claude's own bill; with no
-readable transcript the step keeps the streamed figure (or none) and the
-agent logs why. Read spend with the cost commands (full surfaces in
-:doc:`/cli/node`):
+transcripts it keeps for the session's sub-agents, a workflow's included:
+each reply written during the launch counts at its final token usage and
+its own model, and the sum replaces the streamed figure when it is higher.
+A reply the loop ends at the output cap counts at the usage the stream
+recorded for it, since the kill can beat Claude Code's own write. A
+``claude`` step whose result frame did name its cost is checked the same
+way for spend after it: the replies Claude Code's background sub-agents
+complete after the result are added to the result's figure. The figure is
+priced from recorded usage rather than Claude's own bill, with one-hour
+cache writes at their own rate; with no readable transcript the step
+keeps the streamed figure (or none) and the agent logs why. Read spend
+with the cost commands (full surfaces in :doc:`/cli/node`):
 
 .. code-block:: console
 
@@ -325,6 +330,14 @@ From the user's point of view:
   that completed with no reported figure stores no cost and carries no
   marker. ``cost spent`` and ``cost breakdown`` disclose on stderr how
   many ended steps carry no recorded cost, marked or not.
+- **A step cut off mid-reply is partly unpriced.** When a ``claude``
+  launch dies with a reply in flight, no record holds that reply's spend:
+  the step books what was recorded, with no estimate for the cut reply,
+  its row's metadata gains ``; partly unpriced``, and the loop prints a
+  ``Warning:`` line. ``cost spent`` and ``cost breakdown`` disclose how
+  many such steps their sums count at recorded spend. A launch killed
+  while a tool runs is not cut off, and a cut-off ``codex`` step stays
+  unpriced.
 - **The figure's source varies by backend.** ``claude`` (native),
   ``grok``, ``opencode``, and ``omp`` report their own spend on the
   stream; ``codex`` — and ``claude`` behind ``openrouter`` — are priced

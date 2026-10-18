@@ -41,6 +41,16 @@ fresh table. Cost-reporting agents read the cache only opportunistically, so for
 them a missing or corrupt cache degrades to no pricing -- streams record
 unpriced, never crash mid-step.
 
+Claude's cache writes bill by their lifetime. A usage record's `cache_creation`
+split names the one-hour writes (`ephemeral_1h_input_tokens`), which price at
+the table's `cache_creation_input_token_cost_above_1hr`; the five-minute writes
+and any the split leaves unnamed price at the base write rate, as does every
+write for a model with no one-hour rate. Claude Code writes one-hour entries, so
+the base rate alone would underprice them by about 37.5%. This reaches fractal's
+own Claude figures (the streaming estimate, the killed-step settle, the gateway
+path), never a direct step's result-frame cost; the gateway's `modelUsage` table
+carries no split, so its cache writes price at the base rate.
+
 ## Model resolution
 
 The default lookup is exact by model id; a backend whose provider ids miss the

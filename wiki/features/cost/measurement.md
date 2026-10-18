@@ -136,27 +136,70 @@ figure that result settled, so the parser's `final` flag clears at each new
 top-level reply and only the next result frame sets it again. Once the process
 exits and the loop has dropped the launch's `.step_pgid` handle (a pause or kill
 landing during the transcript read must never signal the dead group's recycled
-id), it calls `Agent.settle_cost` for any launch whose stream did not end final,
-with the launch's window (its spawn instant to its exit), and the claude backend
-prices that window from Claude Code's own session transcript, resolved through
-`Agent.transcript`, and from the sub-agent transcripts Claude Code keeps beside
-it (`<session>/subagents/agent-*.jsonl`, whose sidechain entries carry the
-parent session): every `assistant` entry stamped inside the window, deduplicated
-by message id across the files keeping the **last** line -- Claude splits a
-reply across lines, one per content block, and each line carries the reply's
-usage as it stood when written, so the last is the final usage. The files are
-joined with a newline, so a torn last line in one cannot swallow the next file's
-first record. Each reply is priced at its own model; an unpriced model (or a
-zeroed gateway figure) drops out without voiding the rest. The sum lands as a
-`final=False` figure when it exceeds the recorded one -- both undercount a
-killed launch, so the higher is the closer -- and lands as-is: it is the
-launch's own spend, so a thread-scope backend's settle against the session's
-earlier steps, which `record_cost` applies to a streamed thread total, never
-touches it. An absent or unreadable session transcript, or a window with no
-priced usage, leaves the row as it was and logs `launch unpriced: <reason>` at
-warning level on the agent's logger; a sub-agent transcript that cannot be read
-is left out of the sum with `launch partly unpriced: <reason>`. The ledger has
-no estimate column: `fractal node cost` reports the figure like any other.
+id), it calls `Agent.settle_cost` for every launch with the launch's window (its
+spawn instant to its exit), and the claude backend prices that window from
+Claude Code's own session transcript, resolved through `Agent.transcript`, and
+from the sub-agent transcripts Claude Code keeps beside it, found recursively
+(`<session>/subagents/**/agent-*.jsonl`, so a workflow's agents under
+`subagents/workflows/wf_<id>/` count and its `journal.jsonl` never matches): a
+sub-agent file last modified before the launch opened belongs to an earlier
+launch and is skipped unread, since a long session's folder holds hundreds. Each
+file is read on its own, keeping every `assistant` entry stamped inside the
+window at its **last** line per message id -- Claude splits a reply across
+lines, one per content block, and each line carries the reply's usage as it
+stood when written, so the last is the final usage -- and a reply seen in more
+than one file counts once, at its latest line. Each reply is priced at its own
+model; an unpriced model (or a zeroed gateway figure) drops out without voiding
+the rest.
+
+For a launch whose stream did not end final, the sum lands as a `final=False`
+figure when it exceeds the recorded one -- both undercount a killed launch, so
+the higher is the closer -- and lands as-is: it is the launch's own spend, so a
+thread-scope backend's settle against the session's earlier steps, which
+`record_cost` applies to a streamed thread total, never touches it. A launch
+whose result frame named its cost can still spend after it: Claude Code outlives
+its result while background sub-agents run, and counts a reply's cost when the
+reply completes. The loop records the instant the result frame arrived and
+passes it as `after`; the backend then prices only the replies whose final line
+falls after that instant, and their sum lands added to the recorded figure, as a
+`final=False` figure, whether the process then exits `0`, exits non-zero, or
+meets its deadline. A reply completing before the result is already in its
+figure.
+
+An absent or unreadable session transcript, or a window with no priced usage,
+leaves the row as it was and logs `launch unpriced: <reason>` at warning level
+on the agent's logger (past a result, only the later spend goes unseen, so it
+logs `spend after the result unpriced: <reason>` at info and finding nothing
+logs nothing); a sub-agent transcript that cannot be read is left out of the sum
+with `launch partly unpriced: <reason>`. The ledger has no estimate column:
+`fractal node cost` reports the figure like any other.
+
+A launch can be **cut off mid-reply**: a reply was in flight when it died, and
+no record holds that reply's spend. The settle calls a launch cut off when any
+of its transcripts ends its window on a `user` turn that no reply follows (a
+tool result, a prompt, or Claude's continuation past the output cap -- the
+reply's request was in flight) or on a reply whose final line has a null
+`stop_reason` (written before the reply completed); entries of other types are
+Claude's bookkeeping and never end a window. A kill during a tool call ends on
+the completed reply that called the tool, so it is not cut off. The step books
+what was recorded, with no estimate for the cut reply: `_settle_cost` returns a
+`Settlement` (`cost`, `cut_off`), `Agent.settle_cost` returns the verdict, and
+the loop prints a `Warning:` line to stderr (which reaches `headless.log`) and
+passes it to `step_end`, at the steered close too, which appends
+`; partly unpriced` to the row's metadata at any terminal -- unless nothing
+priced at all, where `; unpriced` stands. `step_cost`'s strip of a stale
+`unpriced` marker leaves it alone, since the cut reply stays unpriced.
+
+A thinking-cap kill is the one cut the stream itself records: the loop ends the
+launch at the `max_tokens` delta, which can beat Claude Code's write of that
+reply (up to the output cap's worth of tokens). The parser keeps the newest
+top-level reply's usage from its `message_start`, overlaid with the closing
+`message_delta`'s usage, and when the delta reported a figure the `thinking_cap`
+event carries the reply in the transcript's message shape. The loop passes it to
+the settle as `replies`, which closes the session transcript's window with it at
+that usage -- so the step books it and reads as whole. Only a delta with no
+usage leaves the step partly unpriced. A cut-off Codex step stays `NULL`: its
+usage window accepts exactly one completed turn and it has no settle path.
 
 ## Rollups and the per-run subtree
 
@@ -207,6 +250,11 @@ Zero and unknowable are never conflated:
 - Ended steps with `NULL` cost are silently skipped by the sum, so ledger-facing
   commands disclose the count on stderr
   (`N unpriced steps (NULL cost) excluded`) while stdout stays parseable.
+- A priced step marked `partly unpriced` (cut off mid-reply, above) sums as if
+  whole, so the same commands disclose those too
+  (`N partly unpriced steps (cut off mid-reply) counted at recorded spend`,
+  counted by `Cost.partly_unpriced`). Nothing adds a margin for the spend no
+  record holds ([[features/cost/budgets|budgets]]).
 
 Codex's model-acceptance preflight is a paid invocation -- one short turn at the
 configured model -- that runs before step rows exist. Its spend stays off the

@@ -1161,7 +1161,8 @@ Print the total recorded cost, children included; ``--max-depth 0`` restricts
 to this node only. ``--run``, ``--iter``, and ``--step`` scope the reading to
 one run, iteration, or step. Prints ``untracked`` when the scope ran only
 cost-untracked steps; when ended steps carry no recorded cost, a stderr
-disclosure notes how many unpriced steps were excluded.
+disclosure notes how many unpriced steps were excluded, and another notes
+how many steps cut off mid-reply count only their recorded spend.
 
 ``cost breakdown``
 ~~~~~~~~~~~~~~~~~~

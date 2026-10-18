@@ -207,6 +207,30 @@ may include breaking changes, each listed under a Breaking heading.
   readable transcript the step keeps the streamed figure (or `NULL`) and the
   agent logs `launch unpriced: <reason>`; a sub-agent transcript it cannot read
   is left out with `launch partly unpriced: <reason>`.
+- Claude's one-hour cache writes are priced at their own rate, the price table's
+  `cache_creation_input_token_cost_above_1hr`, instead of the five-minute rate,
+  which read them about 37.5% low. Claude Code writes one-hour entries, so this
+  raises fractal's own Claude figures: the streaming estimate and the
+  killed-step settle. The openrouter route's `modelUsage` table carries no
+  split, so it stays at the five-minute rate. A direct step's result-frame cost
+  was already right.
+- A killed Claude step's settle also reads the transcripts of a workflow's
+  sub-agents, kept a folder deeper under `subagents/workflows/`, and skips
+  sub-agent transcripts last written before the launch started.
+- A Claude step's spend after its result frame is booked: Claude Code outlives
+  its result while background sub-agents run, and the replies they complete
+  after the result were never counted. Once the process ends — exit 0, a
+  non-zero exit, or the deadline — the transcript replies completing after the
+  result are priced and added to its figure.
+- A Claude step cut off with a reply in flight (its transcript ends on a user
+  turn no reply follows, or on a reply written before it completed) books the
+  spend recorded, with no estimate for the cut reply, and its row's metadata
+  gains `; partly unpriced`; the loop prints a `Warning:` line, and
+  `fractal node cost spent` and `breakdown` disclose how many such steps they
+  count. A launch killed while a tool runs is not cut off. A reply the loop ends
+  at the output cap books the usage the stream recorded for it, so a
+  thinking-cap kill reads as whole unless the stream reported no usage. A
+  cut-off Codex step still records no cost.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the

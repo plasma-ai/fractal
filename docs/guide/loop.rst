@@ -553,7 +553,10 @@ that recorded no cost counts as zero in every sum, though its ``NULL`` means
 "unknown", never "$0"; a step that ended abnormally (any status other than
 ``completed``) with a session on its row but no figure flushed is marked
 ``unpriced`` in its metadata, and a figure that flushes later strips the
-marker. These config keys (all USD) bound spend:
+marker. A ``claude`` step cut off with a reply in flight books the spend
+recorded and is marked ``partly unpriced`` instead (see :doc:`agents`); no
+cap adds a margin for the spend no record holds. These config keys (all
+USD) bound spend:
 
 .. list-table::
    :header-rows: 1
@@ -841,7 +844,8 @@ When a step fails, the steps after it are still booked as real rows —
 opened and immediately closed ``stopped`` with reason ``failed on <step>`` —
 so the activity log answers which steps never ran. An abnormally ended step
 that has a session but no recorded cost gets ``; unpriced`` appended to its
-metadata.
+metadata, and a step whose launch was cut off mid-reply gets
+``; partly unpriced``.
 
 How a run ends
 ~~~~~~~~~~~~~~
