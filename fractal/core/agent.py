@@ -965,8 +965,9 @@ class Agent:
         *,
         started: str,
         ended: str,
+        after: Optional[str] = None,
     ) -> None:
-        """Price a launch that ended without its authoritative cost.
+        """Price a launch's spend past its recorded figure.
 
         A launch killed before its closing cost fact (a deadline, a stall,
         a thinking cap, a pause, a dead stream) leaves its step row at the
@@ -979,22 +980,40 @@ class Agent:
         the cost scope, never settled against the session's earlier steps
         as a thread total is.
 
+        A launch whose result frame named its cost can still spend after
+        it: the process lives on while background work runs. With
+        ``after``, the instant that figure arrived, the hook prices only
+        the spend completing after it, which lands added to the recorded
+        figure, again as an estimate.
+
         Args:
             step_id: The launch's step row, stamped with its session.
             started: The launch's spawn instant (ISO 8601 UTC).
             ended: The launch's exit instant (ISO 8601 UTC).
+            after: The instant the launch's result frame named its cost
+                (ISO 8601 UTC), or ``None`` when none did.
 
         """
         rows = self.node.db.read('steps', where={'step_id': step_id}, limit=1)
         if not rows or rows[0]['session'] is None:
             return
-        cost = self._settle_cost(rows[0]['session'], started=started, ended=ended)
+        cost = self._settle_cost(
+            rows[0]['session'],
+            started=started,
+            ended=ended,
+            after=after,
+        )
         if cost is None:
             return
         # a launch can't have negative spend (as in record_cost)
         cost = max(0.0, cost)
         recorded = rows[0]['cost']
-        if recorded is not None and recorded >= cost:
+        if after is not None:
+            # the result's figure plus the spend past it
+            if not cost:
+                return
+            cost += recorded or 0.0
+        elif recorded is not None and recorded >= cost:
             return
         # book the launch's own figure past record_cost's thread settle,
         # firing the record event with exactly what lands
@@ -1007,6 +1026,7 @@ class Agent:
         *,
         started: str,
         ended: str,
+        after: Optional[str] = None,
     ) -> Optional[float]:
         """Hook for pricing a launch's window from the provider's own record.
 
@@ -1014,10 +1034,12 @@ class Agent:
         a backend whose provider persists per-message usage, returning the
         launch's own spend (per invocation, whatever the backend's
         ``cost_scope`` -- never a thread total) or ``None`` with the reason
-        logged::
+        logged; with ``after``, only the spend completing after that
+        instant::
 
-            def _settle_cost(self, session, *, started, ended):
-                usage = provider.usage(session, since=started, until=ended)
+            def _settle_cost(self, session, *, started, ended, after=None):
+                since = after or started
+                usage = provider.usage(session, since=since, until=ended)
                 return _compute_cost(usage, self.model)
         """
         return None

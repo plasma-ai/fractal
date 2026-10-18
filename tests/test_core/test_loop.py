@@ -15,6 +15,7 @@ import logging
 import os
 import pathlib
 import re
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -86,6 +87,7 @@ __all__ = [
     'test_launch_prices_the_step_from_the_finish_frame',
     'test_killed_claude_launch_prices_from_its_transcript',
     'test_killed_wake_up_after_a_result_prices_from_the_transcript',
+    'test_background_spend_after_the_result_is_booked',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_killed_launch_settles_after_dropping_its_group_handle',
     'test_a_settle_never_lowers_the_streamed_figure',
@@ -2554,6 +2556,67 @@ def test_killed_wake_up_after_a_result_prices_from_the_transcript(
     ]
 
 
+@pytest.mark.parametrize(
+    argnames=('end', 'outcome'),
+    argvalues=[
+        pytest.param('exit 0', 'PLAN/completed/', id='exit-0'),
+        pytest.param('exit 3', 'PLAN/failed/agent error (exit 3)', id='non-zero'),
+        pytest.param('exec sleep 30', 'PLAN/exited/timed out', id='deadline'),
+    ],
+)
+def test_background_spend_after_the_result_is_booked(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    end: str,
+    outcome: str,
+) -> None:
+    """Spend completing after the result frame adds to the figure it named.
+
+    Claude Code outlives its result while a background sub-agent runs, and
+    counts a reply's cost when the reply completes, so a reply its
+    transcripts complete after the result lies past that figure. However
+    the process then ends -- cleanly, failing, or at the deadline -- the
+    step books the result's figure plus that reply. The reply completed
+    before the result is already in its figure and adds nothing.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='3s', step_retries=0)
+    before = {'input_tokens': 100, 'output_tokens': 900}
+    background = {'input_tokens': 2_000, 'output_tokens': 700}
+    # the background agent's workflow transcript, under the launch's session
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    flow = session.with_suffix('') / 'subagents' / 'workflows' / 'wf_1'
+    reply = _assistant_entry(
+        message_id='msg_late',
+        usage=background,
+        model='claude-haiku-5',
+        isSidechain=True,
+    )
+    script = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', before),
+        _RESULT,
+        # the result reaches the loop before the background reply completes
+        'sleep 1',
+        _append_entry(flow / 'agent-w.jsonl', reply),
+        end,
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', before)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    booked = min(rows, key=lambda row: row['step_id'])
+    late = _price(background, 'claude-haiku-5')
+    assert booked['cost'] == pytest.approx(_RESULT['total_cost_usd'] + late)
+
+
 def test_killed_claude_launch_without_a_transcript_stays_unpriced(
     loop_node: Node,
     scripted_claude: Callable[..., ScriptedClaude],
@@ -2610,8 +2673,9 @@ def test_killed_launch_settles_after_dropping_its_group_handle(
 
     monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
     ScriptedLoop(loop_node, agent).run()
-    # one settle, for the launch the watchdog ended
-    assert handles == [False]
+    # a settle per launch: the one the watchdog ended, then the two whose
+    # results it checks for spend past them
+    assert handles == [False, False, False]
 
 
 def test_a_settle_never_lowers_the_streamed_figure(
@@ -7261,6 +7325,20 @@ def _assistant_frame(message_id: str, usage: dict[str, int]) -> dict[str, Any]:
     frame = json.loads(json.dumps(_THINKING_REPLY))
     frame['message'].update(id=message_id, model='claude-fable-5', usage=usage)
     return frame
+
+
+def _append_entry(path: pathlib.Path, entry: dict[str, Any]) -> str:
+    """Return the shell command appending a transcript entry, stamped as it runs."""
+    code = (
+        'import datetime, json, pathlib, sys\n'
+        'path = pathlib.Path(sys.argv[1])\n'
+        'path.parent.mkdir(parents=True, exist_ok=True)\n'
+        'entry = json.loads(sys.argv[2])\n'
+        "entry['timestamp'] = datetime.datetime.now(datetime.UTC).isoformat()\n"
+        "with path.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(entry) + '\\n')\n"
+    )
+    return shlex.join([sys.executable, '-c', code, f'{path}', json.dumps(entry)])
 
 
 def _assistant_entry(

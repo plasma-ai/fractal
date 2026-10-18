@@ -3038,13 +3038,18 @@ class Loop:
         # the session the stream names, which a capped launch's steer
         # resumes (the reader dies at the cap, so no result carries it)
         stream_session: Optional[str] = None
+        # the instant a result frame named the launch's cost -- spend the
+        # agent completes after it lies past that figure
+        settled_at: Optional[str] = None
 
         def _render(event: StreamEvent) -> None:
-            nonlocal idle_since, stream_session
+            nonlocal idle_since, stream_session, settled_at
             if self._render is not None:
                 self._render(event)
             if event.session is not None:
                 stream_session = event.session
+            if event.kind == 'result' and event.cost is not None:
+                settled_at = fractal.util.time.utc_now()
             if event.kind == 'result' and event.failed and event.message:
                 failures.append(event.message)
             if watch_cap and event.kind == 'thinking_cap':
@@ -3122,13 +3127,17 @@ class Loop:
 
         # a launch that ended without its authoritative cost (killed, or its
         # stream dead before the closing figure) is priced from the provider's
-        # own usage record, read once the process has exited and flushed it
-        if self._step_id is not None and (result is None or not result.final):
+        # own usage record, read once the process has exited and flushed it;
+        # one that reached it is priced for the spend past it, since the
+        # process outlives its result while background work runs
+        if self._step_id is not None:
+            after = settled_at if result is not None and result.final else None
             try:
                 agent.settle_cost(
                     step_id=self._step_id,
                     started=launched,
                     ended=fractal.util.time.utc_now(),
+                    after=after,
                 )
             except Exception as error:
                 print(

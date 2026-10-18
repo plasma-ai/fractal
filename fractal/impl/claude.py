@@ -585,6 +585,7 @@ class ClaudeAgent(Agent):
         *,
         started: str,
         ended: str,
+        after: Optional[str] = None,
     ) -> Optional[float]:
         """Price the launch's window from claude's own session transcripts.
 
@@ -598,16 +599,28 @@ class ClaudeAgent(Agent):
         skipped with the reason logged. An absent or unreadable session
         transcript, or a window with no priced usage, logs the reason and
         returns ``None``.
+
+        With ``after``, the result frame's figure stands and only the
+        replies completing after it price: claude counts a reply's cost
+        when it completes, so those are the spend past its figure, and
+        finding none is the common case, never logged.
         """
+        # past a result, a record the settle cannot read leaves only the
+        # spend after it unseen
+        unpriced = 'launch unpriced'
+        level = logging.WARNING
+        if after is not None:
+            unpriced = 'spend after the result unpriced'
+            level = logging.INFO
         try:
             found = self.transcript(session)
         except (OSError, ValueError) as e:
-            self.log(f'launch unpriced: transcript unreadable: {e}', logging.WARNING)
+            self.log(f'{unpriced}: transcript unreadable: {e}', level)
             return None
         if not found['exists']:
             self.log(
-                message=f'launch unpriced: no transcript for session {session}',
-                level=logging.WARNING,
+                message=f'{unpriced}: no transcript for session {session}',
+                level=level,
             )
             return None
         # read each sub-agent's transcript beside the session's -- one pass
@@ -630,8 +643,8 @@ class ClaudeAgent(Agent):
                     level=logging.WARNING,
                 )
         content = '\n'.join(contents)
-        cost = _transcript_cost(content, started=started, ended=ended)
-        if cost is None:
+        cost = _transcript_cost(content, started=started, ended=ended, after=after)
+        if cost is None and after is None:
             self.log(
                 message=f'launch unpriced: no priced usage in session {session}'
                 f' between {started} and {ended}',
@@ -707,7 +720,13 @@ def _is_continuation(message: dict[str, Any], /) -> bool:
     return False
 
 
-def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[float]:
+def _transcript_cost(
+    content: str,
+    *,
+    started: str,
+    ended: str,
+    after: Optional[str] = None,
+) -> Optional[float]:
     """Price the assistant entries a transcript stamped within a window.
 
     Claude splits a reply across lines, one per content block under the
@@ -722,12 +741,15 @@ def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[floa
         content: The transcripts' raw JSONL text, joined by newlines.
         started: The window's opening instant (ISO 8601 UTC).
         ended: The window's closing instant (ISO 8601 UTC).
+        after: An instant inside the window (ISO 8601 UTC); when given,
+            only the replies whose final line is stamped after it price.
 
     """
     opened = dt.datetime.fromisoformat(started)
     closed = dt.datetime.fromisoformat(ended)
-    # keep the final usage per message id (later lines overwrite earlier)
-    replies: dict[str, tuple[dict[str, Any], Optional[str]]] = {}
+    # keep the final usage per message id (later lines overwrite earlier),
+    # with the instant its final line was written
+    replies: dict[str, tuple[dict[str, Any], Optional[str], dt.datetime]] = {}
     # a newline alone ends a record -- splitlines would also split at the
     # U+2028 and U+0085 claude leaves raw inside a record's strings
     for line in content.split('\n'):
@@ -752,9 +774,14 @@ def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[floa
         usage = message.get('usage')
         model = message.get('model')
         if isinstance(message_id, str) and isinstance(usage, dict):
-            replies[message_id] = (usage, model if isinstance(model, str) else None)
+            model = model if isinstance(model, str) else None
+            replies[message_id] = (usage, model, stamped)
+    # a reply completing by the instant was already counted
+    since = dt.datetime.fromisoformat(after) if after is not None else None
     total: Optional[float] = None
-    for usage, model in replies.values():
+    for usage, model, stamped in replies.values():
+        if since is not None and stamped <= since:
+            continue
         # a zero figure is a missing one (a gateway zeroes its usage), not a
         # free reply -- it must not turn an unknowable launch into $0
         cost = _compute_cost(usage, model)
