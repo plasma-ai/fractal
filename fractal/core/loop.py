@@ -434,7 +434,7 @@ class Loop:
         # as committed on the tree's root branch and held for the run (no
         # node can change its own, and an edit lands at the next start or
         # resume); an agent the settings do not name keeps its own ladder
-        self._effort_ladders = worktree.committed_effort_setting(
+        self._effort_ladders = worktree.committed_effort_ladders(
             node.repo_dir,
             ref=config.get('root'),
             project=node.project_path,

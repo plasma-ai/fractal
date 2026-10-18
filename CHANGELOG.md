@@ -183,9 +183,10 @@ may include breaking changes, each listed under a Breaking heading.
   `(effort xhigh -> high for the steer)`. Claude never lowers below `high`, and
   a step at or below that floor, or at a level off the ladder, steers at its own
   effort. The no-action watchdog's steer keeps the effort, and Codex never
-  lowers. A project can set an agent's levels and floor with a new `effort` key
-  in `.fractal/.settings.json`, read from the tree's root branch at each start
-  or resume; an invalid ladder refuses wherever the file is read.
+  lowers. A project can set an agent's levels and floor with a new
+  `effort_ladder` key in `.fractal/.settings.json`, read from the tree's root
+  branch at each start or resume; an invalid ladder refuses wherever the file is
+  read.
 
 ### Fixed
 

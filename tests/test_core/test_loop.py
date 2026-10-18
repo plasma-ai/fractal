@@ -2082,9 +2082,9 @@ def test_project_settings_override_the_ladder(
     """
     _configure(loop_node, effort='high')
     ladder = {'levels': ['low', 'high', 'max'], 'floor': 'low'}
-    _commit_settings(loop_node, {'effort': {'claude': ladder}})
+    _commit_settings(loop_node, {'effort_ladder': {'claude': ladder}})
     settings = loop_node.worktree / '.fractal' / '.settings.json'
-    unchanged = {'effort': {'claude': {**ladder, 'floor': 'high'}}}
+    unchanged = {'effort_ladder': {'claude': {**ladder, 'floor': 'high'}}}
     settings.write_text(json.dumps(unchanged), encoding='utf-8')
     capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
     resumed = _claude_script(_INIT, _RESULT)
@@ -2097,7 +2097,7 @@ def test_project_settings_override_the_ladder(
 
 
 @pytest.mark.parametrize(
-    argnames=('effort', 'match'),
+    argnames=('ladders', 'match'),
     argvalues=[
         pytest.param(['high'], 'map agent names', id='not-an-object'),
         pytest.param({'claude': {'levels': ['high']}}, 'exactly', id='no-floor'),
@@ -2135,11 +2135,11 @@ def test_project_settings_override_the_ladder(
 )
 def test_invalid_effort_setting_fails_boot(
     loop_node: Node,
-    effort: Any,
+    ladders: Any,
     match: str,
 ) -> None:
     """An invalid committed effort ladder fails the loop's boot, naming the file."""
-    _commit_settings(loop_node, {'effort': effort})
+    _commit_settings(loop_node, {'effort_ladder': ladders})
     with pytest.raises(ValueError, match=match) as excinfo:
         MockLoop(loop_node)
     assert f'{loop_node.branch}:.fractal/.settings.json' in str(excinfo.value)

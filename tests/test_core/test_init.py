@@ -2752,7 +2752,7 @@ def test_wiki_setting_is_fixed_at_init_and_inherited(
         settings = git_repo / '.fractal' / '.settings.json'
         settings.parent.mkdir()
         ladder = {'levels': ['high', 'max'], 'floor': 'high'}
-        content = {'wiki': wiki, 'effort': {'claude': ladder}}
+        content = {'wiki': wiki, 'effort_ladder': {'claude': ladder}}
         settings.write_text(json.dumps(content), encoding='utf-8')
     user = Node(git_repo)
     user.init(agent='claude', user=True)
@@ -2802,7 +2802,8 @@ def test_wiki_setting_is_fixed_at_init_and_inherited(
         pytest.param('{"wiki": "null"}', 'clearing the key', id='named-null'),
         pytest.param('{"wiki": "docs", "wikis": "x"}', 'unknown keys', id='typo'),
         pytest.param(
-            '{"wiki": "docs", "effort": {"claude": {"levels": ["high"], "floor": "max"}}}',
+            '{"wiki": "docs", "effort_ladder": {"claude": {"levels": ["high"],'
+            ' "floor": "max"}}}',
             'one of its levels',
             id='effort-ladder',
         ),

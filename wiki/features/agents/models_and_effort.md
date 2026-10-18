@@ -117,19 +117,20 @@ through the `config_effort()` hook shaped like `config_model()`: claude reads
 `effortLevel` through the same settings chain as its model (the shared
 `ClaudeAgent._setting`), and the base hook returns `None`.
 
-A project overrides an agent's ladder in the `effort` key of its
+A project overrides an agent's ladder in the `effort_ladder` key of its
 `<project>/.fractal/.settings.json`:
-`{"effort": {"claude": {"levels": [...], "floor": "high"}}}`. The settings
-parser (`worktree._parse_settings`) validates every key the file carries,
-whichever reader asks: `wiki` as before, and `effort` as an object of agent
-ladders, each with exactly `levels` (unique non-empty strings) and `floor` (one
-of them). The loop reads the copy committed on the tree's root branch at boot
-(`worktree.committed_effort_setting`, beside `committed_wiki_setting`) and holds
-it for the run, so a node cannot change its own ladder and a committed change
-lands at the next start or resume; an invalid ladder fails the boot, and since
-every reader parses the whole file, `fractal init`, the `--init` baseline, and
-spawn refuse it too. The parser cannot know the levels a provider accepts, so an
-override naming a level the CLI rejects fails the steered launch.
+`{"effort_ladder": {"claude": {"levels": [...], "floor": "high"}}}`. The
+settings parser (`worktree._parse_settings`) validates every key the file
+carries, whichever reader asks: `wiki` as before, and `effort_ladder` as an
+object of agent ladders, each with exactly `levels` (unique non-empty strings)
+and `floor` (one of them). The loop reads the copy committed on the tree's root
+branch at boot (`worktree.committed_effort_ladders`, beside
+`committed_wiki_setting`) and holds it for the run, so a node cannot change its
+own ladder and a committed change lands at the next start or resume; an invalid
+ladder fails the boot, and since every reader parses the whole file,
+`fractal init`, the `--init` baseline, and spawn refuse it too. The parser
+cannot know the levels a provider accepts, so an override naming a level the CLI
+rejects fails the steered launch.
 
 ## Preflight
 

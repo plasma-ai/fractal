@@ -515,8 +515,8 @@ settings file at ``<project>/.fractal/.settings.json``:
    }
 
 The file is the repository's source of truth, committed with the project, so
-no operator flag can be forgotten. ``wiki`` and ``effort`` (see `The effort
-ladder`_) are its only keys — any other key refuses, so a typo cannot read as
+no operator flag can be forgotten. ``wiki`` and ``effort_ladder`` (see `The
+effort ladder`_) are its only keys — any other key refuses, so a typo cannot read as
 the default. The default folder is spelled
 by omitting the key (or the file), never by setting it to ``null``, which
 refuses. No node's ``config.json``, user or child, records ``wiki`` for the
@@ -568,14 +568,14 @@ A step stuck at a thinking cap is steered one effort level lower (see
 :doc:`/guide/loop`). Each agent carries its own ladder of levels and a floor
 the steer never goes below: Claude lowers through ``low``, ``medium``,
 ``high``, ``xhigh``, and ``max``, never below ``high``; Codex never lowers. A
-project overrides an agent's ladder with the ``effort`` key of its
+project overrides an agent's ladder with the ``effort_ladder`` key of its
 ``<project>/.fractal/.settings.json``, mapping the agent's name to its levels,
 lowest first, and its floor:
 
 .. code-block:: json
 
    {
-     "effort": {
+     "effort_ladder": {
        "claude": {
          "levels": ["low", "medium", "high", "xhigh", "max"],
          "floor": "medium"

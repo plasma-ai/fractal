@@ -37,7 +37,7 @@ String keys:
 - `wiki` -- the shared project-wiki folder relative to the project: the one
   folder a node commits to regardless of its `scope`. Read at `fractal init`
   from the project's tracked `.fractal/.settings.json` (`{"wiki": "docs"}`,
-  beside the `effort` ladder key the loop reads; see
+  beside the `effort_ladder` key the loop reads; see
   [[features/agents/models_and_effort#The effort ladder|models_and_effort]]) and
   copied from the parent at every spawn in the same project (a child in another
   sub-project reads that project's setting); not settable by flag; **immutable**

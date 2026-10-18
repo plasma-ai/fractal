@@ -50,7 +50,7 @@ _EXCLUDE_END = '# <<< fractal <<<'
 
 # the keys a project's settings file may carry (any other key fails, so a
 # misspelled one never silently reads as its default)
-_SETTINGS_KEYS = ('effort', 'wiki')
+_SETTINGS_KEYS = ('effort_ladder', 'wiki')
 
 
 @contextlib.contextmanager
@@ -300,8 +300,9 @@ def read_wiki_setting(project_dir: pathlib.Path) -> Optional[str]:
     The tracked ``<project>/.fractal/.settings.json`` is the repository's
     source of truth for the folder: user init reads it once and fixes the
     value into the tree's config, which every descendant inherits. The
-    file holds one JSON object whose keys are ``wiki`` and ``effort``, so
-    a misspelled key fails rather than silently reading as the default.
+    file holds one JSON object whose keys are ``wiki`` and
+    ``effort_ladder``, so a misspelled key fails rather than silently
+    reading as the default.
 
     Args:
         project_dir: The project's directory in the user node's worktree.
@@ -352,16 +353,17 @@ def committed_wiki_setting(
     return _committed_settings(repo_dir, ref=ref, project=project).get('wiki')
 
 
-def committed_effort_setting(
+def committed_effort_ladders(
     repo_dir: pathlib.Path,
     ref: str,
     project: str,
 ) -> dict[str, tuple[tuple[str, ...], str]]:
     """Read a project's per-agent effort ladders as committed on ``ref``.
 
-    The settings file's ``effort`` key maps an agent name to the levels a
-    thinking-capped step's steer lowers through and the floor it stops at
-    (``{"effort": {"claude": {"levels": [...], "floor": "high"}}}``),
+    The settings file's ``effort_ladder`` key maps an agent name to the
+    levels a thinking-capped step's steer lowers through and the floor it
+    stops at (``{"effort_ladder": {"claude": {"levels": [...], "floor":
+    "high"}}}``),
     overriding that agent's own defaults. The loop reads it at boot from
     the tree's root branch, never a node's checkout, so no node can change
     its own ladder.
@@ -373,7 +375,7 @@ def committed_effort_setting(
 
     Returns:
         Each named agent's ``(levels, floor)``, levels lowest first; empty
-        when the file or its ``effort`` key is absent at ``ref``.
+        when the file or its ``effort_ladder`` key is absent at ``ref``.
 
     Raises:
         ValueError: If the committed file is not a JSON object, carries an
@@ -381,7 +383,8 @@ def committed_effort_setting(
             effort ladder.
 
     """
-    return _committed_settings(repo_dir, ref=ref, project=project).get('effort', {})
+    settings = _committed_settings(repo_dir, ref=ref, project=project)
+    return settings.get('effort_ladder', {})
 
 
 def exclude_update(repo_dir: pathlib.Path) -> None:
@@ -916,8 +919,8 @@ def _parse_settings(text: str, source: str) -> dict[str, Any]:
         source: The file's name in the error.
 
     Returns:
-        The keys present: ``wiki`` as its validated folder, and ``effort``
-        as each agent's ``(levels, floor)``.
+        The keys present: ``wiki`` as its validated folder, and
+        ``effort_ladder`` as each agent's ``(levels, floor)``.
 
     Raises:
         ValueError: If ``text`` is not a JSON object, carries an unknown
@@ -938,13 +941,17 @@ def _parse_settings(text: str, source: str) -> dict[str, Any]:
     parsed: dict[str, Any] = {}
     if 'wiki' in settings:
         parsed['wiki'] = validate_wiki(settings['wiki'], source=f'"wiki" in {source}')
-    if 'effort' in settings:
-        parsed['effort'] = _parse_effort(settings['effort'], source=source)
+    if 'effort_ladder' in settings:
+        ladders = _parse_effort_ladder(settings['effort_ladder'], source=source)
+        parsed['effort_ladder'] = ladders
     return parsed
 
 
-def _parse_effort(value: Any, source: str) -> dict[str, tuple[tuple[str, ...], str]]:
-    """Validate a settings file's ``effort`` key into each agent's ladder.
+def _parse_effort_ladder(
+    value: Any,
+    source: str,
+) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Validate a settings file's ``effort_ladder`` key into each agent's ladder.
 
     Args:
         value: The key's value.
@@ -961,11 +968,12 @@ def _parse_effort(value: Any, source: str) -> dict[str, tuple[tuple[str, ...], s
     """
     if not isinstance(value, dict):
         raise ValueError(
-            f'"effort" in {source} must map agent names to ladders, not {value!r}.'
+            f'"effort_ladder" in {source} must map agent names to ladders,'
+            f' not {value!r}.'
         )
     ladders = {}
     for agent, ladder in value.items():
-        name = f'"effort.{agent}" in {source}'
+        name = f'"effort_ladder.{agent}" in {source}'
         if not isinstance(ladder, dict) or set(ladder) != {'levels', 'floor'}:
             raise ValueError(
                 f'{name} must be an object with exactly "levels" and "floor",'
