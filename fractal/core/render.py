@@ -11,6 +11,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Optional
 
 import jinja2
+import jinja2.meta
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 if typing.TYPE_CHECKING:
@@ -96,6 +97,31 @@ def _ordered_values(value: Any) -> Any:
     return value
 
 
+def rooted_references(blob: bytes) -> list[str]:
+    """Return the literal repo-rooted names one seed source references.
+
+    Parses -- never renders -- the source in the seed environment and
+    collects each include, import, or extends name that starts with
+    ``/``. A source that is not UTF-8 text or not valid Jinja yields
+    none: only a rendered or included source must decode and parse, and
+    rendering reports it where it is used. A computed name cannot be
+    known before rendering, so the loader refuses a repo-rooted one then.
+
+    Args:
+        blob: The committed source bytes.
+
+    Returns:
+        The repo-rooted names, in source order.
+
+    """
+    try:
+        ast = _SeedEnvironment().parse(blob.decode('utf-8'))
+    except (UnicodeDecodeError, jinja2.TemplateSyntaxError):
+        return []
+    names = jinja2.meta.find_referenced_templates(ast)
+    return [name for name in names if name is not None and name.startswith('/')]
+
+
 def render_seed(
     sources: Mapping[str, bytes],
     files: Iterable[str],
@@ -109,10 +135,13 @@ def render_seed(
     Includes read the same source snapshot as each output. Only requested
     files render independently; unused sources need not decode as UTF-8.
     Supplied values remain literal, with table order normalized recursively
-    so TOML serialization cannot change subsequent rendering.
+    so TOML serialization cannot change subsequent rendering. A repo-rooted
+    name (a leading ``/``) loads the shared file the snapshot read under
+    that name.
 
     Args:
-        sources: Template-relative names mapped to committed source bytes.
+        sources: Template-relative names mapped to committed source bytes,
+            beside each shared file under its repo-rooted include name.
         files: Template-relative output filenames to render.
         values: Resolved TOML inputs.
         path: Repo-relative template folder for error messages.
@@ -127,6 +156,12 @@ def render_seed(
 
     """
 
+    def display(name: str) -> str:
+        # a shared file is named by its own repo-relative path
+        if name.startswith('/'):
+            return name[1:]
+        return f'{path}/{name}'
+
     def load(name: str) -> Optional[tuple[str, str, None]]:
         blob = sources.get(name)
         if blob is None:
@@ -139,12 +174,12 @@ def render_seed(
                 message='source is not UTF-8 text; templates are text',
                 lineno=prefix.count(b'\n') + 1,
                 name=name,
-                filename=f'{path}/{name}',
+                filename=display(name),
             ) from e
-        return text, f'{path}/{name}', None
+        return text, display(name), None
 
     values = _ordered_values(values)
-    filenames = {f'{path}/{name}' for name in sources}
+    filenames = {display(name) for name in sources}
     rendered: dict[str, bytes] = {}
     # complete every output before the caller can write any deployment file
     for name in files:
@@ -179,6 +214,13 @@ def render_seed(
             message = str(e)
             if isinstance(e, jinja2.TemplateNotFound):
                 message = f'included source not found: {e.name!r}'
+                # the snapshot reads every literal repo-rooted name, so a
+                # missing one was computed while rendering
+                if isinstance(e.name, str) and e.name.startswith('/'):
+                    message = (
+                        f'{message}; a repo-rooted include must name its file'
+                        " literally, so the seed reads it at the template's commit"
+                    )
             elif isinstance(e, jinja2.UndefinedError):
                 fix = remedy
                 if not fix:
