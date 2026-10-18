@@ -121,12 +121,14 @@ _SNAPSHOT_WIDTHS = ((8,), (4, 2, 2))
 
 # the way out of a leftover git operation whose generic finish-or-abort is not
 # enough, keyed by its marker: a child's squash merge finishes through fractal's
-# own tail, and git holds index.lock only while it runs, so whether a lock is
-# stale is the agent's to check
+# own tail and aborts without the MERGE_HEAD `git merge --abort` needs, and git
+# holds index.lock only while it runs, so whether a lock is stale is the
+# agent's to check
 _GIT_PENDING_HINTS = {
     'SQUASH_MSG': (
         'a child merge stopped before its commit; resolve and stage its'
-        ' conflicts, then finish it with `fractal node merge <child> --continue`'
+        ' conflicts, then finish it with `fractal node merge <child> --continue`,'
+        ' or abort it with `git reset --merge`'
     ),
     'index.lock': 'remove it only once no git process runs in this worktree',
 }
@@ -1237,11 +1239,26 @@ class Loop:
         """Restore the worktree for a continue launch.
 
         Continue-mode cleanup: commit operator seed edits --no-verify,
-        clean, re-arm budgets, preserve config.json.
+        clean, re-arm budgets, preserve config.json. A worktree holding a
+        git operation in progress is left as found.
         """
         node = self.node
         worktree = node.worktree
         node_dir = node.node_dir
+        # a git operation left in progress is the agent's to finish or abort
+        # (its first prompt names it): the commit below would silently finish
+        # a staged merge or crash boot on a conflicted one, and the restore
+        # would discard the operation's state; a probe that cannot answer
+        # names nothing
+        if operations := fractal.util.git.in_progress(worktree, check=False):
+            named = ', '.join(
+                f'{operation} ({marker.name})' for operation, marker in operations
+            )
+            print(
+                'Continuing: skipped the operator-edit commit and the clean:'
+                f' the worktree has {named}, which the first step prompt names'
+            )
+            return
         # commit operator steering edits before the checkout/clean below
         # reverts them (--no-verify, unguarded: failing loud beats destroying
         # them); the excludes-scoped -uall probe keeps runtime artifacts from
@@ -2734,6 +2751,17 @@ class Loop:
         lines = []
         for operation, marker in operations:
             line = f'- {operation} ({marker.name})'
+            # a linked worktree's lock lives in its own git dir, never the
+            # main checkout's .git/index.lock, so the lock is named by its
+            # resolved path; a lock its git command just dropped has no age
+            if marker.name == 'index.lock':
+                try:
+                    age = time.time() - marker.stat().st_mtime
+                except OSError:
+                    line = f'- {operation} ({marker})'
+                else:
+                    age_label = fractal.util.duration.format_age(max(0.0, age))
+                    line = f'- {operation} ({marker}, {age_label} old)'
             if hint := _GIT_PENDING_HINTS.get(marker.name):
                 line = f'{line}: {hint}'
             lines.append(line)

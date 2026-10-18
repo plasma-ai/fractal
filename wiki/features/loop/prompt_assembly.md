@@ -87,6 +87,12 @@ cherry-pick, revert, rebase, or `index.lock` is left there, renders it with the
 operation list as `GIT_OPERATIONS` and opens the prompt with it -- ahead of the
 charter, or of `STALL.md` for a steer -- so the seat finishes or aborts the
 operation before running git on top of it. A squash merge's line points at
-`fractal node merge <child> --continue`; the lock's line names it without
-judging staleness, since a live git command holds the same file. A probe that
-cannot answer names nothing, and a clean worktree's prompt is unchanged.
+`fractal node merge <child> --continue` to finish and `git reset --merge` to
+abort (`git merge --abort` needs a `MERGE_HEAD` a squash never writes). The
+lock's line names it by its resolved path and age without judging staleness,
+since a live git command holds the same file; a linked worktree's lock lives in
+its own git dir, and a guessed `.git/index.lock` would be the main checkout's. A
+probe that cannot answer names nothing, and a clean worktree's prompt is
+unchanged. A `--continue` boot over such an operation skips its operator-edit
+commit and clean (`Loop._clean_worktree`), so the operation reaches this notice
+intact instead of being committed or crashing the boot.

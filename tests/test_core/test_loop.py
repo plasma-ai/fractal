@@ -169,6 +169,7 @@ __all__ = [
     'test_resumed_seats_get_the_inbox_re_read',
     'test_digest_renders_mail_as_inert_data',
     'test_a_leftover_git_operation_opens_every_launch_prompt',
+    'test_continue_leaves_a_pending_merge_for_the_agent',
     'test_a_clean_worktree_launch_prompt_carries_no_notice',
     'test_drain_survives_a_pause_and_resume',
     'test_drain_guards_survive_an_env_scrub',
@@ -6199,8 +6200,10 @@ class PromptRecordingLoop(MockLoop):
         ('MERGE_HEAD', 'a merge in progress (MERGE_HEAD)'),
         # a child's squash merge stopped before its commit
         ('SQUASH_MSG', 'fractal node merge <child> --continue'),
+        # a git command killed mid-write, named by where git keeps the lock
+        ('index.lock', 'a running git process or a stale index.lock ({path}, '),
     ],
-    ids=['merge', 'squash'],
+    ids=['merge', 'squash', 'index-lock'],
 )
 def test_a_leftover_git_operation_opens_every_launch_prompt(
     loop_node: Node,
@@ -6213,13 +6216,16 @@ def test_a_leftover_git_operation_opens_every_launch_prompt(
     A killed or paused step can leave a merge or squash unfinished, and the
     next agent otherwise starts git work on top of it blind. Every launch --
     a retry and a resumed one included -- opens with the notice naming the
-    operation and its way out, ahead of the charter and any mode.
+    operation and its way out, ahead of the charter and any mode; a steer
+    opens with it ahead of its stall notice.
     """
     monkeypatch.setenv('_NODE', '')
     node = loop_node
     _configure(node, step_retry_backoff='1s')
     relpath = _git(node.worktree, 'rev-parse', '--git-path', marker).stdout
-    (node.worktree / relpath.strip()).write_text('0' * 40 + '\n', encoding='utf-8')
+    path = node.worktree / relpath.strip()
+    path.write_text('0' * 40 + '\n', encoding='utf-8')
+    named = named.format(path=path)
     results = [
         StepResult(status='failed', exit_code=2, reason='agent error (exit 2)'),
         StepResult(status='completed'),
@@ -6236,6 +6242,62 @@ def test_a_leftover_git_operation_opens_every_launch_prompt(
     prompt = loop._build_step_prompt(loop._discover_steps()[0])
     assert prompt.startswith('## Git Operation Pending')
     assert prompt.index('# Charter') < prompt.index('## Resume Mode')
+    # a steer's prompt is the stall notice alone, still opened by the notice
+    loop._resume_mode = False
+    loop._steer_session = 'SID'
+    prompt = loop._build_step_prompt(loop._discover_steps()[0])
+    assert prompt.startswith('## Git Operation Pending')
+    assert named in prompt[: prompt.index('## Stall Mode')]
+    assert '# Charter' not in prompt
+
+
+@pytest.mark.parametrize('conflicted', [False, True], ids=['staged', 'conflicted'])
+def test_continue_leaves_a_pending_merge_for_the_agent(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    conflicted: bool,
+) -> None:
+    """A continue over a merge in progress leaves it for the agent's prompt.
+
+    The continue commits operator edits under the node folder and then
+    restores the worktree; over a staged merge that commit would silently
+    finish the merge, and over a conflicted one git refuses it and boot
+    crashes. The continue leaves the worktree as found, says so, and the
+    first prompt names the merge.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    repo = node.worktree
+    # a side branch changing a shared file, and on a conflict the same file here
+    (repo / 'shared.txt').write_text('base\n', encoding='utf-8')
+    _git(repo, 'add', 'shared.txt')
+    _git(repo, 'commit', '-q', '-m', 'add shared')
+    _git(repo, 'checkout', '-q', '-b', 'side')
+    (repo / 'shared.txt').write_text('side\n', encoding='utf-8')
+    _git(repo, 'commit', '-q', '-am', 'side edit')
+    _git(repo, 'checkout', '-q', '-')
+    if conflicted:
+        (repo / 'shared.txt').write_text('main\n', encoding='utf-8')
+        _git(repo, 'commit', '-q', '-am', 'main edit')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    merge = subprocess.run(
+        ['git', '-C', f'{repo}', 'merge', '--no-commit', '--no-ff', 'side'],
+        capture_output=True,
+        text=True,
+    )
+    assert (merge.returncode != 0) is conflicted
+    # an operator edit under the node folder arms the continue's commit
+    (node.node_dir / 'note.md').write_text('steer\n', encoding='utf-8')
+    loop = PromptRecordingLoop(node, continue_=True)
+    assert loop.run() == 0
+    # the merge is neither committed nor discarded
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    merge_head = _git(repo, 'rev-parse', '--git-path', 'MERGE_HEAD').stdout
+    assert (repo / merge_head.strip()).is_file()
+    assert 'skipped the operator-edit commit and the clean' in capsys.readouterr().out
+    assert loop.prompts[0].startswith('## Git Operation Pending')
+    assert 'a merge in progress (MERGE_HEAD)' in loop.prompts[0]
 
 
 def test_a_clean_worktree_launch_prompt_carries_no_notice(

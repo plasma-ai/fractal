@@ -200,7 +200,8 @@ detached tmux session, or in an independent process group with
    * - ``--continue``
      - Re-arm a settled node (``completed``, ``stopped``, ``exited``, or
        ``killed``) for further iterations. The launch restores the worktree
-       and the loop opens a fresh run.
+       (leaving it as found when a git operation is in progress there, for
+       the first step's prompt to name) and the loop opens a fresh run.
    * - ``--clean``
      - Requires ``--continue``. Acknowledges that the continue's worktree
        restore discards uncommitted project files; without it a dirty

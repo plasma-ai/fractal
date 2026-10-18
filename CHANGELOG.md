@@ -94,16 +94,20 @@ may include breaking changes, each listed under a Breaking heading.
 - Every step launch checks the node's worktree for a git operation left
   unfinished — a merge, squash merge, cherry-pick, revert, rebase, or held
   `index.lock` — and, when it finds one, opens the prompt with a notice naming
-  each and saying to finish or abort it before any other git operation. This
-  covers retried, resumed, and steered launches too; a squash merge points at
-  `fractal node merge <child> --continue`, and a clean worktree's prompt is
-  unchanged.
+  each and saying to finish or abort it before starting any other git work. This
+  covers retried, resumed, and steered launches too. A squash merge points at
+  `fractal node merge <child> --continue` and `git reset --merge`, a held
+  `index.lock` is named by its resolved path and age, and a clean worktree's
+  prompt is unchanged. `fractal node start --continue` over such an operation
+  leaves the worktree as found, skipping its operator-edit commit and clean.
 - `fractal commit` warns, without refusing, when it stages a new path at the
   worktree root whose top-level name matches an entry of the node's own folder
   (`plans/x.md` beside `.fractal/<node>/plans`) and the project had no top-level
   path of that name when the node started. The warning names each path and the
-  entry it shadows, as a node file likely written at the worktree root by
-  mistake; a force commit folds it into its body.
+  entry it shares a name with, and says to move node files under the node's
+  folder and to ignore it for project files. It stays quiet during a merge, a
+  failure inside the check never fails the commit, and a force commit folds the
+  warning into its body.
 
 ### Changed
 

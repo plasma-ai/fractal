@@ -341,17 +341,25 @@ def commit(
         listing = '\n'.join(large)
         large_warning = f'Warning: staged file(s) exceed {threshold}MB:\n{listing}'
         output.append(large_warning)
-    # a new root path named like an entry of the node's own folder is usually
-    # a node file written from the worktree root by mistake, but a project may
-    # grow such a folder on purpose -- so the guard warns and never blocks
+    # a new root path named like an entry of the node's own folder may be a
+    # node file written from the worktree root by mistake, or project work --
+    # so the guard warns and never blocks, and a failure inside it (a locked
+    # record read, a vanished node folder) skips it rather than failing the
+    # commit, a backstop save included
     shadow_warning = None
     if not init:
-        if shadows := _root_shadows(node):
+        try:
+            shadows = _root_shadows(node)
+        except Exception:
+            shadows = []
+        if shadows:
             listing = '\n'.join(shadows)
+            node_folder = node.node_dir.relative_to(worktree).as_posix()
             shadow_warning = (
-                "Warning: staged root path(s) shadow entries of the node's own"
-                ' folder; a node file was likely written at the worktree root by'
-                f' mistake:\n{listing}'
+                'Warning: staged root path(s) share a name with an entry of the'
+                " node's own folder; if these are node files, move them under"
+                f' {node_folder}/; if they are project files, ignore this'
+                f' warning:\n{listing}'
             )
             output.append(shadow_warning)
     # compose the commit subject: run-qualified when the commit has run
@@ -787,7 +795,9 @@ def _root_shadows(node: Node) -> list[str]:
     A staged addition shadows when its first path segment names an entry of
     the node's own folder (``plans``, ``memory``, ``tmp``, ...) and the
     project had no top-level path of that name at the node's base, the fork
-    sha its record anchors. A node with no resolvable base names nothing.
+    sha its record anchors. A node with no resolvable base names nothing,
+    and neither does a merge or squash merge in progress, whose additions
+    are not the node's own writes.
 
     Args:
         node: The node whose staged additions to check.
@@ -798,6 +808,9 @@ def _root_shadows(node: Node) -> list[str]:
 
     """
     worktree = node.worktree
+    markers = {marker.name for _, marker in fractal.util.git.in_progress(worktree)}
+    if markers & {'MERGE_HEAD', 'SQUASH_MSG'}:
+        return []
     # -z and raw bytes, as in _changed_paths; --no-renames so a path moved to
     # the root lists as the addition it is
     cmd = ['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=A', '-z']
