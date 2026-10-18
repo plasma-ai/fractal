@@ -412,18 +412,20 @@ its next checkpoint. Only if the first read of the process table fails does the
 abort fall back to TERMing every recorded group except the caller's own, so a
 self-pause from a tool shell in a group of its own then aborts its own step.
 
-An orphan outside the agent's session survives every reap: a process that
-left the agent's session and whose parent has since exited, so no parent chain
-leads back to the agent. That covers a double-forked daemon and a job an
+A step that ends normally ends no process: any background job outlives its
+step unless the agent ends it. The loop reaps only a step it cuts short — a
+step deadline, the no-progress watchdog, a stream failure, or the crash heal —
+and that reap lands while the step still runs, so it reaches every process
+still linked to the agent. It misses an orphan outside the agent's session: a
+process that left the session and whose parent has since exited, so no parent
+chain leads back to the agent. That covers a double-forked daemon and a job an
 earlier tool call backgrounded under a session leader that has since exited
-(``validate.sh &`` under a ``setsid`` shell that already returned). Nothing
-links such a job to the agent any more, so the end of its step, a step
-deadline, a stream failure, and the crash heal all leave it running and
-unnamed. Only ``pause`` and
-``kill`` name it, in their sweep of the node's worktree: any process working
-there that is not a node's loop is reported but left running, each line naming
-its node. An orphan working elsewhere is not named at all. End such a job by
-hand.
+(``validate.sh &`` under a ``setsid`` shell that already returned). A job that
+a finished step left behind is outside every later reap. ``pause`` with a step
+in flight and ``kill`` with a recorded process group name such a job in their
+sweep of the node's worktree: any process working there that is not a node's
+loop is reported but left running, each line naming its node. An orphan
+working elsewhere is not named at all. End such a job by hand.
 
 While parked, a node:
 
