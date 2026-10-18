@@ -499,6 +499,16 @@ row, and is surfaced as a notice on a later ``start --continue``.
 
    $ fractal node kill parser --reason "runaway loop"
 
+``pause`` and ``kill`` also sweep the node's worktree: each process working
+there outside the reaped tree, other than a node's loop, is named on stderr
+(``pid <pid> works in the worktree of <branch> outside the reaped tree (left
+running)``) and never signaled. The sweep is the only place an orphan outside
+the agent's session comes to light — a process that left the session and lost
+its parent, such as a double-forked daemon or a job backgrounded under a
+``setsid`` shell that has since exited. No reap ends it, whether the end of its
+step, a step deadline, a stream failure, or the crash heal, and no other command
+names it; end it by hand.
+
 Integration and teardown
 ------------------------
 

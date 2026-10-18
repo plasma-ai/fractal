@@ -142,7 +142,9 @@ sweep is how the operator learns of it. The same holds for the one process the
 walk cannot reach: an orphan from an earlier tool call whose own session's
 leader has exited (`validate.sh &` under a `setsid` shell that already returned)
 sits in no member's session and under no member, so the sweep names it and
-leaves it running. The sweep reads `lsof` on macOS and `/proc/<pid>/cwd` on
+leaves it running. No other reap sweeps the worktree — the step deadline, a
+stream failure, and the crash heal pass no worktree — so such an orphan survives
+them unnamed, and nothing ends it at the end of its step either. The sweep reads `lsof` on macOS and `/proc/<pid>/cwd` on
 Linux, and it skips the caller and its ancestors (an operator may run
 `fractal pause` from a shell in the worktree), the processes the tree hangs from
 (the loop and its parents), every process in the node's own loop group (its

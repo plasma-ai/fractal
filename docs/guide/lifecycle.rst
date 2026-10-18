@@ -398,18 +398,26 @@ The abort takes the agent's whole process tree, not just its process group:
 agent CLIs run tool commands in groups (or sessions) of their own, and every
 one still linked to the agent dies with it. ``kill`` and a step deadline reap
 the same way. Anything still alive after the forced kill is named in the
-command's output, and so is any other process working in the node's worktree
-that is not a node's loop, which is reported but left running. That includes a
-job an earlier tool call left behind under a session leader that has since
-exited (``validate.sh &`` under a ``setsid`` shell that already returned):
-nothing links it to the agent any more, so it is named, never ended. Each line
-names its node. A git operation the abort left unfinished in the worktree — a
-merge, a rebase, an ``index.lock`` — is named too, so it is finished or aborted
-before the node is merged. An agent that pauses its own node aborts nothing:
-its step finishes with every tool it started, and the loop parks at its next
-checkpoint. Only if the first read of the process table fails does the abort
-fall back to TERMing every recorded group except the caller's own, so a
+command's output. A git operation the abort left unfinished in the worktree —
+a merge, a rebase, an ``index.lock`` — is named too, so it is finished or
+aborted before the node is merged. An agent that pauses its own node aborts
+nothing: its step finishes with every tool it started, and the loop parks at
+its next checkpoint. Only if the first read of the process table fails does the
+abort fall back to TERMing every recorded group except the caller's own, so a
 self-pause from a tool shell in a group of its own then aborts its own step.
+
+An orphan outside the agent's session survives every reap: a process that
+left the agent's session and whose parent has since exited, so no parent chain
+leads back to the agent. That covers a double-forked daemon and a job an
+earlier tool call backgrounded under a session leader that has since exited
+(``validate.sh &`` under a ``setsid`` shell that already returned). Nothing
+links such a job to the agent any more, so the end of its step, a step
+deadline, a stream failure, and the crash heal all leave it running and
+unnamed. Only ``pause`` and
+``kill`` name it, in their sweep of the node's worktree: any process working
+there that is not a node's loop is reported but left running, each line naming
+its node. An orphan working elsewhere is not named at all. End such a job by
+hand.
 
 While parked, a node:
 

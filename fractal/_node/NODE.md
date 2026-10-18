@@ -192,11 +192,15 @@ Execute ONLY the current step's instructions (below). The sections above are
 context -- do not act on them directly. Do the step's work, then stop; the next
 step runs automatically. Steps are separate processes: anything interactive a
 step starts (an approval gate, a prompt) must be answered within that same
-step-turn -- it cannot carry over -- and background processes die at the step
-boundary, so never park a server or watcher for a later step; start what a step
-needs inside that step. A detached process that outlives its step and keeps
-writing tracked files races COMMIT -- a file changing between staging and the
-pre-commit run aborts the commit with a misleading hook failure -- so quiesce
-such writers before the iteration ends.
+step-turn -- it cannot carry over. Never park a server or watcher for a later
+step; start what a step needs inside that step, and end every background job
+you start before the step ends. A job that has left your session and lost its
+parent (a double fork, or a job backgrounded by a `setsid` shell that has since
+exited) does not die with the step: no reap reaches it, and a pause or kill
+only names it, when it works in your worktree, and leaves it running. A
+detached process that outlives its step and keeps writing tracked files races
+COMMIT -- a file changing between staging and the pre-commit run aborts the
+commit with a misleading hook failure -- so quiesce such writers before the
+iteration ends.
 
 ______________________________________________________________________

@@ -178,6 +178,16 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- The stock `NODE.md` no longer tells nodes that background processes die at
+  the step boundary. An orphan outside the agent's session — a process that
+  left the session and lost its parent, such as a double-forked daemon or a job
+  backgrounded under a `setsid` shell that has since exited — survives every
+  reap: the end of its step, a step deadline, a stream failure, and the crash
+  heal all leave it running. Only `fractal node pause` and `fractal node kill`
+  name it, in their sweep of the node's worktree, and leave it running. The
+  seed now says so and asks nodes to end every background job they start before
+  the step ends; the lifecycle guide and the `node` CLI reference describe the
+  class.
 - A `node merge` whose wiki refresh fails after creating an index removes that
   index along with the rest of the squash, so the retry lands instead of
   refusing it as an untracked file under the wiki.
