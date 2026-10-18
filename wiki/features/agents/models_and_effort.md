@@ -24,10 +24,12 @@ invocation builder also accepts per-call `model` and `effort` overrides, so a
 single spawn can deviate from the node's configured defaults.
 
 Effort is passed through to the provider's own effort flag *unvalidated* —
-fractal does not maintain a level vocabulary; an unknown level surfaces as the
-agent's own error. A hard USD budget is a separate per-invocation knob accepted
-only by backends that declare budget enforcement; asking a non-enforcing backend
-for one is an error.
+fractal checks no level against the provider's vocabulary; an unknown level
+surfaces as the agent's own error. The one place fractal orders levels is the
+effort ladder a thinking-capped step's steer lowers through (see
+[[#The effort ladder]]). A hard USD budget is a separate per-invocation knob
+accepted only by backends that declare budget enforcement; asking a
+non-enforcing backend for one is an error.
 
 ## Per-backend spelling
 
@@ -95,6 +97,51 @@ The iteration row records the served model too: when every step's
 stream-reported model agrees, it wins over the config-seeded pin at the
 iteration close, so divergence is visible on the row rather than laundered under
 the pin.
+
+## The effort ladder
+
+A step stuck at a thinking cap is steered one effort level lower (see
+[[features/loop/steps#Stuck steps|steps]]). Each backend declares its ladder as
+class attributes: `effort_levels`, the levels lowest first (empty, the base
+default, never lowers), and `effort_floor`, the lowest level a lowering reaches.
+Claude declares `low`, `medium`, `high`, `xhigh`, `max` with the floor `high`,
+the level its seeded `settings.json` defaults to, so only `xhigh` and `max`
+steps lower by default; codex and the other backends keep the empty ladder (only
+Claude's parser reports a thinking cap anyway). The module-level
+`lower_effort(effort, *, levels, floor)` is the pure step down: the next level
+below, or the effort itself when it sits at or below the floor or off the
+ladder.
+
+The effort to lower is the step's own, else the agent's configured default, read
+through the `config_effort()` hook shaped like `config_model()`: claude reads
+`effortLevel` through the same settings chain as its model (the shared
+`ClaudeAgent._setting`), and the base hook returns `None`.
+
+A project overrides an agent's ladder in the `effort_ladder` key of its
+`<project>/.fractal/.settings.json`:
+`{"effort_ladder": {"claude": {"levels": [...], "floor": "high"}}}`. The
+settings parser (`worktree._parse_settings`) validates every key the file
+carries, whichever reader asks: `wiki` as before, and `effort_ladder` as an
+object of agent ladders, each with exactly `levels` (unique non-empty strings)
+and `floor` (one of them). The loop reads the copy committed on the tree's root
+branch at boot (`worktree.committed_effort_ladders`, beside
+`committed_wiki_setting`) and holds it for the run, so a node cannot change its
+own ladder and a committed change lands at the next start or resume; an invalid
+ladder fails the boot, and since every reader parses the whole file,
+`fractal init`, the `--init` baseline, spawn, and the merge footprint check's
+reads of the root branch's copy (`Node.check_wiki` for a node in another
+sub-project, or with its parent checked out nowhere) refuse it too. The parser
+cannot know the levels a provider accepts, so an override naming a level the CLI
+rejects fails the steered launch.
+
+Two checks need the agent registry, so they run at the loop's boot
+(`loop._check_effort_ladders`) rather than in the parser: the boot agent's
+resolve has loaded the tree's deployment hook file by then, so custom agents are
+registered. Each ladder must name a registered agent (a misspelled `Claude`
+would otherwise keep the default ladder), and a ladder built only from levels
+its agent declares in `effort_levels` must list them in that order, lowest first
+(a highest-first list would make the steer raise the effort). A ladder carrying
+a level of its own is taken as written.
 
 ## Preflight
 

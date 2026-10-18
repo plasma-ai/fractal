@@ -81,12 +81,14 @@ project:
 
    {"wiki": "docs"}
 
-The file accepts only the ``wiki`` key. Init reads it once, before writing
+The file accepts two keys: ``wiki``, and ``effort_ladder``, which the loop
+reads (see :doc:`/configuration`). Init reads the file once, before writing
 anything, records the folder in the user node's ``config.json``, and every
 node of the tree inherits it (see :doc:`/configuration`). A bad file —
-invalid JSON, an unknown key, or a folder that is absolute, ``.``,
-``null``, carries a ``..``, ``.fractal``, ``.worktrees``, or ``.git``
-component, or is not written canonically — refuses init, naming the file.
+invalid JSON, an unknown key, a folder that is absolute, ``.``, ``null``,
+carries a ``..``, ``.fractal``, ``.worktrees``, or ``.git`` component, or is
+not written canonically, or a malformed ``effort_ladder`` — refuses init,
+naming the file.
 With no file, the folder is ``wiki/`` and nothing new is recorded.
 
 The command ends by printing the required next step: the baseline commit
@@ -135,7 +137,10 @@ Refuses when:
   (run ``fractal init`` from the main checkout);
 - the branch is already mapped to a different project — one branch maps to
   a single project;
-- the project's ``.fractal/.settings.json`` is invalid (see above);
+- the project's ``.fractal/.settings.json`` is invalid: not valid JSON, an
+  unknown key, a ``wiki`` folder that is absolute, ``.``, ``null``, carries a
+  ``..``, ``.fractal``, ``.worktrees``, or ``.git`` component, or is not
+  canonical, or a malformed ``effort_ladder``;
 - the project wiki folder (``<project>/wiki/``, or the folder the settings
   file names) exists, is not empty, and is not a project wiki (it carries no
   ``.wiki/`` marker): adopting it would rewrite its files in place. Move the

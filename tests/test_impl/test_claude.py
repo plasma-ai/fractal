@@ -64,7 +64,7 @@ __all__ = [
     'test_routed_tracking_and_preflight_gate_on_the_route',
     'test_rates_falls_back_through_the_openrouter_chain_claude',
     'test_unavailable_names_the_provider_outage_shapes_claude',
-    'test_config_model_walks_the_settings_chain',
+    'test_config_defaults_walk_the_settings_chain',
     'test_seed_config_disables_fast_mode_claude',
     'test_transcript_resolves_the_config_home_slug',
     'test_settle_cost_adds_each_readable_sub_agent_transcript',
@@ -1489,41 +1489,53 @@ def test_unavailable_names_the_provider_outage_shapes_claude(
     assert backend.unavailable(detail) is unavailable
 
 
-def test_config_model_walks_the_settings_chain(
+@pytest.mark.parametrize(
+    argnames=('key', 'verb'),
+    argvalues=[
+        pytest.param('model', 'config_model', id='model'),
+        pytest.param('effortLevel', 'config_effort', id='effort'),
+    ],
+)
+def test_config_defaults_walk_the_settings_chain(
     node_with_db: Node,
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    verb: str,
 ) -> None:
-    """The first settings file naming a model wins: node, local, worktree, home."""
+    """The first settings file naming a default wins: node, local, worktree, home."""
     node = node_with_db
     backend = ClaudeAgent(node, 'claude')
+    default = getattr(backend, verb)
     # isolate the chain's tail from the real user home
     home = tmp_path / 'home'
     (home / '.claude').mkdir(parents=True)
     monkeypatch.setattr(pathlib.Path, 'home', lambda: home)
-    assert backend.config_model() is None
+    assert default() is None
     # the home settings back the chain
     (home / '.claude' / 'settings.json').write_text(
-        '{"model": "from-home"}\n',
+        json.dumps({key: 'from-home'}),
         encoding='utf-8',
     )
-    assert backend.config_model() == 'from-home'
-    # a worktree settings model outranks the home one
+    assert default() == 'from-home'
+    # a worktree settings default outranks the home one
     worktree_settings = node.worktree / '.claude' / 'settings.json'
     worktree_settings.parent.mkdir()
-    worktree_settings.write_text('{"model": "from-worktree"}\n', encoding='utf-8')
-    assert backend.config_model() == 'from-worktree'
+    worktree_settings.write_text(json.dumps({key: 'from-worktree'}), encoding='utf-8')
+    assert default() == 'from-worktree'
     # the worktree's local settings outrank its shared file
     local_settings = node.worktree / '.claude' / 'settings.local.json'
-    local_settings.write_text('{"model": "from-local"}\n', encoding='utf-8')
-    assert backend.config_model() == 'from-local'
-    # the node's own settings outrank everything; a malformed file is skipped
+    local_settings.write_text(json.dumps({key: 'from-local'}), encoding='utf-8')
+    assert default() == 'from-local'
+    # the node's own settings outrank everything; a malformed file, or one
+    # whose JSON is not an object, is skipped
     node_settings = node.node_dir / '.claude' / 'settings.json'
     node_settings.parent.mkdir()
-    node_settings.write_text('not json\n', encoding='utf-8')
-    assert backend.config_model() == 'from-local'
-    node_settings.write_text('{"model": "from-node"}\n', encoding='utf-8')
-    assert backend.config_model() == 'from-node'
+    for content in ('not json\n', 'null\n', '[]\n', '"text"\n'):
+        node_settings.write_text(content, encoding='utf-8')
+        assert default() == 'from-local', content
+    node_settings.write_text(json.dumps({key: 'from-node'}), encoding='utf-8')
+    assert default() == 'from-node'
 
 
 def test_seed_config_disables_fast_mode_claude(tmp_path: pathlib.Path) -> None:
