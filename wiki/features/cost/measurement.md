@@ -220,9 +220,10 @@ The step books what was recorded, with no estimate for the missing part:
 returns the verdict, and the loop prints
 `Warning: a reply's spend is missing from the launch's record` to stderr (which
 reaches `headless.log`) and passes it to `step_end`, at the steered close too,
-which appends `; partly unpriced` to the row's metadata at any terminal --
-unless nothing priced at all, where `; unpriced` stands. `step_cost`'s strip of
-a stale `unpriced` marker leaves it alone, since the missing part stays
+which appends `; partly unpriced` to the row's metadata at any terminal when the
+row holds a figure; a row with no figure is not partly priced, so an abnormal
+end marks it `; unpriced` and a completed one stays unmarked. `step_cost`'s
+strip of a stale `unpriced` marker leaves it alone, since the missing part stays
 unpriced.
 
 The settle runs after every launch and parses every line of each transcript it

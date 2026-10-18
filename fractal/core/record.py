@@ -746,9 +746,11 @@ class Record:
         a flush that lands later strips the marker.
 
         A launch whose record leaves part of a reply out books the spend
-        recorded: its end appends ``partly unpriced`` instead, at
-        any terminal (``Cost.partly_unpriced`` discloses the count). A
-        later flush never strips it, since the cut reply stays unpriced.
+        recorded: when a figure stands, its end appends ``partly
+        unpriced`` instead, at any terminal (``Cost.partly_unpriced``
+        discloses the count). A row with no figure is not partly priced,
+        so it keeps the rule above. A later flush never strips the marker,
+        since the missing part stays unpriced.
 
         Args:
             step_id: Step to end.
@@ -778,16 +780,17 @@ class Record:
         if metadata is not None:
             data['metadata'] = metadata
         # mark an abnormal end unpriced when the stream opened but no usage
-        # flushed -- burn happened with no recorded figure; a launch whose
-        # record leaves part of a reply out is partly unpriced unless
-        # nothing priced at all
-        marker = 'partly unpriced' if partly_unpriced else None
+        # flushed -- burn happened with no recorded figure; a figure whose
+        # launch's record leaves part of a reply out is partly unpriced
         if status != 'completed' or partly_unpriced:
             rows = self.db.read('steps', where={'step_id': step_id, 'ended_at': None})
             if rows:
                 row = rows[0]
-                abnormal = status != 'completed'
-                if abnormal and row['cost'] is None and row['session'] is not None:
+                marker = None
+                if row['cost'] is not None:
+                    if partly_unpriced:
+                        marker = 'partly unpriced'
+                elif status != 'completed' and row['session'] is not None:
                     marker = 'unpriced'
                 if marker is not None:
                     reason = metadata if metadata is not None else row['metadata']
