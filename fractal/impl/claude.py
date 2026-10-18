@@ -764,6 +764,7 @@ def _model_usage_tokens(entry: dict[str, Any]) -> dict[str, Any]:
     ``outputTokens``); the per-message ``usage`` shape names the same
     buckets in snake case.
     """
+    # the table has no 5m/1h split, so every cache write prices at the base rate
     return {
         'input_tokens': entry.get('inputTokens'),
         'cache_read_input_tokens': entry.get('cacheReadInputTokens'),
@@ -785,6 +786,11 @@ def _compute_cost(
     reports its own API call -- per-message costs sum to the invocation
     total (the parser prices each message id once, since claude repeats a
     frame per content block), unlike codex's cumulative snapshots.
+
+    Cache writes bill by their lifetime: the ``cache_creation`` split's
+    one-hour writes price at the one-hour write rate, and the five-minute
+    writes plus any the split leaves unnamed at the base write rate. A
+    model with no one-hour rate prices them all at the base rate.
     """
     if model is None:
         return None
@@ -795,6 +801,10 @@ def _compute_cost(
     input_rate = rates.get('input_cost_per_token', 0.0)
     cache_read_rate = rates.get('cache_read_input_token_cost', input_rate)
     cache_creation_rate = rates.get('cache_creation_input_token_cost', input_rate)
+    cache_hour_rate = rates.get(
+        'cache_creation_input_token_cost_above_1hr',
+        cache_creation_rate,
+    )
     output_rate = rates.get('output_cost_per_token', 0.0)
     # coerce with `or 0.0`, not a .get default: the openrouter gateway sends
     # the cache buckets as explicit null on partial frames, and a present-null
@@ -803,9 +813,16 @@ def _compute_cost(
     cache_read_tokens = usage.get('cache_read_input_tokens') or 0.0
     cache_creation_tokens = usage.get('cache_creation_input_tokens') or 0.0
     output_tokens = usage.get('output_tokens') or 0.0
+    # the one-hour share of the cache writes, never more than their total
+    split = usage.get('cache_creation')
+    cache_hour_tokens = 0.0
+    if isinstance(split, dict):
+        cache_hour_tokens = split.get('ephemeral_1h_input_tokens') or 0.0
+        cache_hour_tokens = min(cache_hour_tokens, cache_creation_tokens)
     return (
         input_tokens * input_rate
         + cache_read_tokens * cache_read_rate
-        + cache_creation_tokens * cache_creation_rate
+        + (cache_creation_tokens - cache_hour_tokens) * cache_creation_rate
+        + cache_hour_tokens * cache_hour_rate
         + output_tokens * output_rate
     )

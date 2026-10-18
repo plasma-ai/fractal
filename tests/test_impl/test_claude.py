@@ -47,6 +47,7 @@ __all__ = [
     'test_parser_result_overwrites_the_accumulated_estimate',
     'test_parser_unpriced_model_accumulates_no_cost',
     'test_compute_cost_prices_disjoint_buckets',
+    'test_one_hour_cache_writes_price_at_their_own_rate',
     'test_compute_cost_unpriced_model_returns_none_claude',
     'test_stream_records_cost_model_and_session_claude',
     'test_stream_detached_keeps_session_unpersisted_claude',
@@ -863,6 +864,41 @@ def test_compute_cost_prices_disjoint_buckets(
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
     cost = claude._compute_cost(_USAGE_FIRST, 'claude-fable-5')
     assert cost == pytest.approx(_USAGE_FIRST_COST)
+
+
+@pytest.mark.parametrize(
+    argnames=('hour_rate', 'expected'),
+    argvalues=[
+        # the one-hour writes at their own rate, the rest at the base rate
+        pytest.param(6e-6, 600 * 6e-6 + 400 * 3.75e-6, id='one-hour-rate'),
+        # a model with no one-hour rate prices every write at the base rate
+        pytest.param(None, 1000 * 3.75e-6, id='no-one-hour-rate'),
+    ],
+)
+def test_one_hour_cache_writes_price_at_their_own_rate(
+    monkeypatch: pytest.MonkeyPatch,
+    hour_rate: Optional[float],
+    expected: float,
+) -> None:
+    """A reply's one-hour cache writes bill at the one-hour write rate.
+
+    Claude Code writes one-hour cache entries, which cost more than the
+    five-minute ones; the five-minute writes and any the split leaves
+    unnamed price at the base write rate.
+    """
+    rates = dict(_PRICING['claude-fable-5'])
+    if hour_rate is not None:
+        rates['cache_creation_input_token_cost_above_1hr'] = hour_rate
+    monkeypatch.setattr(pricing, '_load', lambda: {'claude-fable-5': rates})
+    usage = {
+        'cache_creation_input_tokens': 1000,
+        'cache_creation': {
+            'ephemeral_1h_input_tokens': 600,
+            'ephemeral_5m_input_tokens': 300,
+        },
+    }
+    cost = claude._compute_cost(usage, 'claude-fable-5')
+    assert cost == pytest.approx(expected)
 
 
 def test_compute_cost_unpriced_model_returns_none_claude(
