@@ -487,8 +487,8 @@ class Loop:
         # must see a substitution the stream recovered from; empty for an
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
-        # this launch's record shows a reply cut off mid-way, so its booked
-        # figure leaves that reply out
+        # this launch's record leaves part of a reply out, so its booked
+        # figure misses that part
         self._step_partly_unpriced = False
         self._step_limit_seconds = 0
         self._step_ceiling_seconds = 0
@@ -2482,7 +2482,7 @@ class Loop:
         # spent nothing, so its row's cost is a knowable zero -- NULL cost stays
         # reserved for unknowable spend (a kill before the first stream flush)
         self._step_launched = False
-        # nor can a launch that never ran have been cut off mid-reply
+        # nor can a launch that never ran leave a reply out of its record
         self._step_partly_unpriced = False
 
         def close(result: StepResult) -> StepResult:
@@ -3159,8 +3159,9 @@ class Loop:
                 )
             if self._step_partly_unpriced:
                 print(
-                    'Warning: the launch was cut off mid-reply; its step'
-                    ' books the spend recorded (partly unpriced)',
+                    "Warning: a reply's spend is missing from the launch's"
+                    ' record; its step books the spend recorded (partly'
+                    ' unpriced)',
                     file=sys.stderr,
                 )
 

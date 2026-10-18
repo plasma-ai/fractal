@@ -313,7 +313,7 @@ class Settlement:
 
     # USD, the launch's own spend (None = the record priced nothing)
     cost: Optional[float]
-    # the record shows a reply cut off mid-way, whose spend it never holds
+    # the record leaves part of a reply out, whose spend it never holds
     cut_off: bool = False
 
 
@@ -1016,8 +1016,8 @@ class Agent:
                 backend's own reply shape.
 
         Returns:
-            Whether the record shows a reply cut off mid-way: the step
-            books the spend recorded, which leaves that reply out.
+            Whether the record leaves part of a reply out: the step books
+            the spend recorded, which misses that part.
 
         """
         rows = self.node.db.read('steps', where={'step_id': step_id}, limit=1)
@@ -1063,9 +1063,9 @@ class Agent:
         backend whose provider persists per-message usage, returning the
         launch's own spend (per invocation, whatever the backend's
         ``cost_scope`` -- never a thread total), or no cost with the
-        reason logged, and whether the record shows a reply cut off
-        mid-way; with ``after``, only the spend completing after that
-        instant, and the stream's own ``replies`` over the record's::
+        reason logged, and whether the record leaves part of a reply out;
+        with ``after``, only the spend completing after that instant, and
+        the stream's own ``replies`` over the record's::
 
             def _settle_cost(self, session, *, started, ended, after=None, replies=()):
                 since = after or started

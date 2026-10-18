@@ -90,6 +90,8 @@ __all__ = [
     'test_background_spend_after_the_result_is_booked',
     'test_cut_off_mid_reply_books_recorded_spend_partly_unpriced',
     'test_kill_during_a_tool_call_is_fully_priced',
+    'test_structured_output_result_ends_a_sub_agent_whole',
+    'test_partial_record_before_the_result_leaves_its_figure_whole',
     'test_capped_reply_books_the_stream_usage',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_killed_launch_settles_after_dropping_its_group_handle',
@@ -2696,7 +2698,7 @@ def test_cut_off_mid_reply_books_recorded_spend_partly_unpriced(
     loop_node.record.step_cost(step_id=killed_row['step_id'], cost=recorded)
     assert _step_rows(loop_node)[0].endswith('; partly unpriced')
     err = capsys.readouterr().err
-    assert 'Warning: the launch was cut off mid-reply' in err
+    assert "Warning: a reply's spend is missing from the launch's record" in err
 
 
 def test_kill_during_a_tool_call_is_fully_priced(
@@ -2733,6 +2735,89 @@ def test_kill_during_a_tool_call_is_fully_priced(
     killed = min(rows, key=lambda row: row['step_id'])
     assert killed['cost'] == pytest.approx(_price(first) + _price(called))
     assert loop_node.cost.partly_unpriced(run_id=killed['run_id']) == 0
+
+
+def test_structured_output_result_ends_a_sub_agent_whole(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow sub-agent ending on its StructuredOutput result is whole.
+
+    A workflow agent finishes by calling ``StructuredOutput`` and stopping
+    once the call's result comes back, so its transcript ends on that
+    result with no reply after it. In a killed launch that is otherwise
+    whole, the step books every reply with no marker.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    main = {'input_tokens': 100, 'output_tokens': 900}
+    side = {'input_tokens': 2_000, 'output_tokens': 700}
+    output = _assistant_entry(
+        message_id='msg_side',
+        usage=side,
+        model='claude-haiku-5',
+        stop_reason='tool_use',
+        isSidechain=True,
+        subagent='x',
+    )
+    output['message']['content'] = [
+        {'type': 'tool_use', 'id': 'toolu_out', 'name': 'StructuredOutput', 'input': {}}
+    ]
+    answered = _user_entry(isSidechain=True, subagent='x')
+    answered['message']['content'][0]['tool_use_id'] = 'toolu_out'
+    killed = [_assistant_entry('msg_a', main), output, answered]
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1}),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[killed, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node)[0] == 'PLAN/stopped/steered: no action for 1s'
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed_row = min(rows, key=lambda row: row['step_id'])
+    booked = _price(main) + _price(side, 'claude-haiku-5')
+    assert killed_row['cost'] == pytest.approx(booked)
+
+
+def test_partial_record_before_the_result_leaves_its_figure_whole(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A partial line written before the result frame marks nothing.
+
+    A completed sub-agent's last line can be written mid-stream, with no
+    stop reason and a partial usage. When it lands before the result
+    frame, the result's figure already covers that spend, so the
+    completed launch books its result with no marker and no warning.
+    """
+    written = [
+        _assistant_entry('msg_a', {'input_tokens': 100, 'output_tokens': 900}),
+        _assistant_entry(
+            message_id='msg_side',
+            usage={'input_tokens': 2_000, 'output_tokens': 4},
+            model='claude-haiku-5',
+            stop_reason=None,
+            isSidechain=True,
+            subagent='x',
+        ),
+    ]
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[finished, finished],
+        transcripts=[written, []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    first = min(rows, key=lambda row: row['step_id'])
+    assert first['cost'] == _RESULT['total_cost_usd']
+    assert 'Warning: a reply' not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -3732,10 +3817,11 @@ def test_step_budget_reserve_window_floors_at_remaining(loop_node: Node) -> None
 def test_no_budget_margin_for_unseen_spend(loop_node: Node) -> None:
     """The step leash holds back only the configured reserve.
 
-    A step cut off mid-reply booked less than it spent, and a NULL-cost
-    step booked nothing, but the engine cannot see how much either missed:
-    the remaining budget is the cap minus the recorded spend, and the
-    leash is that minus the reserve, never minus a guessed margin.
+    A step whose record left part of a reply out booked less than it
+    spent, and a NULL-cost step booked nothing, but the engine cannot see
+    how much either missed: the remaining budget is the cap minus the
+    recorded spend, and the leash is that minus the reserve, never minus a
+    guessed margin.
     """
     node = loop_node
     _configure(node, max_cost=10.0, reserve_budget=1.0)

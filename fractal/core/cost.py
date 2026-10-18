@@ -277,9 +277,9 @@ class Cost:
     ) -> int:
         """Count a scope's ended steps whose recorded cost leaves a reply out.
 
-        A launch cut off mid-reply books the spend its provider recorded,
-        which never holds the cut reply, so ``SUM()`` reads its figure as
-        whole; its row is marked ``partly unpriced`` (the metadata's last
+        A launch whose record leaves part of a reply out books the spend
+        its provider recorded, which misses that part, so ``SUM()`` reads
+        its figure as whole; its row is marked ``partly unpriced`` (the metadata's last
         marker), and ledger-facing readings disclose this count when
         nonzero. A NULL-cost row counts toward :meth:`unpriced` instead.
         Scopes mirror ``spent``.

@@ -745,8 +745,8 @@ class Record:
         step". Cost stays NULL (``Cost.unpriced`` discloses the gap count);
         a flush that lands later strips the marker.
 
-        A launch cut off mid-reply books the spend recorded, which leaves
-        that reply out: its end appends ``partly unpriced`` instead, at
+        A launch whose record leaves part of a reply out books the spend
+        recorded: its end appends ``partly unpriced`` instead, at
         any terminal (``Cost.partly_unpriced`` discloses the count). A
         later flush never strips it, since the cut reply stays unpriced.
 
@@ -757,7 +757,8 @@ class Record:
             metadata: Optional short, fractal-owned failure reason (e.g.
                 ``timed out``/``agent error``) for visibility in ``node
                 activity``; the metadata column is left untouched when ``None``.
-            partly_unpriced: Whether the launch was cut off mid-reply.
+            partly_unpriced: Whether the launch's record leaves part of a
+                reply out.
 
         Returns:
             Rows transitioned -- 0 when another writer already closed it.
@@ -777,8 +778,9 @@ class Record:
         if metadata is not None:
             data['metadata'] = metadata
         # mark an abnormal end unpriced when the stream opened but no usage
-        # flushed -- burn happened with no recorded figure; a launch cut off
-        # mid-reply is partly unpriced unless nothing priced at all
+        # flushed -- burn happened with no recorded figure; a launch whose
+        # record leaves part of a reply out is partly unpriced unless
+        # nothing priced at all
         marker = 'partly unpriced' if partly_unpriced else None
         if status != 'completed' or partly_unpriced:
             rows = self.db.read('steps', where={'step_id': step_id, 'ended_at': None})

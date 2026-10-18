@@ -651,9 +651,10 @@ class ClaudeAgent(Agent):
         when it completes, so those are the spend past its figure, and
         finding none is the common case, never logged.
 
-        The launch is cut off mid-reply when any of its transcripts ends
-        its window cut off (see ``_transcript_window``): that reply's
-        spend reached no record, so the figure is partial. A reply the
+        The record leaves part of a reply out when any of the transcripts
+        ends its window that way (see ``_transcript_window``), so the
+        figure is partial; with ``after``, only an ending past the result
+        counts, since the result's figure covers the rest. A reply the
         stream recorded whole (``replies``, the capped reply) is the
         session's newest, so it closes the session transcript's window
         at its recorded usage, whether or not claude wrote it first.
@@ -694,7 +695,7 @@ class ClaudeAgent(Agent):
                     level=logging.WARNING,
                 )
         # keep each reply's latest line across the files, and whether any
-        # file ends cut off
+        # file's record leaves part of a reply out
         latest: dict[str, _Reply] = {}
         cut_off = False
         for index, content in enumerate(contents):
@@ -702,6 +703,7 @@ class ClaudeAgent(Agent):
                 content,
                 started=started,
                 ended=ended,
+                after=after,
                 recorded=replies if index == 0 else (),
             )
             for message_id, reply in window.items():
@@ -800,6 +802,7 @@ def _transcript_window(
     *,
     started: str,
     ended: str,
+    after: Optional[str] = None,
     recorded: Sequence[dict[str, Any]] = (),
 ) -> tuple[dict[str, _Reply], bool]:
     """Read the replies one transcript stamped within a window.
@@ -810,32 +813,42 @@ def _transcript_window(
     kept at its final line, with the model it ran (a sidechain reply runs
     its own).
 
-    The transcript ends its window cut off mid-reply when its last turn
-    there is a user turn that no reply follows (a tool result, a prompt,
-    or claude's continuation past the output cap), whose reply's request
-    was in flight, or a reply whose final line has no stop reason, written
-    before the reply completed. A kill during a tool call ends on the
-    reply that called the tool, which completed, so it is not cut off.
+    The record leaves part of a reply out when the window's last turn is
+    a user turn that no reply follows (a tool result, a prompt, or
+    claude's continuation past the output cap), whose reply's request was
+    in flight, or a reply whose final line has no stop reason. That line
+    was written before its reply completed: a killed reply, or a
+    completed sub-agent's last line written mid-stream, whose usage is
+    then partial (its output tokens a handful on a full answer). Two
+    endings are whole: a kill during a tool call ends on the reply that
+    called the tool, which completed, and a workflow sub-agent ends by
+    design on the result of its ``StructuredOutput`` call, with no reply
+    after it. With ``after``, the spend before that instant is already in
+    a result frame's figure, so only a last turn stamped after it counts.
 
     Args:
         content: One transcript's raw JSONL text.
         started: The window's opening instant (ISO 8601 UTC).
         ended: The window's closing instant (ISO 8601 UTC).
+        after: An instant inside the window (ISO 8601 UTC) whose spend a
+            result frame already named, or ``None``.
         recorded: Replies recorded elsewhere, in the transcript's message
             shape, that close the window after its last line (stamped at
             its close).
 
     Returns:
-        Each reply's final line by message id, and whether the window ends
-        cut off.
+        Each reply's final line by message id, and whether the record
+        leaves part of a reply out.
 
     """
     opened = dt.datetime.fromisoformat(started)
     closed = dt.datetime.fromisoformat(ended)
     # keep the final line per message id (later lines overwrite earlier)
     replies: dict[str, _Reply] = {}
-    # the window's last turn: a user turn, or a reply and its stop reason
-    last: Optional[tuple[str, Optional[str]]] = None
+    # the ids of the StructuredOutput calls, whose results end a sub-agent
+    structured: set[str] = set()
+    # whether the window's last turn leaves part of a reply out, and its stamp
+    last: Optional[tuple[bool, dt.datetime]] = None
     # a newline alone ends a record -- splitlines would also split at the
     # U+2028 and U+0085 claude leaves raw inside a record's strings
     for line in content.split('\n'):
@@ -846,6 +859,16 @@ def _transcript_window(
             continue
         if not isinstance(entry, dict) or entry.get('type') not in _TURNS:
             continue
+        message = entry.get('message')
+        if not isinstance(message, dict):
+            continue
+        blocks = message.get('content')
+        blocks = blocks if isinstance(blocks, list) else []
+        if entry['type'] == 'assistant':
+            for block in blocks:
+                if isinstance(block, dict) and block.get('type') == 'tool_use':
+                    if block.get('name') == 'StructuredOutput':
+                        structured.add(block.get('id'))
         try:
             stamped = dt.datetime.fromisoformat(entry['timestamp'])
         except (KeyError, TypeError, ValueError):
@@ -854,12 +877,17 @@ def _transcript_window(
         if stamped.tzinfo is None or not opened <= stamped <= closed:
             continue
         if entry['type'] == 'user':
-            last = ('user', None)
+            # a turn answering only StructuredOutput calls ends a sub-agent
+            answers = [
+                block.get('tool_use_id')
+                for block in blocks
+                if isinstance(block, dict) and block.get('type') == 'tool_result'
+            ]
+            whole = bool(answers) and len(answers) == len(blocks)
+            whole = whole and all(answer in structured for answer in answers)
+            last = (not whole, stamped)
             continue
-        message = entry.get('message')
-        if not isinstance(message, dict):
-            continue
-        last = ('assistant', message.get('stop_reason'))
+        last = (message.get('stop_reason') is None, stamped)
         message_id = message.get('id')
         usage = message.get('usage')
         model = message.get('model')
@@ -867,9 +895,10 @@ def _transcript_window(
             model = model if isinstance(model, str) else None
             replies[message_id] = (usage, model, stamped)
     for message in recorded:
-        last = ('assistant', message['stop_reason'])
+        last = (message['stop_reason'] is None, closed)
         replies[message['id']] = (message['usage'], message['model'], closed)
-    cut_off = last is not None and (last[0] == 'user' or last[1] is None)
+    since = dt.datetime.fromisoformat(after) if after is not None else None
+    cut_off = last is not None and last[0] and (since is None or last[1] > since)
     return replies, cut_off
 
 

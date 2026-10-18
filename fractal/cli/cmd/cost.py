@@ -170,12 +170,13 @@ def cost_spent(app: typer.Typer) -> typer.Typer:
                     f'{unpriced} unpriced step{s} (NULL cost) excluded',
                     err=True,
                 )
-            # and the steps whose figure leaves out a reply cut off mid-way
+            # and the steps whose record leaves part of a reply out
             partly = node.cost.partly_unpriced(**kwargs, max_depth=max_depth)
             if partly:
                 s = 's' if partly != 1 else ''
                 typer.echo(
-                    f'{partly} partly unpriced step{s} (cut off mid-reply)'
+                    f'{partly} partly unpriced step{s}'
+                    " (a reply's spend missing from the record)"
                     ' counted at recorded spend',
                     err=True,
                 )
@@ -261,7 +262,7 @@ def cost_breakdown(app: typer.Typer) -> typer.Typer:
                 f'{unpriced} unpriced step{s} (NULL cost) excluded',
                 err=True,
             )
-        # and the steps whose figure leaves out a reply cut off mid-way
+        # and the steps whose record leaves part of a reply out
         partly = node.cost.partly_unpriced(
             run_id=run_id,
             max_depth=max_depth,
@@ -269,7 +270,8 @@ def cost_breakdown(app: typer.Typer) -> typer.Typer:
         if partly:
             s = 's' if partly != 1 else ''
             typer.echo(
-                f'{partly} partly unpriced step{s} (cut off mid-reply)'
+                f'{partly} partly unpriced step{s}'
+                " (a reply's spend missing from the record)"
                 ' counted at recorded spend',
                 err=True,
             )

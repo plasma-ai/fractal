@@ -396,11 +396,11 @@ def test_cost_spent_and_breakdown_disclose_unpriced_count(repo: dict) -> None:
 
 
 def test_node_cost_discloses_partly_unpriced_steps(repo: dict) -> None:
-    """``cost spent``/``breakdown`` disclose steps cut off mid-reply.
+    """``cost spent``/``breakdown`` disclose steps missing a reply's spend.
 
-    A launch cut off mid-reply books the spend its provider recorded, which
-    leaves the cut reply out, so its figure sums on stdout as if whole; a
-    flush landing after the close does not make it whole. Both readings
+    A launch whose record leaves part of a reply out books the spend its
+    provider recorded, so its figure sums on stdout as if whole; a flush
+    landing after the close does not make it whole. Both readings
     note the step on stderr, while stdout stays parseable.
     """
     root = repo['root']
@@ -425,7 +425,10 @@ def test_node_cost_discloses_partly_unpriced_steps(repo: dict) -> None:
     )
     # a late flush leaves the cut reply unpriced
     record.step_cost(step_id=step_id, cost=2 * STEP_COST)
-    note = '1 partly unpriced step (cut off mid-reply) counted at recorded spend'
+    note = (
+        "1 partly unpriced step (a reply's spend missing from the record)"
+        ' counted at recorded spend'
+    )
     spent = _run(partly, 'node', 'cost', 'spent', '--run', str(run_id))
     assert spent.returncode == 0, spent.stderr
     assert float(spent.stdout.strip().removeprefix('$')) == pytest.approx(2 * STEP_COST)
