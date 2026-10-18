@@ -550,12 +550,16 @@ class ClaudeAgent(Agent):
         ):
             if not path.is_file():
                 continue
-            # an unreadable or malformed settings file names no value
+            # an unreadable or malformed settings file, or one whose JSON is
+            # not an object, names no value
             try:
                 with open(path, encoding='utf-8') as file:
-                    value = json.load(file).get(key)
+                    settings = json.load(file)
             except (OSError, json.JSONDecodeError):
                 continue
+            if not isinstance(settings, dict):
+                continue
+            value = settings.get(key)
             if isinstance(value, str) and value:
                 return value
         return None

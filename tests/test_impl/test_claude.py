@@ -1527,11 +1527,13 @@ def test_config_defaults_walk_the_settings_chain(
     local_settings = node.worktree / '.claude' / 'settings.local.json'
     local_settings.write_text(json.dumps({key: 'from-local'}), encoding='utf-8')
     assert default() == 'from-local'
-    # the node's own settings outrank everything; a malformed file is skipped
+    # the node's own settings outrank everything; a malformed file, or one
+    # whose JSON is not an object, is skipped
     node_settings = node.node_dir / '.claude' / 'settings.json'
     node_settings.parent.mkdir()
-    node_settings.write_text('not json\n', encoding='utf-8')
-    assert default() == 'from-local'
+    for content in ('not json\n', 'null\n', '[]\n', '"text"\n'):
+        node_settings.write_text(content, encoding='utf-8')
+        assert default() == 'from-local', content
     node_settings.write_text(json.dumps({key: 'from-node'}), encoding='utf-8')
     assert default() == 'from-node'
 
