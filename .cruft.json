@@ -1,6 +1,6 @@
 {
   "template": "https://github.com/plasma-ai/templates.git",
-  "commit": "e3b36759eadbef7438013499a68052a73df5d8ca",
+  "commit": "85e017797bc14fa53e38293d5ec31f0185eccd81",
   "checkout": null,
   "context": {
     "cookiecutter": {
@@ -39,7 +39,7 @@
         "docs": "docs.plasma.ai/fractal"
       },
       "_template": "https://github.com/plasma-ai/templates.git",
-      "_commit": "e3b36759eadbef7438013499a68052a73df5d8ca"
+      "_commit": "85e017797bc14fa53e38293d5ec31f0185eccd81"
     }
   },
   "directory": "package"

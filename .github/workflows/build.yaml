@@ -64,6 +64,11 @@ jobs:
         run: |
           export LC_ALL=C
           tracked=$(git ls-files fractal | sort)
+          # an empty listing would compare as nothing missing
+          if [[ -z "$tracked" ]]; then
+            echo "::error::no tracked files under fractal/"
+            exit 1
+          fi
           # the sdist nests every path under its top folder
           missing=$(
             comm -23 <(echo "$tracked") <(unzip -Z1 dist/plasma_fractal-*.whl | sort) | sed 's/^/::error::wheel lacks /'
