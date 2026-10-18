@@ -12,7 +12,7 @@ import shutil
 import signal
 import subprocess
 from collections.abc import Callable, Iterator
-from typing import Optional
+from typing import Any, Optional
 
 import fractal.util
 from fractal.constants import (
@@ -47,6 +47,10 @@ _MAX_NODE_NAME_LENGTH = 64
 # exclude-block delimiters (matched only as whole lines, never substrings)
 _EXCLUDE_BEGIN = '# >>> fractal >>>'
 _EXCLUDE_END = '# <<< fractal <<<'
+
+# the keys a project's settings file may carry (any other key fails, so a
+# misspelled one never silently reads as its default)
+_SETTINGS_KEYS = ('effort', 'wiki')
 
 
 @contextlib.contextmanager
@@ -296,8 +300,8 @@ def read_wiki_setting(project_dir: pathlib.Path) -> Optional[str]:
     The tracked ``<project>/.fractal/.settings.json`` is the repository's
     source of truth for the folder: user init reads it once and fixes the
     value into the tree's config, which every descendant inherits. The
-    file holds one JSON object whose only key is ``wiki``, so a misspelled
-    key fails rather than silently reading as the default.
+    file holds one JSON object whose keys are ``wiki`` and ``effort``, so
+    a misspelled key fails rather than silently reading as the default.
 
     Args:
         project_dir: The project's directory in the user node's worktree.
@@ -308,14 +312,15 @@ def read_wiki_setting(project_dir: pathlib.Path) -> Optional[str]:
 
     Raises:
         ValueError: If the file is not a JSON object, carries an unknown
-            key, or names an invalid folder.
+            key, names an invalid folder, or holds an invalid effort
+            ladder.
 
     """
     path = project_dir / FRACTAL_FOLDER / SETTINGS_FILE
     if not path.is_file():
         return None
     text = path.read_text(encoding='utf-8')
-    return _parse_wiki_setting(text, source=f'{path}')
+    return _parse_settings(text, source=f'{path}').get('wiki')
 
 
 def committed_wiki_setting(
@@ -340,18 +345,43 @@ def committed_wiki_setting(
 
     Raises:
         ValueError: If the committed file is not a JSON object, carries an
-            unknown key, or names an invalid folder.
+            unknown key, names an invalid folder, or holds an invalid
+            effort ladder.
 
     """
-    if project == '.':
-        rel = f'{FRACTAL_FOLDER}/{SETTINGS_FILE}'
-    else:
-        rel = f'{project}/{FRACTAL_FOLDER}/{SETTINGS_FILE}'
-    cmd = ['show', f'{ref}:{rel}']
-    text = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
-    if text is None:
-        return None
-    return _parse_wiki_setting(text, source=f'{ref}:{rel}')
+    return _committed_settings(repo_dir, ref=ref, project=project).get('wiki')
+
+
+def committed_effort_setting(
+    repo_dir: pathlib.Path,
+    ref: str,
+    project: str,
+) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Read a project's per-agent effort ladders as committed on ``ref``.
+
+    The settings file's ``effort`` key maps an agent name to the levels a
+    thinking-capped step's steer lowers through and the floor it stops at
+    (``{"effort": {"claude": {"levels": [...], "floor": "high"}}}``),
+    overriding that agent's own defaults. The loop reads it at boot from
+    the tree's root branch, never a node's checkout, so no node can change
+    its own ladder.
+
+    Args:
+        repo_dir: Main repository root.
+        ref: The revision to read (the tree's root branch).
+        project: Project path (``.`` for the repo root).
+
+    Returns:
+        Each named agent's ``(levels, floor)``, levels lowest first; empty
+        when the file or its ``effort`` key is absent at ``ref``.
+
+    Raises:
+        ValueError: If the committed file is not a JSON object, carries an
+            unknown key, names an invalid folder, or holds an invalid
+            effort ladder.
+
+    """
+    return _committed_settings(repo_dir, ref=ref, project=project).get('effort', {})
 
 
 def exclude_update(repo_dir: pathlib.Path) -> None:
@@ -847,19 +877,52 @@ def _strip_exclude_blocks(lines: list[str]) -> list[str]:
     return kept
 
 
-def _parse_wiki_setting(text: str, source: str) -> Optional[str]:
-    """Parse a settings file's text into its validated ``wiki`` folder.
+def _committed_settings(
+    repo_dir: pathlib.Path,
+    ref: str,
+    project: str,
+) -> dict[str, Any]:
+    """Read a project's validated settings as committed on ``ref``.
+
+    Args:
+        repo_dir: Main repository root.
+        ref: The revision to read.
+        project: Project path (``.`` for the repo root).
+
+    Returns:
+        The validated settings (see :func:`_parse_settings`), empty when
+        the file is absent at ``ref``.
+
+    Raises:
+        ValueError: If the committed file is invalid.
+
+    """
+    if project == '.':
+        rel = f'{FRACTAL_FOLDER}/{SETTINGS_FILE}'
+    else:
+        rel = f'{project}/{FRACTAL_FOLDER}/{SETTINGS_FILE}'
+    cmd = ['show', f'{ref}:{rel}']
+    text = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
+    if text is None:
+        return {}
+    return _parse_settings(text, source=f'{ref}:{rel}')
+
+
+def _parse_settings(text: str, source: str) -> dict[str, Any]:
+    """Parse a settings file's text into its validated settings.
 
     Args:
         text: The file's content.
         source: The file's name in the error.
 
     Returns:
-        The validated folder, or ``None`` when the ``wiki`` key is absent.
+        The keys present: ``wiki`` as its validated folder, and ``effort``
+        as each agent's ``(levels, floor)``.
 
     Raises:
         ValueError: If ``text`` is not a JSON object, carries an unknown
-            key, or names an invalid folder.
+            key, names an invalid folder, or holds an invalid effort
+            ladder.
 
     """
     try:
@@ -868,9 +931,58 @@ def _parse_wiki_setting(text: str, source: str) -> Optional[str]:
         raise ValueError(f'{source} is not valid JSON: {e}') from e
     if not isinstance(settings, dict):
         raise ValueError(f'{source} must hold a JSON object.')
-    unknown = sorted(set(settings) - {'wiki'})
+    unknown = sorted(set(settings) - set(_SETTINGS_KEYS))
     if unknown:
-        raise ValueError(f"{source} has unknown keys {unknown} (valid keys: ['wiki']).")
-    if 'wiki' not in settings:
-        return None
-    return validate_wiki(settings['wiki'], source=f'"wiki" in {source}')
+        valid = list(_SETTINGS_KEYS)
+        raise ValueError(f'{source} has unknown keys {unknown} (valid keys: {valid}).')
+    parsed: dict[str, Any] = {}
+    if 'wiki' in settings:
+        parsed['wiki'] = validate_wiki(settings['wiki'], source=f'"wiki" in {source}')
+    if 'effort' in settings:
+        parsed['effort'] = _parse_effort(settings['effort'], source=source)
+    return parsed
+
+
+def _parse_effort(value: Any, source: str) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Validate a settings file's ``effort`` key into each agent's ladder.
+
+    Args:
+        value: The key's value.
+        source: The settings file's name in the error.
+
+    Returns:
+        Each named agent's ``(levels, floor)``.
+
+    Raises:
+        ValueError: If ``value`` is not an object of agent ladders, or a
+            ladder's levels are not unique non-empty strings or its floor
+            is not one of them.
+
+    """
+    if not isinstance(value, dict):
+        raise ValueError(
+            f'"effort" in {source} must map agent names to ladders, not {value!r}.'
+        )
+    ladders = {}
+    for agent, ladder in value.items():
+        name = f'"effort.{agent}" in {source}'
+        if not isinstance(ladder, dict) or set(ladder) != {'levels', 'floor'}:
+            raise ValueError(
+                f'{name} must be an object with exactly "levels" and "floor",'
+                f' not {ladder!r}.'
+            )
+        levels, floor = ladder['levels'], ladder['floor']
+        if not isinstance(levels, list) or not all(
+            isinstance(level, str) and level for level in levels
+        ):
+            raise ValueError(
+                f'{name} "levels" must be a list of non-empty strings, not {levels!r}.'
+            )
+        if len(set(levels)) != len(levels):
+            raise ValueError(f'{name} "levels" must be unique, not {levels!r}.')
+        if floor not in levels:
+            raise ValueError(
+                f'{name} "floor" must be one of its levels {levels}, not {floor!r}.'
+            )
+        ladders[agent] = (tuple(levels), floor)
+    return ladders

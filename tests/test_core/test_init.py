@@ -2744,12 +2744,16 @@ def test_wiki_setting_is_fixed_at_init_and_inherited(
     commits both. Children and grandchildren carry the folder in their
     config, a node's own copy of the file is never re-read, and the key can
     never be set afterwards. With no setting, no config records the key.
+    An effort ladder beside the folder is the loop's to read, never init's.
     """
-    # the project names its folder in a settings file the baseline commits
+    # the project names its folder, beside an effort ladder, in a settings
+    # file the baseline commits
     if wiki != 'wiki':
         settings = git_repo / '.fractal' / '.settings.json'
         settings.parent.mkdir()
-        settings.write_text(json.dumps({'wiki': wiki}), encoding='utf-8')
+        ladder = {'levels': ['high', 'max'], 'floor': 'high'}
+        content = {'wiki': wiki, 'effort': {'claude': ladder}}
+        settings.write_text(json.dumps(content), encoding='utf-8')
     user = Node(git_repo)
     user.init(agent='claude', user=True)
     assert (git_repo / wiki / '_index.md').is_file()
@@ -2797,6 +2801,11 @@ def test_wiki_setting_is_fixed_at_init_and_inherited(
         pytest.param('{"wiki": ".GIT"}', 'machinery', id='git-casefolded'),
         pytest.param('{"wiki": "null"}', 'clearing the key', id='named-null'),
         pytest.param('{"wiki": "docs", "wikis": "x"}', 'unknown keys', id='typo'),
+        pytest.param(
+            '{"wiki": "docs", "effort": {"claude": {"levels": ["high"], "floor": "max"}}}',
+            'one of its levels',
+            id='effort-ladder',
+        ),
         pytest.param('{"wiki": "docs"', 'not valid JSON', id='bad-json'),
         pytest.param('["docs"]', 'JSON object', id='not-an-object'),
     ],

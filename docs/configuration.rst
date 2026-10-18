@@ -515,8 +515,9 @@ settings file at ``<project>/.fractal/.settings.json``:
    }
 
 The file is the repository's source of truth, committed with the project, so
-no operator flag can be forgotten. ``wiki`` is its only key — any other key
-refuses, so a typo cannot read as the default. The default folder is spelled
+no operator flag can be forgotten. ``wiki`` and ``effort`` (see `The effort
+ladder`_) are its only keys — any other key refuses, so a typo cannot read as
+the default. The default folder is spelled
 by omitting the key (or the file), never by setting it to ``null``, which
 refuses. No node's ``config.json``, user or child, records ``wiki`` for the
 default: a child's config stores ``null`` for its other unset keys but omits
@@ -559,6 +560,42 @@ new folder, commit the new setting, run ``fractal reset <root>`` (the tree's
 history survives), re-run ``fractal init``, and commit the baseline with
 ``--init``. A re-init over live nodes refuses. An absent setting and one
 naming ``wiki`` are the same folder, so neither counts as a switch.
+
+The effort ladder
+-----------------
+
+A step stuck at a thinking cap is steered one effort level lower (see
+:doc:`/guide/loop`). Each agent carries its own ladder of levels and a floor
+the steer never goes below: Claude lowers through ``low``, ``medium``,
+``high``, ``xhigh``, and ``max``, never below ``high``; Codex never lowers. A
+project overrides an agent's ladder with the ``effort`` key of its
+``<project>/.fractal/.settings.json``, mapping the agent's name to its levels,
+lowest first, and its floor:
+
+.. code-block:: json
+
+   {
+     "effort": {
+       "claude": {
+         "levels": ["low", "medium", "high", "xhigh", "max"],
+         "floor": "medium"
+       }
+     }
+   }
+
+With this file, a ``high`` step that hits a thinking cap steers at
+``medium``. Both ``levels`` and ``floor`` are required; the levels must be
+unique non-empty strings, and the floor must be one of them. An agent the key
+does not name keeps its own ladder. A step at or below the floor, or at a
+level that is not on the ladder, steers at its own effort.
+
+The loop reads the file as committed on the tree's root branch each time it
+starts or resumes, and holds the ladder for the run. A node editing its own
+copy changes nothing, and a change committed on the root branch takes effect
+at each node's next start or resume. An invalid ladder refuses wherever the
+file is read: the loop's boot, ``fractal init``, ``fractal commit --init``, and
+each spawn. Fractal does not check the levels against the ones the agent
+accepts, so a level the agent rejects fails the steered launch.
 
 The cleanup reserve
 -------------------

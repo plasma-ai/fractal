@@ -29,6 +29,7 @@ from fractal.constants import (
 from fractal.exceptions import AgentStreamError, _Abort, _ThinkingCap
 
 from . import commit, pricing, render, worktree
+from .agent import lower_effort
 from .config import DEFAULT_RESERVE_FRACTION
 from .event import FailureEvent, InitialEvent, TerminalEvent
 
@@ -70,6 +71,10 @@ _REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS +
 #: end, or a wake-up), paused while a tool runs, a think is open, or
 #: its turn has ended -- after which the loop ends the launch as stuck.
 NO_PROGRESS_SECONDS = 1_800
+
+# the stuck reason of a launch ended at a thinking cap, whose steer runs one
+# effort level lower (the no-action watchdog's steer keeps the effort)
+_THINKING_CAP_REASON = 'thinking cap'
 
 # grace between the TERM and KILL when the stream reader dies -- short, but
 # long enough for a tool's `git commit` to drop `.git/index.lock`, which
@@ -425,6 +430,15 @@ class Loop:
         self._detached = bool(config.get('detached', False))
         self._node_model = config.get('model') or ''
         self._node_effort = config.get('effort') or ''
+        # the effort ladders a thinking-capped step's steer lowers through,
+        # as committed on the tree's root branch and held for the run (no
+        # node can change its own, and an edit lands at the next start or
+        # resume); an agent the settings do not name keeps its own ladder
+        self._effort_ladders = worktree.committed_effort_setting(
+            node.repo_dir,
+            ref=config.get('root'),
+            project=node.project_path,
+        )
         meta = config.get('meta') or ''
         self._meta_mode = bool(meta)
         # the boot-pinned mode flags, the one source the step env and the
@@ -491,10 +505,12 @@ class Loop:
         self._step_ceiling_seconds = 0
         self._step_timeout_effective = self._step_timeout_seconds
         self._step_budget_value: Optional[float] = None
-        # a steered launch: the stuck session it resumes and the
-        # seconds its attempt already ran (the step ceiling spans both)
+        # a steered launch: the stuck session it resumes, the seconds its
+        # attempt already ran (the step ceiling spans both), and whether a
+        # thinking cap stuck it (the steer then runs one effort level lower)
         self._steer_session: Optional[str] = None
         self._steer_elapsed = 0
+        self._steer_capped = False
         # the immutable mode docs run from the installed package,
         # never a per-node copy
         self._modes_dir = node._package_dir / '_node' / 'modes'
@@ -2066,6 +2082,7 @@ class Loop:
                 result = self._run_step(step)
                 self._steer_session = None
                 self._steer_elapsed = 0
+                self._steer_capped = False
                 duration = int(time.monotonic() - step_start)
                 failed = False
 
@@ -2116,6 +2133,7 @@ class Loop:
                         steered = True
                         self._steer_session = result.session
                         self._steer_elapsed = duration
+                        self._steer_capped = trigger == _THINKING_CAP_REASON
                         print(
                             f'--- Step {step_num}/{step_count} ({step_name}):'
                             f' {trigger}; steering ({duration}s) ---'
@@ -2532,6 +2550,17 @@ class Loop:
             )
         step_model = step.model or self._node_model
         step_effort = step.effort or self._node_effort
+        # a thinking-capped launch's steer runs one level below the step's
+        # effort (else the agent's own default), never below the ladder's
+        # floor; at or below the floor, or off the ladder, it keeps the effort
+        if self._steer_capped:
+            effort = step_effort or agent.config_effort() or ''
+            ladder = (agent.effort_levels, agent.effort_floor)
+            levels, floor = self._effort_ladders.get(agent.name, ladder)
+            lowered = lower_effort(effort, levels=levels, floor=floor)
+            if lowered != effort:
+                print(f'  (effort {effort} -> {lowered} for the steer)')
+                step_effort = lowered
 
         # validate detached: in a detached node any per-step detached: key is
         # invalid (already detached); in a continuous node detached: true
@@ -3303,7 +3332,7 @@ class Loop:
             return StepResult(
                 status='stuck',
                 exit_code=1,
-                reason='thinking cap',
+                reason=_THINKING_CAP_REASON,
                 session=stuck_session,
             )
         if stream_error is not None:

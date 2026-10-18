@@ -175,6 +175,17 @@ may include breaking changes, each listed under a Breaking heading.
   `wiki update` on wikis of several thousand pages, and 1.7 keeps a row one side
   deleted out of the merged index and leaves a clean merge's rows in the order
   `wiki update` writes them, the behavior fractal's merge tests pin.
+- A Claude step stuck at a thinking cap is steered one effort level lower: a
+  `max` step's steer runs at `xhigh`, an `xhigh` step's at `high`. The step's
+  effort is its `effort:` frontmatter, else the node's `effort`, else Claude's
+  own `effortLevel`. The lowered level lasts only for the steer, the steer's row
+  records it in its `effort` column, and the pane prints
+  `(effort xhigh -> high for the steer)`. Claude never lowers below `high`, and
+  a step at or below that floor, or at a level off the ladder, steers at its own
+  effort. The no-action watchdog's steer keeps the effort, and Codex never
+  lowers. A project can set an agent's levels and floor with a new `effort` key
+  in `.fractal/.settings.json`, read from the tree's root branch at each start
+  or resume; an invalid ladder refuses wherever the file is read.
 
 ### Fixed
 
