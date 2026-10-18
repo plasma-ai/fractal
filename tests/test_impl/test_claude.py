@@ -9,6 +9,7 @@ the config-home transcript layout. Stream-level cases drive the base
 
 from __future__ import annotations
 
+import datetime as dt
 import itertools
 import json
 import logging
@@ -69,6 +70,7 @@ __all__ = [
     'test_seed_config_disables_fast_mode_claude',
     'test_transcript_resolves_the_config_home_slug',
     'test_settle_cost_adds_each_readable_sub_agent_transcript',
+    'test_settle_reads_workflow_sub_agent_transcripts',
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
 ]
 
@@ -1658,6 +1660,44 @@ def test_settle_cost_adds_each_readable_sub_agent_transcript(
     ]
     assert warning.startswith('launch partly unpriced: sub-agent transcript')
     assert 'agent-b.jsonl' in warning
+
+
+def test_settle_reads_workflow_sub_agent_transcripts(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow's sub-agents, a folder deeper, price beside the session's.
+
+    A workflow keeps each agent's transcript in a folder of its own, beside
+    a journal that holds no reply of the launch's. A sub-agent transcript
+    last written before the launch opened belongs to an earlier launch, so
+    the settle never reads it.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude')
+    session = str(uuid.uuid4())
+    (step_id,) = _steps(node, 1)
+    node.record.step_session('claude', step_id=step_id, model=None, session=session)
+    transcript = pathlib.Path(backend.transcript(session)['path'])
+    workflow = transcript.with_suffix('') / 'subagents' / 'workflows' / 'wf_1'
+    workflow.mkdir(parents=True)
+    transcript.write_text(_transcript_line('msg_main', _USAGE_FIRST), encoding='utf-8')
+    side = _transcript_line('msg_flow', _USAGE_SECOND)
+    (workflow / 'agent-a.jsonl').write_text(side, encoding='utf-8')
+    journal = _transcript_line('msg_journal', {'output_tokens': 50_000})
+    (workflow / 'journal.jsonl').write_text(journal, encoding='utf-8')
+    # an earlier launch's sub-agent, untouched since before this one opened
+    stale = workflow.parent.parent / 'agent-old.jsonl'
+    stale_line = _transcript_line('msg_stale', {'output_tokens': 50_000})
+    stale.write_text(stale_line, encoding='utf-8')
+    before = dt.datetime.fromisoformat(_OPENED).timestamp() - 60
+    os.utime(stale, (before, before))
+    backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED)
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
 
 
 def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(

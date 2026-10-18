@@ -592,10 +592,12 @@ class ClaudeAgent(Agent):
         launch killed before its result frame still left each reply's
         final usage on disk, where the stream priced only each reply's
         first frame. A sub-agent's replies sit in a transcript of their own
-        in the session's ``subagents`` folder, read beside the session's;
-        one that cannot be read is skipped with the reason logged. An
-        absent or unreadable session transcript, or a window with no
-        priced usage, logs the reason and returns ``None``.
+        under the session's ``subagents`` folder (a workflow's agents a
+        folder deeper), read beside the session's; one last written before
+        the launch opened is skipped, and one that cannot be read is
+        skipped with the reason logged. An absent or unreadable session
+        transcript, or a window with no priced usage, logs the reason and
+        returns ``None``.
         """
         try:
             found = self.transcript(session)
@@ -610,11 +612,16 @@ class ClaudeAgent(Agent):
             return None
         # read each sub-agent's transcript beside the session's -- one pass
         # over them all keeps a reply counted once across files, and a
-        # newline between files keeps a torn tail off the next file's record
+        # newline between files keeps a torn tail off the next file's record;
+        # a long session keeps hundreds, so only those written since the
+        # launch opened are read
         contents = [found['content']]
         subagents = pathlib.Path(found['path']).with_suffix('') / 'subagents'
-        for path in sorted(subagents.glob('agent-*.jsonl')):
+        opened = dt.datetime.fromisoformat(started).timestamp()
+        for path in sorted(subagents.rglob('agent-*.jsonl')):
             try:
+                if path.stat().st_mtime < opened:
+                    continue
                 contents.append(path.read_text(encoding='utf-8', errors='replace'))
             except OSError as e:
                 self.log(
