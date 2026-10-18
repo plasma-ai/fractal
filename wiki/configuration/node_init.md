@@ -82,7 +82,9 @@ exists.
   at init (`## Instructions` / `## Completion Requirements` present; every
   `pin:` line resolves to a commit and matches `--pin` case-blind, and a `pin:`
   spelling that is not a hex sha refuses outright; every `docket: <path>` line
-  resolves at the pin) -- stale or truncated commission seeds die at init.
+  resolves at the pin) -- stale or truncated commission seeds die at init. A
+  Jinja include with a leading `/` reads a shared file from the repo root at the
+  same commit, recorded beside the folder and never deployed.
   [[configuration/templates]] is the full reference.
 - `--include` / `--exclude` (repeatable; mutually exclusive) --
   template-relative paths to deploy or drop; a directory entry covers its

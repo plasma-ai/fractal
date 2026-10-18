@@ -109,15 +109,17 @@ continue (a continue re-arms the cap at start, not init).
 
 **Template authoring** — put prose and Jinja expressions in `NODE.md`, steps,
 and included fragments such as `_partials/foundations.md`. Includes read the
-same committed template bundle and cannot reach sibling templates. Values are
-data: strings containing `{{...}}` are never rendered again, and `$VAR` stays
-for runtime rendering. The template's `_template.toml` supplies defaults; the
-node's generated `_template.toml` records complete inputs and the source commit.
-Parent edits to the rendered charter are ordinary text edits. Editing recorded
-inputs is not a live update: `node diff` and bare `node reseed` replay them,
-while an explicit `reseed --ref` or `--template` adds defaults only for missing
-keys. Reseed preserves `NODE.md`, config, and memory, so charter drift can
-remain.
+same committed template bundle; to share one file across templates, include it
+by a literal name from the repo root (`{% include '/campaign/DOCTRINE.md' %}`):
+it reads at the template's commit and never deploys. Values are data: strings
+containing `{{...}}` are never rendered again, and `$VAR` stays for runtime
+rendering. The template's `_template.toml` supplies defaults; the node's
+generated `_template.toml` records complete inputs, the source commit, and each
+shared file's blob id. Parent edits to the rendered charter are ordinary text
+edits. Editing recorded inputs is not a live update: `node diff` and bare
+`node reseed` replay them, while an explicit `reseed --ref` or `--template` adds
+defaults only for missing keys. Reseed preserves `NODE.md`, config, and memory,
+so charter drift can remain.
 
 **Start** — `fractal node start` just launches; all run parameters come from
 `config.json`. A `max_cost` in `config.json` must be positive if set; a missing

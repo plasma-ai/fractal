@@ -81,12 +81,20 @@ Requirements* sections, then launch with ``fractal node start``.
 
 With a template, supply required inputs before init. Reusable prose and Jinja
 expressions live in ``NODE.md``, steps, or source-only fragments such as
-``_partials/foundations.md``. Jinja includes read only the same committed
-template bundle. Its optional ``_template.toml`` holds literal ``[values]``
-defaults, while the node's generated file records the complete resolved inputs
-and source commit. TOML is parsed as data, without rendering, and metadata is
-not a standalone output. An explicit Jinja include treats any named bundle
-file as source.
+``_partials/foundations.md``. Jinja includes read the same committed template
+bundle; a name with a leading ``/``, such as
+``{% include '/campaign/stations/DOCTRINE.md' %}``, names a shared file by its
+repo-relative path instead, read at the same commit. Shared names must be
+literal, and a shared file may include another. A symlink, a folder, a
+submodule, a credential-named file, a ``..`` step, a ``.git`` or
+``.worktrees`` component, and a path the commit does not track all refuse
+before any worktree exists. A shared file renders only inside the output that
+includes it and never deploys into the node. The template's optional
+``_template.toml`` holds literal ``[values]`` defaults, while the node's
+generated file records the complete resolved inputs, the source commit, and
+each shared file's blob id. TOML is parsed as data, without rendering, and
+metadata is not a standalone output. An explicit Jinja include treats any named
+bundle file as source.
 
 Jinja supports includes, imports, macros, inheritance, branches, loops, and raw
 blocks. Source line endings normalize to LF, trailing newlines are retained,
@@ -159,7 +167,8 @@ node at ``--path``.
        a broken ``steps/`` contract, missing required Jinja inputs, a
        truncated charter — fires before any worktree exists. One notice
        appended to the init output names the ``@<ref>`` form when the
-       root branch holds a different copy of the folder.
+       root branch holds a different copy of the folder or of a shared file
+       it includes, naming each shared file that differs.
    * - ``--include <path>``
      - whole template
      - Deploy only these template-relative output paths (repeatable; a
@@ -183,11 +192,11 @@ node at ``--path``.
        optional ``_template.toml`` ``[values]`` defaults. The external file
        names inputs at its top level, or under a ``[values]`` table — the
        shape a node's generated ``_template.toml`` records, so one node's
-       record can seed another (its ``path``, ``commit``, ``include``, and
-       ``exclude`` keys beside the table are ignored); a ``[values]`` table
-       beside any other top-level key refuses, naming the keys. Strings,
-       booleans, numbers, lists, tables, and date/time values keep
-       their types. Requires ``--template``; the node's generated
+       record can seed another (its ``path``, ``commit``, ``include``,
+       ``exclude``, and ``shared`` keys beside the table are ignored); a
+       ``[values]`` table beside any other top-level key refuses, naming the
+       keys. Strings, booleans, numbers, lists, tables, and date/time values
+       keep their types. Requires ``--template``; the node's generated
        ``_template.toml`` records the complete resolved map. Missing inputs
        used by selected outputs refuse before creation. Values remain literal
        data, and prompt-time ``$VAR`` text passes through untouched.
@@ -824,7 +833,9 @@ node lacks is drift. Literal braces are valid output and are compared like any
 other text. Source defaults are not merged again; deleting a required recorded
 input causes a rendering refusal. The recorded commit resolves as long as it
 is reachable, so a template folder
-moved or deleted later still diffs at the commit that seeded the node.
+moved or deleted later still diffs at the commit that seeded the node. The
+shared files the folder includes re-read at that commit too, so a hand edit to
+an included part of ``NODE.md`` is drift.
 
 Drift prints one unified diff per file (``template/<file>`` against
 ``node/<file>``); a recorded listing entry the template no longer carries
@@ -1072,7 +1083,8 @@ worktree — a node may not edit its own seed.
    in ``_template.toml``, and the node reseeds from it — memory and config
    stay intact, so a moved template is followed with one command. One notice
    names the ``@<root>`` form when the root branch holds a different copy of
-   the folder (a plain or ``--ref`` reseed stays silent).
+   the folder or of a shared file it includes (a plain or ``--ref`` reseed
+   stays silent).
 
 ``--force`` / ``-f``
    Reseed even while the node is active or paused.

@@ -116,6 +116,27 @@ may include breaking changes, each listed under a Breaking heading.
   folder and to ignore it for project files. It stays quiet during a merge, a
   failure inside the check never fails the commit, and a force commit folds the
   warning into its body.
+- A template can include a shared file from anywhere in the repository: a Jinja
+  include, import, or extends name with a leading `/`, such as
+  `{% include '/campaign/stations/DOCTRINE.md' %}`, names the file by its
+  repo-relative path, so several templates open with one committed text instead
+  of a copy each. The include statement is the declaration: `node init`,
+  `node diff`, and `node reseed` parse the template's sources without rendering
+  them, then read each named file at the template's commit from git, never from
+  disk, and parse those files the same way, so a shared file may include
+  another. A shared file renders only inside the output that includes it; it
+  never deploys into the node and `--include`/`--exclude` cannot select it. The
+  name must be literal: a computed name refuses at render time, saying so. A
+  `..` step, a `.git` or `.worktrees` component, a credential-named file, a
+  symlink, a folder, a submodule, and a path the commit does not track refuse
+  before any worktree exists, naming the template and the include. The node's
+  `_template.toml` records each shared path with the blob id read in a
+  `[shared]` table, which `node diff` and `node reseed` validate, and a
+  `--values` sheet in the record's shape ignores it like the record's other
+  keys. The root-differs notice at init and at a `node reseed --template`
+  re-point also compares each shared file's blob id with the root branch's copy,
+  naming every one that differs. An older fractal refuses a template that uses
+  the feature, reporting the include as not found.
 
 ### Changed
 
