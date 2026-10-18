@@ -3048,6 +3048,9 @@ class Loop:
         # the instant a result frame named the launch's cost -- spend the
         # agent completes after it lies past that figure
         settled_at: Optional[str] = None
+        # the capped reply as the stream recorded it, which the cap's kill
+        # can keep from the agent's own record
+        capped: list[dict[str, Any]] = []
 
         def _render(event: StreamEvent) -> None:
             nonlocal idle_since, stream_session, settled_at
@@ -3060,6 +3063,8 @@ class Loop:
             if event.kind == 'result' and event.failed and event.message:
                 failures.append(event.message)
             if watch_cap and event.kind == 'thinking_cap':
+                if event.reply is not None:
+                    capped.append(event.reply)
                 raise _ThinkingCap()
             if event.kind == 'acting':
                 idle_since = time.monotonic()
@@ -3145,6 +3150,7 @@ class Loop:
                     started=launched,
                     ended=fractal.util.time.utc_now(),
                     after=after,
+                    replies=capped,
                 )
             except Exception as error:
                 print(

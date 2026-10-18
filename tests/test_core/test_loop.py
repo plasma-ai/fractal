@@ -90,6 +90,7 @@ __all__ = [
     'test_background_spend_after_the_result_is_booked',
     'test_cut_off_mid_reply_books_recorded_spend_partly_unpriced',
     'test_kill_during_a_tool_call_is_fully_priced',
+    'test_capped_reply_books_the_stream_usage',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_killed_launch_settles_after_dropping_its_group_handle',
     'test_a_settle_never_lowers_the_streamed_figure',
@@ -2731,6 +2732,81 @@ def test_kill_during_a_tool_call_is_fully_priced(
     killed = min(rows, key=lambda row: row['step_id'])
     assert killed['cost'] == pytest.approx(_price(first) + _price(called))
     assert loop_node.cost.partly_unpriced(run_id=killed['run_id']) == 0
+
+
+@pytest.mark.parametrize(
+    argnames=('delta_usage', 'outcome'),
+    argvalues=[
+        # the closing delta reported the reply's final output
+        pytest.param(
+            {'output_tokens': 128_000},
+            'PLAN/stopped/steered: thinking cap',
+            id='recorded',
+        ),
+        # an older stream's delta reports none: the reply stays unpriced
+        pytest.param(
+            None,
+            'PLAN/stopped/steered: thinking cap; partly unpriced',
+            id='unrecorded',
+        ),
+    ],
+)
+def test_capped_reply_books_the_stream_usage(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    delta_usage: Optional[dict[str, int]],
+    outcome: str,
+) -> None:
+    """A reply the loop ends at the output cap books the stream's own usage.
+
+    The kill at the cap can beat claude's write of the capped reply, so
+    its transcript ends on the tool result the reply answered. The stream
+    recorded the reply's final usage -- its start's input buckets and its
+    closing delta's output -- so the step books it with the transcript's
+    replies and reads as whole. With no usage on the delta, nothing
+    recorded the reply, and the step is partly unpriced.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    called = {'input_tokens': 100, 'output_tokens': 900}
+    started = {'input_tokens': 2, 'cache_read_input_tokens': 10_000, 'output_tokens': 1}
+    reply = {
+        'id': 'msg_cap',
+        'model': 'claude-fable-5',
+        'content': [],
+        'usage': started,
+    }
+    stop: dict[str, Any] = {
+        'type': 'message_delta',
+        'delta': {'stop_reason': 'max_tokens'},
+    }
+    if delta_usage is not None:
+        stop['usage'] = delta_usage
+    capped = _claude_script(
+        _INIT,
+        _stream_frame({'type': 'message_start', 'message': reply}),
+        _assistant_frame('msg_cap', started),
+        _stream_frame(stop),
+        'exec sleep 30',
+    )
+    written = [
+        _assistant_entry('msg_a', called, stop_reason='tool_use'),
+        _user_entry(),
+    ]
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[capped, finished, finished],
+        transcripts=[written, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    booked = _price(called)
+    if delta_usage is not None:
+        booked += _price({**started, **delta_usage})
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(booked)
 
 
 def test_killed_claude_launch_without_a_transcript_stays_unpriced(
@@ -7482,6 +7558,16 @@ def _assistant_entry(
             'stop_reason': stop_reason,
             'usage': usage,
         },
+    }
+
+
+def _stream_frame(event: dict[str, Any]) -> dict[str, Any]:
+    """Return a claude stream frame wrapping one top-level raw API event."""
+    return {
+        'type': 'stream_event',
+        'event': event,
+        'parent_tool_use_id': None,
+        'session_id': 'SID',
     }
 
 

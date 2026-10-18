@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import typing
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Optional, Union
 
 from fractal.exceptions import AbstractMethodError, AgentStreamError
@@ -219,7 +219,9 @@ class StreamEvent:
     that hit the output-token cap while still thinking -- no text and no
     tool call -- once per reply: an agent that continues past it loses the
     cut-off thought, so it restarts the thought and caps again. Sub-agent
-    replies never report one.
+    replies never report one. When the stream recorded the capped reply's
+    final usage, it rides ``reply`` in the backend's own reply shape, for
+    the settle to book a reply the kill may keep from the provider's record.
 
     ``'acting'`` and ``'waiting'`` mark the agent's own control, for an
     agent that ``reports_progress``: acting when it takes control (its
@@ -252,6 +254,8 @@ class StreamEvent:
     failed: bool = False
     # error detail / tool-result body
     message: Optional[str] = None
+    # the capped reply as the stream recorded it (kind='thinking_cap')
+    reply: Optional[dict[str, Any]] = None
 
 
 def _sanitize(value: Optional[str]) -> Optional[str]:
@@ -977,6 +981,7 @@ class Agent:
         started: str,
         ended: str,
         after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
     ) -> bool:
         """Price a launch's spend past its recorded figure.
 
@@ -997,12 +1002,18 @@ class Agent:
         the spend completing after it, which lands added to the recorded
         figure, again as an estimate.
 
+        A launch the loop ends on a reply's own stop (the thinking cap)
+        can die before the provider records that reply, so the stream's
+        record of it rides ``replies`` for the hook to book.
+
         Args:
             step_id: The launch's step row, stamped with its session.
             started: The launch's spawn instant (ISO 8601 UTC).
             ended: The launch's exit instant (ISO 8601 UTC).
             after: The instant the launch's result frame named its cost
                 (ISO 8601 UTC), or ``None`` when none did.
+            replies: The replies the stream recorded whole, in the
+                backend's own reply shape.
 
         Returns:
             Whether the record shows a reply cut off mid-way: the step
@@ -1017,6 +1028,7 @@ class Agent:
             started=started,
             ended=ended,
             after=after,
+            replies=replies,
         )
         if settled.cost is None:
             return settled.cut_off
@@ -1043,6 +1055,7 @@ class Agent:
         started: str,
         ended: str,
         after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
     ) -> Settlement:
         """Hook for pricing a launch's window from the provider's own record.
 
@@ -1052,9 +1065,9 @@ class Agent:
         ``cost_scope`` -- never a thread total), or no cost with the
         reason logged, and whether the record shows a reply cut off
         mid-way; with ``after``, only the spend completing after that
-        instant::
+        instant, and the stream's own ``replies`` over the record's::
 
-            def _settle_cost(self, session, *, started, ended, after=None):
+            def _settle_cost(self, session, *, started, ended, after=None, replies=()):
                 since = after or started
                 usage = provider.usage(session, since=since, until=ended)
                 return Settlement(

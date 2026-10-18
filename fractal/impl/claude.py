@@ -9,7 +9,7 @@ import os
 import pathlib
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Optional
 
 import fractal.core.pricing
@@ -94,6 +94,11 @@ class ClaudeParser(StreamParser):
         self._reply_id: Optional[str] = None
         self._reply_blocks: set[Optional[str]] = set()
         self._reply_capped = False
+        # the newest top-level reply's model and usage as its raw API events
+        # report them, and whether its closing delta reported a final figure
+        self._reply_model: Optional[str] = None
+        self._reply_usage: dict[str, Any] = {}
+        self._reply_final = False
         # the top-level tool calls still awaiting their results, by id -- a
         # call can arrive on a raw block start, an assistant frame, or both
         self._pending: set[Optional[str]] = set()
@@ -144,7 +149,10 @@ class ClaudeParser(StreamParser):
             # acts; a tool call, a think's start or a turn's end waits)
             if top_level:
                 if event_type == 'message_start':
-                    self._track_reply((event.get('message') or {}).get('id'))
+                    reply = event.get('message') or {}
+                    self._track_reply(reply.get('id'))
+                    self._reply_model = reply.get('model') or self.model
+                    self._reply_usage = dict(reply.get('usage') or {})
                     self._turn_ended = False
                     self._thinking = False
                     events.append(StreamEvent(kind='acting'))
@@ -160,6 +168,14 @@ class ClaudeParser(StreamParser):
                     events.append(StreamEvent(kind='acting'))
                 elif event_type == 'message_delta':
                     self._thinking = False
+                    # the closing delta's usage is the reply's final figure
+                    # for each bucket it names, over the start's
+                    usage = event.get('usage') or {}
+                    if usage:
+                        for bucket, count in usage.items():
+                            if count is not None:
+                                self._reply_usage[bucket] = count
+                        self._reply_final = True
                     delta = event.get('delta') or {}
                     if delta.get('stop_reason') == 'max_tokens':
                         events += self._thinking_cap()
@@ -345,6 +361,9 @@ class ClaudeParser(StreamParser):
             self._reply_id = reply_id
             self._reply_blocks = set()
             self._reply_capped = False
+            self._reply_model = None
+            self._reply_usage = {}
+            self._reply_final = False
             self._pending.clear()
             # a reply after a result spends past the figure the result settled
             self.final = False
@@ -353,13 +372,24 @@ class ClaudeParser(StreamParser):
         """Report the tracked reply's thinking cap, once, if it only thought.
 
         Claude's continuation drops the cut-off thinking, so a reply with no
-        text and no tool call restarts from scratch and caps again.
+        text and no tool call restarts from scratch and caps again. A
+        reply whose closing delta reported its final usage rides the event
+        in the transcript's message shape: the loop ends the launch at the
+        cap, which can beat claude's own write of it.
         """
         blocks = self._reply_blocks
         if self._reply_capped or not blocks or not blocks <= _THINKING_BLOCKS:
             return []
         self._reply_capped = True
-        return [StreamEvent(kind='thinking_cap', session=self.session)]
+        reply = None
+        if self._reply_final and self._reply_id is not None:
+            reply = {
+                'id': self._reply_id,
+                'model': self._reply_model,
+                'stop_reason': 'max_tokens',
+                'usage': dict(self._reply_usage),
+            }
+        return [StreamEvent(kind='thinking_cap', session=self.session, reply=reply)]
 
     def _message_cost(self: ClaudeParser, usage: dict[str, Any]) -> Optional[float]:
         """Hook for an assistant frame's running cost estimate."""
@@ -599,6 +629,7 @@ class ClaudeAgent(Agent):
         started: str,
         ended: str,
         after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
     ) -> Settlement:
         """Price the launch's window from claude's own session transcripts.
 
@@ -622,7 +653,10 @@ class ClaudeAgent(Agent):
 
         The launch is cut off mid-reply when any of its transcripts ends
         its window cut off (see ``_transcript_window``): that reply's
-        spend reached no record, so the figure is partial.
+        spend reached no record, so the figure is partial. A reply the
+        stream recorded whole (``replies``, the capped reply) is the
+        session's newest, so it closes the session transcript's window
+        at its recorded usage, whether or not claude wrote it first.
         """
         # past a result, a record the settle cannot read leaves only the
         # spend after it unseen
@@ -661,22 +695,23 @@ class ClaudeAgent(Agent):
                 )
         # keep each reply's latest line across the files, and whether any
         # file ends cut off
-        replies: dict[str, _Reply] = {}
+        latest: dict[str, _Reply] = {}
         cut_off = False
-        for content in contents:
+        for index, content in enumerate(contents):
             window, ends_cut = _transcript_window(
                 content,
                 started=started,
                 ended=ended,
+                recorded=replies if index == 0 else (),
             )
             for message_id, reply in window.items():
-                if message_id not in replies or replies[message_id][2] <= reply[2]:
-                    replies[message_id] = reply
+                if message_id not in latest or latest[message_id][2] <= reply[2]:
+                    latest[message_id] = reply
             cut_off = cut_off or ends_cut
         # a reply completing by the result was already in its figure
         since = dt.datetime.fromisoformat(after) if after is not None else None
         cost: Optional[float] = None
-        for usage, model, stamped in replies.values():
+        for usage, model, stamped in latest.values():
             if since is not None and stamped <= since:
                 continue
             # a zero figure is a missing one (a gateway zeroes its usage), not
@@ -765,6 +800,7 @@ def _transcript_window(
     *,
     started: str,
     ended: str,
+    recorded: Sequence[dict[str, Any]] = (),
 ) -> tuple[dict[str, _Reply], bool]:
     """Read the replies one transcript stamped within a window.
 
@@ -785,6 +821,9 @@ def _transcript_window(
         content: One transcript's raw JSONL text.
         started: The window's opening instant (ISO 8601 UTC).
         ended: The window's closing instant (ISO 8601 UTC).
+        recorded: Replies recorded elsewhere, in the transcript's message
+            shape, that close the window after its last line (stamped at
+            its close).
 
     Returns:
         Each reply's final line by message id, and whether the window ends
@@ -827,6 +866,9 @@ def _transcript_window(
         if isinstance(message_id, str) and isinstance(usage, dict):
             model = model if isinstance(model, str) else None
             replies[message_id] = (usage, model, stamped)
+    for message in recorded:
+        last = ('assistant', message['stop_reason'])
+        replies[message['id']] = (message['usage'], message['model'], closed)
     cut_off = last is not None and (last[0] == 'user' or last[1] is None)
     return replies, cut_off
 
