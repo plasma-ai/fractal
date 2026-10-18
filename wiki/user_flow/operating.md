@@ -28,8 +28,11 @@ Commands run from the repository root act as the user node.
 status, spend, and limits (run from the root it shows the whole tree; it never
 includes the target row itself — `fractal node status <node>` gives one node's
 status). `status` is always the bare lifecycle status, and any qualifier rides
-the `detail` column beside it: a pending `pausing`/`stopping`/`finishing`
-signal, an `exited` run's recorded end reason, `orphaned` for a settled node
+the `detail` column beside it: `starting` for a node in its boot window (its
+loop runtime live, `active` not yet stamped after preflight; `fractal node
+status` reads `idle (starting)`, and the boolean `starting` column is true only
+then), a pending `pausing`/`stopping`/`finishing` signal, an `exited` run's
+recorded end reason, `orphaned` for a settled node
 whose worktree was removed out of band, or `model drop` while the newest
 iteration carries a step served off its pinned model that the loop's single
 re-dispatch could not resolve (see [[features/loop/steps|steps]]). Keeping the
@@ -44,8 +47,9 @@ steering read rather than an invoice. The `last` column is the age of each
 node's newest activity, and a `!` flags an active node that has been quiet past
 `max(step limit, 5m)` — the first sign of a hang. The step limit is the active
 step's own `timeout:` frontmatter, else `step_timeout`. `--live` re-checks
-reality: it relabels a crashed active node (no tmux session) as `exited` and
-drops nodes whose worktree is gone.
+reality: it relabels a crashed active node (no tmux session) as `exited`, a
+booting idle node as `active` (its `detail` still `starting`), and drops nodes
+whose worktree is gone.
 
 **History and spend.** `fractal node activity` shows a node's lifecycle activity
 most recent first, each row with its own-node step cost and, on a step's rows,

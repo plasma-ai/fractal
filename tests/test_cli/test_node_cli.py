@@ -81,6 +81,7 @@ __all__ = [
     'test_list_rejects_unknown_status',
     'test_list_whole_tree_from_a_non_init_checkout',
     'test_status_reports_idle_from_anywhere',
+    'test_booting_node_reads_idle_starting',
     'test_rm_rf_worktree_lists_orphan_then_force_deletes',
     'test_list_shows_stored_status_for_orphaned_terminal_node',
     'test_reconcile_records_orphan_event_once',
@@ -1723,6 +1724,71 @@ def test_status_reports_idle_from_anywhere(repo: dict) -> None:
     by_branch = _run(repo['root'], 'node', 'status', 'main.task')
     assert by_branch.returncode == 0
     assert by_branch.stdout.strip() == 'idle'
+
+
+def test_booting_node_reads_idle_starting(repo: dict) -> None:
+    """A started node reads ``idle (starting)`` until its loop stamps ``active``.
+
+    Between ``start`` and the loop's post-preflight ``active`` stamp the
+    stored status stays ``idle`` while the loop's tmux session is already
+    live -- the boot window. ``status`` shows ``idle (starting)``; both
+    JSON listings mark the row ``starting`` with a ``starting`` detail,
+    the plain one keeping the stored ``idle`` and ``--live`` the
+    ``active`` its drains read. A never-started idle node and a stamped
+    active one are not starting. Creates and removes its own node, so the
+    shared fixture is left as found.
+    """
+    _require_tmux()
+    root = repo['root']
+    spawn = _run(root, 'node', 'init', 'boot', '--agent', 'claude', '--max-cost', '1')
+    assert spawn.returncode == 0, spawn.stderr
+    worktree = root / '.worktrees' / 'main.boot'
+
+    def listed(*flags: str) -> dict:
+        result = _run(root, 'node', 'list', '--json', *flags)
+        assert result.returncode == 0, result.stderr
+        (row,) = [row for row in json.loads(result.stdout) if row['node'] == 'main.boot']
+        return row
+
+    # never started: no live session, so plain idle everywhere
+    assert _run(worktree, 'node', 'status').stdout.strip() == 'idle'
+    for flags in ((), ('--live',)):
+        row = listed(*flags)
+        assert (row['status'], row['starting']) == ('idle', False), row
+    # the boot window: the session start.sh names (<repo dirname> (<branch,
+    # dots dashed>)) is live while the stored status is still idle
+    session = f'{root.name} (main-boot)'
+    subprocess.run(['tmux', 'new-session', '-d', '-s', session], check=True)
+    try:
+        status = _run(worktree, 'node', 'status').stdout.strip()
+        plain = listed()
+        live = listed('--live')
+        # the loop's post-preflight stamp ends the window
+        Node(worktree).status_set('active')
+        stamped = [listed(), listed('--live')]
+    finally:
+        # settle the node before its session goes, or the read heals it exited
+        Node(worktree).status_set('idle')
+        # `=` prefix forces an exact target match (no prefix resolution)
+        subprocess.run(
+            ['tmux', 'kill-session', '-t', f'={session}'],
+            capture_output=True,
+        )
+    assert status == 'idle (starting)'
+    assert (plain['status'], plain['detail'], plain['starting']) == (
+        'idle',
+        'starting',
+        True,
+    ), plain
+    assert (live['status'], live['detail'], live['starting']) == (
+        'active',
+        'starting',
+        True,
+    ), live
+    for row in stamped:
+        assert (row['status'], row['starting']) == ('active', False), row
+    # clean up so the shared module fixture is left as other tests expect
+    assert _run(root, 'node', 'delete', 'main.boot', '--force').returncode == 0
 
 
 def test_rm_rf_worktree_lists_orphan_then_force_deletes(repo: dict) -> None:

@@ -80,9 +80,10 @@ Display decorations
 ~~~~~~~~~~~~~~~~~~~
 
 ``fractal node status`` composes the bare status with a qualifier in
-parentheses — ``active (pausing)``, ``exited (<reason>)`` — while
-``fractal node list`` keeps its ``status`` column bare and carries the same
-qualifier in a separate ``detail`` column, with a typed ``end_reason`` column
+parentheses — ``idle (starting)``, ``active (pausing)``,
+``exited (<reason>)`` — while ``fractal node list`` keeps its ``status``
+column bare and carries the same qualifier in a separate ``detail`` column,
+with a typed ``end_reason`` column
 (``goal_met``, ``run_exhausted``, ``final_iteration_failed``, ``cost_budget``,
 ``timeout``, ``setup_abort``, ``crashed``, ``other``, or empty — ``null`` in
 ``--json``
@@ -90,6 +91,11 @@ qualifier in a separate ``detail`` column, with a typed ``end_reason`` column
 status stays bare, and ``list --status`` filters match the bare ``status``
 column. Several qualifiers can stand at once, ``;``-joined:
 
+- ``idle (starting)`` — the boot window: ``start`` has launched the loop and
+  its runtime is live, but the loop has not yet stamped ``active`` after
+  preflight. The status stays ``idle``; the listing marks the row with a
+  boolean ``starting`` (``true`` only here), and ``--live`` reads the row as
+  ``active`` with ``detail`` ``starting``.
 - ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)`` — a
   pause, stop, or finish signal is pending on an active node.
 - ``exited (<reason>)`` — the latest run row recorded why it ended; a crash

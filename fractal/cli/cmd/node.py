@@ -72,6 +72,7 @@ _LIST_COLUMNS = [
     'max_descendants',
     'last',
     'end_reason',
+    'starting',
 ]
 
 # consumers bind activity columns by header name, never by position
@@ -1063,7 +1064,10 @@ def node_list(app: typer.Typer) -> typer.Typer:
         settled row's landing (``goal_met``, ``run_exhausted``,
         ``final_iteration_failed``, ``cost_budget``, ``timeout``,
         ``setup_abort``, ``crashed``, ``other``), null when nothing is
-        recorded.
+        recorded. ``starting`` is true only for a node in its boot window
+        (a live loop runtime, ``active`` not yet stamped): ``status`` stays
+        ``idle`` there, or reads ``active`` under ``--live``, and ``detail``
+        says ``starting``.
         ``spend`` is the current run's subtree cost, the
         scope ``max_cost`` beside it is enforced at, and is blank for a node
         that has never run. ``last`` is the age of each node's newest activity;

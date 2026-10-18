@@ -5249,6 +5249,8 @@ class Node:
     def status_detail(self: Node) -> str:
         """Return the qualifier that refines the node's status, if any.
 
+        ``starting`` for an ``idle`` node whose loop runtime is already live
+        (the boot window before the loop stamps ``active``);
         ``pausing`` / ``stopping`` / ``finishing`` when a pause/stop/finish
         signal is pending on an active node; the recorded end reason when
         the latest run row says why an ``exited`` run ended (the run row is
@@ -5269,6 +5271,10 @@ class Node:
         self._reconcile_status()
         status = self.status()
         detail = ''
+        # a started node holds 'idle' until its loop stamps 'active' after
+        # preflight, but its runtime is already live -- the boot window
+        if status == 'idle' and self._loop_alive() is True:
+            detail = 'starting'
         if status == 'active':
             if self.record.signal_get('pause') is not None:
                 detail = 'pausing'
@@ -5471,12 +5477,13 @@ class Node:
     def status_display(self: Node) -> str:
         """Return the status decorated with a pending signal or end reason.
 
-        ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)``
-        / ``exited (<reason>)`` -- :meth:`status_detail`'s qualifier in
-        parentheses -- else the bare status. The composed form is for
-        single-node human surfaces; the tabular listing carries the two as
-        separate ``status`` and ``detail`` columns so machine consumers
-        never parse the parentheses back apart.
+        ``idle (starting)`` / ``active (pausing)`` / ``active (stopping)`` /
+        ``active (finishing)`` / ``exited (<reason>)`` --
+        :meth:`status_detail`'s qualifier in parentheses -- else the bare
+        status. The composed form is for single-node human surfaces; the
+        tabular listing carries the two as separate ``status`` and
+        ``detail`` columns so machine consumers never parse the parentheses
+        back apart.
 
         Returns:
             Status string, possibly with a pending-signal or end-reason
@@ -5570,8 +5577,10 @@ class Node:
                 ``.status()``, dropping descendants whose worktree is gone,
                 relabeling a crashed ``active`` node (no live loop runtime)
                 to ``exited``, and a booting ``idle`` node (live runtime,
-                the loop not yet stamped) to ``active`` (the authoritative
-                view). Read-only -- it does not persist the relabel.
+                the loop not yet stamped) to ``active`` with a ``starting``
+                detail (the authoritative view). Read-only -- it does not
+                persist the relabel. Every row carries a boolean
+                ``starting``, true only in that boot window, in either view.
             decorated: Record each descendant's status qualifier (a
                 pending signal, an exited run's end reason, a model-drop
                 marker) in its ``detail`` and its typed end token in its
@@ -5616,7 +5625,12 @@ class Node:
                         # started seconds earlier; a sessionless idle node (spawned,
                         # never started) stays idle and never blocks a drain
                     elif current == 'idle' and alive:
-                        row = {**row, 'status': 'active'}
+                        row = {
+                            **row,
+                            'status': 'active',
+                            'detail': 'starting',
+                            'starting': True,
+                        }
                 rows.append(row)
         else:
             rows = self.child_list(max_depth=max_depth)
@@ -5683,6 +5697,13 @@ class Node:
                         step_limit = node.time.limit('step')
                     if age > max(step_limit or 0.0, _STALE_AGE_FLOOR_SECONDS):
                         last += '!'
+            # a stored-idle node whose loop runtime is already live is in its
+            # boot window (the loop stamps 'active' after preflight); --live
+            # judged its own rows above, relabeling them 'active'
+            starting = bool(row.get('starting'))
+            idle = _base_status(row.get('status')) == 'idle'
+            if idle and not live and node is not None:
+                starting = node._loop_alive() is True
             # a gone worktree keeps its registry caps -- the only surviving
             # source -- and yields no spend: the live config and the ledger
             # are both reached through the node
@@ -5711,6 +5732,7 @@ class Node:
                 **drifted,
                 'spend': spend,
                 'last': last,
+                'starting': starting,
             }
             capped.append(row)
         rows = capped
