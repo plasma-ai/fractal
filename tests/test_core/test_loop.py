@@ -114,6 +114,7 @@ __all__ = [
     'test_soft_cap_warning_fires_once_for_unbraked_caps',
     'test_soft_cap_warning_counts_step_timeouts',
     'test_step_budget_reserve_window_floors_at_remaining',
+    'test_no_budget_margin_for_unseen_spend',
     'test_boundary_checks_read_live_caps',
     'test_unpriced_spend_under_caps_warns_once',
     'test_priced_first_step_never_reads_as_untracked',
@@ -3726,6 +3727,46 @@ def test_step_budget_reserve_window_floors_at_remaining(loop_node: Node) -> None
     # a fully drained budget yields a non-positive leash: the step is skipped
     _record_step_cost(node, run_id=loop._run_id, cost=0.5, iter=2)
     assert loop._step_budget() <= 0
+
+
+def test_no_budget_margin_for_unseen_spend(loop_node: Node) -> None:
+    """The step leash holds back only the configured reserve.
+
+    A step cut off mid-reply booked less than it spent, and a NULL-cost
+    step booked nothing, but the engine cannot see how much either missed:
+    the remaining budget is the cap minus the recorded spend, and the
+    leash is that minus the reserve, never minus a guessed margin.
+    """
+    node = loop_node
+    _configure(node, max_cost=10.0, reserve_budget=1.0)
+    loop = MockLoop(node)
+    loop._read_cost_caps()
+    loop._run_id = node.record.run_start()
+    iter_id = node.record.iter_start(run_id=loop._run_id, iter=1)
+    cut, killed = (
+        node.record.step_start(
+            iter_id=iter_id,
+            run_id=loop._run_id,
+            step=step,
+            step_name='PLAN',
+        )
+        for step in (1, 2)
+    )
+    node.record.step_session('claude', step_id=cut, model=None, session='s-1')
+    node.record.step_cost(step_id=cut, cost=2.0)
+    node.record.step_end(
+        step_id=cut,
+        status='stopped',
+        exit_code=0,
+        metadata='steered: thinking cap',
+        partly_unpriced=True,
+    )
+    node.record.step_session('claude', step_id=killed, model=None, session='s-2')
+    node.record.step_end(step_id=killed, status='exited', exit_code=124)
+    assert node.cost.partly_unpriced(run_id=loop._run_id) == 1
+    assert node.cost.unpriced(run_id=loop._run_id) == 1
+    assert loop._run_remaining() == pytest.approx(8.0)
+    assert loop._step_budget() == pytest.approx(7.0)
 
 
 def test_boundary_checks_read_live_caps(loop_node: Node) -> None:
