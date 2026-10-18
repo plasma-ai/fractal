@@ -271,6 +271,11 @@ class ClaudeParser(StreamParser):
             usage = inner.get('usage')
             # a frame with no id cannot be deduped, so it prices as it arrives
             message_id = inner.get('id')
+            # past a result, a sub-agent's spend is the settle's to book from
+            # its transcript (only a top-level reply reopens the figure), so
+            # pricing its frames here too would count it twice
+            if self.final and not top_level:
+                usage = None
             if usage and (message_id is None or message_id != self._priced_id):
                 self._priced_id = message_id
                 cost = self._message_cost(usage)
@@ -660,18 +665,23 @@ class ClaudeAgent(Agent):
         or unreadable session transcript, or a window with no priced
         usage, logs the reason and prices nothing.
 
+        Whatever the figure leaves out marks the launch: an absent or
+        unreadable session transcript on a launch with no result figure, a
+        sub-agent transcript that cannot be read, and a reply whose usage
+        holds a count the pricing cannot read.
+
         With ``after``, the result frame's figure stands and only the
         replies completing after it price: claude counts a reply's cost
         when it completes, so those are the spend past its figure, and
         finding none is the common case, never logged.
 
-        The record leaves part of a reply out when any of the transcripts
-        ends its window that way (see ``_transcript_window``), so the
-        figure is partial; with ``after``, only an ending past the result
-        counts, since the result's figure covers the rest. A reply the
-        stream recorded whole (``replies``, the capped reply) is the
-        session's newest, so it closes the session transcript's window
-        at its recorded usage, whether or not claude wrote it first.
+        The record leaves part of a reply out when any transcript's window
+        reads that way (see ``_transcript_window``), so the figure is
+        partial; with ``after``, only what follows the result counts, since
+        the result's figure covers the rest. A reply the
+        stream recorded whole (``replies``, the capped reply) prices at its
+        recorded usage; one claude never wrote closes the session
+        transcript's window, while a written one keeps the turns after it.
         """
         # past a result, a record the settle cannot read leaves only the
         # spend after it unseen
@@ -680,23 +690,26 @@ class ClaudeAgent(Agent):
         if after is not None:
             unpriced = 'spend after the result unpriced'
             level = logging.INFO
+        # with no result figure, a record the settle cannot read leaves the
+        # launch's spend out
         try:
             found = self.transcript(session)
         except (OSError, ValueError) as e:
             self.log(f'{unpriced}: transcript unreadable: {e}', level)
-            return Settlement(cost=None)
+            return Settlement(cost=None, cut_off=after is None)
         if not found['exists']:
             self.log(
                 message=f'{unpriced}: no transcript for session {session}',
                 level=level,
             )
-            return Settlement(cost=None)
+            return Settlement(cost=None, cut_off=after is None)
         # read each sub-agent's transcript beside the session's; a long
         # session keeps hundreds, so only those written since the launch
         # opened are read
         contents = [found['content']]
         subagents = pathlib.Path(found['path']).with_suffix('') / 'subagents'
         opened = dt.datetime.fromisoformat(started).timestamp()
+        cut_off = False
         for path in sorted(subagents.rglob('agent-*.jsonl')):
             try:
                 if path.stat().st_mtime < opened:
@@ -708,10 +721,10 @@ class ClaudeAgent(Agent):
                     f' unreadable: {e}',
                     level=logging.WARNING,
                 )
+                cut_off = True
         # keep each reply's latest line across the files, and whether any
         # file's record leaves part of a reply out
         latest: dict[str, _Reply] = {}
-        cut_off = False
         for index, content in enumerate(contents):
             window, ends_cut = _transcript_window(
                 content,
@@ -732,7 +745,8 @@ class ClaudeAgent(Agent):
                 continue
             # a zero figure is a missing one (a gateway zeroes its usage), not
             # a free reply -- it must not turn an unknowable launch into $0
-            reply_cost = _compute_cost(usage, model)
+            reply_cost, whole = _usage_cost(usage, model)
+            cut_off = cut_off or not whole
             if reply_cost:
                 cost = (cost or 0.0) + reply_cost
         if cost is None and after is None:
@@ -827,18 +841,22 @@ def _transcript_window(
     kept at its final line, with the model it ran (a sidechain reply runs
     its own).
 
-    The record leaves part of a reply out when the window's last turn is
-    a user turn that no reply follows (a tool result, a prompt, or
-    claude's continuation past the output cap), whose reply's request was
-    in flight, or a reply whose final line has no stop reason. That line
-    was written before its reply completed: a killed reply, or a
-    completed sub-agent's last line written mid-stream, whose usage is
-    then partial (its output tokens a handful on a full answer). Two
-    endings are whole: a kill during a tool call ends on the reply that
-    called the tool, which completed, and a workflow sub-agent ends by
-    design on the result of its ``StructuredOutput`` call, with no reply
-    after it. With ``after``, the spend before that instant is already in
-    a result frame's figure, so only a last turn stamped after it counts.
+    The record leaves part of a reply out when a reply's final line has
+    no stop reason, or when the window's last turn is a user turn whose
+    reply's request was in flight. A final line with no stop reason was
+    written before its reply completed: a killed reply, or a completed
+    sub-agent's line written mid-stream, whose usage is then partial (its
+    output tokens a handful on a full answer). A user turn's reply was in
+    flight when the turn is a prompt, claude's continuation past the
+    output cap, or the result of the newest reply's last open tool call;
+    a result while other calls of that reply still run is a kill during a
+    tool call, which is whole. A workflow sub-agent ends by design on the
+    result of its ``StructuredOutput`` call, with no reply after it, which
+    is whole too unless the result is an error (the agent retries). An
+    entry the reader cannot read whole -- a reply's usage, or a tool id,
+    of the wrong shape -- leaves its part out as well. With ``after``, the
+    spend before that instant is already in a result frame's figure, so
+    only what the window holds past it counts.
 
     Args:
         content: One transcript's raw JSONL text.
@@ -847,8 +865,9 @@ def _transcript_window(
         after: An instant inside the window (ISO 8601 UTC) whose spend a
             result frame already named, or ``None``.
         recorded: Replies recorded elsewhere, in the transcript's message
-            shape, that close the window after its last line (stamped at
-            its close).
+            shape, final over the transcript's lines of the same id; one
+            the transcript does not hold is its newest turn (stamped at
+            the window's close).
 
     Returns:
         Each reply's final line by message id, and whether the record
@@ -857,12 +876,20 @@ def _transcript_window(
     """
     opened = dt.datetime.fromisoformat(started)
     closed = dt.datetime.fromisoformat(ended)
-    # keep the final line per message id (later lines overwrite earlier)
+    since = dt.datetime.fromisoformat(after) if after is not None else None
+    # keep the final line per message id (later lines overwrite earlier),
+    # and its stop reason
     replies: dict[str, _Reply] = {}
+    stops: dict[str, Optional[str]] = {}
     # the ids of the StructuredOutput calls, whose results end a sub-agent
     structured: set[str] = set()
+    # the newest reply and its tool calls still awaiting their results
+    newest: Optional[str] = None
+    pending: set[str] = set()
     # whether the window's last turn leaves part of a reply out, and its stamp
     last: Optional[tuple[bool, dt.datetime]] = None
+    # an entry past `since` the reader could not read whole
+    malformed = False
     # a newline alone ends a record -- splitlines would also split at the
     # U+2028 and U+0085 claude leaves raw inside a record's strings
     for line in content.split('\n'):
@@ -878,42 +905,87 @@ def _transcript_window(
             continue
         blocks = message.get('content')
         blocks = blocks if isinstance(blocks, list) else []
-        if entry['type'] == 'assistant':
-            for block in blocks:
-                if isinstance(block, dict) and block.get('type') == 'tool_use':
-                    if block.get('name') == 'StructuredOutput':
-                        structured.add(block.get('id'))
+        # place the entry against the window; a zone-less stamp cannot be
+        # placed against the UTC window
         try:
             stamped = dt.datetime.fromisoformat(entry['timestamp'])
         except (KeyError, TypeError, ValueError):
-            continue
-        # a zone-less stamp cannot be placed against the UTC window
-        if stamped.tzinfo is None or not opened <= stamped <= closed:
-            continue
-        if entry['type'] == 'user':
-            # a turn answering only StructuredOutput calls ends a sub-agent
-            answers = [
-                block.get('tool_use_id')
-                for block in blocks
-                if isinstance(block, dict) and block.get('type') == 'tool_result'
-            ]
-            whole = bool(answers) and len(answers) == len(blocks)
-            whole = whole and all(answer in structured for answer in answers)
-            last = (not whole, stamped)
-            continue
-        last = (message.get('stop_reason') is None, stamped)
-        message_id = message.get('id')
-        usage = message.get('usage')
-        model = message.get('model')
-        if isinstance(message_id, str) and isinstance(usage, dict):
+            stamped = None
+        inside = stamped is not None and stamped.tzinfo is not None
+        inside = inside and opened <= stamped <= closed
+        counted = inside and (since is None or stamped > since)
+        if entry['type'] == 'assistant':
+            # note the reply's tool calls, a StructuredOutput call even
+            # before the window, since its result can land inside it
+            message_id = message.get('id')
+            calls: set[str] = set()
+            for block in blocks:
+                if not isinstance(block, dict) or block.get('type') != 'tool_use':
+                    continue
+                call = block.get('id')
+                if not isinstance(call, str):
+                    malformed = malformed or counted
+                    continue
+                calls.add(call)
+                if block.get('name') == 'StructuredOutput':
+                    structured.add(call)
+            if not inside:
+                continue
+            if message_id != newest:
+                newest = message_id
+                pending = set()
+            pending |= calls
+            last = (False, stamped)
+            # keep the reply's usage; a line with none recorded no spend
+            usage = message.get('usage')
+            if usage is None:
+                continue
+            if not isinstance(message_id, str) or not isinstance(usage, dict):
+                malformed = malformed or counted
+                continue
+            model = message.get('model')
             model = model if isinstance(model, str) else None
             replies[message_id] = (usage, model, stamped)
+            stops[message_id] = message.get('stop_reason')
+            continue
+        if not inside:
+            continue
+        # a user turn: a prompt or a continuation always awaits a reply
+        results = [
+            block
+            for block in blocks
+            if isinstance(block, dict) and block.get('type') == 'tool_result'
+        ]
+        if not results:
+            last = (True, stamped)
+            continue
+        answers = [block.get('tool_use_id') for block in results]
+        if not all(isinstance(answer, str) for answer in answers):
+            malformed = malformed or counted
+            last = (True, stamped)
+            continue
+        pending -= set(answers)
+        # a clean StructuredOutput result ends a sub-agent; any other result
+        # awaits a reply once the newest reply's calls have all returned
+        ended_whole = all(
+            answer in structured and block.get('is_error') is not True
+            for answer, block in zip(answers, results)
+        )
+        last = (not ended_whole and not pending, stamped)
+    # the stream's own record of a reply is final; one claude never wrote
+    # is the newest turn, while a written one keeps the turns after it
     for message in recorded:
-        last = (message['stop_reason'] is None, closed)
+        if message['id'] not in replies:
+            last = (False, closed)
         replies[message['id']] = (message['usage'], message['model'], closed)
-    since = dt.datetime.fromisoformat(after) if after is not None else None
-    cut_off = last is not None and last[0] and (since is None or last[1] > since)
-    return replies, cut_off
+        stops[message['id']] = message['stop_reason']
+    partial = any(
+        stops[message_id] is None and (since is None or reply[2] > since)
+        for message_id, reply in replies.items()
+    )
+    unanswered = last is not None and last[0]
+    unanswered = unanswered and (since is None or last[1] > since)
+    return replies, partial or unanswered or malformed
 
 
 def _model_usage_tokens(entry: dict[str, Any]) -> dict[str, Any]:
@@ -950,14 +1022,61 @@ def _compute_cost(
     Cache writes bill by their lifetime: the ``cache_creation`` split's
     one-hour writes price at the one-hour write rate, and the five-minute
     writes plus any the split leaves unnamed at the base write rate. A
-    model with no one-hour rate prices them all at the base rate.
+    model with no one-hour rate prices them all at the base rate. A count
+    that is not a number prices as nothing (``_usage_cost`` reports it).
     """
+    cost, _ = _usage_cost(usage, model)
+    return cost
+
+
+def _usage_cost(
+    usage: dict[str, Any],
+    model: Optional[str] = None,
+) -> tuple[Optional[float], bool]:
+    """Price claude token usage, and say whether every count was read.
+
+    The pricing behind ``_compute_cost``. A count present but not a number
+    (wire noise) is left out of the cost rather than raising, so the
+    figure that results is partial.
+
+    Returns:
+        The cost (``None`` for an unknown or unpriced model), and whether
+        every count the usage holds was priced.
+
+    """
+    # read each count, leaving out one that is not a number; coerce null
+    # to 0.0, not via a .get default: the openrouter gateway sends the
+    # cache buckets as explicit null on partial frames, and a present-null
+    # key skips the default (None would then poison the arithmetic)
+    whole = True
+
+    def count(value: Any) -> float:
+        nonlocal whole
+        if value is None:
+            return 0.0
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            whole = False
+            return 0.0
+        return float(value)
+
+    input_tokens = count(usage.get('input_tokens'))
+    cache_read_tokens = count(usage.get('cache_read_input_tokens'))
+    cache_creation_tokens = count(usage.get('cache_creation_input_tokens'))
+    output_tokens = count(usage.get('output_tokens'))
+    # the one-hour share of the cache writes, never more than their total
+    split = usage.get('cache_creation')
+    cache_hour_tokens = 0.0
+    if isinstance(split, dict):
+        cache_hour_tokens = count(split.get('ephemeral_1h_input_tokens'))
+        cache_hour_tokens = min(cache_hour_tokens, cache_creation_tokens)
+    elif split is not None:
+        whole = False
     if model is None:
-        return None
+        return None, whole
     # look up per-token rates (missing cache rates fall back to the input rate)
     rates = _rates(model)
     if rates is None:
-        return None
+        return None, whole
     input_rate = rates.get('input_cost_per_token', 0.0)
     cache_read_rate = rates.get('cache_read_input_token_cost', input_rate)
     cache_creation_rate = rates.get('cache_creation_input_token_cost', input_rate)
@@ -966,23 +1085,11 @@ def _compute_cost(
         cache_creation_rate,
     )
     output_rate = rates.get('output_cost_per_token', 0.0)
-    # coerce with `or 0.0`, not a .get default: the openrouter gateway sends
-    # the cache buckets as explicit null on partial frames, and a present-null
-    # key skips the default (None would then poison the arithmetic)
-    input_tokens = usage.get('input_tokens') or 0.0
-    cache_read_tokens = usage.get('cache_read_input_tokens') or 0.0
-    cache_creation_tokens = usage.get('cache_creation_input_tokens') or 0.0
-    output_tokens = usage.get('output_tokens') or 0.0
-    # the one-hour share of the cache writes, never more than their total
-    split = usage.get('cache_creation')
-    cache_hour_tokens = 0.0
-    if isinstance(split, dict):
-        cache_hour_tokens = split.get('ephemeral_1h_input_tokens') or 0.0
-        cache_hour_tokens = min(cache_hour_tokens, cache_creation_tokens)
-    return (
+    cost = (
         input_tokens * input_rate
         + cache_read_tokens * cache_read_rate
         + (cache_creation_tokens - cache_hour_tokens) * cache_creation_rate
         + cache_hour_tokens * cache_hour_rate
         + output_tokens * output_rate
     )
+    return cost, whole

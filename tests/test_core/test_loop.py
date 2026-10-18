@@ -96,6 +96,8 @@ __all__ = [
     'test_killed_claude_launch_prices_from_its_transcript',
     'test_killed_wake_up_after_a_result_prices_from_the_transcript',
     'test_background_spend_after_the_result_is_booked',
+    'test_streamed_background_spend_is_booked_once',
+    'test_unreadable_record_marks_the_killed_step',
     'test_cut_off_mid_reply_books_recorded_spend_partly_unpriced',
     'test_kill_during_a_tool_call_is_fully_priced',
     'test_structured_output_result_ends_a_sub_agent_whole',
@@ -2905,6 +2907,110 @@ def test_background_spend_after_the_result_is_booked(
 
 
 @pytest.mark.parametrize(
+    argnames=('end', 'outcome'),
+    argvalues=[
+        pytest.param('exit 0', 'PLAN/completed/', id='exit-0'),
+        pytest.param('exec sleep 30', 'PLAN/exited/timed out', id='deadline'),
+    ],
+)
+def test_streamed_background_spend_is_booked_once(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    end: str,
+    outcome: str,
+) -> None:
+    """A background reply both streamed and transcribed after the result counts once.
+
+    Claude streams a background sub-agent's reply after the result frame
+    as well as writing it to the sub-agent's transcript. The transcript is
+    the one source for spend past the result, so the step books the
+    result's figure plus that reply, never the reply twice.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='3s', step_retries=0)
+    background = {'input_tokens': 2_000, 'output_tokens': 700}
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    flow = session.with_suffix('') / 'subagents' / 'workflows' / 'wf_1'
+    reply = _assistant_entry(
+        message_id='msg_late',
+        usage=background,
+        model='claude-haiku-5',
+        isSidechain=True,
+    )
+    streamed = _assistant_frame('msg_late', background)
+    streamed['message']['model'] = 'claude-haiku-5'
+    streamed['parent_tool_use_id'] = 'toolu_bg'
+    before = {'input_tokens': 100, 'output_tokens': 900}
+    script = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', before),
+        _RESULT,
+        # the result reaches the loop before the background reply completes
+        'sleep 1',
+        _append_entry(flow / 'agent-w.jsonl', reply),
+        streamed,
+        end,
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', before)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    booked = min(rows, key=lambda row: row['step_id'])
+    late = _price(background, 'claude-haiku-5')
+    assert booked['cost'] == pytest.approx(_RESULT['total_cost_usd'] + late)
+
+
+@pytest.mark.parametrize(
+    argnames='record',
+    argvalues=[
+        # claude's record never reached disk
+        pytest.param('no transcript', id='no-transcript'),
+        # a reply's output count is wire noise
+        pytest.param('malformed entry', id='malformed-entry'),
+    ],
+)
+def test_unreadable_record_marks_the_killed_step(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    record: str,
+) -> None:
+    """A killed launch whose record the settle cannot read whole is partly unpriced.
+
+    With no transcript, the step keeps the stream's estimate, which leaves
+    out whatever the record would have added. A count that is not a
+    number prices as nothing rather than failing the settle. Either way
+    the row says its figure is partial.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    first = {'input_tokens': 100, 'output_tokens': 1}
+    stalled = _claude_script(_INIT, _assistant_frame('msg_a', first), 'exec sleep 30')
+    finished = _claude_script(_INIT, _RESULT)
+    transcripts = None
+    if record == 'malformed entry':
+        noisy = {'input_tokens': 100, 'output_tokens': '900'}
+        transcripts = [[_assistant_entry('msg_a', noisy)], [], []]
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=transcripts,
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node)[0] == (
+        'PLAN/stopped/steered: no action for 1s; partly unpriced'
+    )
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(first))
+
+
+@pytest.mark.parametrize(
     argnames='cut',
     argvalues=[
         # the reply's request was in flight after a tool result
@@ -3279,15 +3385,19 @@ def test_a_failed_settle_leaves_the_killed_launch_as_booked(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """A settle that raises never changes how the killed launch is booked.
+    """A settle that raises leaves the killed launch's figure, marked partial.
 
     Pricing reads a file the provider writes, so it can fail in ways the
-    hook does not foresee: the launch keeps its outcome and row, the run
-    goes on, and the pane says what went unpriced.
+    hook does not foresee: the launch keeps its outcome and its stream's
+    estimate, which leaves out whatever the settle would have added, the
+    run goes on, and the pane says what went unpriced. A launch whose
+    result named its figure stays whole.
     """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    first = {'input_tokens': 100, 'output_tokens': 1}
     agent = scripted_claude(
         [
-            _claude_script(_INIT, 'exec sleep 30'),
+            _claude_script(_INIT, _assistant_frame('msg_a', first), 'exec sleep 30'),
             _claude_script(_INIT, _RESULT),
             _claude_script(_INIT, _RESULT),
         ]
@@ -3299,7 +3409,7 @@ def test_a_failed_settle_leaves_the_killed_launch_as_booked(
     monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
     ScriptedLoop(loop_node, agent).run()
     assert _step_rows(loop_node) == [
-        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/stopped/steered: no action for 1s; partly unpriced',
         'PLAN/completed/steer',
         'EXECUTE/completed/',
     ]

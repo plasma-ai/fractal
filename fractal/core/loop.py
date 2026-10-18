@@ -3259,6 +3259,9 @@ class Loop:
                     f'Warning: pricing the ended launch failed ({error})',
                     file=sys.stderr,
                 )
+                # with no result figure, the stream's estimate leaves out
+                # whatever the failed settle would have added
+                self._step_partly_unpriced = after is None
             if self._step_partly_unpriced:
                 print(
                     "Warning: a reply's spend is missing from the launch's"
