@@ -174,21 +174,44 @@ logs nothing); a sub-agent transcript that cannot be read is left out of the sum
 with `launch partly unpriced: <reason>`. The ledger has no estimate column:
 `fractal node cost` reports the figure like any other.
 
-A launch can be **cut off mid-reply**: a reply was in flight when it died, and
-no record holds that reply's spend. The settle calls a launch cut off when any
-of its transcripts ends its window on a `user` turn that no reply follows (a
-tool result, a prompt, or Claude's continuation past the output cap -- the
-reply's request was in flight) or on a reply whose final line has a null
-`stop_reason` (written before the reply completed); entries of other types are
-Claude's bookkeeping and never end a window. A kill during a tool call ends on
-the completed reply that called the tool, so it is not cut off. The step books
-what was recorded, with no estimate for the cut reply: `_settle_cost` returns a
-`Settlement` (`cost`, `cut_off`), `Agent.settle_cost` returns the verdict, and
-the loop prints a `Warning:` line to stderr (which reaches `headless.log`) and
-passes it to `step_end`, at the steered close too, which appends
-`; partly unpriced` to the row's metadata at any terminal -- unless nothing
-priced at all, where `; unpriced` stands. `step_cost`'s strip of a stale
-`unpriced` marker leaves it alone, since the cut reply stays unpriced.
+A launch's record can **leave part of a reply out**, so its figure is partial.
+The settle reads that from how any of its transcripts ends its window:
+
+- on a `user` turn that no reply follows (a tool result, a prompt, Claude's
+  continuation past the output cap, or `[Request interrupted by user]`): the
+  reply's request was in flight when the launch died;
+- on a reply whose final line has a null `stop_reason`: the line was written
+  before the reply completed. A killed reply ends this way, and so can a
+  completed sub-agent whose last line Claude Code wrote mid-stream (seen on
+  2.1.286 to 2.1.296): its final text is there, but its usage is partial, its
+  `output_tokens` a handful on a full answer. Both leave part of a reply's spend
+  out of the record.
+
+Two endings are whole. A kill during a tool call ends on the completed reply
+that called the tool. A workflow sub-agent ends by design on the result of its
+`StructuredOutput` call (a user turn whose `tool_result`s all answer
+`StructuredOutput` calls seen earlier in the same transcript), with no reply
+after it. Entries of types other than `user` and `assistant` are Claude's
+bookkeeping and never end a window. With `after`, the result frame's figure
+already covers the spend before it, so only a window whose last turn is stamped
+after that instant counts; a completed launch with a partial line or an
+interrupted sub-agent before its result reads as whole.
+
+The step books what was recorded, with no estimate for the missing part:
+`_settle_cost` returns a `Settlement` (`cost`, `cut_off`), `Agent.settle_cost`
+returns the verdict, and the loop prints
+`Warning: a reply's spend is missing from the launch's record` to stderr (which
+reaches `headless.log`) and passes it to `step_end`, at the steered close too,
+which appends `; partly unpriced` to the row's metadata at any terminal --
+unless nothing priced at all, where `; unpriced` stands. `step_cost`'s strip of
+a stale `unpriced` marker leaves it alone, since the missing part stays
+unpriced.
+
+The settle runs after every launch and parses every line of each transcript it
+opens, before the window check (a `StructuredOutput` call can precede the
+window); a whole session transcript of a long node parses in tens of
+milliseconds, and sub-agent files untouched since the launch opened are never
+opened.
 
 A thinking-cap kill is the one cut the stream itself records: the loop ends the
 launch at the `max_tokens` delta, which can beat Claude Code's write of that
@@ -250,9 +273,9 @@ Zero and unknowable are never conflated:
 - Ended steps with `NULL` cost are silently skipped by the sum, so ledger-facing
   commands disclose the count on stderr
   (`N unpriced steps (NULL cost) excluded`) while stdout stays parseable.
-- A priced step marked `partly unpriced` (cut off mid-reply, above) sums as if
-  whole, so the same commands disclose those too
-  (`N partly unpriced steps (cut off mid-reply) counted at recorded spend`,
+- A priced step marked `partly unpriced` (above) sums as if whole, so the same
+  commands disclose those too
+  (`N partly unpriced steps (a reply's spend missing from the record) counted at recorded spend`,
   counted by `Cost.partly_unpriced`). Nothing adds a margin for the spend no
   record holds ([[features/cost/budgets|budgets]]).
 

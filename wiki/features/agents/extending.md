@@ -60,8 +60,8 @@ the subclass implements:
   invocation -- a killed launch's whole window, or with `after` only the spend
   completing past its result frame, with the stream's own `replies` (a capped
   reply) over the record's -- and returns a `Settlement` naming the cost and
-  whether the record shows a reply cut off mid-way; it defaults to no cost,
-  leaving the stream's figure standing;
+  whether the record leaves part of a reply out; it defaults to no cost, leaving
+  the stream's figure standing;
 - the transcript hook (with its fallback) locates a session's transcript file —
   the seam the project-files surface fronts (see
   [[features/files/transcripts]]);

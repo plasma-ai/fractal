@@ -222,15 +222,18 @@ may include breaking changes, each listed under a Breaking heading.
   after the result were never counted. Once the process ends — exit 0, a
   non-zero exit, or the deadline — the transcript replies completing after the
   result are priced and added to its figure.
-- A Claude step cut off with a reply in flight (its transcript ends on a user
-  turn no reply follows, or on a reply written before it completed) books the
-  spend recorded, with no estimate for the cut reply, and its row's metadata
-  gains `; partly unpriced`; the loop prints a `Warning:` line, and
+- A Claude step whose record leaves part of a reply out (a transcript ends on a
+  user turn no reply follows, or on a reply line written before the reply
+  completed, which a completed sub-agent's last line can be) books the spend
+  recorded, with no estimate for the missing part, and its row's metadata gains
+  `; partly unpriced`; the loop prints a `Warning:` line, and
   `fractal node cost spent` and `breakdown` disclose how many such steps they
-  count. A launch killed while a tool runs is not cut off. A reply the loop ends
-  at the output cap books the usage the stream recorded for it, so a
-  thinking-cap kill reads as whole unless the stream reported no usage. A
-  cut-off Codex step still records no cost.
+  count. A launch killed while a tool runs, and a workflow sub-agent ending on
+  its `StructuredOutput` result, are whole, and a launch whose result frame
+  named its cost counts only what follows the result. A reply the loop ends at
+  the output cap books the usage the stream recorded for it, so a thinking-cap
+  kill reads as whole unless the stream reported no usage. A killed Codex step
+  still records no cost.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the

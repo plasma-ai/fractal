@@ -330,14 +330,17 @@ From the user's point of view:
   that completed with no reported figure stores no cost and carries no
   marker. ``cost spent`` and ``cost breakdown`` disclose on stderr how
   many ended steps carry no recorded cost, marked or not.
-- **A step cut off mid-reply is partly unpriced.** When a ``claude``
-  launch dies with a reply in flight, no record holds that reply's spend:
-  the step books what was recorded, with no estimate for the cut reply,
-  its row's metadata gains ``; partly unpriced``, and the loop prints a
-  ``Warning:`` line. ``cost spent`` and ``cost breakdown`` disclose how
-  many such steps their sums count at recorded spend. A launch killed
-  while a tool runs is not cut off, and a cut-off ``codex`` step stays
-  unpriced.
+- **A step missing part of a reply's spend is partly unpriced.** When a
+  ``claude`` launch dies with a reply in flight, or a sub-agent's last
+  line was written before its reply completed, the record leaves part of
+  a reply's spend out: the step books what was recorded, with no
+  estimate for the missing part, its row's metadata gains
+  ``; partly unpriced``, and the loop prints a ``Warning:`` line.
+  ``cost spent`` and ``cost breakdown`` disclose how many such steps
+  their sums count at recorded spend. A launch killed while a tool runs,
+  or a workflow sub-agent ending on its structured output, is whole;
+  past a result frame only what follows the result counts; and a killed
+  ``codex`` step stays unpriced.
 - **The figure's source varies by backend.** ``claude`` (native),
   ``grok``, ``opencode``, and ``omp`` report their own spend on the
   stream; ``codex`` — and ``claude`` behind ``openrouter`` — are priced
