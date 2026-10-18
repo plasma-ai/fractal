@@ -90,10 +90,12 @@ __all__ = [
     'test_diff_requires_a_recorded_template_and_a_full_sha',
     'test_diff_stays_clean_after_the_template_folder_moves',
     'test_diff_never_judges_a_root_file_named_like_a_surface',
+    'test_diff_reports_drift_in_a_shared_include',
     'test_diff_and_reseed_name_the_record_remedy_for_a_missing_value',
     'test_reseed_keeps_recorded_values_and_adds_new_defaults',
     'test_reseed_restores_the_seed_surfaces_and_records_the_event',
     'test_reseed_ref_reads_another_commit_and_keeps_exclusions',
+    'test_reseed_ref_picks_up_a_changed_shared_include',
     'test_reseed_refuses_a_missing_path_at_a_ref_and_re_points',
     'test_reseed_bare_re_point_reads_the_node_branch_tip',
     'test_reseed_prints_no_root_notice_without_a_re_point',
@@ -2182,6 +2184,60 @@ def test_diff_never_judges_a_root_file_named_like_a_surface(repo: dict) -> None:
         _run(root, 'node', 'delete', 'main.rootnames', '--force')
 
 
+def test_diff_reports_drift_in_a_shared_include(repo: dict) -> None:
+    """``diff`` re-renders a shared include at the recorded commit.
+
+    A charter including a shared file seeds clean and stays clean after
+    the root branch moves the shared file on -- the recorded commit is
+    what re-renders -- while a hand edit to the included portion of the
+    live charter is drift.
+    """
+    root = repo['root']
+    _commit_template(root, 'shared/diffdoc', {'DOCTRINE.md': 'doctrine v1\n'})
+    charter = (
+        '# shareddiff\n\n## Instructions\n\n'
+        "{% include '/shared/diffdoc/DOCTRINE.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+    }
+    _commit_template(root, 'templates/shareddiff', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'shareddiff',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/shareddiff',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.shareddiff' / '.fractal' / 'main.shareddiff'
+        )
+        # the root's newer copy never reaches the recorded render
+        _commit_template(root, 'shared/diffdoc', {'DOCTRINE.md': 'doctrine v2\n'})
+        clean = _run(root, 'node', 'diff', 'main.shareddiff')
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        assert clean.stdout.strip() == 'No drift from the recorded template.'
+        # a hand edit to the included text is charter drift
+        live = node_dir / 'NODE.md'
+        text = live.read_text(encoding='utf-8')
+        edited = text.replace('doctrine v1', 'doctrine, hand-edited')
+        live.write_text(edited, encoding='utf-8')
+        drifted = _run(root, 'node', 'diff', 'main.shareddiff')
+        assert drifted.returncode == 1, drifted.stdout + drifted.stderr
+        assert '--- template/NODE.md' in drifted.stdout
+        assert '-doctrine v1' in drifted.stdout
+        assert '+doctrine, hand-edited' in drifted.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.shareddiff', '--force')
+
+
 def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
     repo: dict,
 ) -> None:
@@ -2517,6 +2573,60 @@ def test_reseed_ref_reads_another_commit_and_keeps_exclusions(
         ]
     finally:
         _run(root, 'node', 'delete', 'main.refreseed', '--force')
+
+
+def test_reseed_ref_picks_up_a_changed_shared_include(repo: dict) -> None:
+    """``reseed --ref`` reads the shared files at the new commit.
+
+    A step including a shared file deploys the shared file's new text
+    once the root branch changes it, and the record's ``[shared]`` blob id
+    advances with the commit; the charter keeps its seeded text, as every
+    reseed does.
+    """
+    root = repo['root']
+    _commit_template(root, 'shared/reseeddoc', {'DOCTRINE.md': 'doctrine v1\n'})
+    charter = (
+        '# sharedreseed\n\n## Instructions\n\n'
+        "{% include '/shared/reseeddoc/DOCTRINE.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+        'steps/01-GO.md': "# go\n{% include '/shared/reseeddoc/DOCTRINE.md' %}",
+    }
+    _commit_template(root, 'templates/sharedreseed', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'sharedreseed',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/sharedreseed',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.sharedreseed' / '.fractal' / 'main.sharedreseed'
+        )
+        # the shared file evolves after the spawn; the template folder does not
+        _commit_template(root, 'shared/reseeddoc', {'DOCTRINE.md': 'doctrine v2\n'})
+        advanced = _git(root, 'rev-parse', 'main').stdout.strip()
+        reseeded = _run(root, 'node', 'reseed', 'main.sharedreseed', '--ref', 'main')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\ndoctrine v2\n'
+        assert 'doctrine v1\n' in (node_dir / 'NODE.md').read_text(encoding='utf-8')
+        # the record advances the shared blob id with the commit
+        data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+        shared = f'{advanced}:shared/reseeddoc/DOCTRINE.md'
+        blob = _git(root, 'rev-parse', shared).stdout.strip()
+        assert data['commit'] == advanced
+        assert data['shared'] == {'shared/reseeddoc/DOCTRINE.md': blob}
+    finally:
+        _run(root, 'node', 'delete', 'main.sharedreseed', '--force')
 
 
 def test_reseed_refuses_a_missing_path_at_a_ref_and_re_points(
