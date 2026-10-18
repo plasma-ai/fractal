@@ -142,13 +142,18 @@ sweep is how the operator learns of it. The same holds for the one process the
 walk cannot reach: an orphan from an earlier tool call whose own session's
 leader has exited (`validate.sh &` under a `setsid` shell that already returned)
 sits in no member's session and under no member, so the sweep names it and
-leaves it running. The sweep reads `lsof` on macOS and `/proc/<pid>/cwd` on
-Linux, and it skips the caller and its ancestors (an operator may run
-`fractal pause` from a shell in the worktree), the processes the tree hangs from
-(the loop and its parents), every process in the node's own loop group (its
-`.pgid`, read before the first signal, since an abort parks the loop and the
-park drops the record), and every other node's loop with everything at or below
-it, since a child's loop works in the worktree of the tool that started it.
+leaves it running. No other reap sweeps the worktree — the step deadline, the
+no-progress watchdog, a stream failure, and the crash heal pass none, and they
+miss such an orphan while its step still runs. A step that ends normally reaps
+nothing at all, so a job a finished step left behind is outside every later
+reap; pause sweeps only with a step in flight and kill only with a recorded
+group. The sweep reads `lsof` on macOS and `/proc/<pid>/cwd` on Linux, and it
+skips the caller and its ancestors (an operator may run `fractal pause` from a
+shell in the worktree), the processes the tree hangs from (the loop and its
+parents), every process in the node's own loop group (its `.pgid`, read before
+the first signal, since an abort parks the loop and the park drops the record),
+and every other node's loop with everything at or below it, since a child's loop
+works in the worktree of the tool that started it.
 
 After the script returns, pause and kill check the worktree for a git operation
 the abort may have cut short — an unfinished merge, squash, cherry-pick, revert

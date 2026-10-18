@@ -19,6 +19,7 @@ from packaging.specifiers import SpecifierSet
 
 import fractal
 from fractal.constants import CONFIG_FILE, LOCK_FILE, PGID_FILE
+from tests._helpers import _digests, _tree_drift
 
 __all__ = [
     'test_gitignore_spares_node_artifact_names',
@@ -28,6 +29,7 @@ __all__ = [
     'test_seeded_skills_do_not_deny_wiki_walk_up',
     'test_seeded_skills_do_not_call_stale_links_non_blocking',
     'test_version_strings_agree',
+    'test_seed_guard_names_each_drifted_path',
 ]
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -288,3 +290,39 @@ def test_version_strings_agree() -> None:
             f'shim pin {pin!r} must pin plasma-fractal=={fractal.__version__} '
             '(the shim resolves to exactly the release it ships with)'
         )
+
+
+def test_seed_guard_names_each_drifted_path(tmp_path: pathlib.Path) -> None:
+    """The seed guard's failure names every drifted path and both causes.
+
+    A bare "the seed trees changed" leaves the reader bisecting the suite
+    for a write that may never have happened: the same drift appears when
+    someone edits the tree while the tests run. The message names each
+    created, deleted, and modified file, and states both causes; a mass
+    drift names the first paths of each kind and counts the rest.
+    """
+    package = tmp_path / 'fractal'
+    seeds = [package / '_node', package / '_scripts']
+    for seed in seeds:
+        seed.mkdir(parents=True)
+    (package / '_node' / 'NODE.md').write_text('seed\n', encoding='utf-8')
+    (package / '_scripts' / 'start.sh').write_text('#!/bin/sh\n', encoding='utf-8')
+    before = _digests(tmp_path, seeds)
+    assert _tree_drift(before, _digests(tmp_path, seeds)) == ''
+    # one file created, one deleted, one modified
+    (package / '_node' / 'extra.md').write_text('new\n', encoding='utf-8')
+    (package / '_scripts' / 'start.sh').unlink()
+    (package / '_node' / 'NODE.md').write_text('edited\n', encoding='utf-8')
+    drift = _tree_drift(before, _digests(tmp_path, seeds))
+    assert 'added: fractal/_node/extra.md' in drift, drift
+    assert 'removed: fractal/_scripts/start.sh' in drift, drift
+    assert 'changed: fractal/_node/NODE.md' in drift, drift
+    # the guard cannot tell the two causes apart, so it states both
+    assert 'a test wrote into the source tree' in drift, drift
+    assert 'the tree was edited while the tests ran' in drift, drift
+    # a mass drift names the first paths of each kind and counts the rest
+    flood = {f'fractal/_node/gen/{index:02d}.md': 'sha' for index in range(25)}
+    drift = _tree_drift({}, flood)
+    assert 'added: fractal/_node/gen/19.md' in drift, drift
+    assert 'gen/20.md' not in drift, drift
+    assert '... and 5 more added' in drift, drift
