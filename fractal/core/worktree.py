@@ -362,11 +362,12 @@ def committed_effort_ladders(
 
     The settings file's ``effort_ladder`` key maps an agent name to the
     levels a thinking-capped step's steer lowers through and the floor it
-    stops at (``{"effort_ladder": {"claude": {"levels": [...], "floor":
-    "high"}}}``),
-    overriding that agent's own defaults. The loop reads it at boot from
-    the tree's root branch, never a node's checkout, so no node can change
-    its own ladder.
+    stops at, overriding that agent's own defaults::
+
+        {"effort_ladder": {"claude": {"levels": [...], "floor": "high"}}}
+
+    The loop reads it at boot from the tree's root branch, never a node's
+    checkout, so no node can change its own ladder.
 
     Args:
         repo_dir: Main repository root.
