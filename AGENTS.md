@@ -77,6 +77,13 @@ The test suite uses `pytest` with `--doctest-modules` enabled. Integration tests
 create real git repos and worktrees — session-scoped to avoid repeated
 `fractal node init` overhead.
 
+- **No edits to the tree while its tests run.** A session guard digests the
+  package's seed trees (`_assets/`, `_node/`, `_scripts/`, `skills/`) before and
+  after the run and fails on any drift, naming each added, removed, and changed
+  path. It cannot tell a test writing through a package path from an edit made
+  mid-run, so an edit during the run fails the suite as if a test had made it —
+  wait for the run to end.
+
 ## Consistency
 
 The single most important pattern in this codebase is the pattern of **adhering

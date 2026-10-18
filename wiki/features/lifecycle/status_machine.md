@@ -68,7 +68,10 @@ metadata states the reason before the operation raises.
   killed.
 - **`idle`** is the parked, startable state: `start` runs it, `retire` hides it,
   `delete` removes it, and `kill` stamps it `killed` — a booting spawn is
-  reaped, a never-started one can never activate.
+  reaped, a never-started one can never activate. A started node stays `idle`
+  until its loop stamps `active` after preflight; through that boot window, with
+  its loop runtime already live, it reads `idle (starting)` (a display
+  qualifier, never stored), and `list --live` reads it as `active`.
 - **Settled** nodes (`completed`/`stopped`/`exited`/`killed`) accept
   `start --continue` to re-arm, `retire`, and `delete`.
 - **`retired`** accepts only `unretire` and `delete`; a retired node is hidden

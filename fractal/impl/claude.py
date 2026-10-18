@@ -465,6 +465,8 @@ class ClaudeAgent(Agent):
     enforces_budget = True
     reports_progress = True
     providers = ('openrouter',)
+    effort_levels = ('low', 'medium', 'high', 'xhigh', 'max')
+    effort_floor = 'high'
 
     __parser__ = ClaudeParser
 
@@ -567,11 +569,19 @@ class ClaudeAgent(Agent):
         )
 
     def _config_model(self: ClaudeAgent) -> Optional[str]:
-        """Resolve the model claude's own settings chain defaults to.
+        """Resolve the model claude's own settings chain defaults to."""
+        return self._setting('model')
+
+    def _config_effort(self: ClaudeAgent) -> Optional[str]:
+        """Resolve the effort claude's own settings chain defaults to."""
+        return self._setting('effortLevel')
+
+    def _setting(self: ClaudeAgent, key: str) -> Optional[str]:
+        """Resolve one string setting through claude's own settings chain.
 
         Claude applies the node's ``--settings`` over the worktree's
         ``.claude/settings.local.json`` over its ``settings.json`` over
-        ``~/.claude/settings.json``; the first file naming a model wins,
+        ``~/.claude/settings.json``; the first file naming ``key`` wins,
         and ``None`` means none does (managed settings layers are not
         consulted -- the resolution is best-effort).
         """
@@ -583,14 +593,18 @@ class ClaudeAgent(Agent):
         ):
             if not path.is_file():
                 continue
-            # an unreadable or malformed settings file names no model
+            # an unreadable or malformed settings file, or one whose JSON is
+            # not an object, names no value
             try:
                 with open(path, encoding='utf-8') as file:
-                    model = json.load(file).get('model')
+                    settings = json.load(file)
             except (OSError, json.JSONDecodeError):
                 continue
-            if isinstance(model, str) and model:
-                return model
+            if not isinstance(settings, dict):
+                continue
+            value = settings.get(key)
+            if isinstance(value, str) and value:
+                return value
         return None
 
     def _transcript(self: ClaudeAgent, session: str) -> Optional[pathlib.Path]:

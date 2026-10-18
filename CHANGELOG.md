@@ -20,6 +20,14 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Added
 
+- `fractal node status` reads `idle (starting)` for a node in its boot window:
+  between `start` and the loop's `active` stamp after preflight, while its loop
+  runtime is already live. `fractal node list` carries the qualifier as a
+  `starting` detail and adds a `starting` column to every row: true only in that
+  window, false otherwise, and null when the listing could not look (tmux gave
+  no answer for a node that records no runtime of its own). The plain listing
+  keeps the stored `idle` status, and `--live` keeps reading the row as `active`
+  so drains still wait for it. The stored status stays `idle`.
 - A no-progress watchdog for Claude steps: 30 minutes of the agent's own idle
   time, counted only while it holds control (paused while a tool runs, while it
   thinks, after its turn ends while Claude Code waits on background work, and
@@ -175,9 +183,35 @@ may include breaking changes, each listed under a Breaking heading.
   `wiki update` on wikis of several thousand pages, and 1.7 keeps a row one side
   deleted out of the merged index and leaves a clean merge's rows in the order
   `wiki update` writes them, the behavior fractal's merge tests pin.
+- A Claude step stuck at a thinking cap is steered one effort level lower: a
+  `max` step's steer runs at `xhigh`, an `xhigh` step's at `high`. The step's
+  effort is its `effort:` frontmatter, else the node's `effort`, else Claude's
+  own `effortLevel`. The lowered level lasts only for the steer, the steer's row
+  records it in its `effort` column, and the pane prints
+  `(effort xhigh -> high for the steer)`. By default Claude never lowers below
+  `high`, and a step at or below that floor, or at a level off the ladder,
+  steers at its own effort. The no-action watchdog's steer keeps the effort, and
+  Codex never lowers. A project can set an agent's levels and floor with a new
+  `effort_ladder` key in `.fractal/.settings.json`, read from the tree's root
+  branch at each start or resume. A ladder with a bad shape refuses wherever the
+  file is read, and one naming an unregistered agent or listing the agent's own
+  levels out of order refuses at the loop's boot.
 
 ### Fixed
 
+- The stock `NODE.md` no longer tells nodes that background processes die at the
+  step boundary. A step that ends normally ends no process, so any background
+  job outlives its step unless the agent ends it. The loop reaps only a step it
+  cuts short — a step deadline, the no-progress watchdog, a stream failure, the
+  crash heal — and that reap, landing while the step still runs, misses an
+  orphan outside the agent's session: a process that left the session and lost
+  its parent, such as a double-forked daemon or a job backgrounded under a
+  `setsid` shell that has since exited. A job a finished step left behind is
+  outside every later reap. `fractal node pause` (with a step in flight) and
+  `fractal node kill` (with a recorded process group) name such a process in
+  their sweep of the node's worktree and leave it running. The seed now says so
+  and asks nodes to end every background job they start before the step ends;
+  the lifecycle guide and the `node` CLI reference describe the class.
 - A `node merge` whose wiki refresh fails after creating an index removes that
   index along with the rest of the squash, so the retry lands instead of
   refusing it as an untracked file under the wiki.

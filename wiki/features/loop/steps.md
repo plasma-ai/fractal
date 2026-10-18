@@ -210,6 +210,24 @@ timeout does (no new lifecycle status), the iteration fails as after a timed-out
 step, and the loop posts a `step stalled` notice naming the trigger to the
 node's outbox, which the parent's feed follows.
 
+A thinking cap's steer runs one effort level lower. At the steer (and only when
+the stuck trigger is the thinking cap, never the watchdog), `Loop._run_step`
+takes the step's effort -- its `effort:` frontmatter, else the node's `effort`,
+else the agent's `config_effort()` -- and lowers it with `lower_effort`
+(`core/agent.py`) over the step agent's ladder: the project's override held by
+the loop, else the agent class's `effort_levels` and `effort_floor` (see
+[[features/agents/models_and_effort#The effort ladder|models_and_effort]]). A
+changed level replaces the launch's effort, so the steer passes it as the effort
+flag and its row's `effort` column records it, and the pane prints
+`  (effort xhigh -> high for the steer)` under the step header; the steering
+banner and the stuck row's `steered: <trigger>` stay as for any steer. The
+`_steer_capped` flag that asks for the lowering resets with the steer session
+after the launch, so the next step, a retry, and the next iteration run at the
+step's own effort. At or below the floor, or at a level off the ladder (or with
+no effort anywhere), the steer keeps the effort and passes the same flag as the
+first launch: the floor means never lower, not never steer. A lowered steer that
+caps again is a stall like any second stuck launch.
+
 ## Model drops
 
 Infrastructure can silently serve a different model than a step pinned, so

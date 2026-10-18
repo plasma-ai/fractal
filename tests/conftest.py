@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import pathlib
 import shutil
@@ -14,6 +13,7 @@ from collections.abc import Iterator
 import pytest
 
 import fractal
+from tests._helpers import _digests, _tree_drift
 
 # the suite drives the installed fractal console script as a subprocess (and
 # the loop shells out to it on every step), which coverage's in-process tracer
@@ -70,32 +70,22 @@ def _isolate_loop_env() -> Iterator[None]:
 
 @pytest.fixture(scope='session', autouse=True)
 def _package_seeds_stay_pristine() -> Iterator[None]:
-    """Fail the session when a test mutates the package's seed trees.
+    """Fail the session when the package's seed trees change under it.
 
     The loop resolves shared seed files (modes, steps, scripts) straight
     from the installed package, so a test that writes through such a path
     (e.g. via ``loop._sync_file``) corrupts the working tree for every
-    later test and every live run. Digest the seed trees before and after
-    the session and fail loudly on drift, naming the class of mistake.
+    later test and every live run. Digest each seed file before and after
+    the session and fail loudly on drift, naming every added, removed, and
+    changed path and both causes -- a test's write, or an edit to the tree
+    while the suite ran.
     """
     package = pathlib.Path(fractal.__file__).parent
-    seeds = ('_assets', '_node', '_scripts', 'skills')
-
-    def digest() -> str:
-        sha = hashlib.sha256()
-        for seed in seeds:
-            for path in sorted((package / seed).rglob('*')):
-                if path.is_file():
-                    sha.update(str(path.relative_to(package)).encode())
-                    sha.update(path.read_bytes())
-        return sha.hexdigest()
-
-    before = digest()
+    seeds = [package / seed for seed in ('_assets', '_node', '_scripts', 'skills')]
+    before = _digests(package.parent, seeds)
     yield
-    assert digest() == before, (
-        'package seed trees (_assets/_node/_scripts/skills) were modified by'
-        ' the test suite -- a test wrote through a package path'
-    )
+    drift = _tree_drift(before, _digests(package.parent, seeds))
+    assert not drift, drift
 
 
 @pytest.fixture(scope='session', autouse=True)
