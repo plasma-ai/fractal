@@ -669,8 +669,9 @@ class Loop:
         # instead of clobbered: an idle kill stamps 'killed' with no session
         # to reap, and overwriting it here would activate a node the kill
         # already reported dead; guarded so a transient failure (a DB
-        # contended under wide fan-out) never aborts the run and strands
-        # .status at 'idle' (a missed stamp self-corrects as the loop runs)
+        # contended under wide fan-out) never aborts the run -- nothing
+        # re-stamps a missed one, so .status stays 'idle' for the whole run
+        # and reads 'idle (starting)' while --live still reads it active
         stood_down = ''
         try:
             with worktree.lock(node.repo_dir):
@@ -678,8 +679,11 @@ class Loop:
                     stood_down = node.status()
                 else:
                     node.status_set('active')
-        except Exception:
-            pass
+        except Exception as error:
+            print(
+                f'=== Active stamp failed ({error}): the node reads idle (starting)'
+                f' for this run; --live still reads it active ==='
+            )
         if stood_down:
             print(f'=== Stood down at boot: node was {stood_down} ===')
             try:
