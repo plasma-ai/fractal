@@ -78,6 +78,7 @@ __all__ = [
     'test_cap_at_the_floor_steers_at_the_same_effort',
     'test_idle_watchdog_steer_keeps_the_effort',
     'test_lowered_steer_that_caps_again_stalls',
+    'test_claude_step_in_a_codex_node_steers_on_the_claude_ladder',
     'test_project_settings_override_the_ladder',
     'test_invalid_effort_setting_fails_boot',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
@@ -2066,6 +2067,43 @@ def test_lowered_steer_that_caps_again_stalls(
         'PLAN/stopped/steered: thinking cap; unpriced',
         'PLAN/exited/stalled: thinking cap, after a steer; unpriced',
         'EXECUTE/stopped/failed on PLAN',
+    ]
+
+
+def test_claude_step_in_a_codex_node_steers_on_the_claude_ladder(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A Claude step in a Codex node lowers on Claude's ladder, not the node's.
+
+    Codex declares no ladder, but the capped step runs Claude through its
+    own ``agent:`` frontmatter, so its ``xhigh`` steer relaunches at
+    ``high``.
+    """
+    # the step's agent must be installed; a stand-in binary satisfies the
+    # check, and the scripted agent runs every launch
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'claude').write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+    (bindir / 'claude').chmod(0o755)
+    monkeypatch.setenv('PATH', f'{bindir}{os.pathsep}{os.environ["PATH"]}')
+    _configure(loop_node, agent='codex')
+    step = loop_node.node_dir / 'steps' / '01-PLAN.md'
+    content = '---\nagent: claude\neffort: xhigh\n---\n# PLAN\n'
+    step.write_text(content, encoding='utf-8')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    first, steer, _ = agent.argvs
+    assert _effort(first) == 'xhigh'
+    assert _effort(steer) == 'high'
+    assert _step_efforts(loop_node)[:2] == ['xhigh', 'high']
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
     ]
 
 
