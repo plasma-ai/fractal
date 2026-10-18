@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 import pathlib
 import signal
@@ -16,6 +17,8 @@ from fractal.core.node import Node
 __all__ = [
     '_git',
     '_files',
+    '_digests',
+    '_tree_drift',
     '_commit_template',
     '_past_timestamp',
     '_age_iter',
@@ -45,6 +48,42 @@ def _files(root: pathlib.Path) -> dict[str, bytes]:
         for path in root.rglob('*')
         if path.is_file()
     }
+
+
+def _digests(root: pathlib.Path, folders: list[pathlib.Path]) -> dict[str, str]:
+    """Map every file under ``folders``, by ``root``-relative path, to its sha256."""
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for folder in folders
+        for path in folder.rglob('*')
+        if path.is_file()
+    }
+
+
+def _tree_drift(before: dict[str, str], after: dict[str, str]) -> str:
+    """Return the seed guard's failure message for two digest maps, ``''`` if equal.
+
+    Names every added, removed, and changed path, then both causes a drift
+    can have -- the guard cannot tell a test's write from a concurrent edit.
+    """
+    added = sorted(after.keys() - before.keys())
+    removed = sorted(before.keys() - after.keys())
+    changed = sorted(
+        path for path in before.keys() & after.keys() if before[path] != after[path]
+    )
+    if not (added or removed or changed):
+        return ''
+    lines = [
+        'package seed trees (_assets/_node/_scripts/skills) changed during the session:'
+    ]
+    lines.extend(f'  added: {path}' for path in added)
+    lines.extend(f'  removed: {path}' for path in removed)
+    lines.extend(f'  changed: {path}' for path in changed)
+    lines.append(
+        'either a test wrote into the source tree through a package path, or'
+        ' the tree was edited while the tests ran (never edit it mid-run)'
+    )
+    return '\n'.join(lines)
 
 
 def _commit_template(
