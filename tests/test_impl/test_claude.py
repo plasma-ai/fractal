@@ -1942,8 +1942,8 @@ def test_settle_marks_an_entry_it_cannot_read_whole(
 @pytest.mark.parametrize(
     argnames=('saved', 'provider', 'baseline'),
     argvalues=[
-        # no transcript yet
-        pytest.param(None, None, 0.0, id='no-transcript'),
+        # claude resumes only from a transcript, so a missing one is unknown
+        pytest.param(None, None, None, id='no-transcript'),
         # an older claude saves no total
         pytest.param([], None, 0.0, id='none-saved'),
         # each launch saves the session's total at exit; the latest stands
@@ -1980,8 +1980,9 @@ def test_cost_baseline_is_the_total_a_resume_restores(
     Claude Code saves a ``cost-state`` record to the session's transcript
     as each launch exits, and a resume restores the latest one naming the
     session. Routed, the result figure prices the record's usage table
-    through the alias chain, so the baseline does too. A record whose
-    total cannot be read carries an unknown amount, and says why.
+    through the alias chain, so the baseline does too. A transcript that
+    cannot be found, or a record whose total cannot be read, carries an
+    unknown amount, and says why.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))

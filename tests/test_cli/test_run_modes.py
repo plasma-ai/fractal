@@ -257,6 +257,12 @@ if [[ "$SELF" == "claude" ]]; then
     # echo session_id like real claude: the opened/resumed id, or a fresh one
     SID="${SESSION##* }"
     [[ -n "$SID" ]] || SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    # open the session's transcript where real claude keeps it, keyed by the
+    # cwd with every non-alphanumeric character dashed
+    SLUG=$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')
+    TRANSCRIPTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$SLUG"
+    mkdir -p "$TRANSCRIPTS"
+    touch "$TRANSCRIPTS/$SID.jsonl"
     printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
     # a prompt carrying SPAWN-TOOLS starts two long sleepers the way agent
     # CLIs run tool commands -- one in a process group of its own, one in a
@@ -4017,8 +4023,7 @@ def test_drain_wait_sync_failure_keeps_completed_with_note(repo: dict) -> None:
     silently swallowing it would hide a rotting node (e.g. expired
     credentials failing every wait SYNC), so the row's metadata records
     ``sync failed (exit N)`` -- and the stderr snapshot lands under
-    ``tmp/err/`` like any failed launch. No transcript prices the failed
-    launch, so its unknown spend is marked ``unpriced`` too.
+    ``tmp/err/`` like any failed launch.
     """
     node = _make_node(repo, 'fwsyncfail', detached=False, sync=True, steps=_GATE_STEPS)
     worktree = node['worktree']
@@ -4047,7 +4052,7 @@ def test_drain_wait_sync_failure_keeps_completed_with_note(repo: dict) -> None:
         calls, result = _finish_wait_result(proc, capture, log)
 
     # every drain-wait SYNC row (step 0) keeps the lenient completed/0 close,
-    # with the failure and its unpriced spend named in its metadata
+    # with the failure named in its metadata
     rows = (
         _run(
             worktree,
@@ -4062,8 +4067,7 @@ def test_drain_wait_sync_failure_keeps_completed_with_note(repo: dict) -> None:
         .splitlines()[1:]
     )
     assert rows, (calls, result.stdout)
-    note = 'completed/0/sync failed (exit 7); unpriced'
-    assert all(row == note for row in rows), rows
+    assert all(row == 'completed/0/sync failed (exit 7)' for row in rows), rows
     # the failed SYNC's stderr snapshot lands like any failed launch's
     run_id = (
         _run(

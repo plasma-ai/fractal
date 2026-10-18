@@ -317,10 +317,11 @@ launch that resumes a session (a continuous step, a steer, a SYNC) gets a
 result figure that counts on from the session's earlier spend: Claude Code
 saves the session's running total to its transcript as each launch exits
 and restores it on resume. Before the launch spawns, fractal reads the
-latest saved total and books the result less it. When that total cannot
-be read, or is above the figure, the figure is refused and the step is
-priced from its transcript as a killed step is. Read spend with the cost
-commands (full surfaces in :doc:`/cli/node`):
+latest saved total and books the result less it. When the session's
+transcript cannot be found, the total cannot be read, or it is above the
+figure, the figure is refused and the step is priced from its transcript
+as a killed step is. Read spend with the cost commands (full surfaces in
+:doc:`/cli/node`):
 
 .. code-block:: console
 

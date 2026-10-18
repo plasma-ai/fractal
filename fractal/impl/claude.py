@@ -774,8 +774,10 @@ class ClaudeAgent(Agent):
         writes none) carries nothing. Through openrouter the figure is the
         result's ``modelUsage`` table priced through the alias chain, and the
         record carries the same table, so its price is the baseline. A
-        transcript that cannot be read, or a record whose figure cannot be
-        read or priced, logs the reason and carries an unknown amount.
+        transcript that cannot be found or read, or a record whose figure
+        cannot be read or priced, logs the reason and carries an unknown
+        amount: claude resumes a session only from its transcript, so a
+        missing one means the resolution here has lost track of claude's.
         """
         # an unknown baseline refuses the launch's result figure
         unknown = f'cost baseline of session {session} unknown'
@@ -783,6 +785,9 @@ class ClaudeAgent(Agent):
             found = self.transcript(session)
         except (OSError, ValueError) as e:
             self.log(f'{unknown}: transcript unreadable: {e}', logging.WARNING)
+            return None
+        if not found['exists']:
+            self.log(f'{unknown}: no transcript found', logging.WARNING)
             return None
         # a resume restores the latest record naming the session (claude, too,
         # skips a line it cannot parse)

@@ -147,8 +147,10 @@ settle adds to it. Claude stays `cost_scope = 'call'`: nothing settles against
 the ledger's sibling rows.
 
 A figure the baseline cannot settle is **refused**, never booked whole or less
-the baseline: when the baseline cannot be read (an unreadable transcript, or a
-record whose total is not a number or cannot be priced, logged as
+the baseline: when the baseline cannot be read (a transcript that cannot be
+found or read -- claude resumes a session only from its transcript, so a missing
+one means fractal's resolution has lost track of claude's -- or a record whose
+total is not a number or cannot be priced, logged as
 `cost baseline of session <id> unknown: <reason>` at warning level) or the
 figure is below it (a zeroed crash result), the result event names no cost and
 sets `refused`, and every later result of the launch is refused too. The

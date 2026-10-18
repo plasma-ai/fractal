@@ -492,18 +492,19 @@ class ScriptedClaude(ClaudeAgent):
     Each launch runs the next script in place of ``claude`` (``SID`` in it
     becomes the launch's session), in the production spawn shape: its own
     process group, a text stdout pipe; its argv and the env it was handed
-    are kept. With ``transcripts``, each launch first appends its next
-    batch of entries to the session's transcript, or to a sub-agent's own
-    transcript beside it for an entry naming one (``subagent``), stamped
-    at the spawn unless an entry carries its own stamp. Every settled cost
-    flush is kept with its finality.
+    are kept. Each launch first opens the session's transcript, as claude
+    does, and appends its next batch of ``transcripts`` entries to it, or
+    to a sub-agent's own transcript beside it for an entry naming one
+    (``subagent``), stamped at the spawn unless an entry carries its own
+    stamp; a ``None`` batch is a launch whose record never reached disk.
+    Every settled cost flush is kept with its finality.
     """
 
     def __init__(
         self: ScriptedClaude,
         node: Node,
         scripts: list[str],
-        transcripts: Optional[list[list[dict[str, Any]]]] = None,
+        transcripts: Optional[list[Optional[list[dict[str, Any]]]]] = None,
     ) -> None:
         """Initialize ``ScriptedClaude``."""
         super().__init__(node, 'claude')
@@ -526,11 +527,14 @@ class ScriptedClaude(ClaudeAgent):
         """Run the next script, recording the launch's argv and env."""
         self.argvs.append(invocation.argv)
         self.envs.append(dict(invocation.env or {}))
-        if self.transcripts:
+        batch = self.transcripts.pop(0) if self.transcripts else []
+        if batch is not None:
             path = self._transcript(f'{invocation.session}')
             assert path is not None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
             now = fractal.util.time.utc_now()
-            for entry in self.transcripts.pop(0):
+            for entry in batch:
                 line = {'timestamp': now, **entry}
                 # claude keeps each sub-agent's replies in a file of its own
                 subagent = line.pop('subagent', None)
@@ -3001,7 +3005,7 @@ def test_unreadable_record_marks_the_killed_step(
     first = {'input_tokens': 100, 'output_tokens': 1}
     stalled = _claude_script(_INIT, _assistant_frame('msg_a', first), 'exec sleep 30')
     finished = _claude_script(_INIT, _RESULT)
-    transcripts = None
+    transcripts: list[Optional[list[dict[str, Any]]]] = [None]
     if record == 'malformed entry':
         noisy = {'input_tokens': 100, 'output_tokens': '900'}
         transcripts = [[_assistant_entry('msg_a', noisy)], [], []]
@@ -3302,7 +3306,8 @@ def test_killed_claude_launch_without_a_transcript_stays_unpriced(
             _claude_script(_INIT, 'exec sleep 30'),
             _claude_script(_INIT, _RESULT),
             _claude_script(_INIT, _RESULT),
-        ]
+        ],
+        [None],
     )
     ScriptedLoop(loop_node, agent).run()
 
@@ -3316,7 +3321,9 @@ def test_killed_claude_launch_without_a_transcript_stays_unpriced(
         for record in caplog.records
         if record.getMessage().startswith('launch unpriced')
     ]
-    assert unpriced == [f'launch unpriced: no transcript for session {session}']
+    # only the killed launch's settle finds no transcript: the steer opens one
+    reason = f'launch unpriced: no transcript for session {session}'
+    assert unpriced.count(reason) == 1
 
 
 def test_killed_launch_settles_after_dropping_its_group_handle(
@@ -3582,6 +3589,8 @@ def test_resumed_launch_books_only_its_own_spend(
         pytest.param(_SAVED_TOTALS[0], 0.0, True, id='below-the-saved-total'),
         # the saved total is no number
         pytest.param(f'{_SAVED_TOTALS[0]}', _SAVED_TOTALS[1], True, id='unreadable'),
+        # the session's transcript is nowhere to be found
+        pytest.param(None, _SAVED_TOTALS[1], True, id='no-transcript'),
         # a zeroed result frame, and a transcript that prices nothing either
         pytest.param(_SAVED_TOTALS[0], 0.0, False, id='nothing-priced'),
     ],
@@ -3597,20 +3606,23 @@ def test_unsettled_result_figure_books_the_launch_record_instead(
 ) -> None:
     """A resumed launch's result figure its saved total cannot settle is refused.
 
-    With the session's saved total unreadable, or above the figure the
-    result names, the figure is never booked, whole or less the total: the
-    step books what its own transcript window prices, as a killed launch
-    does, marked partly unpriced. A window that prices nothing leaves the
-    completed step's cost unknown, marked unpriced and counted as such.
+    With the session's saved total unreadable, its transcript not found
+    (claude resumes only from one, so fractal has lost track of it), or the
+    total above the figure the result names, the figure is never booked,
+    whole or less the total: the step books what its own transcript window
+    prices, as a killed launch does, marked partly unpriced. A window that
+    prices nothing leaves the completed step's cost unknown, marked
+    unpriced and counted as such.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
     session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
     assert session is not None
-    first = _claude_script(
-        _INIT,
-        {**_RESULT, 'total_cost_usd': _SAVED_TOTALS[0]},
-        _save_cost_state(session, saved),
-    )
+    first = [_INIT, {**_RESULT, 'total_cost_usd': _SAVED_TOTALS[0]}]
+    # the first launch's record reaches disk with its saved total, or not at all
+    opened: Optional[list[dict[str, Any]]] = None
+    if saved is not None:
+        first.append(_save_cost_state(session, saved))
+        opened = []
     # the resumed launch streams its reply's first frame, then the result
     reply = {'input_tokens': 100, 'output_tokens': 900}
     frames: list[Any] = [_INIT]
@@ -3621,7 +3633,7 @@ def test_unsettled_result_figure_books_the_launch_record_instead(
         )
         written.append(_assistant_entry('msg_a', reply))
     resumed = _claude_script(*frames, {**_RESULT, 'total_cost_usd': figure})
-    agent = scripted_claude([first, resumed], [[], written])
+    agent = scripted_claude([_claude_script(*first), resumed], [opened, written])
     ScriptedLoop(loop_node, agent).run()
     marker = 'partly unpriced' if priced else 'unpriced'
     assert _step_rows(loop_node) == ['PLAN/completed/', f'EXECUTE/completed/{marker}']
