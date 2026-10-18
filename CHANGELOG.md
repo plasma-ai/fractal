@@ -185,8 +185,9 @@ may include breaking changes, each listed under a Breaking heading.
   effort. The no-action watchdog's steer keeps the effort, and Codex never
   lowers. A project can set an agent's levels and floor with a new
   `effort_ladder` key in `.fractal/.settings.json`, read from the tree's root
-  branch at each start or resume; an invalid ladder refuses wherever the file is
-  read.
+  branch at each start or resume. A ladder with a bad shape refuses wherever the
+  file is read, and one naming an unregistered agent or listing the agent's own
+  levels out of order refuses at the loop's boot.
 
 ### Fixed
 

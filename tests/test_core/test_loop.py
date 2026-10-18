@@ -2131,6 +2131,16 @@ def test_project_settings_override_the_ladder(
             'one of its levels',
             id='no-levels',
         ),
+        pytest.param(
+            {'Claude': {'levels': ['high', 'max'], 'floor': 'high'}},
+            'no registered agent',
+            id='misspelled-agent',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['max', 'xhigh', 'high'], 'floor': 'max'}},
+            'lowest first',
+            id='highest-first',
+        ),
     ],
 )
 def test_invalid_effort_setting_fails_boot(
@@ -2138,11 +2148,18 @@ def test_invalid_effort_setting_fails_boot(
     ladders: Any,
     match: str,
 ) -> None:
-    """An invalid committed effort ladder fails the loop's boot, naming the file."""
+    """An invalid committed effort ladder fails the loop's boot, naming the file.
+
+    Beyond its shape, a ladder must name a registered agent, and a ladder
+    built only from levels its agent declares must list them in the
+    agent's own order, lowest first -- a misspelled name would otherwise
+    keep the default ladder, and a reversed one would raise the effort.
+    """
     _commit_settings(loop_node, {'effort_ladder': ladders})
     with pytest.raises(ValueError, match=match) as excinfo:
         MockLoop(loop_node)
-    assert f'{loop_node.branch}:.fractal/.settings.json' in str(excinfo.value)
+    assert '.fractal/.settings.json' in str(excinfo.value)
+    assert loop_node.branch in str(excinfo.value)
 
 
 @pytest.mark.parametrize(

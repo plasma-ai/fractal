@@ -29,7 +29,7 @@ from fractal.constants import (
 from fractal.exceptions import AgentStreamError, _Abort, _ThinkingCap
 
 from . import commit, pricing, render, worktree
-from .agent import lower_effort
+from .agent import lower_effort, resolve
 from .config import DEFAULT_RESERVE_FRACTION
 from .event import FailureEvent, InitialEvent, TerminalEvent
 
@@ -438,6 +438,11 @@ class Loop:
             node.repo_dir,
             ref=config.get('root'),
             project=node.project_path,
+        )
+        _check_effort_ladders(
+            self._effort_ladders,
+            ref=config.get('root'),
+            root=node.db.path.parent,
         )
         meta = config.get('meta') or ''
         self._meta_mode = bool(meta)
@@ -5201,6 +5206,45 @@ def _models_match(pinned: str, served: str) -> bool:
         widths = tuple(len(segment) for segment in tail)
         return all(segment.isdigit() for segment in tail) and widths in _SNAPSHOT_WIDTHS
     return False
+
+
+def _check_effort_ladders(
+    ladders: dict[str, tuple[tuple[str, ...], str]],
+    *,
+    ref: str,
+    root: pathlib.Path,
+) -> None:
+    """Refuse committed effort ladders that name no agent or invert one.
+
+    The settings parser checks each ladder's shape; which agents exist,
+    and how each orders its own levels, is known only once the tree's
+    deployment hook file has registered its agents. A ladder built only
+    from levels its agent declares must list them in the agent's order,
+    lowest first; a ladder with a level of its own is taken as written.
+
+    Args:
+        ladders: The committed ladders, keyed by agent name.
+        ref: The root branch they were read from.
+        root: The tree's data dir, whose hook file registers custom agents.
+
+    Raises:
+        ValueError: If a ladder names no registered agent, or lists its
+            agent's own levels out of the agent's order.
+
+    """
+    for name, (levels, _) in ladders.items():
+        setting = f'"effort_ladder.{name}" in .fractal/.settings.json on {ref!r}'
+        try:
+            declared = resolve(name, root=root).effort_levels
+        except ValueError as error:
+            raise ValueError(f'{setting} names no registered agent: {error}') from error
+        if set(levels) <= set(declared):
+            ranks = [declared.index(level) for level in levels]
+            if ranks != sorted(ranks):
+                raise ValueError(
+                    f"{setting} lists {list(levels)} out of the agent's order"
+                    f' {list(declared)}; list the levels lowest first.'
+                )
 
 
 def _boot_modes(node: Node, *, detached: bool, meta: str) -> dict[str, str]:

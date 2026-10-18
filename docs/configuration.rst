@@ -585,16 +585,22 @@ lowest first, and its floor:
 
 With this file, a ``high`` step that hits a thinking cap steers at
 ``medium``. Both ``levels`` and ``floor`` are required; the levels must be
-unique non-empty strings, and the floor must be one of them. An agent the key
-does not name keeps its own ladder. A step at or below the floor, or at a
-level that is not on the ladder, steers at its own effort.
+unique non-empty strings, and the floor must be one of them. Each name must be
+a registered agent, so a misspelled name refuses instead of reading as the
+default ladder. A ladder built only from levels the agent itself declares
+must list them in the agent's order, lowest first, so a reversed list refuses
+instead of raising the effort. An agent the key does not name keeps its own
+ladder. A step at or below the floor, or at a level that is not on the ladder,
+steers at its own effort.
 
 The loop reads the file as committed on the tree's root branch each time it
 starts or resumes, and holds the ladder for the run. A node editing its own
 copy changes nothing, and a change committed on the root branch takes effect
-at each node's next start or resume. An invalid ladder refuses wherever the
-file is read: the loop's boot, ``fractal init``, ``fractal commit --init``, and
-each spawn. Fractal does not check the levels against the ones the agent
+at each node's next start or resume. A ladder with a bad shape refuses
+wherever the file is read: the loop's boot, ``fractal init``,
+``fractal commit --init``, and each spawn. An unknown agent name or a reversed
+ladder refuses at the loop's boot, once the tree's custom agents are
+registered. Fractal does not check the levels against the ones the agent
 accepts, so a level the agent rejects fails the steered launch.
 
 The cleanup reserve

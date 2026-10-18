@@ -132,6 +132,15 @@ ladder fails the boot, and since every reader parses the whole file,
 cannot know the levels a provider accepts, so an override naming a level the CLI
 rejects fails the steered launch.
 
+Two checks need the agent registry, so they run at the loop's boot
+(`loop._check_effort_ladders`) rather than in the parser: the boot agent's
+resolve has loaded the tree's deployment hook file by then, so custom agents are
+registered. Each ladder must name a registered agent (a misspelled `Claude`
+would otherwise keep the default ladder), and a ladder built only from levels
+its agent declares in `effort_levels` must list them in that order, lowest first
+(a highest-first list would make the steer raise the effort). A ladder carrying
+a level of its own is taken as written.
+
 ## Preflight
 
 Model acceptance is probed before a run commits to it. codex in particular runs
