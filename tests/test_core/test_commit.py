@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sqlite3
 import subprocess
 import sys
 from typing import Any, Optional
@@ -47,6 +48,8 @@ __all__ = [
     'test_commit_untracks_a_pretracked_wiki_cache',
     'test_commit_update_failure_blocks_commit_but_not_backstops',
     'test_force_commit_body_describes_the_sweep',
+    'test_commit_warns_on_a_root_path_shadowing_the_node_folder',
+    'test_a_failing_shadow_check_never_fails_the_commit',
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
     'test_multi_scope_commit_boundary',
     'test_dot_scope_root_bounds_the_whole_project',
@@ -69,6 +72,13 @@ __all__ = [
 # the console script beside the running interpreter -- a bare name would
 # resolve through a shim to whatever install the ambient PATH front-runs
 _FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
+
+# the commit warning's header over the root paths shadowing node folder entries
+_SHADOW_WARNING = (
+    "Warning: staged root path(s) share a name with an entry of the node's own"
+    ' folder; if these are node files, move them under {node_folder}/; if they'
+    ' are project files, ignore this warning:'
+)
 
 
 # ------ baselines and pushes
@@ -1159,7 +1169,8 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     The loop's backstop saves are force commits made when an iteration
     fails, so the commit must explain itself from git history alone: the
     caller's body paragraph (the failure reason and never-run tail), the
-    ignore-skip and oversized-file warnings, and the staged diffstat.
+    ignore-skip, oversized-file, and root-shadow warnings, and the staged
+    diffstat.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
@@ -1172,12 +1183,15 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     node = Node(project_dir)
     node.commit('baseline', init=True)
     # a tracked host ignore rule eats a workspace file (the skip warning), an
-    # oversized file trips the size warning, and real work rides the sweep
+    # oversized file trips the size warning, a root plan trips the shadow
+    # warning, and real work rides the sweep
     gitignore = project_dir / '.gitignore'
     ignored = gitignore.read_text(encoding='utf-8') + 'eaten.log\n'
     gitignore.write_text(ignored, encoding='utf-8')
     (project_dir / 'eaten.log').write_text('eaten\n', encoding='utf-8')
     (project_dir / 'blob.bin').write_bytes(b'\0' * (11 * 1024 * 1024))
+    (project_dir / 'plans').mkdir()
+    (project_dir / 'plans' / 'stray.md').write_text('plan\n', encoding='utf-8')
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
     # a hostile external ignore holds the estate out, so the record pass
     # force-stages a fresh record and refuses the parked non-record --
@@ -1204,7 +1218,7 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     # the subject is the run-qualified backstop label
     assert _log('%s') == f'{branch}: iteration {run_id}.2 (failed on EXECUTE)'
     # the body carries the caller's paragraph, the record pass's notices,
-    # both warnings, and a diffstat naming the swept files
+    # every warning, and a diffstat naming the swept files
     body = _log('%b')
     assert 'agent error (exit 2)' in body
     assert 'steps not run: REVIEW, COMMIT' in body
@@ -1218,7 +1232,112 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     assert '.fractal/main.task/.env (.git/info/exclude:' not in body
     assert f'{repo}' not in body
     assert 'blob.bin (11MB)' in body
+    assert 'plans/stray.md (shadows .fractal/main.task/plans)' in body
     assert 'work.txt' in body
+
+
+@pytest.mark.parametrize(
+    argnames=('origin', 'path', 'warned'),
+    argvalues=[
+        # a node plan written at the worktree root by mistake
+        ('written', 'plans/x.md', True),
+        # a committed node plan moved to the worktree root
+        ('moved', 'plans/x.md', True),
+        # the project's own plans folder, there when the node started
+        ('at-base', 'plans/x.md', False),
+        # a new top-level path no node folder entry names
+        ('unrelated', 'notes/x.md', False),
+        # a merge bringing the path in, not the node writing it
+        ('merged', 'plans/x.md', False),
+    ],
+    ids=['written', 'moved', 'at-base', 'unrelated', 'merged'],
+)
+def test_commit_warns_on_a_root_path_shadowing_the_node_folder(
+    tmp_path: pathlib.Path,
+    origin: str,
+    path: str,
+    warned: bool,
+) -> None:
+    """A new root path named like a node folder entry warns, and still commits.
+
+    An agent that writes ``plans/x.md`` from the worktree root, or moves its
+    own plan there, may have meant its own ``.fractal/<branch>/plans``; the
+    commit names the path and the entry it shares a name with, and says what
+    to do either way. A top-level name the project already had when the node
+    started is the project's own, an unrelated new path is ordinary work, and
+    a merge's additions are not the node's writes.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    if origin == 'at-base':
+        (repo / 'plans').mkdir()
+        (repo / 'plans' / 'README.md').write_text('roadmap\n', encoding='utf-8')
+        _git(repo, 'add', 'plans')
+        _git(repo, 'commit', '-m', 'add the project plans folder')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    branch = _resolve_branch(project_dir)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    node.commit('baseline', init=True)
+    assert (node.node_dir / 'plans').is_dir()
+    stray = project_dir / path
+    stray.parent.mkdir(exist_ok=True)
+    if origin == 'moved':
+        plan = node.node_dir / 'plans' / 'x.md'
+        plan.write_text('plan\n', encoding='utf-8')
+        node.commit('add a plan')
+        plan.rename(stray)
+    elif origin == 'merged':
+        _git(project_dir, 'checkout', '-q', '-b', 'side')
+        stray.write_text('plan\n', encoding='utf-8')
+        _git(project_dir, 'add', path)
+        _git(project_dir, 'commit', '-q', '-m', 'side plan')
+        _git(project_dir, 'checkout', '-q', branch)
+        _git(project_dir, 'merge', '-q', '--no-commit', '--no-ff', 'side')
+    else:
+        stray.write_text('plan\n', encoding='utf-8')
+    result = node.commit('add the path')
+    lines = result.splitlines()
+    warning = _SHADOW_WARNING.format(node_folder=f'.fractal/{branch}')
+    assert (warning in lines) is warned, result
+    assert (f'{path} (shadows .fractal/{branch}/plans)' in lines) is warned
+    # the warning never refuses: the path is committed either way
+    assert _git(project_dir, 'ls-files', path).stdout.strip() == path
+
+
+@pytest.mark.parametrize('force', [False, True], ids=['plain', 'force'])
+def test_a_failing_shadow_check_never_fails_the_commit(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force: bool,
+) -> None:
+    """The shadow check is advisory: when it cannot run, the commit lands.
+
+    The check reads the node's record for its base, and a locked central
+    database must not fail a commit -- least of all the loop's backstop save.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    node.commit('baseline', init=True)
+    (project_dir / 'plans').mkdir()
+    (project_dir / 'plans' / 'x.md').write_text('plan\n', encoding='utf-8')
+
+    def _locked(*args: Any, **kwargs: Any) -> str:
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr('fractal.core.files.Files._diff_anchor', _locked)
+    result = commit.commit(node=node, message='add a plan', force=force)
+    assert 'share a name' not in result
+    assert _git(project_dir, 'ls-files', 'plans/x.md').stdout.strip() == 'plans/x.md'
 
 
 # ------ scope boundaries

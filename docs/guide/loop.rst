@@ -166,6 +166,19 @@ A steered relaunch (see `Stuck steps`_) is the one launch built otherwise:
 its whole prompt is the package's ``modes/STALL.md`` alone, rendered with the
 same variables, since its resumed session already holds the step.
 
+Every launch — a retry, a resumed step, a steer, and SYNC included — first
+checks the node's worktree for a git operation left unfinished: a merge, a
+squash merge, a cherry-pick, a revert, a rebase, or a held ``index.lock``.
+When it finds one, the prompt opens with the package's
+``modes/GIT_PENDING.md``, which names each operation and says to finish or
+abort it before starting any other git work. A squash merge points at
+``fractal node merge <child> --continue`` to finish and ``git reset
+--merge`` to abort. git holds ``index.lock`` only while a command runs, so
+the notice names the lock by its resolved path (a linked worktree keeps it in
+its own git directory, not the main checkout's ``.git/``) and its age,
+without judging whether it is stale, and says to remove it only once no git
+process runs in the worktree. A clean worktree adds nothing to the prompt.
+
 On the iteration a resume re-enters, the prompt also ends with an
 unread-inbox digest, appended after rendering (so it is never substituted):
 the twenty highest-priority unread ``inbox`` messages as metadata only —
@@ -733,7 +746,20 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``core.excludesFile``. Whenever step 3 left an estate file unstaged or the
    ignore warning fired, the command's last line repeats the counts (``Held
    out: N estate file(s) not staged; N path(s) ignored``, non-zero parts
-   only), after any hook or gate output and on a no-op commit too.
+   only), after any hook or gate output and on a no-op commit too. A third
+   warning names each staged addition at the worktree root whose top-level
+   name matches an entry of the node's own folder, when the project had no
+   top-level path of that name at the node's base (its fork commit) —
+   ``plans/x.md`` beside ``.fractal/<node>/plans``, say. Such a path may be a
+   node file written at the worktree root by mistake or real project work, so
+   the warning says to move node files under the node's folder and to ignore
+   it for project files (``Warning: staged root path(s) share a name with an
+   entry of the node's own folder; ...`` then one ``plans/x.md (shadows
+   .fractal/<node>/plans)`` line per path). It stays quiet while a merge or
+   squash merge is in progress, since a merge's additions are not the node's
+   writes, and a failure inside the check skips it rather than failing the
+   commit. Those paths are staged and committed, so they are not counted in
+   ``Held out``.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
    caller's run/iteration/step lineage. "Nothing staged" is a tolerated
    no-op.
@@ -791,7 +817,11 @@ Pause is the one path that never commits: the dirty worktree *is* the frozen
 mid-step state that resume continues from. ``fractal node start --continue``
 is the path that discards it (it restores the worktree with a clean), after
 first committing any operator edits made under the node directory and
-preserving ``config.json`` edits.
+preserving ``config.json`` edits. A worktree holding a git operation in
+progress (a merge, squash merge, cherry-pick, revert, rebase, or
+``index.lock``) is the exception: the continue leaves it as found, skipping
+both the operator-edit commit and the clean, says so on its output, and the
+first step's prompt names the operation for the agent to finish or abort.
 
 What gets recorded
 ------------------

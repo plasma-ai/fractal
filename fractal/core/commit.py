@@ -341,6 +341,27 @@ def commit(
         listing = '\n'.join(large)
         large_warning = f'Warning: staged file(s) exceed {threshold}MB:\n{listing}'
         output.append(large_warning)
+    # a new root path named like an entry of the node's own folder may be a
+    # node file written from the worktree root by mistake, or project work --
+    # so the guard warns and never blocks, and a failure inside it (a locked
+    # record read, a vanished node folder) skips it rather than failing the
+    # commit, a backstop save included
+    shadow_warning = None
+    if not init:
+        try:
+            shadows = _root_shadows(node)
+        except Exception:
+            shadows = []
+        if shadows:
+            listing = '\n'.join(shadows)
+            node_folder = node.node_dir.relative_to(worktree).as_posix()
+            shadow_warning = (
+                'Warning: staged root path(s) share a name with an entry of the'
+                " node's own folder; if these are node files, move them under"
+                f' {node_folder}/; if they are project files, ignore this'
+                f' warning:\n{listing}'
+            )
+            output.append(shadow_warning)
     # compose the commit subject: run-qualified when the commit has run
     # lineage; a row-less commit keeps the plain zero label
     if init:
@@ -358,7 +379,9 @@ def commit(
     if force:
         paragraphs.extend(record_notices)
         paragraphs.extend(
-            warning for warning in (skip_warning, large_warning) if warning
+            warning
+            for warning in (skip_warning, large_warning, shadow_warning)
+            if warning
         )
         cmd = ['diff', '--cached', '--stat']
         stat = fractal.util.git.run(cmd, cwd=worktree, check=False) or ''
@@ -764,6 +787,54 @@ def _changed_paths(node: Node) -> set[str]:
         listing = os.fsdecode(raw)
         changed.update(filter(None, listing.split('\0')))
     return changed
+
+
+def _root_shadows(node: Node) -> list[str]:
+    """Return each staged root addition that shadows a node folder entry.
+
+    A staged addition shadows when its first path segment names an entry of
+    the node's own folder (``plans``, ``memory``, ``tmp``, ...) and the
+    project had no top-level path of that name at the node's base, the fork
+    sha its record anchors. A node with no resolvable base names nothing,
+    and neither does a merge or squash merge in progress, whose additions
+    are not the node's own writes.
+
+    Args:
+        node: The node whose staged additions to check.
+
+    Returns:
+        ``<path> (shadows <node folder entry>)`` per shadowing addition, the
+        entry repo-relative.
+
+    """
+    worktree = node.worktree
+    markers = {marker.name for _, marker in fractal.util.git.in_progress(worktree)}
+    if markers & {'MERGE_HEAD', 'SQUASH_MSG'}:
+        return []
+    # -z and raw bytes, as in _changed_paths; --no-renames so a path moved to
+    # the root lists as the addition it is
+    cmd = ['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=A', '-z']
+    raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
+    added = list(filter(None, os.fsdecode(raw).split('\0')))
+    if not added:
+        return []
+    base = node.files._diff_anchor('base')
+    if base is None:
+        return []
+    # the top-level names the project had when the node started
+    cmd = ['ls-tree', '--name-only', '-z', base]
+    raw = fractal.util.git.run_bytes(cmd, cwd=worktree)
+    if raw is None:
+        return []
+    existing = set(os.fsdecode(raw).split('\0'))
+    entries = {entry.name for entry in node.node_dir.iterdir()}
+    node_folder = node.node_dir.relative_to(worktree).as_posix()
+    result = []
+    for path in added:
+        name = path.split('/', 1)[0]
+        if name in entries and name not in existing:
+            result.append(f'{path} (shadows {node_folder}/{name})')
+    return result
 
 
 def _baseline_check(node: Node, bounds: Scope) -> None:

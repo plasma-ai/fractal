@@ -48,7 +48,9 @@ must be resumed instead, and a retired one unretired). What "fresh run" means:
 - **The worktree is restored.** The launch restores the worktree to its
   committed state; if uncommitted project files exist (a kill usually leaves
   some), the continue refuses until you pass `--clean` to acknowledge discarding
-  them.
+  them. A worktree holding a git operation in progress (a merge, squash merge,
+  cherry-pick, revert, rebase, or `index.lock`) is left as found instead, and
+  the first step's prompt names the operation for the agent to finish or abort.
 - **A budget-ended run never re-arms silently.** If the last run ended by
   exhausting its cost cap, a bare `--continue` refuses, naming the spent and
   armed figures; pass an explicit `--max-cost` to arm the next run deliberately.
@@ -94,7 +96,10 @@ iteration count, the interrupted step re-entered (resuming the recorded agent
 session when one exists, re-orienting fresh otherwise), and the run and
 iteration deadlines credited for the paused span, so a pause never costs
 wall-clock budget. A node caught still parking gets its pause withdrawn instead
-— the live loop simply never parks.
+— the live loop simply never parks. If the abort left a git operation unfinished
+in the worktree, the re-entered step's prompt opens by naming it, so the agent
+finishes or aborts it before any other git work (see
+[[features/loop/prompt_assembly]]).
 
 ## Tree-wide pause and resume
 

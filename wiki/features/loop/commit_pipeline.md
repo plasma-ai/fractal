@@ -95,13 +95,27 @@ them repository or host rules, not node-record refusals -- the estate law's
 refusal warnings print beside it and the two must not read as one count, so an
 estate file the commit left unstaged (refused on either staging path, or a
 record the force-add could not stage) is theirs to name and never lists here,
-nor does the collapsed directory entry holding one. The other guard lists any
+nor does the collapsed directory entry holding one. A second guard lists any
 staged file at or over 10MB by name -- an oversized file is usually an accident,
-but large commits are also legitimate. Whenever an estate file was left unstaged
-or the ignore warning fired, the command's last line repeats both counts
-(`Held out: ...`, non-zero parts only): a hook's or gate's long output prints
-between the warnings and the end, and a no-op commit is exactly when a node
-would otherwise read the tree as clean.
+but large commits are also legitimate. A third names each staged addition whose
+top-level name matches an entry of the node's own folder (`plans/x.md` beside
+`.fractal/<node>/plans`) with the entry it shadows. The path may be a node file
+written at the worktree root by mistake or real project work, so the warning
+states both outcomes: move node files under the node's folder, ignore it for
+project files (an agent told only "mistake" would move project files into its
+folder, where a merge never carries them). Staged additions are listed with
+`--no-renames`, so a node file moved to the root counts as the addition it is. A
+top-level name the project already had at the node's base -- the fork sha
+`Files` anchors `base` on -- is the project's own and stays silent; so is a
+merge or squash merge in progress, whose additions are not the node's writes,
+and `--init` skips the guard. Any failure inside the check (a locked record read
+among them) skips the warning, never the commit. Those paths are staged, so they
+never count in `Held out`; a force commit folds this warning into its body with
+the others. Whenever an estate file was left unstaged or the ignore warning
+fired, the command's last line repeats both counts (`Held out: ...`, non-zero
+parts only): a hook's or gate's long output prints between the warnings and the
+end, and a no-op commit is exactly when a node would otherwise read the tree as
+clean.
 
 ## The estate content law
 
