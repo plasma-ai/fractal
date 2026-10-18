@@ -598,7 +598,9 @@ starts or resumes, and holds the ladder for the run. A node editing its own
 copy changes nothing, and a change committed on the root branch takes effect
 at each node's next start or resume. A ladder with a bad shape refuses
 wherever the file is read: the loop's boot, ``fractal init``,
-``fractal commit --init``, and each spawn. An unknown agent name or a reversed
+``fractal commit --init``, each spawn, and the merge footprint check where it
+reads the root branch's copy (for a node in another sub-project than its
+parent, or one whose parent is checked out nowhere). An unknown agent name or a reversed
 ladder refuses at the loop's boot, once the tree's custom agents are
 registered. Fractal does not check the levels against the ones the agent
 accepts, so a level the agent rejects fails the steered launch.

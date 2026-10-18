@@ -128,7 +128,9 @@ branch at boot (`worktree.committed_effort_ladders`, beside
 `committed_wiki_setting`) and holds it for the run, so a node cannot change its
 own ladder and a committed change lands at the next start or resume; an invalid
 ladder fails the boot, and since every reader parses the whole file,
-`fractal init`, the `--init` baseline, and spawn refuse it too. The parser
+`fractal init`, the `--init` baseline, spawn, and the merge footprint check's
+reads of the root branch's copy (`Node.check_wiki` for a node in another
+sub-project, or with its parent checked out nowhere) refuse it too. The parser
 cannot know the levels a provider accepts, so an override naming a level the CLI
 rejects fails the steered launch.
 
