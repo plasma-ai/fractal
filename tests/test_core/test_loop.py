@@ -15,6 +15,7 @@ import logging
 import os
 import pathlib
 import re
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -94,6 +95,14 @@ __all__ = [
     'test_launch_prices_the_step_from_the_finish_frame',
     'test_killed_claude_launch_prices_from_its_transcript',
     'test_killed_wake_up_after_a_result_prices_from_the_transcript',
+    'test_background_spend_after_the_result_is_booked',
+    'test_streamed_background_spend_is_booked_once',
+    'test_unreadable_record_marks_the_killed_step',
+    'test_cut_off_mid_reply_books_recorded_spend_partly_unpriced',
+    'test_kill_during_a_tool_call_is_fully_priced',
+    'test_structured_output_result_ends_a_sub_agent_whole',
+    'test_partial_record_before_the_result_leaves_its_figure_whole',
+    'test_capped_reply_books_the_stream_usage',
     'test_killed_claude_launch_without_a_transcript_stays_unpriced',
     'test_killed_launch_settles_after_dropping_its_group_handle',
     'test_a_settle_never_lowers_the_streamed_figure',
@@ -117,6 +126,7 @@ __all__ = [
     'test_soft_cap_warning_fires_once_for_unbraked_caps',
     'test_soft_cap_warning_counts_step_timeouts',
     'test_step_budget_reserve_window_floors_at_remaining',
+    'test_no_budget_margin_for_unseen_spend',
     'test_boundary_checks_read_live_caps',
     'test_unpriced_spend_under_caps_warns_once',
     'test_priced_first_step_never_reads_as_untracked',
@@ -2835,6 +2845,443 @@ def test_killed_wake_up_after_a_result_prices_from_the_transcript(
     ]
 
 
+@pytest.mark.parametrize(
+    argnames=('end', 'outcome'),
+    argvalues=[
+        pytest.param('exit 0', 'PLAN/completed/', id='exit-0'),
+        pytest.param('exit 3', 'PLAN/failed/agent error (exit 3)', id='non-zero'),
+        pytest.param('exec sleep 30', 'PLAN/exited/timed out', id='deadline'),
+    ],
+)
+def test_background_spend_after_the_result_is_booked(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    end: str,
+    outcome: str,
+) -> None:
+    """Spend completing after the result frame adds to the figure it named.
+
+    Claude Code outlives its result while a background sub-agent runs, and
+    counts a reply's cost when the reply completes, so a reply its
+    transcripts complete after the result lies past that figure. However
+    the process then ends -- cleanly, failing, or at the deadline -- the
+    step books the result's figure plus that reply. The reply completed
+    before the result is already in its figure and adds nothing.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='3s', step_retries=0)
+    before = {'input_tokens': 100, 'output_tokens': 900}
+    background = {'input_tokens': 2_000, 'output_tokens': 700}
+    # the background agent's workflow transcript, under the launch's session
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    flow = session.with_suffix('') / 'subagents' / 'workflows' / 'wf_1'
+    reply = _assistant_entry(
+        message_id='msg_late',
+        usage=background,
+        model='claude-haiku-5',
+        isSidechain=True,
+    )
+    script = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', before),
+        _RESULT,
+        # the result reaches the loop before the background reply completes
+        'sleep 1',
+        _append_entry(flow / 'agent-w.jsonl', reply),
+        end,
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', before)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    booked = min(rows, key=lambda row: row['step_id'])
+    late = _price(background, 'claude-haiku-5')
+    assert booked['cost'] == pytest.approx(_RESULT['total_cost_usd'] + late)
+
+
+@pytest.mark.parametrize(
+    argnames=('end', 'outcome'),
+    argvalues=[
+        pytest.param('exit 0', 'PLAN/completed/', id='exit-0'),
+        pytest.param('exec sleep 30', 'PLAN/exited/timed out', id='deadline'),
+    ],
+)
+def test_streamed_background_spend_is_booked_once(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    end: str,
+    outcome: str,
+) -> None:
+    """A background reply both streamed and transcribed after the result counts once.
+
+    Claude streams a background sub-agent's reply after the result frame
+    as well as writing it to the sub-agent's transcript. The transcript is
+    the one source for spend past the result, so the step books the
+    result's figure plus that reply, never the reply twice.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='3s', step_retries=0)
+    background = {'input_tokens': 2_000, 'output_tokens': 700}
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    flow = session.with_suffix('') / 'subagents' / 'workflows' / 'wf_1'
+    reply = _assistant_entry(
+        message_id='msg_late',
+        usage=background,
+        model='claude-haiku-5',
+        isSidechain=True,
+    )
+    streamed = _assistant_frame('msg_late', background)
+    streamed['message']['model'] = 'claude-haiku-5'
+    streamed['parent_tool_use_id'] = 'toolu_bg'
+    before = {'input_tokens': 100, 'output_tokens': 900}
+    script = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', before),
+        _RESULT,
+        # the result reaches the loop before the background reply completes
+        'sleep 1',
+        _append_entry(flow / 'agent-w.jsonl', reply),
+        streamed,
+        end,
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', before)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    booked = min(rows, key=lambda row: row['step_id'])
+    late = _price(background, 'claude-haiku-5')
+    assert booked['cost'] == pytest.approx(_RESULT['total_cost_usd'] + late)
+
+
+@pytest.mark.parametrize(
+    argnames='record',
+    argvalues=[
+        # claude's record never reached disk
+        pytest.param('no transcript', id='no-transcript'),
+        # a reply's output count is wire noise
+        pytest.param('malformed entry', id='malformed-entry'),
+    ],
+)
+def test_unreadable_record_marks_the_killed_step(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    record: str,
+) -> None:
+    """A killed launch whose record the settle cannot read whole is partly unpriced.
+
+    With no transcript, the step keeps the stream's estimate, which leaves
+    out whatever the record would have added. A count that is not a
+    number prices as nothing rather than failing the settle. Either way
+    the row says its figure is partial.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    first = {'input_tokens': 100, 'output_tokens': 1}
+    stalled = _claude_script(_INIT, _assistant_frame('msg_a', first), 'exec sleep 30')
+    finished = _claude_script(_INIT, _RESULT)
+    transcripts = None
+    if record == 'malformed entry':
+        noisy = {'input_tokens': 100, 'output_tokens': '900'}
+        transcripts = [[_assistant_entry('msg_a', noisy)], [], []]
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=transcripts,
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node)[0] == (
+        'PLAN/stopped/steered: no action for 1s; partly unpriced'
+    )
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(first))
+
+
+@pytest.mark.parametrize(
+    argnames='cut',
+    argvalues=[
+        # the reply's request was in flight after a tool result
+        pytest.param('tool result', id='tool-result'),
+        # the reply was written before it completed
+        pytest.param('unfinished reply', id='unfinished-reply'),
+        # a sub-agent's reply was in flight
+        pytest.param('sub-agent', id='sub-agent'),
+    ],
+)
+def test_cut_off_mid_reply_books_recorded_spend_partly_unpriced(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    cut: str,
+) -> None:
+    """A launch killed inside a reply books what was recorded, marked partly unpriced.
+
+    No record holds the cut reply's spend, so the step books the replies
+    its transcripts recorded, with no estimate for the cut one, and its
+    row says the figure is partial -- whichever transcript the cut reply
+    belonged to. A cost flush landing after the close keeps the marker,
+    since the cut reply stays unpriced. The pane warns.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    called = {'input_tokens': 100, 'output_tokens': 900}
+    side = {'input_tokens': 2_000, 'output_tokens': 700}
+    if cut == 'tool result':
+        killed = [
+            _assistant_entry('msg_a', called, stop_reason='tool_use'),
+            _user_entry(),
+        ]
+        recorded = _price(called)
+    elif cut == 'unfinished reply':
+        killed = [_assistant_entry('msg_a', called, stop_reason=None)]
+        recorded = _price(called)
+    else:
+        killed = [
+            _assistant_entry('msg_a', called),
+            _assistant_entry(
+                message_id='msg_side',
+                usage=side,
+                model='claude-haiku-5',
+                stop_reason='tool_use',
+                isSidechain=True,
+                subagent='x',
+            ),
+            _user_entry(isSidechain=True, subagent='x'),
+        ]
+        recorded = _price(called) + _price(side, 'claude-haiku-5')
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1}),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[killed, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; partly unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed_row = min(rows, key=lambda row: row['step_id'])
+    assert killed_row['cost'] == pytest.approx(recorded)
+    # a late flush leaves the marker standing
+    loop_node.record.step_cost(step_id=killed_row['step_id'], cost=recorded)
+    assert _step_rows(loop_node)[0].endswith('; partly unpriced')
+    err = capsys.readouterr().err
+    assert "Warning: a reply's spend is missing from the launch's record" in err
+
+
+def test_kill_during_a_tool_call_is_fully_priced(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch killed while a tool runs books its replies, with no marker.
+
+    Its last reply called the tool and completed, so its transcript holds
+    every reply the launch paid for, and the ledger reads the figure as
+    whole.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='1s')
+    first = {'input_tokens': 100, 'output_tokens': 900}
+    called = {'input_tokens': 300, 'output_tokens': 50}
+    written = [
+        _assistant_entry('msg_a', first, stop_reason='tool_use'),
+        _user_entry(),
+        _assistant_entry('msg_b', called, stop_reason='tool_use'),
+    ]
+    # the open call holds the idle clock, so only the deadline ends it
+    script = _claude_script(_INIT, _TOOL_START, 'exec sleep 30')
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[written, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first_row, *_ = _step_rows(loop_node)
+    assert first_row == 'PLAN/exited/timed out'
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(first) + _price(called))
+    assert loop_node.cost.partly_unpriced(run_id=killed['run_id']) == 0
+
+
+def test_structured_output_result_ends_a_sub_agent_whole(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow sub-agent ending on its StructuredOutput result is whole.
+
+    A workflow agent finishes by calling ``StructuredOutput`` and stopping
+    once the call's result comes back, so its transcript ends on that
+    result with no reply after it. In a killed launch that is otherwise
+    whole, the step books every reply with no marker.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    main = {'input_tokens': 100, 'output_tokens': 900}
+    side = {'input_tokens': 2_000, 'output_tokens': 700}
+    output = _assistant_entry(
+        message_id='msg_side',
+        usage=side,
+        model='claude-haiku-5',
+        stop_reason='tool_use',
+        isSidechain=True,
+        subagent='x',
+    )
+    output['message']['content'] = [
+        {'type': 'tool_use', 'id': 'toolu_out', 'name': 'StructuredOutput', 'input': {}}
+    ]
+    answered = _user_entry(isSidechain=True, subagent='x')
+    answered['message']['content'][0]['tool_use_id'] = 'toolu_out'
+    killed = [_assistant_entry('msg_a', main), output, answered]
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1}),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[killed, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node)[0] == 'PLAN/stopped/steered: no action for 1s'
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed_row = min(rows, key=lambda row: row['step_id'])
+    booked = _price(main) + _price(side, 'claude-haiku-5')
+    assert killed_row['cost'] == pytest.approx(booked)
+
+
+def test_partial_record_before_the_result_leaves_its_figure_whole(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A partial line written before the result frame marks nothing.
+
+    A completed sub-agent's last line can be written mid-stream, with no
+    stop reason and a partial usage. When it lands before the result
+    frame, the result's figure already covers that spend, so the
+    completed launch books its result with no marker and no warning.
+    """
+    written = [
+        _assistant_entry('msg_a', {'input_tokens': 100, 'output_tokens': 900}),
+        _assistant_entry(
+            message_id='msg_side',
+            usage={'input_tokens': 2_000, 'output_tokens': 4},
+            model='claude-haiku-5',
+            stop_reason=None,
+            isSidechain=True,
+            subagent='x',
+        ),
+    ]
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[finished, finished],
+        transcripts=[written, []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    first = min(rows, key=lambda row: row['step_id'])
+    assert first['cost'] == _RESULT['total_cost_usd']
+    assert 'Warning: a reply' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('delta_usage', 'outcome'),
+    argvalues=[
+        # the closing delta reported the reply's final output
+        pytest.param(
+            {'output_tokens': 128_000},
+            'PLAN/stopped/steered: thinking cap',
+            id='recorded',
+        ),
+        # an older stream's delta reports none: the reply stays unpriced
+        pytest.param(
+            None,
+            'PLAN/stopped/steered: thinking cap; partly unpriced',
+            id='unrecorded',
+        ),
+    ],
+)
+def test_capped_reply_books_the_stream_usage(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    delta_usage: Optional[dict[str, int]],
+    outcome: str,
+) -> None:
+    """A reply the loop ends at the output cap books the stream's own usage.
+
+    The kill at the cap can beat claude's write of the capped reply, so
+    its transcript ends on the tool result the reply answered. The stream
+    recorded the reply's final usage -- its start's input buckets and its
+    closing delta's output -- so the step books it with the transcript's
+    replies and reads as whole. With no usage on the delta, nothing
+    recorded the reply, and the step is partly unpriced.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    called = {'input_tokens': 100, 'output_tokens': 900}
+    started = {'input_tokens': 2, 'cache_read_input_tokens': 10_000, 'output_tokens': 1}
+    reply = {
+        'id': 'msg_cap',
+        'model': 'claude-fable-5',
+        'content': [],
+        'usage': started,
+    }
+    stop: dict[str, Any] = {
+        'type': 'message_delta',
+        'delta': {'stop_reason': 'max_tokens'},
+    }
+    if delta_usage is not None:
+        stop['usage'] = delta_usage
+    capped = _claude_script(
+        _INIT,
+        _stream_frame({'type': 'message_start', 'message': reply}),
+        _assistant_frame('msg_cap', started),
+        _stream_frame(stop),
+        'exec sleep 30',
+    )
+    written = [
+        _assistant_entry('msg_a', called, stop_reason='tool_use'),
+        _user_entry(),
+    ]
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[capped, finished, finished],
+        transcripts=[written, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    booked = _price(called)
+    if delta_usage is not None:
+        booked += _price({**started, **delta_usage})
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(booked)
+
+
 def test_killed_claude_launch_without_a_transcript_stays_unpriced(
     loop_node: Node,
     scripted_claude: Callable[..., ScriptedClaude],
@@ -2891,8 +3338,9 @@ def test_killed_launch_settles_after_dropping_its_group_handle(
 
     monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
     ScriptedLoop(loop_node, agent).run()
-    # one settle, for the launch the watchdog ended
-    assert handles == [False]
+    # a settle per launch: the one the watchdog ended, then the two whose
+    # results it checks for spend past them
+    assert handles == [False, False, False]
 
 
 def test_a_settle_never_lowers_the_streamed_figure(
@@ -2937,15 +3385,19 @@ def test_a_failed_settle_leaves_the_killed_launch_as_booked(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """A settle that raises never changes how the killed launch is booked.
+    """A settle that raises leaves the killed launch's figure, marked partial.
 
     Pricing reads a file the provider writes, so it can fail in ways the
-    hook does not foresee: the launch keeps its outcome and row, the run
-    goes on, and the pane says what went unpriced.
+    hook does not foresee: the launch keeps its outcome and its stream's
+    estimate, which leaves out whatever the settle would have added, the
+    run goes on, and the pane says what went unpriced. A launch whose
+    result named its figure stays whole.
     """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    first = {'input_tokens': 100, 'output_tokens': 1}
     agent = scripted_claude(
         [
-            _claude_script(_INIT, 'exec sleep 30'),
+            _claude_script(_INIT, _assistant_frame('msg_a', first), 'exec sleep 30'),
             _claude_script(_INIT, _RESULT),
             _claude_script(_INIT, _RESULT),
         ]
@@ -2957,7 +3409,7 @@ def test_a_failed_settle_leaves_the_killed_launch_as_booked(
     monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
     ScriptedLoop(loop_node, agent).run()
     assert _step_rows(loop_node) == [
-        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/stopped/steered: no action for 1s; partly unpriced',
         'PLAN/completed/steer',
         'EXECUTE/completed/',
     ]
@@ -3751,6 +4203,47 @@ def test_step_budget_reserve_window_floors_at_remaining(loop_node: Node) -> None
     # a fully drained budget yields a non-positive leash: the step is skipped
     _record_step_cost(node, run_id=loop._run_id, cost=0.5, iter=2)
     assert loop._step_budget() <= 0
+
+
+def test_no_budget_margin_for_unseen_spend(loop_node: Node) -> None:
+    """The step leash holds back only the configured reserve.
+
+    A step whose record left part of a reply out booked less than it
+    spent, and a NULL-cost step booked nothing, but the engine cannot see
+    how much either missed: the remaining budget is the cap minus the
+    recorded spend, and the leash is that minus the reserve, never minus a
+    guessed margin.
+    """
+    node = loop_node
+    _configure(node, max_cost=10.0, reserve_budget=1.0)
+    loop = MockLoop(node)
+    loop._read_cost_caps()
+    loop._run_id = node.record.run_start()
+    iter_id = node.record.iter_start(run_id=loop._run_id, iter=1)
+    cut, killed = (
+        node.record.step_start(
+            iter_id=iter_id,
+            run_id=loop._run_id,
+            step=step,
+            step_name='PLAN',
+        )
+        for step in (1, 2)
+    )
+    node.record.step_session('claude', step_id=cut, model=None, session='s-1')
+    node.record.step_cost(step_id=cut, cost=2.0)
+    node.record.step_end(
+        step_id=cut,
+        status='stopped',
+        exit_code=0,
+        metadata='steered: thinking cap',
+        partly_unpriced=True,
+    )
+    node.record.step_session('claude', step_id=killed, model=None, session='s-2')
+    node.record.step_end(step_id=killed, status='exited', exit_code=124)
+    assert node.cost.partly_unpriced(run_id=loop._run_id) == 1
+    assert node.cost.unpriced(run_id=loop._run_id) == 1
+    assert loop._run_remaining() == pytest.approx(8.0)
+    assert loop._step_budget() == pytest.approx(7.0)
 
 
 def test_boundary_checks_read_live_caps(loop_node: Node) -> None:
@@ -7681,14 +8174,33 @@ def _assistant_frame(message_id: str, usage: dict[str, int]) -> dict[str, Any]:
     return frame
 
 
+def _append_entry(path: pathlib.Path, entry: dict[str, Any]) -> str:
+    """Return the shell command appending a transcript entry, stamped as it runs."""
+    code = (
+        'import datetime, json, pathlib, sys\n'
+        'path = pathlib.Path(sys.argv[1])\n'
+        'path.parent.mkdir(parents=True, exist_ok=True)\n'
+        'entry = json.loads(sys.argv[2])\n'
+        "entry['timestamp'] = datetime.datetime.now(datetime.UTC).isoformat()\n"
+        "with path.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(entry) + '\\n')\n"
+    )
+    return shlex.join([sys.executable, '-c', code, f'{path}', json.dumps(entry)])
+
+
 def _assistant_entry(
     message_id: str,
     usage: dict[str, int],
     *,
     model: str = 'claude-fable-5',
+    stop_reason: Optional[str] = 'end_turn',
     **fields: Any,
 ) -> dict[str, Any]:
-    """Return a claude transcript line of one reply's content block."""
+    """Return a claude transcript line of one reply's content block.
+
+    A ``stop_reason`` of ``None`` is a line written before its reply
+    completed.
+    """
     return {
         'type': 'assistant',
         'isSidechain': False,
@@ -7698,7 +8210,33 @@ def _assistant_entry(
             'model': model,
             'role': 'assistant',
             'content': [{'type': 'text', 'text': ''}],
+            'stop_reason': stop_reason,
             'usage': usage,
+        },
+    }
+
+
+def _stream_frame(event: dict[str, Any]) -> dict[str, Any]:
+    """Return a claude stream frame wrapping one top-level raw API event."""
+    return {
+        'type': 'stream_event',
+        'event': event,
+        'parent_tool_use_id': None,
+        'session_id': 'SID',
+    }
+
+
+def _user_entry(**fields: Any) -> dict[str, Any]:
+    """Return a claude transcript line of a user turn: a tool's result."""
+    return {
+        'type': 'user',
+        'isSidechain': False,
+        **fields,
+        'message': {
+            'role': 'user',
+            'content': [
+                {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': ''}
+            ],
         },
     }
 

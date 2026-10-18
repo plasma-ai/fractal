@@ -267,6 +267,61 @@ class Cost:
         )
         return row['unpriced'] if row else 0
 
+    def partly_unpriced(
+        self: Cost,
+        *,
+        run_id: Optional[int] = None,
+        iter_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        max_depth: Optional[int] = None,
+    ) -> int:
+        """Count a scope's ended steps whose recorded cost leaves a reply out.
+
+        A launch whose record leaves part of a reply out books the spend
+        its provider recorded, which misses that part, so ``SUM()`` reads
+        its figure as whole; its row is marked ``partly unpriced`` (the metadata's last
+        marker), and ledger-facing readings disclose this count when
+        nonzero. A NULL-cost row counts toward :meth:`unpriced` instead.
+        Scopes mirror ``spent``.
+
+        Args:
+            run_id: A run to scope to; the current run if omitted.
+            iter_id: Scope to a specific iteration.
+            step_id: Scope to a specific step.
+            max_depth: Maximum child depth to include for the run scope
+                (``None`` all descendants, ``0`` this node only).
+
+        Returns:
+            Number of ended, priced steps in the scope marked partly unpriced.
+
+        """
+        # iteration/step scope: own steps only (children
+        # not applicable, mirroring spent); the marker ends the metadata,
+        # alone or after the step's reason
+        if step_id is not None or iter_id is not None:
+            if step_id is not None:
+                where, param = 'step_id = ?', step_id
+            else:
+                where, param = 'iter_id = ?', iter_id
+            query = (
+                'SELECT COUNT(*) AS partly FROM steps'
+                f' WHERE {where} AND ended_at IS NOT NULL AND cost IS NOT NULL'
+                " AND (metadata = 'partly unpriced'"
+                " OR metadata LIKE '%; partly unpriced')"
+            )
+            rows = self.db.read(query=query, params=(param,))
+            return rows[0]['partly'] if rows else 0
+        # run scope: count the per-run subtree's rows like spent
+        row = self._scoped(
+            'COUNT(*) AS partly',
+            run_id=run_id,
+            max_depth=max_depth,
+            where=' WHERE s.ended_at IS NOT NULL AND s.cost IS NOT NULL'
+            " AND (s.metadata = 'partly unpriced'"
+            " OR s.metadata LIKE '%; partly unpriced')",
+        )
+        return row['partly'] if row else 0
+
     def breakdown(
         self: Cost,
         *,

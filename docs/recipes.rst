@@ -137,8 +137,11 @@ with ``--csv`` (piped output is CSV automatically).
 
 Cost is recorded, never estimated. When ended steps carry no cost figure, the
 sums omit them and a disclosure rides stderr (``N unpriced step(s)
-(NULL cost) excluded``); a scope whose steps recorded no cost at all prints
-``untracked``. A deleted node still answers ``cost spent`` and
+(NULL cost) excluded``); steps whose record leaves part of a reply out
+count at the spend recorded, with their own disclosure (``N partly unpriced
+step(s) (a reply's spend missing from the record) counted at recorded
+spend``); a scope whose steps recorded no
+cost at all prints ``untracked``. A deleted node still answers ``cost spent`` and
 ``cost breakdown`` from its persisted history (its latest recorded run by
 default), while ``cost remaining`` for it always prints ``no budget`` — caps
 die with the node, history does not.

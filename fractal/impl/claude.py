@@ -9,11 +9,17 @@ import os
 import pathlib
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Optional
 
 import fractal.core.pricing
-from fractal.core.agent import Agent, Invocation, StreamEvent, StreamParser
+from fractal.core.agent import (
+    Agent,
+    Invocation,
+    Settlement,
+    StreamEvent,
+    StreamParser,
+)
 
 __all__ = [
     'ClaudeParser',
@@ -39,6 +45,13 @@ _CONTINUATION_PREFIX = 'Output token limit hit'
 
 # the content block types of a reply that is still thinking
 _THINKING_BLOCKS = frozenset({'thinking', 'redacted_thinking'})
+
+# the transcript entry types of the conversation's turns (the rest are
+# claude's bookkeeping: attachments, queue operations, request records)
+_TURNS = frozenset({'user', 'assistant'})
+
+# a reply's final transcript line: its usage, model, and write instant
+_Reply = tuple[dict[str, Any], Optional[str], dt.datetime]
 
 # Claude Code's provider-outage shapes, as its failed result frame names them
 # once its own API retries are spent: an `API Error: <status>` line (529
@@ -81,6 +94,11 @@ class ClaudeParser(StreamParser):
         self._reply_id: Optional[str] = None
         self._reply_blocks: set[Optional[str]] = set()
         self._reply_capped = False
+        # the newest top-level reply's model and usage as its raw API events
+        # report them, and whether its closing delta reported a final figure
+        self._reply_model: Optional[str] = None
+        self._reply_usage: dict[str, Any] = {}
+        self._reply_final = False
         # the top-level tool calls still awaiting their results, by id -- a
         # call can arrive on a raw block start, an assistant frame, or both
         self._pending: set[Optional[str]] = set()
@@ -131,7 +149,10 @@ class ClaudeParser(StreamParser):
             # acts; a tool call, a think's start or a turn's end waits)
             if top_level:
                 if event_type == 'message_start':
-                    self._track_reply((event.get('message') or {}).get('id'))
+                    reply = event.get('message') or {}
+                    self._track_reply(reply.get('id'))
+                    self._reply_model = reply.get('model') or self.model
+                    self._reply_usage = dict(reply.get('usage') or {})
                     self._turn_ended = False
                     self._thinking = False
                     events.append(StreamEvent(kind='acting'))
@@ -147,6 +168,14 @@ class ClaudeParser(StreamParser):
                     events.append(StreamEvent(kind='acting'))
                 elif event_type == 'message_delta':
                     self._thinking = False
+                    # the closing delta's usage is the reply's final figure
+                    # for each bucket it names, over the start's
+                    usage = event.get('usage') or {}
+                    if usage:
+                        for bucket, count in usage.items():
+                            if count is not None:
+                                self._reply_usage[bucket] = count
+                        self._reply_final = True
                     delta = event.get('delta') or {}
                     if delta.get('stop_reason') == 'max_tokens':
                         events += self._thinking_cap()
@@ -242,6 +271,11 @@ class ClaudeParser(StreamParser):
             usage = inner.get('usage')
             # a frame with no id cannot be deduped, so it prices as it arrives
             message_id = inner.get('id')
+            # past a result, a sub-agent's spend is the settle's to book from
+            # its transcript (only a top-level reply reopens the figure), so
+            # pricing its frames here too would count it twice
+            if self.final and not top_level:
+                usage = None
             if usage and (message_id is None or message_id != self._priced_id):
                 self._priced_id = message_id
                 cost = self._message_cost(usage)
@@ -332,6 +366,9 @@ class ClaudeParser(StreamParser):
             self._reply_id = reply_id
             self._reply_blocks = set()
             self._reply_capped = False
+            self._reply_model = None
+            self._reply_usage = {}
+            self._reply_final = False
             self._pending.clear()
             # a reply after a result spends past the figure the result settled
             self.final = False
@@ -340,13 +377,24 @@ class ClaudeParser(StreamParser):
         """Report the tracked reply's thinking cap, once, if it only thought.
 
         Claude's continuation drops the cut-off thinking, so a reply with no
-        text and no tool call restarts from scratch and caps again.
+        text and no tool call restarts from scratch and caps again. A
+        reply whose closing delta reported its final usage rides the event
+        in the transcript's message shape: the loop ends the launch at the
+        cap, which can beat claude's own write of it.
         """
         blocks = self._reply_blocks
         if self._reply_capped or not blocks or not blocks <= _THINKING_BLOCKS:
             return []
         self._reply_capped = True
-        return [StreamEvent(kind='thinking_cap', session=self.session)]
+        reply = None
+        if self._reply_final and self._reply_id is not None:
+            reply = {
+                'id': self._reply_id,
+                'model': self._reply_model,
+                'stop_reason': 'max_tokens',
+                'usage': dict(self._reply_usage),
+            }
+        return [StreamEvent(kind='thinking_cap', session=self.session, reply=reply)]
 
     def _message_cost(self: ClaudeParser, usage: dict[str, Any]) -> Optional[float]:
         """Hook for an assistant frame's running cost estimate."""
@@ -599,36 +647,73 @@ class ClaudeAgent(Agent):
         *,
         started: str,
         ended: str,
-    ) -> Optional[float]:
+        after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
+    ) -> Settlement:
         """Price the launch's window from claude's own session transcripts.
 
         Claude writes each reply to the transcript as it streams, so a
         launch killed before its result frame still left each reply's
         final usage on disk, where the stream priced only each reply's
         first frame. A sub-agent's replies sit in a transcript of their own
-        in the session's ``subagents`` folder, read beside the session's;
-        one that cannot be read is skipped with the reason logged. An
-        absent or unreadable session transcript, or a window with no
-        priced usage, logs the reason and returns ``None``.
+        under the session's ``subagents`` folder (a workflow's agents a
+        folder deeper), read beside the session's; one last written before
+        the launch opened is skipped, and one that cannot be read is
+        skipped with the reason logged. An id seen in more than one file
+        counts once, at its latest line, and each prices at its own model:
+        an unpriced model drops out of the sum, never the rest. An absent
+        or unreadable session transcript, or a window with no priced
+        usage, logs the reason and prices nothing.
+
+        Whatever the figure leaves out marks the launch: an absent or
+        unreadable session transcript on a launch with no result figure, a
+        sub-agent transcript that cannot be read, and a reply whose usage
+        holds a count the pricing cannot read.
+
+        With ``after``, the result frame's figure stands and only the
+        replies completing after it price: claude counts a reply's cost
+        when it completes, so those are the spend past its figure, and
+        finding none is the common case, never logged.
+
+        The record leaves part of a reply out when any transcript's window
+        reads that way (see ``_transcript_window``), so the figure is
+        partial; with ``after``, only what follows the result counts, since
+        the result's figure covers the rest. A reply the
+        stream recorded whole (``replies``, the capped reply) prices at its
+        recorded usage; one claude never wrote closes the session
+        transcript's window, while a written one keeps the turns after it.
         """
+        # past a result, a record the settle cannot read leaves only the
+        # spend after it unseen
+        unpriced = 'launch unpriced'
+        level = logging.WARNING
+        if after is not None:
+            unpriced = 'spend after the result unpriced'
+            level = logging.INFO
+        # with no result figure, a record the settle cannot read leaves the
+        # launch's spend out
         try:
             found = self.transcript(session)
         except (OSError, ValueError) as e:
-            self.log(f'launch unpriced: transcript unreadable: {e}', logging.WARNING)
-            return None
+            self.log(f'{unpriced}: transcript unreadable: {e}', level)
+            return Settlement(cost=None, cut_off=after is None)
         if not found['exists']:
             self.log(
-                message=f'launch unpriced: no transcript for session {session}',
-                level=logging.WARNING,
+                message=f'{unpriced}: no transcript for session {session}',
+                level=level,
             )
-            return None
-        # read each sub-agent's transcript beside the session's -- one pass
-        # over them all keeps a reply counted once across files, and a
-        # newline between files keeps a torn tail off the next file's record
+            return Settlement(cost=None, cut_off=after is None)
+        # read each sub-agent's transcript beside the session's; a long
+        # session keeps hundreds, so only those written since the launch
+        # opened are read
         contents = [found['content']]
         subagents = pathlib.Path(found['path']).with_suffix('') / 'subagents'
-        for path in sorted(subagents.glob('agent-*.jsonl')):
+        opened = dt.datetime.fromisoformat(started).timestamp()
+        cut_off = False
+        for path in sorted(subagents.rglob('agent-*.jsonl')):
             try:
+                if path.stat().st_mtime < opened:
+                    continue
                 contents.append(path.read_text(encoding='utf-8', errors='replace'))
             except OSError as e:
                 self.log(
@@ -636,15 +721,41 @@ class ClaudeAgent(Agent):
                     f' unreadable: {e}',
                     level=logging.WARNING,
                 )
-        content = '\n'.join(contents)
-        cost = _transcript_cost(content, started=started, ended=ended)
-        if cost is None:
+                cut_off = True
+        # keep each reply's latest line across the files, and whether any
+        # file's record leaves part of a reply out
+        latest: dict[str, _Reply] = {}
+        for index, content in enumerate(contents):
+            window, ends_cut = _transcript_window(
+                content,
+                started=started,
+                ended=ended,
+                after=after,
+                recorded=replies if index == 0 else (),
+            )
+            for message_id, reply in window.items():
+                if message_id not in latest or latest[message_id][2] <= reply[2]:
+                    latest[message_id] = reply
+            cut_off = cut_off or ends_cut
+        # a reply completing by the result was already in its figure
+        since = dt.datetime.fromisoformat(after) if after is not None else None
+        cost: Optional[float] = None
+        for usage, model, stamped in latest.values():
+            if since is not None and stamped <= since:
+                continue
+            # a zero figure is a missing one (a gateway zeroes its usage), not
+            # a free reply -- it must not turn an unknowable launch into $0
+            reply_cost, whole = _usage_cost(usage, model)
+            cut_off = cut_off or not whole
+            if reply_cost:
+                cost = (cost or 0.0) + reply_cost
+        if cost is None and after is None:
             self.log(
                 message=f'launch unpriced: no priced usage in session {session}'
                 f' between {started} and {ended}',
                 level=logging.WARNING,
             )
-        return cost
+        return Settlement(cost=cost, cut_off=cut_off)
 
     def _rates(self: ClaudeAgent, model: str) -> Optional[dict[str, Any]]:
         """Resolve pricing through the claude slug-alias chain."""
@@ -714,27 +825,71 @@ def _is_continuation(message: dict[str, Any], /) -> bool:
     return False
 
 
-def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[float]:
-    """Price the assistant entries a transcript stamped within a window.
+def _transcript_window(
+    content: str,
+    *,
+    started: str,
+    ended: str,
+    after: Optional[str] = None,
+    recorded: Sequence[dict[str, Any]] = (),
+) -> tuple[dict[str, _Reply], bool]:
+    """Read the replies one transcript stamped within a window.
 
     Claude splits a reply across lines, one per content block under the
     reply's message id, each carrying the reply's usage as it stood when
-    written; the last line of an id is its final usage. The content joins
-    the session's transcript with its sub-agents' (sidechain replies, at
-    their own model), and an id seen in more than one file counts once.
-    Each id is priced at its own model, and an unpriced model drops out of
-    the sum, never the rest; ``None`` when nothing in the window priced.
+    written; the last line of an id is its final usage. Each reply is
+    kept at its final line, with the model it ran (a sidechain reply runs
+    its own).
+
+    The record leaves part of a reply out when a reply's final line has
+    no stop reason, or when the window's last turn is a user turn whose
+    reply's request was in flight. A final line with no stop reason was
+    written before its reply completed: a killed reply, or a completed
+    sub-agent's line written mid-stream, whose usage is then partial (its
+    output tokens a handful on a full answer). A user turn's reply was in
+    flight when the turn is a prompt, claude's continuation past the
+    output cap, or the result of the newest reply's last open tool call;
+    a result while other calls of that reply still run is a kill during a
+    tool call, which is whole. A workflow sub-agent ends by design on the
+    result of its ``StructuredOutput`` call, with no reply after it, which
+    is whole too unless the result is an error (the agent retries). An
+    entry the reader cannot read whole -- a reply's usage, or a tool id,
+    of the wrong shape -- leaves its part out as well. With ``after``, the
+    spend before that instant is already in a result frame's figure, so
+    only what the window holds past it counts.
 
     Args:
-        content: The transcripts' raw JSONL text, joined by newlines.
+        content: One transcript's raw JSONL text.
         started: The window's opening instant (ISO 8601 UTC).
         ended: The window's closing instant (ISO 8601 UTC).
+        after: An instant inside the window (ISO 8601 UTC) whose spend a
+            result frame already named, or ``None``.
+        recorded: Replies recorded elsewhere, in the transcript's message
+            shape, final over the transcript's lines of the same id; one
+            the transcript does not hold is its newest turn (stamped at
+            the window's close).
+
+    Returns:
+        Each reply's final line by message id, and whether the record
+        leaves part of a reply out.
 
     """
     opened = dt.datetime.fromisoformat(started)
     closed = dt.datetime.fromisoformat(ended)
-    # keep the final usage per message id (later lines overwrite earlier)
-    replies: dict[str, tuple[dict[str, Any], Optional[str]]] = {}
+    since = dt.datetime.fromisoformat(after) if after is not None else None
+    # keep the final line per message id (later lines overwrite earlier),
+    # and its stop reason
+    replies: dict[str, _Reply] = {}
+    stops: dict[str, Optional[str]] = {}
+    # the ids of the StructuredOutput calls, whose results end a sub-agent
+    structured: set[str] = set()
+    # the newest reply and its tool calls still awaiting their results
+    newest: Optional[str] = None
+    pending: set[str] = set()
+    # whether the window's last turn leaves part of a reply out, and its stamp
+    last: Optional[tuple[bool, dt.datetime]] = None
+    # an entry past `since` the reader could not read whole
+    malformed = False
     # a newline alone ends a record -- splitlines would also split at the
     # U+2028 and U+0085 claude leaves raw inside a record's strings
     for line in content.split('\n'):
@@ -743,31 +898,94 @@ def _transcript_cost(content: str, *, started: str, ended: str) -> Optional[floa
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(entry, dict) or entry.get('type') != 'assistant':
-            continue
-        try:
-            stamped = dt.datetime.fromisoformat(entry['timestamp'])
-        except (KeyError, TypeError, ValueError):
-            continue
-        # a zone-less stamp cannot be placed against the UTC window
-        if stamped.tzinfo is None or not opened <= stamped <= closed:
+        if not isinstance(entry, dict) or entry.get('type') not in _TURNS:
             continue
         message = entry.get('message')
         if not isinstance(message, dict):
             continue
-        message_id = message.get('id')
-        usage = message.get('usage')
-        model = message.get('model')
-        if isinstance(message_id, str) and isinstance(usage, dict):
-            replies[message_id] = (usage, model if isinstance(model, str) else None)
-    total: Optional[float] = None
-    for usage, model in replies.values():
-        # a zero figure is a missing one (a gateway zeroes its usage), not a
-        # free reply -- it must not turn an unknowable launch into $0
-        cost = _compute_cost(usage, model)
-        if cost:
-            total = (total or 0.0) + cost
-    return total
+        blocks = message.get('content')
+        blocks = blocks if isinstance(blocks, list) else []
+        # place the entry against the window; a zone-less stamp cannot be
+        # placed against the UTC window
+        try:
+            stamped = dt.datetime.fromisoformat(entry['timestamp'])
+        except (KeyError, TypeError, ValueError):
+            stamped = None
+        inside = stamped is not None and stamped.tzinfo is not None
+        inside = inside and opened <= stamped <= closed
+        counted = inside and (since is None or stamped > since)
+        if entry['type'] == 'assistant':
+            # note the reply's tool calls, a StructuredOutput call even
+            # before the window, since its result can land inside it
+            message_id = message.get('id')
+            calls: set[str] = set()
+            for block in blocks:
+                if not isinstance(block, dict) or block.get('type') != 'tool_use':
+                    continue
+                call = block.get('id')
+                if not isinstance(call, str):
+                    malformed = malformed or counted
+                    continue
+                calls.add(call)
+                if block.get('name') == 'StructuredOutput':
+                    structured.add(call)
+            if not inside:
+                continue
+            if message_id != newest:
+                newest = message_id
+                pending = set()
+            pending |= calls
+            last = (False, stamped)
+            # keep the reply's usage; a line with none recorded no spend
+            usage = message.get('usage')
+            if usage is None:
+                continue
+            if not isinstance(message_id, str) or not isinstance(usage, dict):
+                malformed = malformed or counted
+                continue
+            model = message.get('model')
+            model = model if isinstance(model, str) else None
+            replies[message_id] = (usage, model, stamped)
+            stops[message_id] = message.get('stop_reason')
+            continue
+        if not inside:
+            continue
+        # a user turn: a prompt or a continuation always awaits a reply
+        results = [
+            block
+            for block in blocks
+            if isinstance(block, dict) and block.get('type') == 'tool_result'
+        ]
+        if not results:
+            last = (True, stamped)
+            continue
+        answers = [block.get('tool_use_id') for block in results]
+        if not all(isinstance(answer, str) for answer in answers):
+            malformed = malformed or counted
+            last = (True, stamped)
+            continue
+        pending -= set(answers)
+        # a clean StructuredOutput result ends a sub-agent; any other result
+        # awaits a reply once the newest reply's calls have all returned
+        ended_whole = all(
+            answer in structured and block.get('is_error') is not True
+            for answer, block in zip(answers, results)
+        )
+        last = (not ended_whole and not pending, stamped)
+    # the stream's own record of a reply is final; one claude never wrote
+    # is the newest turn, while a written one keeps the turns after it
+    for message in recorded:
+        if message['id'] not in replies:
+            last = (False, closed)
+        replies[message['id']] = (message['usage'], message['model'], closed)
+        stops[message['id']] = message['stop_reason']
+    partial = any(
+        stops[message_id] is None and (since is None or reply[2] > since)
+        for message_id, reply in replies.items()
+    )
+    unanswered = last is not None and last[0]
+    unanswered = unanswered and (since is None or last[1] > since)
+    return replies, partial or unanswered or malformed
 
 
 def _model_usage_tokens(entry: dict[str, Any]) -> dict[str, Any]:
@@ -778,6 +996,7 @@ def _model_usage_tokens(entry: dict[str, Any]) -> dict[str, Any]:
     ``outputTokens``); the per-message ``usage`` shape names the same
     buckets in snake case.
     """
+    # the table has no 5m/1h split, so every cache write prices at the base rate
     return {
         'input_tokens': entry.get('inputTokens'),
         'cache_read_input_tokens': entry.get('cacheReadInputTokens'),
@@ -799,27 +1018,78 @@ def _compute_cost(
     reports its own API call -- per-message costs sum to the invocation
     total (the parser prices each message id once, since claude repeats a
     frame per content block), unlike codex's cumulative snapshots.
+
+    Cache writes bill by their lifetime: the ``cache_creation`` split's
+    one-hour writes price at the one-hour write rate, and the five-minute
+    writes plus any the split leaves unnamed at the base write rate. A
+    model with no one-hour rate prices them all at the base rate. A count
+    that is not a number prices as nothing (``_usage_cost`` reports it).
     """
+    cost, _ = _usage_cost(usage, model)
+    return cost
+
+
+def _usage_cost(
+    usage: dict[str, Any],
+    model: Optional[str] = None,
+) -> tuple[Optional[float], bool]:
+    """Price claude token usage, and say whether every count was read.
+
+    The pricing behind ``_compute_cost``. A count present but not a number
+    (wire noise) is left out of the cost rather than raising, so the
+    figure that results is partial.
+
+    Returns:
+        The cost (``None`` for an unknown or unpriced model), and whether
+        every count the usage holds was priced.
+
+    """
+    # read each count, leaving out one that is not a number; coerce null
+    # to 0.0, not via a .get default: the openrouter gateway sends the
+    # cache buckets as explicit null on partial frames, and a present-null
+    # key skips the default (None would then poison the arithmetic)
+    whole = True
+
+    def count(value: Any) -> float:
+        nonlocal whole
+        if value is None:
+            return 0.0
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            whole = False
+            return 0.0
+        return float(value)
+
+    input_tokens = count(usage.get('input_tokens'))
+    cache_read_tokens = count(usage.get('cache_read_input_tokens'))
+    cache_creation_tokens = count(usage.get('cache_creation_input_tokens'))
+    output_tokens = count(usage.get('output_tokens'))
+    # the one-hour share of the cache writes, never more than their total
+    split = usage.get('cache_creation')
+    cache_hour_tokens = 0.0
+    if isinstance(split, dict):
+        cache_hour_tokens = count(split.get('ephemeral_1h_input_tokens'))
+        cache_hour_tokens = min(cache_hour_tokens, cache_creation_tokens)
+    elif split is not None:
+        whole = False
     if model is None:
-        return None
+        return None, whole
     # look up per-token rates (missing cache rates fall back to the input rate)
     rates = _rates(model)
     if rates is None:
-        return None
+        return None, whole
     input_rate = rates.get('input_cost_per_token', 0.0)
     cache_read_rate = rates.get('cache_read_input_token_cost', input_rate)
     cache_creation_rate = rates.get('cache_creation_input_token_cost', input_rate)
+    cache_hour_rate = rates.get(
+        'cache_creation_input_token_cost_above_1hr',
+        cache_creation_rate,
+    )
     output_rate = rates.get('output_cost_per_token', 0.0)
-    # coerce with `or 0.0`, not a .get default: the openrouter gateway sends
-    # the cache buckets as explicit null on partial frames, and a present-null
-    # key skips the default (None would then poison the arithmetic)
-    input_tokens = usage.get('input_tokens') or 0.0
-    cache_read_tokens = usage.get('cache_read_input_tokens') or 0.0
-    cache_creation_tokens = usage.get('cache_creation_input_tokens') or 0.0
-    output_tokens = usage.get('output_tokens') or 0.0
-    return (
+    cost = (
         input_tokens * input_rate
         + cache_read_tokens * cache_read_rate
-        + cache_creation_tokens * cache_creation_rate
+        + (cache_creation_tokens - cache_hour_tokens) * cache_creation_rate
+        + cache_hour_tokens * cache_hour_rate
         + output_tokens * output_rate
     )
+    return cost, whole

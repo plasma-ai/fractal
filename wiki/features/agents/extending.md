@@ -55,9 +55,13 @@ the subclass implements:
 - the configured-model and rates hooks back cost accounting: the former resolves
   the model the provider's own config defaults to, the latter maps a model to
   its pricing;
-- the settle hook (behind `Agent.settle_cost`) prices a killed launch's window,
-  from spawn to exit, from the provider's own per-message usage record, per
-  invocation; it defaults to none, leaving the stream's figure standing;
+- the settle hook (behind `Agent.settle_cost`) prices a launch's window, from
+  spawn to exit, from the provider's own per-message usage record, per
+  invocation -- a killed launch's whole window, or with `after` only the spend
+  completing past its result frame, with the stream's own `replies` (a capped
+  reply) over the record's -- and returns a `Settlement` naming the cost and
+  whether the record leaves part of a reply out; it defaults to no cost, leaving
+  the stream's figure standing;
 - the transcript hook (with its fallback) locates a session's transcript file —
   the seam the project-files surface fronts (see
   [[features/files/transcripts]]);

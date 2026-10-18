@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import typing
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Optional, Union
 
 from fractal.exceptions import AbstractMethodError, AgentStreamError
@@ -33,6 +33,7 @@ __all__ = [
     'Invocation',
     'StreamEvent',
     'StreamResult',
+    'Settlement',
     'StreamParser',
     'Agent',
     'seed_agents',
@@ -249,7 +250,9 @@ class StreamEvent:
     that hit the output-token cap while still thinking -- no text and no
     tool call -- once per reply: an agent that continues past it loses the
     cut-off thought, so it restarts the thought and caps again. Sub-agent
-    replies never report one.
+    replies never report one. When the stream recorded the capped reply's
+    final usage, it rides ``reply`` in the backend's own reply shape, for
+    the settle to book a reply the kill may keep from the provider's record.
 
     ``'acting'`` and ``'waiting'`` mark the agent's own control, for an
     agent that ``reports_progress``: acting when it takes control (its
@@ -282,6 +285,8 @@ class StreamEvent:
     failed: bool = False
     # error detail / tool-result body
     message: Optional[str] = None
+    # the capped reply as the stream recorded it (kind='thinking_cap')
+    reply: Optional[dict[str, Any]] = None
 
 
 def _sanitize(value: Optional[str]) -> Optional[str]:
@@ -331,6 +336,16 @@ class StreamResult:
     #   step row keeps only the last, so a mid-stream substitution that
     #   recovers before the stream ends is visible here alone
     models: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class Settlement:
+    """A launch's spend as its provider's own usage record prices it."""
+
+    # USD, the launch's own spend (None = the record priced nothing)
+    cost: Optional[float]
+    # the record leaves part of a reply out, whose spend it never holds
+    cut_off: bool = False
 
 
 class StreamParser:
@@ -1001,8 +1016,10 @@ class Agent:
         *,
         started: str,
         ended: str,
-    ) -> None:
-        """Price a launch that ended without its authoritative cost.
+        after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
+    ) -> bool:
+        """Price a launch's spend past its recorded figure.
 
         A launch killed before its closing cost fact (a deadline, a stall,
         a thinking cap, a pause, a dead stream) leaves its step row at the
@@ -1015,27 +1032,57 @@ class Agent:
         the cost scope, never settled against the session's earlier steps
         as a thread total is.
 
+        A launch whose result frame named its cost can still spend after
+        it: the process lives on while background work runs. With
+        ``after``, the instant that figure arrived, the hook prices only
+        the spend completing after it, which lands added to the recorded
+        figure, again as an estimate.
+
+        A launch the loop ends on a reply's own stop (the thinking cap)
+        can die before the provider records that reply, so the stream's
+        record of it rides ``replies`` for the hook to book.
+
         Args:
             step_id: The launch's step row, stamped with its session.
             started: The launch's spawn instant (ISO 8601 UTC).
             ended: The launch's exit instant (ISO 8601 UTC).
+            after: The instant the launch's result frame named its cost
+                (ISO 8601 UTC), or ``None`` when none did.
+            replies: The replies the stream recorded whole, in the
+                backend's own reply shape.
+
+        Returns:
+            Whether the record leaves part of a reply out: the step books
+            the spend recorded, which misses that part.
 
         """
         rows = self.node.db.read('steps', where={'step_id': step_id}, limit=1)
         if not rows or rows[0]['session'] is None:
-            return
-        cost = self._settle_cost(rows[0]['session'], started=started, ended=ended)
-        if cost is None:
-            return
+            return False
+        settled = self._settle_cost(
+            rows[0]['session'],
+            started=started,
+            ended=ended,
+            after=after,
+            replies=replies,
+        )
+        if settled.cost is None:
+            return settled.cut_off
         # a launch can't have negative spend (as in record_cost)
-        cost = max(0.0, cost)
+        cost = max(0.0, settled.cost)
         recorded = rows[0]['cost']
-        if recorded is not None and recorded >= cost:
-            return
+        if after is not None:
+            # the result's figure plus the spend past it
+            if not cost:
+                return settled.cut_off
+            cost += recorded or 0.0
+        elif recorded is not None and recorded >= cost:
+            return settled.cut_off
         # book the launch's own figure past record_cost's thread settle,
         # firing the record event with exactly what lands
         self.on_record_cost(cost=cost, final=False)
         self._record_cost(step_id, cost, final=False)
+        return settled.cut_off
 
     def _settle_cost(
         self: Agent,
@@ -1043,20 +1090,28 @@ class Agent:
         *,
         started: str,
         ended: str,
-    ) -> Optional[float]:
+        after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
+    ) -> Settlement:
         """Hook for pricing a launch's window from the provider's own record.
 
-        Default returns ``None`` (the stream's figure stands). Override in
-        a backend whose provider persists per-message usage, returning the
+        Default prices nothing (the stream's figure stands). Override in a
+        backend whose provider persists per-message usage, returning the
         launch's own spend (per invocation, whatever the backend's
-        ``cost_scope`` -- never a thread total) or ``None`` with the reason
-        logged::
+        ``cost_scope`` -- never a thread total), or no cost with the
+        reason logged, and whether the record leaves part of a reply out;
+        with ``after``, only the spend completing after that instant, and
+        the stream's own ``replies`` over the record's::
 
-            def _settle_cost(self, session, *, started, ended):
-                usage = provider.usage(session, since=started, until=ended)
-                return _compute_cost(usage, self.model)
+            def _settle_cost(self, session, *, started, ended, after=None, replies=()):
+                since = after or started
+                usage = provider.usage(session, since=since, until=ended)
+                return Settlement(
+                    cost=_compute_cost(usage, self.model),
+                    cut_off=usage.interrupted,
+                )
         """
-        return None
+        return Settlement(cost=None)
 
     def tracks_cost(self: Agent, model: Optional[str] = None) -> bool:
         """Return whether spend will be recorded.

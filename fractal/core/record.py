@@ -728,6 +728,7 @@ class Record:
         status: str,
         exit_code: int,
         metadata: Optional[str] = None,
+        partly_unpriced: bool = False,
     ) -> int:
         """End a step.
 
@@ -744,6 +745,13 @@ class Record:
         step". Cost stays NULL (``Cost.unpriced`` discloses the gap count);
         a flush that lands later strips the marker.
 
+        A launch whose record leaves part of a reply out books the spend
+        recorded: when a figure stands, its end appends ``partly
+        unpriced`` instead, at any terminal (``Cost.partly_unpriced``
+        discloses the count). A row with no figure is not partly priced,
+        so it keeps the rule above. A later flush never strips the marker,
+        since the missing part stays unpriced.
+
         Args:
             step_id: Step to end.
             status: Final status.
@@ -751,6 +759,8 @@ class Record:
             metadata: Optional short, fractal-owned failure reason (e.g.
                 ``timed out``/``agent error``) for visibility in ``node
                 activity``; the metadata column is left untouched when ``None``.
+            partly_unpriced: Whether the launch's record leaves part of a
+                reply out.
 
         Returns:
             Rows transitioned -- 0 when another writer already closed it.
@@ -770,12 +780,21 @@ class Record:
         if metadata is not None:
             data['metadata'] = metadata
         # mark an abnormal end unpriced when the stream opened but no usage
-        # flushed -- burn happened with no recorded figure
-        if status != 'completed':
+        # flushed -- burn happened with no recorded figure; a figure whose
+        # launch's record leaves part of a reply out is partly unpriced
+        if status != 'completed' or partly_unpriced:
             rows = self.db.read('steps', where={'step_id': step_id, 'ended_at': None})
-            if rows and rows[0]['cost'] is None and rows[0]['session'] is not None:
-                reason = metadata if metadata is not None else rows[0]['metadata']
-                data['metadata'] = f'{reason}; unpriced' if reason else 'unpriced'
+            if rows:
+                row = rows[0]
+                marker = None
+                if row['cost'] is not None:
+                    if partly_unpriced:
+                        marker = 'partly unpriced'
+                elif status != 'completed' and row['session'] is not None:
+                    marker = 'unpriced'
+                if marker is not None:
+                    reason = metadata if metadata is not None else row['metadata']
+                    data['metadata'] = f'{reason}; {marker}' if reason else marker
         return self._fenced(
             data=data,
             table='steps',

@@ -9,6 +9,7 @@ the config-home transcript layout. Stream-level cases drive the base
 
 from __future__ import annotations
 
+import datetime as dt
 import itertools
 import json
 import logging
@@ -47,6 +48,7 @@ __all__ = [
     'test_parser_result_overwrites_the_accumulated_estimate',
     'test_parser_unpriced_model_accumulates_no_cost',
     'test_compute_cost_prices_disjoint_buckets',
+    'test_one_hour_cache_writes_price_at_their_own_rate',
     'test_compute_cost_unpriced_model_returns_none_claude',
     'test_stream_records_cost_model_and_session_claude',
     'test_stream_detached_keeps_session_unpersisted_claude',
@@ -68,7 +70,10 @@ __all__ = [
     'test_seed_config_disables_fast_mode_claude',
     'test_transcript_resolves_the_config_home_slug',
     'test_settle_cost_adds_each_readable_sub_agent_transcript',
+    'test_settle_reads_workflow_sub_agent_transcripts',
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
+    'test_settle_marks_a_record_missing_part_of_a_reply',
+    'test_settle_marks_an_entry_it_cannot_read_whole',
 ]
 
 # claude pricing with all four Anthropic bucket rates distinct, so a bucket
@@ -101,6 +106,9 @@ _USAGE_SECOND_COST = 50 * 3e-6 + 100 * 1.5e-5
 _OPENED = '2026-01-01T00:00:00.000Z'
 _WRITTEN = '2026-01-01T00:00:01.000Z'
 _CLOSED = '2026-01-01T00:00:02.000Z'
+# a result frame's arrival inside that window, and a stamp past it
+_AFTER = '2026-01-01T00:00:01.500Z'
+_LATE = '2026-01-01T00:00:01.800Z'
 
 # a live claude 2.1.300 capture (trimmed, session as @SESSION@): a turn's
 # result on line 18, then claude's wake-up on a background task's notice and
@@ -863,6 +871,44 @@ def test_compute_cost_prices_disjoint_buckets(
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
     cost = claude._compute_cost(_USAGE_FIRST, 'claude-fable-5')
     assert cost == pytest.approx(_USAGE_FIRST_COST)
+
+
+@pytest.mark.parametrize(
+    argnames=('hour_rate', 'hour', 'expected'),
+    argvalues=[
+        # the one-hour writes at their own rate, the rest at the base rate
+        pytest.param(6e-6, 600, 600 * 6e-6 + 400 * 3.75e-6, id='one-hour-rate'),
+        # a model with no one-hour rate prices every write at the base rate
+        pytest.param(None, 600, 1000 * 3.75e-6, id='no-one-hour-rate'),
+        # one-hour writes past the write total price as the total
+        pytest.param(6e-6, 1500, 1000 * 6e-6, id='one-hour-over-total'),
+    ],
+)
+def test_one_hour_cache_writes_price_at_their_own_rate(
+    monkeypatch: pytest.MonkeyPatch,
+    hour_rate: Optional[float],
+    hour: int,
+    expected: float,
+) -> None:
+    """A reply's one-hour cache writes bill at the one-hour write rate.
+
+    Claude Code writes one-hour cache entries, which cost more than the
+    five-minute ones; the five-minute writes and any the split leaves
+    unnamed price at the base write rate.
+    """
+    rates = dict(_PRICING['claude-fable-5'])
+    if hour_rate is not None:
+        rates['cache_creation_input_token_cost_above_1hr'] = hour_rate
+    monkeypatch.setattr(pricing, '_load', lambda: {'claude-fable-5': rates})
+    usage = {
+        'cache_creation_input_tokens': 1000,
+        'cache_creation': {
+            'ephemeral_1h_input_tokens': hour,
+            'ephemeral_5m_input_tokens': 300,
+        },
+    }
+    cost = claude._compute_cost(usage, 'claude-fable-5')
+    assert cost == pytest.approx(expected)
 
 
 def test_compute_cost_unpriced_model_returns_none_claude(
@@ -1636,7 +1682,47 @@ def test_settle_cost_adds_each_readable_sub_agent_transcript(
     assert 'agent-b.jsonl' in warning
 
 
+def test_settle_reads_workflow_sub_agent_transcripts(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow's sub-agents, a folder deeper, price beside the session's.
+
+    A workflow keeps each agent's transcript in a folder of its own, beside
+    a journal that holds no reply of the launch's. A sub-agent transcript
+    last written before the launch opened belongs to an earlier launch, so
+    the settle never reads it.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude')
+    session = str(uuid.uuid4())
+    (step_id,) = _steps(node, 1)
+    node.record.step_session('claude', step_id=step_id, model=None, session=session)
+    transcript = pathlib.Path(backend.transcript(session)['path'])
+    workflow = transcript.with_suffix('') / 'subagents' / 'workflows' / 'wf_1'
+    workflow.mkdir(parents=True)
+    transcript.write_text(_transcript_line('msg_main', _USAGE_FIRST), encoding='utf-8')
+    side = _transcript_line('msg_flow', _USAGE_SECOND)
+    (workflow / 'agent-a.jsonl').write_text(side, encoding='utf-8')
+    journal = _transcript_line('msg_journal', {'output_tokens': 50_000})
+    (workflow / 'journal.jsonl').write_text(journal, encoding='utf-8')
+    # an earlier launch's sub-agent, untouched since before this one opened
+    stale = workflow.parent.parent / 'agent-old.jsonl'
+    stale_line = _transcript_line('msg_stale', {'output_tokens': 50_000})
+    stale.write_text(stale_line, encoding='utf-8')
+    before = dt.datetime.fromisoformat(_OPENED).timestamp() - 60
+    os.utime(stale, (before, before))
+    backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED)
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
+
+
 def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reply's final line prices whole though its text holds line separators.
@@ -1651,8 +1737,137 @@ def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(
         {'output_tokens': 900},
         text='one\u2028two\u0085three',
     )
-    cost = claude._transcript_cost(early + final, started=_OPENED, ended=_CLOSED)
-    assert cost == pytest.approx(900 * 1.5e-5)
+    backend, step_id = _settling(node_with_db, tmp_path, monkeypatch, early + final)
+    assert backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED) is False
+    row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(900 * 1.5e-5)
+
+
+@pytest.mark.parametrize(
+    argnames=('case', 'leaves_out'),
+    argvalues=[
+        # the kill landed while the reply's second call still ran
+        pytest.param('one of two results', False, id='one-of-two-results'),
+        # both calls returned, so the next reply's request was in flight
+        pytest.param('both results', True, id='both-results'),
+        # an earlier reply's final line was written before it completed
+        pytest.param('partial reply mid-window', True, id='partial-mid-window'),
+        # past a result, the result's figure covers the partial reply
+        pytest.param('partial reply before the result', False, id='partial-before'),
+        # a workflow agent ends on its StructuredOutput result
+        pytest.param('structured output', False, id='structured-output'),
+        # an error result sends the agent to retry
+        pytest.param('structured output error', True, id='structured-error'),
+        # the capped reply claude never wrote is the newest turn
+        pytest.param('capped reply unwritten', False, id='capped-unwritten'),
+        # claude wrote the capped reply and continued past it
+        pytest.param('capped reply continued', True, id='capped-continued'),
+        # with no result figure, a missing transcript leaves everything out
+        pytest.param('no transcript', True, id='no-transcript'),
+        # past a result, a missing transcript leaves out no spend it knows of
+        pytest.param('no transcript after the result', False, id='no-transcript-after'),
+    ],
+)
+def test_settle_marks_a_record_missing_part_of_a_reply(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    leaves_out: bool,
+) -> None:
+    """The settle says whether the record leaves part of a reply's spend out.
+
+    A reply's request is in flight after a prompt, a continuation, or the
+    result of the newest reply's last open call; a reply whose final line
+    has no stop reason was written before it completed. A kill during a
+    tool call, and a workflow agent's clean StructuredOutput result, are
+    whole. Past a result frame, only what follows the result counts.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    after = None
+    replies: list[dict[str, Any]] = []
+    calls = _transcript_line(
+        'msg_a',
+        _USAGE_FIRST,
+        stop_reason='tool_use',
+        blocks=[_tool_use('toolu_1'), _tool_use('toolu_2')],
+    )
+    if case == 'one of two results':
+        content = calls + _result_line('toolu_1')
+    elif case == 'both results':
+        content = calls + _result_line('toolu_1') + _result_line('toolu_2')
+    elif case.startswith('partial reply'):
+        content = _transcript_line('msg_a', _USAGE_FIRST, stop_reason=None)
+        if case == 'partial reply before the result':
+            after = _AFTER
+        content += _transcript_line('msg_b', _USAGE_SECOND, stamp=_LATE)
+    elif case.startswith('structured output'):
+        output = _tool_use('toolu_out', name='StructuredOutput')
+        content = _transcript_line(
+            'msg_a',
+            _USAGE_FIRST,
+            stop_reason='tool_use',
+            blocks=[output],
+        )
+        content += _result_line('toolu_out', is_error=case.endswith('error'))
+    elif case.startswith('capped reply'):
+        capped = {
+            'id': 'msg_cap',
+            'model': 'claude-fable-5',
+            'stop_reason': 'max_tokens',
+            'usage': _USAGE_SECOND,
+        }
+        replies.append(capped)
+        content = _transcript_line('msg_a', _USAGE_FIRST, stop_reason='tool_use')
+        content += _result_line('toolu_1')
+        if case == 'capped reply continued':
+            content += _transcript_line('msg_cap', _USAGE_SECOND, stop_reason=None)
+            content += json.dumps(
+                {
+                    'type': 'user',
+                    'timestamp': _WRITTEN,
+                    'isMeta': True,
+                    'message': {'role': 'user', 'content': 'Output token limit hit.'},
+                }
+            )
+    else:
+        content = None
+        if case == 'no transcript after the result':
+            after = _AFTER
+    backend, step_id = _settling(node_with_db, tmp_path, monkeypatch, content)
+    verdict = backend.settle_cost(
+        step_id,
+        started=_OPENED,
+        ended=_CLOSED,
+        after=after,
+        replies=replies,
+    )
+    assert verdict is leaves_out
+
+
+def test_settle_marks_an_entry_it_cannot_read_whole(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed count or tool id leaves its part out, never raising.
+
+    The settle prices what it can read, a count that is not a number
+    prices as nothing, and the launch's record reads as missing part of a
+    reply's spend.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    noisy = {**_USAGE_SECOND, 'output_tokens': '100'}
+    content = _transcript_line('msg_a', _USAGE_FIRST)
+    content += _transcript_line(
+        'msg_b',
+        noisy,
+        blocks=[{'type': 'tool_use', 'id': 7, 'name': 'Bash', 'input': {}}],
+    )
+    backend, step_id = _settling(node_with_db, tmp_path, monkeypatch, content)
+    assert backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED) is True
+    row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + 50 * 3e-6)
 
 
 # ------ helpers
@@ -1785,23 +2000,74 @@ def _continuation_frame(*, parent: Optional[str] = None) -> dict[str, Any]:
     }
 
 
-def _transcript_line(message_id: str, usage: dict[str, int], *, text: str = '') -> str:
+def _transcript_line(
+    message_id: str,
+    usage: dict[str, Any],
+    *,
+    text: str = '',
+    stop_reason: Optional[str] = 'end_turn',
+    blocks: Optional[list[dict[str, Any]]] = None,
+    stamp: str = _WRITTEN,
+) -> str:
     """Return one claude transcript line of a reply, stamped inside the window.
 
-    Written the way claude writes it: non-ASCII text raw, never escaped.
+    Written the way claude writes it: non-ASCII text raw, never escaped. A
+    ``stop_reason`` of ``None`` is a line written before its reply
+    completed; ``blocks`` replaces the line's one text block.
     """
     entry = {
         'type': 'assistant',
-        'timestamp': _WRITTEN,
+        'timestamp': stamp,
         'message': {
             'model': 'claude-fable-5',
             'id': message_id,
             'role': 'assistant',
-            'content': [{'type': 'text', 'text': text}],
+            'content': blocks or [{'type': 'text', 'text': text}],
+            'stop_reason': stop_reason,
             'usage': usage,
         },
     }
     return json.dumps(entry, ensure_ascii=False) + '\n'
+
+
+def _tool_use(call: str, *, name: str = 'Bash') -> dict[str, Any]:
+    """Return a reply's tool-call content block."""
+    return {'type': 'tool_use', 'id': call, 'name': name, 'input': {}}
+
+
+def _result_line(call: str, *, is_error: bool = False) -> str:
+    """Return one claude transcript line of a user turn: one call's result."""
+    result = {'type': 'tool_result', 'tool_use_id': call, 'content': ''}
+    if is_error:
+        result['is_error'] = True
+    entry = {
+        'type': 'user',
+        'timestamp': _WRITTEN,
+        'message': {'role': 'user', 'content': [result]},
+    }
+    return json.dumps(entry) + '\n'
+
+
+def _settling(
+    node: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: Optional[str],
+) -> tuple[ClaudeAgent, int]:
+    """Return a claude backend and a step whose session transcript holds ``content``.
+
+    ``None`` writes no transcript.
+    """
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    backend = ClaudeAgent(node, 'claude')
+    session = str(uuid.uuid4())
+    (step_id,) = _steps(node, 1)
+    node.record.step_session('claude', step_id=step_id, model=None, session=session)
+    if content is not None:
+        transcript = pathlib.Path(backend.transcript(session)['path'])
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(content, encoding='utf-8')
+    return backend, step_id
 
 
 def _feed(parser: ClaudeParser, line: str) -> list[Any]:

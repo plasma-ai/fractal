@@ -85,15 +85,18 @@ Enforcement is only as good as the ledger: armed caps over fully-untracked spend
 ([[features/cost/measurement|measurement]]) can never trip, and a run that mixes
 priced and unpriced steps stands against them undercounted, since a `NULL`-cost
 step adds nothing to the guards' figure; the loop warns once per loop process in
-either case. Caps paired with an agent that takes no budget flag and a step with
-no timeout -- no run or iteration wall, no `step_timeout`, and no `timeout:` on
-that step file (SYNC runs on `step_timeout`) -- draw the same one-time warning,
-since one runaway step could overshoot every cap unbounded. A failed ledger read
-holds the last good figure rather than re-inflating headroom, and before the
-run's first good reading it holds the probes outright -- the reserve-entry probe
-included, so unknown spend never reads as drained -- and the untracked warning
-waits for a successful read to prove the spend untracked, never firing for a
-contention window.
+either case. A step whose record leaves part of a reply out (marked
+`partly unpriced`) counts at the spend recorded. Nothing adds a margin for spend
+the engine cannot see: the step leash holds back only the configured reserve.
+Caps paired with an agent that takes no budget flag and a step with no timeout
+-- no run or iteration wall, no `step_timeout`, and no `timeout:` on that step
+file (SYNC runs on `step_timeout`) -- draw the same one-time warning, since one
+runaway step could overshoot every cap unbounded. A failed ledger read holds the
+last good figure rather than re-inflating headroom, and before the run's first
+good reading it holds the probes outright -- the reserve-entry probe included,
+so unknown spend never reads as drained -- and the untracked warning waits for a
+successful read to prove the spend untracked, never firing for a contention
+window.
 
 ## Preflight guarantees
 

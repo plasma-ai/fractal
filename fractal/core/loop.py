@@ -520,6 +520,9 @@ class Loop:
         # must see a substitution the stream recovered from; empty for an
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
+        # this launch's record leaves part of a reply out, so its booked
+        # figure misses that part
+        self._step_partly_unpriced = False
         self._step_limit_seconds = 0
         self._step_ceiling_seconds = 0
         self._step_timeout_effective = self._step_timeout_seconds
@@ -2163,6 +2166,7 @@ class Loop:
                                     status='stopped',
                                     exit_code=0,
                                     metadata=steer_reason,
+                                    partly_unpriced=self._step_partly_unpriced,
                                 )
                             except Exception:
                                 pass
@@ -2371,6 +2375,7 @@ class Loop:
                             status=step_status,
                             exit_code=step_exit_code,
                             metadata=step_reason,
+                            partly_unpriced=self._step_partly_unpriced,
                         )
                         # a step that never reached its launch spent nothing:
                         # stamp the knowable zero so NULL cost stays reserved
@@ -2534,6 +2539,8 @@ class Loop:
         # spent nothing, so its row's cost is a knowable zero -- NULL cost stays
         # reserved for unknowable spend (a kill before the first stream flush)
         self._step_launched = False
+        # nor can a launch that never ran leave a reply out of its record
+        self._step_partly_unpriced = False
 
         def close(result: StepResult) -> StepResult:
             """Fire the terminal pairing for this step's attribution."""
@@ -3140,16 +3147,26 @@ class Loop:
         # the session the stream names, which a capped launch's steer
         # resumes (the reader dies at the cap, so no result carries it)
         stream_session: Optional[str] = None
+        # the instant a result frame named the launch's cost -- spend the
+        # agent completes after it lies past that figure
+        settled_at: Optional[str] = None
+        # the capped reply as the stream recorded it, which the cap's kill
+        # can keep from the agent's own record
+        capped: list[dict[str, Any]] = []
 
         def _render(event: StreamEvent) -> None:
-            nonlocal idle_since, stream_session
+            nonlocal idle_since, stream_session, settled_at
             if self._render is not None:
                 self._render(event)
             if event.session is not None:
                 stream_session = event.session
+            if event.kind == 'result' and event.cost is not None:
+                settled_at = fractal.util.time.utc_now()
             if event.kind == 'result' and event.failed and event.message:
                 failures.append(event.message)
             if watch_cap and event.kind == 'thinking_cap':
+                if event.reply is not None:
+                    capped.append(event.reply)
                 raise _ThinkingCap()
             if event.kind == 'acting':
                 idle_since = time.monotonic()
@@ -3224,17 +3241,32 @@ class Loop:
 
         # a launch that ended without its authoritative cost (killed, or its
         # stream dead before the closing figure) is priced from the provider's
-        # own usage record, read once the process has exited and flushed it
-        if self._step_id is not None and (result is None or not result.final):
+        # own usage record, read once the process has exited and flushed it;
+        # one that reached it is priced for the spend past it, since the
+        # process outlives its result while background work runs
+        if self._step_id is not None:
+            after = settled_at if result is not None and result.final else None
             try:
-                agent.settle_cost(
+                self._step_partly_unpriced = agent.settle_cost(
                     step_id=self._step_id,
                     started=launched,
                     ended=fractal.util.time.utc_now(),
+                    after=after,
+                    replies=capped,
                 )
             except Exception as error:
                 print(
                     f'Warning: pricing the ended launch failed ({error})',
+                    file=sys.stderr,
+                )
+                # with no result figure, the stream's estimate leaves out
+                # whatever the failed settle would have added
+                self._step_partly_unpriced = after is None
+            if self._step_partly_unpriced:
+                print(
+                    "Warning: a reply's spend is missing from the launch's"
+                    ' record; its step books the spend recorded (partly'
+                    ' unpriced)',
                     file=sys.stderr,
                 )
 
@@ -3567,6 +3599,9 @@ class Loop:
         # against the node default, or erased with it)
         saved_model = self._step_model
         saved_served = self._step_served
+        # and its own cut-off verdict over the awaited step's, which that
+        # step's close books
+        saved_partly = self._step_partly_unpriced
         print()
         print(f'--- SYNC ({label}) ---')
         self._step_label = f'SYNC ({label})'
@@ -3629,6 +3664,7 @@ class Loop:
                     status=sync_status,
                     exit_code=sync_exit_code,
                     metadata=sync_reason,
+                    partly_unpriced=self._step_partly_unpriced,
                 )
                 # a sync that never reached its launch spent nothing: stamp the
                 # knowable zero so NULL cost stays reserved for unknowable spend
@@ -3650,6 +3686,7 @@ class Loop:
         self._step_launched = saved_launched
         self._step_model = saved_model
         self._step_served = saved_served
+        self._step_partly_unpriced = saved_partly
         return result, duration, sync_step_id
 
     def _wait_for_children(self: Loop, context: str) -> bool:

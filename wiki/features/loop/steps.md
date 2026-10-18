@@ -160,7 +160,10 @@ API `message_delta` with a `max_tokens` stop (the loop always passes
 `--include-partial-messages`, and the stop lands before Claude Code requests the
 continuation), or, as a backstop, Claude Code's "Output token limit hit"
 continuation, matched on its text alone since its flag is undocumented.
-Assistant frames cannot serve: their `stop_reason` is always null.
+Assistant frames cannot serve: their `stop_reason` is always null. When the
+closing delta reported the reply's usage, the event carries the reply as the
+stream recorded it, so the killed launch's settle books it
+([[features/cost/measurement|measurement]]).
 
 **No progress**: a watchdog thread in the launch times the agent's own idle span
 against the module constant `NO_PROGRESS_SECONDS` (1800). The provider parser

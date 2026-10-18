@@ -41,6 +41,7 @@ __all__ = [
     'test_cost_remaining_clamps_at_zero_when_overspent',
     'test_cost_spent_marks_untracked_spend',
     'test_cost_spent_and_breakdown_disclose_unpriced_count',
+    'test_node_cost_discloses_partly_unpriced_steps',
     'test_cost_spent_scope_flags',
     'test_cost_scope_flags_reject_two_scopes',
     'test_cost_refuses_another_nodes_scope',
@@ -391,6 +392,49 @@ def test_cost_spent_and_breakdown_disclose_unpriced_count(repo: dict) -> None:
     rows = _csv_rows(breakdown.stdout)
     own = next(row for row in rows if row['node'] == 'main.task')
     assert float(own['spent']) == pytest.approx(STEP_COST)
+    assert note in breakdown.stderr, breakdown.stderr
+
+
+def test_node_cost_discloses_partly_unpriced_steps(repo: dict) -> None:
+    """``cost spent``/``breakdown`` disclose steps missing a reply's spend.
+
+    A launch whose record leaves part of a reply out books the spend its
+    provider recorded, so its figure sums on stdout as if whole; a flush
+    landing after the close does not make it whole. Both readings
+    note the step on stderr, while stdout stays parseable.
+    """
+    root = repo['root']
+    assert _run(root, 'node', 'init', 'partly', '--agent', 'claude').returncode == 0
+    partly = root / '.worktrees' / 'main.partly'
+    record = Node(partly).record
+    run_id = record.run_start()
+    iter_id = record.iter_start(run_id=run_id, iter=1)
+    step_id = record.step_start(
+        iter_id=iter_id,
+        run_id=run_id,
+        step=1,
+        step_name='PLAN',
+    )
+    record.step_cost(step_id=step_id, cost=STEP_COST)
+    record.step_end(
+        step_id=step_id,
+        status='stopped',
+        exit_code=0,
+        metadata='steered: thinking cap',
+        partly_unpriced=True,
+    )
+    # a late flush leaves the cut reply unpriced
+    record.step_cost(step_id=step_id, cost=2 * STEP_COST)
+    note = (
+        "1 partly unpriced step (a reply's spend missing from the record)"
+        ' counted at recorded spend'
+    )
+    spent = _run(partly, 'node', 'cost', 'spent', '--run', str(run_id))
+    assert spent.returncode == 0, spent.stderr
+    assert float(spent.stdout.strip().removeprefix('$')) == pytest.approx(2 * STEP_COST)
+    assert note in spent.stderr, spent.stderr
+    breakdown = _run(partly, 'node', 'cost', 'breakdown', '--run', str(run_id))
+    assert breakdown.returncode == 0, breakdown.stderr
     assert note in breakdown.stderr, breakdown.stderr
 
 
