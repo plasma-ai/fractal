@@ -190,16 +190,19 @@ pool a cheaper token rate buys more steps, not a lower bill.
    `true`/`false`; rendered step settings are checked before init.
 
    Jinja renders once: values containing `{{...}}` stay literal, and `$VAR`
-   remains for runtime rendering. Includes read only the same committed template
-   bundle. `--include`/`--exclude` select deployment outputs; excluded files
-   remain available as include source, and `_partials/` or README files cannot
-   be selected as outputs. The child's generated `_template.toml` records the
-   complete inputs and source commit. Edit the rendered charter directly to
-   steer it; changing the record is not a live update. `node diff` and bare
-   `node reseed` replay recorded values, while an explicit `--ref` or
-   `--template` refresh adds defaults only for missing keys. Reseed refreshes
-   steps, scripts, skills, and agent settings while preserving `NODE.md`,
-   config, and memory, so charter drift can remain.
+   remains for runtime rendering. Includes read the same committed template
+   bundle; a literal name with a leading `/`
+   (`{% include '/campaign/DOCTRINE.md' %}`) reads a shared file from the repo
+   root at the template's commit, and a shared file never deploys.
+   `--include`/`--exclude` select deployment outputs; excluded files remain
+   available as include source, and `_partials/` or README files cannot be
+   selected as outputs. The child's generated `_template.toml` records the
+   complete inputs, the source commit, and each shared file's blob id. Edit the
+   rendered charter directly to steer it; changing the record is not a live
+   update. `node diff` and bare `node reseed` replay recorded values, while an
+   explicit `--ref` or `--template` refresh adds defaults only for missing keys.
+   Reseed refreshes steps, scripts, skills, and agent settings while preserving
+   `NODE.md`, config, and memory, so charter drift can remain.
 
    For a well-specified single-mission leaf, consider the **leaf step set**:
    trim the child to PLAN + EXECUTE + COMMIT. A leaner leaf uses a leaner

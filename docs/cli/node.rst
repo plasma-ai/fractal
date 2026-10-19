@@ -86,15 +86,17 @@ bundle; a name with a leading ``/``, such as
 ``{% include '/campaign/stations/DOCTRINE.md' %}``, names a shared file by its
 repo-relative path instead, read at the same commit. Shared names must be
 literal, and a shared file may include another. A symlink, a folder, a
-submodule, a credential-named file, a ``..`` step, a ``.git`` or
+submodule, a credential-named file, a ``..`` step, a ``.git``, ``.fractal``, or
 ``.worktrees`` component, and a path the commit does not track all refuse
-before any worktree exists. A shared file renders only inside the output that
-includes it and never deploys into the node. The template's optional
-``_template.toml`` holds literal ``[values]`` defaults, while the node's
-generated file records the complete resolved inputs, the source commit, and
-each shared file's blob id. TOML is parsed as data, without rendering, and
-metadata is not a standalone output. An explicit Jinja include treats any named
-bundle file as source.
+before any worktree exists, naming the source that holds the include. A shared
+file renders only inside the output that includes it and never deploys into the
+node; ``node reseed`` never rewrites ``NODE.md``, so a changed shared file
+reaches an existing charter only through a hand edit (``node diff`` prints the
+delta). The template's optional ``_template.toml`` holds literal ``[values]``
+defaults, while the node's generated file records the complete resolved inputs,
+the source commit, and each shared file's blob id. TOML is parsed as data,
+without rendering, and metadata is not a standalone output. An explicit Jinja
+include treats any named bundle file as source.
 
 Jinja supports includes, imports, macros, inheritance, branches, loops, and raw
 blocks. Source line endings normalize to LF, trailing newlines are retained,

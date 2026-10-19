@@ -260,25 +260,35 @@ instead of a copy each:
 The include statement is the declaration -- no metadata file lists shared files.
 At seed time fractal parses every source in the folder as Jinja, without
 rendering it, collects each literal repo-rooted name, and reads the named file
-at the template's commit, through that commit's own tree and never the disk.
-Shared files are parsed the same way, so one may include another. Inside a
-shared file, a name without the leading `/` still names a file in the template
-folder, since every name resolves against the template being seeded. A source
-that is not UTF-8 text or not valid Jinja yields no names; rendering reports it
-if an output uses it.
+at the template's commit, through that commit's own tree and never the disk. The
+read passes the same git filters an archived template file does (an LFS smudge,
+line-ending conversion, `ident`), chosen by the worktree's attributes. Shared
+files are parsed the same way, so one may include another, and each file is read
+once even when includes loop. Inside a shared file, a name without the leading
+`/` still names a file in the template folder, since every name resolves against
+the template being seeded. A source that is not UTF-8 text or not valid Jinja
+yields no names; rendering reports it if an output uses it.
+
+Every source in the folder is scanned, documentation included, so a literal
+repo-rooted name in a `README.md` example must resolve too; keep such an example
+inside a `{% raw %}` block, which the scan reads as text.
 
 A shared file is source only: it renders inside the output that includes it,
 never as an output of its own, never deploys into the node, and is never
 selectable by `--include` or `--exclude`. Reading from the commit's own tree
 keeps every read inside the repository. The read refuses each of these before
-any worktree exists, naming the template and the include:
+any worktree exists, naming the template, the source or shared file holding the
+include, and the name:
 
-- a name that is `/`, `/.`, or carries a `..` step;
-- a `.git` or `.worktrees` component, matched casefolded;
+- a name that is `/`, `/.`, absolute past its `/`, or carries a `..` step;
+- a `.git`, `.fractal`, or `.worktrees` component, matched casefolded -- node
+  data and git machinery are never seed source;
 - a credential-named file (the [[#The credential guard]] list);
 - a symlink (never followed), a folder, or a submodule at the commit;
-- a path the commit does not track, even under `ignore missing` (with the
-  uncommitted-copy hint when a copy exists on disk).
+- a path the commit does not track, even under `ignore missing`. The refusal
+  says when an untracked copy exists on disk under the exact name, and when a
+  copy on disk matches the name only through a symlink or a letter-case
+  difference (which committing would not fix).
 
 The names must be literal. A computed name, such as
 `{% include doctrine_path %}`, cannot be known before rendering, so the seed
@@ -289,7 +299,10 @@ template-relative name still works, since the whole folder is in the snapshot.
 The provenance record lists each shared file with the blob id read (see
 [[#The provenance record]]), and the root-differs notice compares those blob ids
 too. `node diff` re-reads the shared files at the recorded commit, and
-`node reseed --ref` or `--template` reads them at the new commit.
+`node reseed --ref` or `--template` reads them at the new commit. Reseed never
+rewrites `NODE.md`, so a shared file the charter includes reaches an existing
+node only through a hand edit of `NODE.md`; `node diff` after the reseed prints
+the exact delta to apply.
 
 ## The provenance record
 
@@ -306,15 +319,16 @@ maps each shared file's repo-relative path to the 40-hex blob id read:
 "campaign/stations/DOCTRINE.md" = "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
 ```
 
-Its presence is what marks a node as seeded from a template. It is a node record
-file -- the commit pipeline's estate content law counts it beside `NODE.md` and
-`config.json` (see [[features/loop/commit_pipeline]]) -- so it commits with the
-seed, and a `--reset` without `--template` drops it, the forget-unless-repassed
-rule init flags have. The record is hand-editable and validated where it is
-read: `node diff` and `node reseed` refuse a path that is not worktree-relative,
-a commit that is not a full 40-hex sha, `include` beside `exclude`, a `[shared]`
-entry that is not a repo-relative path (absolute, or with a `..` step) mapped to
-a full 40-hex blob id, or a malformed listing or values table.
+The record's presence is what marks a node as seeded from a template. The record
+is a node record file -- the commit pipeline's estate content law counts it
+beside `NODE.md` and `config.json` (see [[features/loop/commit_pipeline]]) -- so
+it commits with the seed, and a `--reset` without `--template` drops it, the
+forget-unless-repassed rule init flags have. The record is hand-editable and
+validated where it is read: `node diff` and `node reseed` refuse a path that is
+not worktree-relative, a commit that is not a full 40-hex sha, `include` beside
+`exclude`, a `[shared]` entry that is not a repo-relative path (absolute, or
+with a `..` step) mapped to a full 40-hex blob id, or a malformed listing or
+values table.
 
 The record stores values, not references to the source defaults or the external
 values file. Editing those source files does not change an existing node.
@@ -387,8 +401,9 @@ change.
 
 - `--ref=<committish>` reads the recorded folder at another commit -- how a
   template improvement, or a change to a shared file it includes, reaches an
-  existing node. A ref at which the recorded path is absent (the folder moved or
-  was retired) refuses naming the re-point remedy.
+  existing node's steps, scripts, skills, and agent files (never its `NODE.md`).
+  A ref at which the recorded path is absent (the folder moved or was retired)
+  refuses naming the re-point remedy.
 - `--template=<path>[@<ref>]` re-points the node at another folder, read at the
   node branch's own tip when the value names no ref: the new path and the commit
   read land in `_template.toml`, with the resolved values and unchanged listing
