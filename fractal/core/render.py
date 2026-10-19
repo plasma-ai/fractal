@@ -102,10 +102,11 @@ def rooted_references(blob: bytes) -> list[str]:
 
     Parses -- never renders -- the source in the seed environment and
     collects each include, import, or extends name that starts with
-    ``/``. A source that is not UTF-8 text or not valid Jinja yields
-    none: only a rendered or included source must decode and parse, and
-    rendering reports it where it is used. A computed name cannot be
-    known before rendering, so the loader refuses a repo-rooted one then.
+    ``/``. A source that is not UTF-8 text or not valid Jinja (nesting
+    too deep for the parser included) yields none: only a rendered or
+    included source must decode and parse, and rendering reports it
+    where it is used. A computed name cannot be known before rendering,
+    so the loader refuses a repo-rooted one then.
 
     Args:
         blob: The committed source bytes.
@@ -116,7 +117,7 @@ def rooted_references(blob: bytes) -> list[str]:
     """
     try:
         ast = _SeedEnvironment().parse(blob.decode('utf-8'))
-    except (UnicodeDecodeError, jinja2.TemplateSyntaxError):
+    except (UnicodeDecodeError, jinja2.TemplateSyntaxError, RecursionError):
         return []
     names = jinja2.meta.find_referenced_templates(ast)
     return [name for name in names if name is not None and name.startswith('/')]

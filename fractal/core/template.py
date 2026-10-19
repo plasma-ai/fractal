@@ -356,6 +356,47 @@ def read_sources(bundle: pathlib.Path) -> dict[str, bytes]:
     return result
 
 
+def _disk_hint(worktree: pathlib.Path, relpath: str) -> str:
+    """Describe what the disk holds at a path a commit does not track.
+
+    An untracked copy under the exact name is the uncommitted-copy hint.
+    A name that reaches an entry on disk only through a symlink or another
+    letter case (a case-insensitive filesystem) says so instead:
+    committing that entry would not track the name.
+
+    Args:
+        worktree: Worktree root the path is relative to.
+        relpath: Worktree-relative POSIX path.
+
+    Returns:
+        The hint with its leading space, or ``''`` when the disk holds
+        nothing at the path.
+
+    """
+    posix = pathlib.PurePosixPath(relpath)
+    target = worktree / posix
+    if not target.exists():
+        return ''
+    inexact = (
+        ' (a copy on disk matches the name only through a symlink or a'
+        ' letter-case difference)'
+    )
+    # the exact name resolves to itself, with no symlink on the way
+    root = worktree.resolve()
+    resolved = target.resolve()
+    if not resolved.is_relative_to(root):
+        return inexact
+    if resolved.relative_to(root).as_posix() != posix.as_posix():
+        return inexact
+    # and spells each component as its parent directory lists it
+    parent = worktree
+    for part in posix.parts:
+        if part not in {entry.name for entry in parent.iterdir()}:
+            return inexact
+        parent = parent / part
+    return ' (an uncommitted copy exists on disk)'
+
+
 def read_shared(
     sources: dict[str, bytes],
     *,
@@ -386,45 +427,52 @@ def read_shared(
 
     Raises:
         ValueError: If a repo-rooted include names no repo-relative file,
-            carries a ``..`` step or a ``.git`` or ``.worktrees``
-            component, or names a credential-named file
+            carries a ``..`` step or a ``.git``, ``.fractal``, or
+            ``.worktrees`` component, or names a credential-named file
             (:data:`CREDENTIAL_NAMES`), a symlink, a folder, a submodule,
-            or a path untracked at the commit.
+            or a path untracked at the commit; each refusal names the
+            source holding the include.
+        RuntimeError: If git cannot read a shared file's blob.
 
     """
     blobs: dict[str, bytes] = {}
     shared: dict[str, str] = {}
-    pending = [name for blob in sources.values() for name in rooted_references(blob)]
+    # each pending name rides with the source that holds it, for messages
+    pending = [
+        (f'source {relfile}', name)
+        for relfile, blob in sources.items()
+        for name in rooted_references(blob)
+    ]
     while pending:
-        name = pending.pop(0)
+        origin, name = pending.pop(0)
         if name in blobs:
             continue
+        where = f'Template {path!r} {origin} includes'
         # past its leading '/', the name is a plain path from the repo root
         relname = pathlib.PurePosixPath(name[1:])
         parts = tuple(part.casefold() for part in relname.parts)
         if not parts or relname.is_absolute():
             raise ValueError(
-                f'Template {path!r} includes {name!r}, which names no'
-                ' repo-relative file; a repo-rooted include is one "/" and a'
-                ' file path from the repo root.'
+                f'{where} {name!r}, which names no repo-relative file; a'
+                ' repo-rooted include is one "/" and a file path from the repo'
+                ' root.'
             )
         if '..' in parts:
             raise ValueError(
-                f'Template {path!r} includes {name!r}, which contains ".."'
-                ' steps; a repo-rooted include names its file from the repo'
-                ' root.'
+                f'{where} {name!r}, which contains ".." steps; a repo-rooted'
+                ' include names its file from the repo root.'
             )
-        if '.git' in parts or WORKTREES_FOLDER in parts:
+        if '.git' in parts or FRACTAL_FOLDER in parts or WORKTREES_FOLDER in parts:
             raise ValueError(
-                f'Template {path!r} includes {name!r}, which contains a .git or'
+                f'{where} {name!r}, which contains a .git, {FRACTAL_FOLDER} or'
                 f' {WORKTREES_FOLDER} component; a shared file is ordinary'
-                f' project content, tracked outside .git/ and {WORKTREES_FOLDER}/.'
+                f' project content, tracked outside .git/, {FRACTAL_FOLDER}/'
+                f' and {WORKTREES_FOLDER}/.'
             )
         if any(fnmatch.fnmatchcase(parts[-1], shape) for shape in CREDENTIAL_NAMES):
             raise ValueError(
-                f'Template {path!r} includes a credential-named file: {name!r};'
-                ' credentials never deploy from a template -- a node links its'
-                ' own at seed time.'
+                f'{where} a credential-named file: {name!r}; credentials never'
+                ' deploy from a template -- a node links its own at seed time.'
             )
         # the commit's own tree is the only source, so no path can escape
         # the repository -- a symlink refuses, never followed
@@ -432,37 +480,42 @@ def read_shared(
         cmd = ['ls-tree', commit, '--', f':(literal){relpath}']
         listing = fractal.util.git.run(cmd, cwd=worktree)
         if not listing:
-            on_disk = ''
-            if (worktree / relpath).exists():
-                on_disk = ' (an uncommitted copy exists on disk)'
+            on_disk = _disk_hint(worktree, relpath)
             raise ValueError(
-                f'Template {path!r} includes {name!r}, which is not tracked at'
-                f' commit {commit}{on_disk}; commit the file on the branch the'
-                ' child forks from, or pass @<ref> to read the template at'
-                ' another commit.'
+                f'{where} {name!r}, which is not tracked at commit'
+                f' {commit}{on_disk}; commit the file on the branch the child'
+                ' forks from, or pass @<ref> to read the template at another'
+                ' commit.'
             )
         mode, kind, blob_id = listing.partition('\t')[0].split()
         if mode == '120000':
             raise ValueError(
-                f'Template {path!r} includes {name!r}, a symlink at {commit};'
-                ' a link is never followed -- include its target file instead.'
+                f'{where} {name!r}, a symlink at {commit}; a link is never'
+                ' followed -- include its target file instead.'
             )
         if kind == 'tree':
             raise ValueError(
-                f'Template {path!r} includes {name!r}, a folder at {commit};'
-                ' include a file inside it.'
+                f'{where} {name!r}, a folder at {commit}; include a file inside it.'
             )
         if kind == 'commit':
             raise ValueError(
-                f'Template {path!r} includes {name!r}, a submodule at'
-                f' {commit}; a shared file is tracked by this repository itself.'
+                f'{where} {name!r}, a submodule at {commit}; a shared file is'
+                ' tracked by this repository itself.'
             )
-        # the blob joins the snapshot, and its own includes queue behind it
-        cmd = ['git', 'cat-file', 'blob', blob_id]
-        blob = subprocess.run(cmd, capture_output=True, cwd=worktree, check=True).stdout
+        # the blob joins the snapshot through the filters an archived folder
+        # file passes (smudge, eol, ident -- the worktree's attributes pick
+        # them), and its own includes queue behind it
+        cmd = ['cat-file', '--filters', f'--path={relpath}', blob_id]
+        blob = fractal.util.git.run_bytes(cmd, cwd=worktree)
+        if blob is None:
+            raise RuntimeError(
+                f'git cat-file failed reading shared file {relpath!r} at {commit}.'
+            )
         blobs[name] = blob
         shared[relpath] = blob_id
-        pending.extend(rooted_references(blob))
+        pending.extend(
+            (f'shared file {relpath}', ref) for ref in rooted_references(blob)
+        )
     return blobs, shared
 
 
@@ -507,9 +560,7 @@ def materialize(
         # git exits 128 with a distinct message per missing half: the
         # pathspec miss (folder untracked at the commit) and the unknown rev
         if 'did not match any files' in stderr:
-            on_disk = ''
-            if (worktree / path).exists():
-                on_disk = ' (an uncommitted copy exists on disk)'
+            on_disk = _disk_hint(worktree, path)
             raise ValueError(
                 f'Template folder {path!r} is not tracked at commit'
                 f' {commit}{on_disk}; commit the folder on the branch the'
