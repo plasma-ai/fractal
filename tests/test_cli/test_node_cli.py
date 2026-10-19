@@ -98,6 +98,7 @@ __all__ = [
     'test_reseed_ref_picks_up_a_changed_shared_include',
     'test_reseed_refuses_a_missing_path_at_a_ref_and_re_points',
     'test_reseed_bare_re_point_reads_the_node_branch_tip',
+    'test_reseed_re_point_names_a_shared_file_differing_on_the_root',
     'test_reseed_prints_no_root_notice_without_a_re_point',
     'test_reseed_refuses_a_template_carrying_agent_credentials',
     'test_reseed_refuses_steps_breaking_the_discovery_contract',
@@ -2757,6 +2758,60 @@ def test_reseed_bare_re_point_reads_the_node_branch_tip(repo: dict) -> None:
         assert data['commit'] == tip
     finally:
         _run(root, 'node', 'delete', 'main.pointer', '--force')
+
+
+def test_reseed_re_point_names_a_shared_file_differing_on_the_root(
+    repo: dict,
+) -> None:
+    """A re-point's root-differs notice names a shared file the root moved on.
+
+    The template folder is the same on the root and the node branch, but
+    the shared file its charter includes changed on the root after the
+    spawn: a bare re-point reads the node branch's tip, and its notice
+    names the shared file that differs.
+    """
+    root = repo['root']
+    _commit_template(root, 'shared/pointdoc', {'DOCTRINE.md': 'doctrine v1\n'})
+    charter = (
+        '# sharedpoint\n\n## Instructions\n\n'
+        "{% include '/shared/pointdoc/DOCTRINE.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+    }
+    _commit_template(root, 'templates/sharedpoint', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'sharedpoint',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/sharedpoint',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        # only the shared file moves on, and only on the root
+        _commit_template(root, 'shared/pointdoc', {'DOCTRINE.md': 'doctrine v2\n'})
+        repointed = _run(
+            root,
+            'node',
+            'reseed',
+            'main.sharedpoint',
+            '--template',
+            'templates/sharedpoint',
+        )
+        assert repointed.returncode == 0, repointed.stdout + repointed.stderr
+        assert (
+            "Notice: template 'templates/sharedpoint' differs on the root branch"
+            " (differing shared files: 'shared/pointdoc/DOCTRINE.md'); pass"
+            " --template=templates/sharedpoint@main to read the root's copy."
+        ) in repointed.stdout, repointed.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.sharedpoint', '--force')
 
 
 def test_reseed_prints_no_root_notice_without_a_re_point(repo: dict) -> None:

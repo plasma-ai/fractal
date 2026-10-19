@@ -83,6 +83,7 @@ __all__ = [
     'test_init_template_defaults_and_includes_replay',
     'test_init_template_shared_include_reads_the_template_commit',
     'test_init_template_shared_include_recurses_and_never_deploys',
+    'test_init_template_shared_include_cycle_reads_each_file_once',
     'test_init_template_validates_rendered_step_settings',
     'test_init_template_docket_anchor_defaults_to_the_fork_commit',
     'test_child_inherits_skills_only_on_request',
@@ -2242,7 +2243,8 @@ def test_init_template_shared_include_reads_the_template_commit(
     uncommitted edit on disk -- records its path with the blob id read,
     and prints the root-differs notice naming it, though the template
     folder itself is unchanged. A root commit touching neither draws no
-    notice, and ``@<root>`` reads the root's committed copy.
+    notice, ``@<root>`` reads the root's committed copy, and a shared file
+    only the parent carries -- absent on the root -- draws no notice.
     """
     Node(git_repo).init(agent='claude', user=True)
     _commit_template(git_repo, 'campaign', {'DOCTRINE.md': 'doctrine v1\n'})
@@ -2254,6 +2256,9 @@ def test_init_template_shared_include_reads_the_template_commit(
     files = {'config.json': '{}\n', 'NODE.md': charter}
     _commit_template(git_repo, 'templates/station', files)
     station = f'{git_repo}/templates/station'
+    # a second template, on the root too, includes a file nobody has yet
+    files['NODE.md'] = charter.replace('DOCTRINE.md', 'DRAFT.md')
+    _commit_template(git_repo, 'templates/draft', files)
     # the parent forks here, then the root moves on with an unrelated file
     Node(git_repo).init(name='task')
     fork = _git(git_repo, 'rev-parse', 'main.task').stdout.strip()
@@ -2282,6 +2287,13 @@ def test_init_template_shared_include_reads_the_template_commit(
     ref_dir = _node_dir(git_repo, 'main.task.ref')
     assert 'doctrine v2\n' in (ref_dir / 'NODE.md').read_text(encoding='utf-8')
     assert 'Notice: template' not in output
+    # a shared file only the parent commits is absent on the root: no notice
+    worktree = git_repo / '.worktrees' / 'main.task'
+    _commit_template(worktree, 'campaign', {'DRAFT.md': 'draft v1\n'})
+    output = Node(git_repo).init(name='draft', template=f'{git_repo}/templates/draft')
+    draft_dir = _node_dir(git_repo, 'main.task.draft')
+    assert 'draft v1\n' in (draft_dir / 'NODE.md').read_text(encoding='utf-8')
+    assert 'Notice: template' not in output
 
 
 def test_init_template_shared_include_recurses_and_never_deploys(
@@ -2290,15 +2302,20 @@ def test_init_template_shared_include_recurses_and_never_deploys(
     """A shared file may include another, and no shared file deploys.
 
     The charter includes ``/campaign/DOCTRINE.md``, which includes
-    ``/campaign/RULES.md``, and a step includes the rules directly: both
-    render with the spawn's inputs and both land in the record with
-    their blob ids, but neither deploys into the node, and neither is a
-    selectable output -- an ``--include`` naming one matches nothing.
+    ``/campaign/RULES.md``; one step includes the rules directly, one
+    extends ``/campaign/BASE.md``, and one imports macros from
+    ``/campaign/MACROS.md``. All of them render with the spawn's inputs
+    and land in the record with their blob ids, but none deploys into
+    the node, and none is a selectable output -- an ``--include`` naming
+    one matches nothing. An error inside a shared file names that file
+    and line.
     """
     Node(git_repo).init(agent='claude', user=True)
     files = {
         'DOCTRINE.md': "doctrine\n{% include '/campaign/RULES.md' %}",
         'RULES.md': 'rules for {{ role }}\n',
+        'BASE.md': '# base\n{% block body %}{% endblock %}\n',
+        'MACROS.md': '{% macro hi(name) %}hi {{ name }}{% endmacro %}',
     }
     _commit_template(git_repo, 'campaign', files)
     charter = (
@@ -2310,9 +2327,22 @@ def test_init_template_shared_include_recurses_and_never_deploys(
         'config.json': '{}\n',
         'NODE.md': charter,
         'steps/01-GO.md': "# go\n{% include '/campaign/RULES.md' %}",
+        'steps/02-BASE.md': (
+            "{% extends '/campaign/BASE.md' %}{% block body %}x{% endblock %}"
+        ),
+        'steps/03-MACRO.md': (
+            "# macro\n{% import '/campaign/MACROS.md' as m %}{{ m.hi('y') }}\n"
+        ),
     }
     sha = _commit_template(git_repo, 'templates/station', files)
     station = f'{git_repo}/templates/station'
+    # a missing input inside a shared file names the file by its repo path
+    with pytest.raises(
+        ValueError,
+        match=r"Template file campaign/RULES\.md:1: 'role' is undefined",
+    ) as refused:
+        Node(git_repo).init(name='task', template=station)
+    assert 'templates/station//' not in str(refused.value)
     # a shared file is source, never a selectable output
     with pytest.raises(
         ValueError,
@@ -2328,16 +2358,57 @@ def test_init_template_shared_include_recurses_and_never_deploys(
     node_dir = _node_dir(git_repo, 'main.task')
     charter = (node_dir / 'NODE.md').read_text(encoding='utf-8')
     assert 'doctrine\nrules for scout\n' in charter
-    step = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
-    assert step == '# go\nrules for scout\n'
+    steps = {
+        name: (node_dir / 'steps' / name).read_text(encoding='utf-8')
+        for name in ('01-GO.md', '02-BASE.md', '03-MACRO.md')
+    }
+    assert steps == {
+        '01-GO.md': '# go\nrules for scout\n',
+        '02-BASE.md': '# base\nx\n',
+        '03-MACRO.md': '# macro\nhi y\n',
+    }
     data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+    shared = ('DOCTRINE.md', 'RULES.md', 'BASE.md', 'MACROS.md')
+    relpaths = [f'campaign/{name}' for name in shared]
     assert data['shared'] == {
         relpath: _git(git_repo, 'rev-parse', f'{sha}:{relpath}').stdout.strip()
-        for relpath in ('campaign/DOCTRINE.md', 'campaign/RULES.md')
+        for relpath in relpaths
     }
-    # neither shared file reaches the node data directory
+    # no shared file reaches the node data directory
     deployed = {entry.name for entry in node_dir.rglob('*')}
-    assert not deployed & {'campaign', 'DOCTRINE.md', 'RULES.md'}
+    assert not deployed & {'campaign', *shared}
+
+
+def test_init_template_shared_include_cycle_reads_each_file_once(
+    git_repo: pathlib.Path,
+) -> None:
+    """Shared files that include each other read once each, and the seed ends.
+
+    ``A.md`` includes ``B.md`` behind a branch the spawn's inputs leave
+    off, and ``B.md`` includes ``A.md`` back: the snapshot follows both
+    names whatever the branch, reads each file once, and the charter
+    renders the branch the inputs take.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    files = {
+        'A.md': "A{% if deep %}{% include '/campaign/B.md' %}{% endif %}",
+        'B.md': "{% include '/campaign/A.md' %}",
+    }
+    _commit_template(git_repo, 'campaign', files)
+    charter = (
+        '# station\n\n## Instructions\n\n'
+        "{% include '/campaign/A.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {'config.json': '{}\n', 'NODE.md': charter}
+    _commit_template(git_repo, 'templates/station', files)
+    station = f'{git_repo}/templates/station'
+    Node(git_repo).init(name='task', template=station, sets=['deep=false'])
+    node_dir = _node_dir(git_repo, 'main.task')
+    charter = (node_dir / 'NODE.md').read_text(encoding='utf-8')
+    assert '## Instructions\n\nA\n## Completion' in charter
+    data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+    assert set(data['shared']) == {'campaign/A.md', 'campaign/B.md'}
 
 
 def test_init_template_validates_rendered_step_settings(
