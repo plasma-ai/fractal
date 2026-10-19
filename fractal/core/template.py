@@ -21,7 +21,7 @@ from fractal.constants import CONFIG_FILE, FRACTAL_FOLDER, WORKTREES_FOLDER
 from fractal.typing import PathLike
 
 from .config import KEYS
-from .render import render_seed
+from .render import render_seed, rooted_references
 
 __all__ = []
 
@@ -35,7 +35,7 @@ _VALUE_NAME = re.compile(r'[a-z_][a-z0-9_]*')
 _RESERVED_NAMES = ('true', 'false', 'none', 'not', 'self')
 
 #: the keys a provenance record carries beside its [values] table
-_PROVENANCE_KEYS = frozenset({'path', 'commit', 'include', 'exclude'})
+_PROVENANCE_KEYS = frozenset({'path', 'commit', 'include', 'exclude', 'shared'})
 
 # a recorded commit is the full sha the folder deploys at -- the verbs
 # that act on a record resolve it verbatim, so anything shorter refuses
@@ -356,6 +356,169 @@ def read_sources(bundle: pathlib.Path) -> dict[str, bytes]:
     return result
 
 
+def _disk_hint(worktree: pathlib.Path, relpath: str) -> str:
+    """Describe what the disk holds at a path a commit does not track.
+
+    An untracked copy under the exact name is the uncommitted-copy hint.
+    A name that reaches an entry on disk only through a symlink or another
+    letter case (a case-insensitive filesystem) says so instead:
+    committing that entry would not track the name.
+
+    Args:
+        worktree: Worktree root the path is relative to.
+        relpath: Worktree-relative POSIX path.
+
+    Returns:
+        The hint with its leading space, or ``''`` when the disk holds
+        nothing at the path.
+
+    """
+    posix = pathlib.PurePosixPath(relpath)
+    target = worktree / posix
+    if not target.exists():
+        return ''
+    inexact = (
+        ' (a copy on disk matches the name only through a symlink or a'
+        ' letter-case difference)'
+    )
+    # the exact name resolves to itself, with no symlink on the way
+    root = worktree.resolve()
+    resolved = target.resolve()
+    if not resolved.is_relative_to(root):
+        return inexact
+    if resolved.relative_to(root).as_posix() != posix.as_posix():
+        return inexact
+    # and spells each component as its parent directory lists it
+    parent = worktree
+    for part in posix.parts:
+        if part not in {entry.name for entry in parent.iterdir()}:
+            return inexact
+        parent = parent / part
+    return ' (an uncommitted copy exists on disk)'
+
+
+def read_shared(
+    sources: dict[str, bytes],
+    *,
+    worktree: pathlib.Path,
+    path: str,
+    commit: str,
+) -> tuple[dict[str, bytes], dict[str, str]]:
+    """Read the shared files a source snapshot includes, at the same commit.
+
+    An include, import, or extends name with a leading ``/`` names a
+    shared file by its repo-relative path. Every literal one is collected
+    by parsing the snapshot, then each shared file the same way, so a
+    shared file may include another. Each resolves through the commit's
+    own tree (``git ls-tree``, run from the worktree root), never the
+    disk, so an uncommitted edit never deploys. A shared file is source
+    only: it never renders as an output or deploys into the node.
+
+    Args:
+        sources: The folder's source snapshot (:func:`read_sources`).
+        worktree: Worktree root the path is recorded against.
+        path: Worktree-relative template folder path (POSIX), for messages.
+        commit: The commit the folder was read at.
+
+    Returns:
+        Tuple of the shared sources -- each repo-rooted include name
+        mapped to its bytes, for the snapshot -- and the shared record:
+        each repo-relative path mapped to its blob id.
+
+    Raises:
+        ValueError: If a repo-rooted include names no repo-relative file,
+            carries a ``..`` step or a ``.git``, ``.fractal``, or
+            ``.worktrees`` component, or names a credential-named file
+            (:data:`CREDENTIAL_NAMES`), a symlink, a folder, a submodule,
+            or a path untracked at the commit; each refusal names the
+            source holding the include.
+        RuntimeError: If git cannot read a shared file's blob.
+
+    """
+    blobs: dict[str, bytes] = {}
+    shared: dict[str, str] = {}
+    # each pending name rides with the source that holds it, for messages
+    pending = [
+        (f'source {relfile}', name)
+        for relfile, blob in sources.items()
+        for name in rooted_references(blob)
+    ]
+    while pending:
+        origin, name = pending.pop(0)
+        if name in blobs:
+            continue
+        where = f'Template {path!r} {origin} includes'
+        # past its leading '/', the name is a plain path from the repo root
+        relname = pathlib.PurePosixPath(name[1:])
+        parts = tuple(part.casefold() for part in relname.parts)
+        if not parts or relname.is_absolute():
+            raise ValueError(
+                f'{where} {name!r}, which names no repo-relative file; a'
+                ' repo-rooted include is one "/" and a file path from the repo'
+                ' root.'
+            )
+        if '..' in parts:
+            raise ValueError(
+                f'{where} {name!r}, which contains ".." steps; a repo-rooted'
+                ' include names its file from the repo root.'
+            )
+        if '.git' in parts or FRACTAL_FOLDER in parts or WORKTREES_FOLDER in parts:
+            raise ValueError(
+                f'{where} {name!r}, which contains a .git, {FRACTAL_FOLDER} or'
+                f' {WORKTREES_FOLDER} component; a shared file is ordinary'
+                f' project content, tracked outside .git/, {FRACTAL_FOLDER}/'
+                f' and {WORKTREES_FOLDER}/.'
+            )
+        if any(fnmatch.fnmatchcase(parts[-1], shape) for shape in CREDENTIAL_NAMES):
+            raise ValueError(
+                f'{where} a credential-named file: {name!r}; credentials never'
+                ' deploy from a template -- a node links its own at seed time.'
+            )
+        # the commit's own tree is the only source, so no path can escape
+        # the repository -- a symlink refuses, never followed
+        relpath = relname.as_posix()
+        cmd = ['ls-tree', commit, '--', f':(literal){relpath}']
+        listing = fractal.util.git.run(cmd, cwd=worktree)
+        if not listing:
+            on_disk = _disk_hint(worktree, relpath)
+            raise ValueError(
+                f'{where} {name!r}, which is not tracked at commit'
+                f' {commit}{on_disk}; commit the file on the branch the child'
+                ' forks from, or pass @<ref> to read the template at another'
+                ' commit.'
+            )
+        mode, kind, blob_id = listing.partition('\t')[0].split()
+        if mode == '120000':
+            raise ValueError(
+                f'{where} {name!r}, a symlink at {commit}; a link is never'
+                ' followed -- include its target file instead.'
+            )
+        if kind == 'tree':
+            raise ValueError(
+                f'{where} {name!r}, a folder at {commit}; include a file inside it.'
+            )
+        if kind == 'commit':
+            raise ValueError(
+                f'{where} {name!r}, a submodule at {commit}; a shared file is'
+                ' tracked by this repository itself.'
+            )
+        # the blob joins the snapshot through the filters an archived folder
+        # file passes (smudge, eol, ident -- the worktree's attributes pick
+        # them), and its own includes queue behind it
+        cmd = ['cat-file', '--filters', f'--path={relpath}', blob_id]
+        blob = fractal.util.git.run_bytes(cmd, cwd=worktree)
+        if blob is None:
+            raise RuntimeError(
+                f'git cat-file failed reading shared file {relpath!r} at {commit}.'
+            )
+        blobs[name] = blob
+        shared[relpath] = blob_id
+        pending.extend(
+            (f'shared file {relpath}', ref) for ref in rooted_references(blob)
+        )
+    return blobs, shared
+
+
 def materialize(
     *,
     worktree: pathlib.Path,
@@ -397,9 +560,7 @@ def materialize(
         # git exits 128 with a distinct message per missing half: the
         # pathspec miss (folder untracked at the commit) and the unknown rev
         if 'did not match any files' in stderr:
-            on_disk = ''
-            if (worktree / path).exists():
-                on_disk = ' (an uncommitted copy exists on disk)'
+            on_disk = _disk_hint(worktree, path)
             raise ValueError(
                 f'Template folder {path!r} is not tracked at commit'
                 f' {commit}{on_disk}; commit the folder on the branch the'
@@ -854,6 +1015,7 @@ def root_notice(
     root: str,
     path: str,
     commit: str,
+    shared: dict[str, str],
 ) -> Optional[str]:
     """Return one notice when the root branch's copy differs from the commit read.
 
@@ -861,13 +1023,17 @@ def root_notice(
     choice (init, and a reseed re-point): a parent deep in the tree
     carries the root's copy only as of its last merge, so the notice
     names the ``@<root>`` form that reads the root's current copy. A
-    path absent on the root is no notice.
+    path absent on the root is no notice. Each shared file the folder
+    includes compares by blob id the same way, and the notice names
+    every one that differs.
 
     Args:
         repo_dir: Main repo root (both revisions resolve there).
         root: The tree's root branch.
         path: Worktree-relative template folder path (POSIX).
         commit: The commit the folder was read at.
+        shared: The shared record read with the folder
+            (:func:`read_shared`).
 
     Returns:
         The notice line, or ``None`` when the copies match or the root
@@ -878,10 +1044,23 @@ def root_notice(
     root_tree = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
     cmd = ['rev-parse', '-q', '--verify', f'{commit}:{path}']
     read_tree = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
-    if root_tree is None or root_tree == read_tree:
+    if root_tree is None:
         return None
+    # a shared file compares by blob id, and one absent on the root is no notice
+    differing = []
+    for relpath, blob_id in sorted(shared.items()):
+        cmd = ['rev-parse', '-q', '--verify', f'{root}:{relpath}']
+        root_blob = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
+        if root_blob is not None and root_blob != blob_id:
+            differing.append(repr(relpath))
+    if root_tree == read_tree and not differing:
+        return None
+    detail = ''
+    if differing:
+        names = ', '.join(differing)
+        detail = f' (differing shared files: {names})'
     return (
-        f'Notice: template {path!r} differs on the root branch; pass'
+        f'Notice: template {path!r} differs on the root branch{detail}; pass'
         f" --template={path}@{root} to read the root's copy."
     )
 
@@ -894,16 +1073,19 @@ def write_provenance(
     values: dict[str, Any],
     include: Optional[list[str]] = None,
     exclude: Optional[list[str]] = None,
+    shared: Optional[dict[str, str]] = None,
 ) -> None:
     """Write the ``_template.toml`` provenance file into a directory.
 
     The file records what seeded the node: the repo-relative template
     ``path``, the ``commit`` actually read, the mutually exclusive
-    ``include``/``exclude`` listing when one was given, and the
-    ``[values]`` table of resolved inputs. The table goes last so the scalar
-    keys stay at the top level. Init writes into the bundle (init.sh
-    places the record with the other surfaces); reseed rewrites the
-    node data directory's copy in place.
+    ``include``/``exclude`` listing when one was given, the ``[shared]``
+    table of each shared file's repo-relative path and the blob id read
+    when the folder includes any, and the ``[values]`` table of resolved
+    inputs. The tables go last so the scalar keys stay at the top level.
+    Init writes into the bundle (init.sh places the record with the
+    other surfaces); reseed rewrites the node data directory's copy in
+    place.
 
     Args:
         bundle: The directory to write the record into (the bundle
@@ -913,6 +1095,7 @@ def write_provenance(
         values: Resolved inputs to record.
         include: Template-relative paths kept (exclusive of ``exclude``).
         exclude: Template-relative paths dropped (exclusive of ``include``).
+        shared: The shared record read with the folder (:func:`read_shared`).
 
     """
     data: dict[str, Any] = {'path': path, 'commit': commit}
@@ -920,6 +1103,8 @@ def write_provenance(
         data['include'] = list(include)
     if exclude:
         data['exclude'] = list(exclude)
+    if shared:
+        data['shared'] = dict(sorted(shared.items()))
     data['values'] = dict(values)
     text = tomli_w.dumps(data)
     (bundle / TEMPLATE_FILE).write_text(text, encoding='utf-8')
@@ -939,14 +1124,16 @@ def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
 
     Returns:
         The record mapping (``path``, ``commit``, the optional
-        ``include``/``exclude`` listing, and ``values``).
+        ``include``/``exclude`` listing, the optional ``shared`` table,
+        and ``values``).
 
     Raises:
         ValueError: If the node records no template, the record is not
             valid TOML, ``path`` is absolute or carries a ``..`` step,
             ``commit`` is not a full 40-hex sha, ``include`` appears
-            beside ``exclude``, a listing is not a list of paths, or
-            ``values`` is not a valid input table.
+            beside ``exclude``, a listing is not a list of paths,
+            ``shared`` is not a table of repo-relative paths to full
+            40-hex blob ids, or ``values`` is not a valid input table.
 
     """
     record = node_dir / TEMPLATE_FILE
@@ -982,6 +1169,19 @@ def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
         strings = listed and all(isinstance(entry, str) for entry in listing)
         if not strings:
             raise ValueError(f'{record} {key} is not a list of paths.')
+    # a shared path is repo-relative like the template path, and its blob
+    # id takes the recorded commit's full 40-hex shape
+    shared = data.get('shared', {})
+    if not isinstance(shared, dict):
+        raise ValueError(f'{record} shared is not a table of paths to blob ids.')
+    for relpath, blob_id in shared.items():
+        posix = pathlib.PurePosixPath(relpath)
+        if not posix.parts or posix.is_absolute() or '..' in posix.parts:
+            raise ValueError(f'{record} shared path is not repo-relative: {relpath!r}.')
+        if not isinstance(blob_id, str) or not _COMMIT_SHA.fullmatch(blob_id):
+            raise ValueError(
+                f'{record} shared blob id is not a full 40-hex id: {blob_id!r}.'
+            )
     validate_values(data.get('values', {}), source=str(record))
     return data
 
@@ -1000,7 +1200,8 @@ def diff(
     ``agents/<agent>/`` file as the live ``.<agent>/`` file. A live
     symlink and a file the bundle does not carry are never judged; a
     bundle file the node lacks is drift. Literal braces are ordinary
-    output and are judged only by the byte comparison.
+    output and are judged only by the byte comparison. The shared files
+    the folder includes re-read at the recorded commit too.
 
     Args:
         node_dir: The node data directory (the live surfaces and the
@@ -1013,8 +1214,9 @@ def diff(
 
     Raises:
         ValueError: If the provenance record refuses
-            (:func:`read_provenance`) or the recorded folder does not
-            materialize at its commit (:func:`materialize`).
+            (:func:`read_provenance`), or the recorded folder or a shared
+            file it includes does not read at its commit
+            (:func:`materialize`, :func:`read_shared`).
 
     """
     record = read_provenance(node_dir)
@@ -1027,6 +1229,13 @@ def diff(
             dest=pathlib.Path(tmp),
         )
         sources = read_sources(bundle)
+        blobs, _ = read_shared(
+            sources,
+            worktree=repo_dir,
+            path=record['path'],
+            commit=record['commit'],
+        )
+        sources |= blobs
         read_defaults(bundle, path=record['path'])
         warnings = trim(
             bundle,

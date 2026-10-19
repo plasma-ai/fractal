@@ -5,7 +5,7 @@ desc: |
   config key, step files and their frontmatter overrides, the node scripts,
   and what children inherit.
 created: 2026-07-21T04:35:35Z
-updated: 2026-09-05T00:06:38Z
+updated: 2026-10-18T23:37:13Z
 ---
 
 # configuration
@@ -34,8 +34,9 @@ discovery and ordering rules, the seed step sequence, the SYNC pseudo-step,
 every supported frontmatter override, and how to customize a node's step list.
 
 [[configuration/templates|templates]]: Node templates carry committed source,
-config presets, and optional defaults. Jinja renders the selected outputs, while
-recorded inputs support drift checks and explicit refreshes.
+config presets, and optional defaults, and may include shared files from the
+repository. Jinja renders the selected outputs, while recorded inputs support
+drift checks and explicit refreshes.
 
 ***
 

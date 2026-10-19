@@ -2,8 +2,9 @@
 name: configuration/templates
 desc: |
   Node templates carry committed source, config presets, and optional
-  defaults. Jinja renders the selected outputs, while recorded inputs
-  support drift checks and explicit refreshes.
+  defaults, and may include shared files from the repository. Jinja renders
+  the selected outputs, while recorded inputs support drift checks and
+  explicit refreshes.
 created: 2026-09-01T05:13:44Z
 updated: 2026-09-01T05:13:44Z
 ---
@@ -114,9 +115,11 @@ when an uncommitted copy exists on disk.
 deep in the tree carries the root's copy only as of its last merge, so
 `--template=<path>@<root-branch>` is how a nested spawn reads the root's current
 copy; init prints one notice when the root branch's copy differs from the commit
-read, naming that form (a path absent on the root is no notice). A
-`node reseed --template` re-point prints the same notice; a plain or `--ref`
-reseed deliberately re-reads a recorded or named version and stays silent.
+read, naming that form (a path absent on the root is no notice). It compares
+each shared file the folder includes the same way, and names every one that
+differs on the root. A `node reseed --template` re-point prints the same notice;
+a plain or `--ref` reseed deliberately re-reads a recorded or named version and
+stays silent.
 
 Template bytes come from git, so anything fractal's ignore rules keep out of
 tracking can never become template content: a `tmp/` folder at any depth, the
@@ -164,9 +167,9 @@ Values come from three sources, later ones winning:
 - The template's `_template.toml` `[values]` defaults, at the template commit.
 - `--values=<file.toml>` -- a TOML document whose top-level keys are inputs, or
   whose `[values]` table holds them in the shape a node's `_template.toml`
-  records (the record's `path`, `commit`, `include` and `exclude` keys beside
-  the table are ignored, so one node's record seeds another); a `[values]` table
-  beside any other top-level key refuses, naming the keys.
+  records (the record's `path`, `commit`, `include`, `exclude`, and `shared`
+  keys beside the table are ignored, so one node's record seeds another); a
+  `[values]` table beside any other top-level key refuses, naming the keys.
 - `--set KEY=VALUE` (repeatable) -- one input whose value is a TOML literal:
   `--set 'role="reviewer"'`, `--set review=false`, or
   `--set 'checks=["tests"]'`.
@@ -210,14 +213,15 @@ Act as {{ role }}.
 {% endfor %}
 ```
 
-An include names a template-relative file from the same committed bundle.
-`../shared/mission.md`, absolute paths, and files outside the template cannot be
-loaded. A missing include refuses unless its author uses Jinja's explicit
-`ignore missing`. All includes read immutable source, so one output cannot
-change what another output includes. Imported module state is scoped to one
-output, so selecting or reordering other outputs cannot change its text. Values
-are literal data: a supplied string containing `{{ other }}` stays that string
-and is never rendered again.
+An include names a template-relative file from the same committed bundle, or,
+with a leading `/`, a shared file anywhere in the repository (see
+[[#Shared files]]). `../shared/mission.md` and other relative names outside the
+template cannot be loaded. A missing template-relative include refuses unless
+its author uses Jinja's explicit `ignore missing`. All includes read immutable
+source, so one output cannot change what another output includes. Imported
+module state is scoped to one output, so selecting or reordering other outputs
+cannot change its text. Values are literal data: a supplied string containing
+`{{ other }}` stays that string and is never rendered again.
 
 Rendering uses strict undefined values, disabled HTML escaping, preserved
 trailing newlines, and no automatic block whitespace trimming. Jinja normalizes
@@ -240,21 +244,91 @@ renders each iteration (see [[features/loop/prompt_assembly]]). `$VAR` and
 committed source rendered with the recorded inputs, which `node diff`
 reproduces; comparing directly against unrendered source does not measure drift.
 
+## Shared files
+
+An include, import, or extends name with a leading `/` names a **shared file**
+by its repo-relative path, so several templates can open with one committed text
+instead of a copy each:
+
+```jinja
+## Instructions
+
+{% include "/campaign/stations/DOCTRINE.md" %}
+{{ mission }}
+```
+
+The include statement is the declaration -- no metadata file lists shared files.
+At seed time fractal parses every source in the folder as Jinja, without
+rendering it, collects each literal repo-rooted name, and reads the named file
+at the template's commit, through that commit's own tree and never the disk. The
+read passes the same git filters an archived template file does (an LFS smudge,
+line-ending conversion, `ident`), chosen by the worktree's attributes. Shared
+files are parsed the same way, so one may include another, and each file is read
+once even when includes loop. Inside a shared file, a name without the leading
+`/` still names a file in the template folder, since every name resolves against
+the template being seeded. A source that is not UTF-8 text or not valid Jinja
+yields no names; rendering reports it if an output uses it.
+
+Every source in the folder is scanned, documentation included, so a literal
+repo-rooted name in a `README.md` example must resolve too; keep such an example
+inside a `{% raw %}` block, which the scan reads as text.
+
+A shared file is source only: it renders inside the output that includes it,
+never as an output of its own, never deploys into the node, and is never
+selectable by `--include` or `--exclude`. Reading from the commit's own tree
+keeps every read inside the repository. The read refuses each of these before
+any worktree exists, naming the template, the source or shared file holding the
+include, and the name:
+
+- a name that is `/`, `/.`, absolute past its `/`, or carries a `..` step;
+- a `.git`, `.fractal`, or `.worktrees` component, matched casefolded -- node
+  data and git machinery are never seed source;
+- a credential-named file (the [[#The credential guard]] list);
+- a symlink (never followed), a folder, or a submodule at the commit;
+- a path the commit does not track, even under `ignore missing`. The refusal
+  says when an untracked copy exists on disk under the exact name, and when a
+  copy on disk matches the name only through a symlink or a letter-case
+  difference (which committing would not fix).
+
+The names must be literal. A computed name, such as
+`{% include doctrine_path %}`, cannot be known before rendering, so the seed
+cannot read its file; rendering then refuses a repo-rooted name the seed did not
+read, saying a repo-rooted include must name its file literally. A computed
+template-relative name still works, since the whole folder is in the snapshot.
+
+The provenance record lists each shared file with the blob id read (see
+[[#The provenance record]]), and the root-differs notice compares those blob ids
+too. `node diff` re-reads the shared files at the recorded commit, and
+`node reseed --ref` or `--template` reads them at the new commit. Reseed never
+rewrites `NODE.md`, so a shared file the charter includes reaches an existing
+node only through a hand edit of `NODE.md`; `node diff` after the reseed prints
+the exact delta to apply.
+
 ## The provenance record
 
 `_template.toml` in the node's data directory records what seeded the node: the
 worktree-relative POSIX `path`, the full 40-hex `commit` actually read (which
 can differ from the init event's fork sha when the parent commits between the
-read and `worktree add`), the optional `include` or `exclude` listing, and the
-`[values]` table of resolved inputs, including defaults and unused inputs. Its
-presence is what marks a node as seeded from a template. It is a node record
-file -- the commit pipeline's estate content law counts it beside `NODE.md` and
-`config.json` (see [[features/loop/commit_pipeline]]) -- so it commits with the
-seed, and a `--reset` without `--template` drops it, the forget-unless-repassed
-rule init flags have. The record is hand-editable and validated where it is
-read: `node diff` and `node reseed` refuse a path that is not worktree-relative,
-a commit that is not a full 40-hex sha, `include` beside `exclude`, or a
-malformed listing or values table.
+read and `worktree add`), the optional `include` or `exclude` listing, the
+`[shared]` table when the folder includes shared files, and the `[values]` table
+of resolved inputs, including defaults and unused inputs. The `[shared]` table
+maps each shared file's repo-relative path to the 40-hex blob id read:
+
+```toml
+[shared]
+"campaign/stations/DOCTRINE.md" = "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
+```
+
+The record's presence is what marks a node as seeded from a template. The record
+is a node record file -- the commit pipeline's estate content law counts it
+beside `NODE.md` and `config.json` (see [[features/loop/commit_pipeline]]) -- so
+it commits with the seed, and a `--reset` without `--template` drops it, the
+forget-unless-repassed rule init flags have. The record is hand-editable and
+validated where it is read: `node diff` and `node reseed` refuse a path that is
+not worktree-relative, a commit that is not a full 40-hex sha, `include` beside
+`exclude`, a `[shared]` entry that is not a repo-relative path (absolute, or
+with a `..` step) mapped to a full 40-hex blob id, or a malformed listing or
+values table.
 
 The record stores values, not references to the source defaults or the external
 values file. Editing those source files does not change an existing node.
@@ -270,11 +344,11 @@ set** is every deployment output minus `exclude`, or only `include` (the
 `config.json` marker always stays). Init deploys the effective set, and
 `node diff` and `node reseed` judge by it, so an excluded step stays gone across
 every reseed -- a deliberate trim is recorded, never remembered. An entry
-matching nothing, naming `config.json` or `_template.toml`, or selecting a
-source-only path such as `README.md` or `_partials/`, refuses at init; on `diff`
-and `reseed` a listing entry the template no longer carries only warns, since
-the record may outlive the file it named. A fully trimmed surface falls back to
-the inherit-or-package source.
+matching nothing (a shared file's `/` name among them), naming `config.json` or
+`_template.toml`, or selecting a source-only path such as `README.md` or
+`_partials/`, refuses at init; on `diff` and `reseed` a listing entry the
+template no longer carries only warns, since the record may outlive the file it
+named. A fully trimmed surface falls back to the inherit-or-package source.
 
 The listing selects outputs, not the source available to Jinja. For example,
 `--include NODE.md` still allows its `_partials/` includes. Excluding a step
@@ -295,7 +369,9 @@ are valid output and do not constitute drift on their own. The command prints a
 unified diff per drifted file and exits 0 when clean, 1 on drift, and 2 on a
 command error (a node with no template recorded included), so scripts branch on
 the exit code. The recorded commit always resolves while it is reachable, so a
-folder moved or deleted on a later commit still diffs at its recorded sha.
+folder moved or deleted on a later commit still diffs at its recorded sha. The
+shared files the folder includes re-read at that commit too, so a hand edit to
+an included part of the live charter is drift like any other.
 
 Diff uses exactly the recorded values, without merging source defaults again.
 Removing a required value from the record causes a rendering refusal.
@@ -311,7 +387,8 @@ nothing is ever deleted, and `NODE.md`, `config.json`, and `memory/` are never
 touched, so an operator's charter edits and the node's memory survive. Skill
 directories merge file by file (a node-added file survives), and the `skills`
 and auth symlinks in the agent dirs stand. The verb records a `reseed` event and
-advances the record's `commit` to the commit actually read.
+advances the record's `commit` to the commit actually read, and its `[shared]`
+table to the blob ids read there.
 
 A bare reseed uses exactly the recorded values. An explicit `--ref` or
 `--template` refresh fills missing keys from the target template's defaults,
@@ -323,15 +400,16 @@ because `NODE.md` is preserved even when the template or its recorded inputs
 change.
 
 - `--ref=<committish>` reads the recorded folder at another commit -- how a
-  template improvement reaches an existing node. A ref at which the recorded
-  path is absent (the folder moved or was retired) refuses naming the re-point
-  remedy.
+  template improvement, or a change to a shared file it includes, reaches an
+  existing node's steps, scripts, skills, and agent files (never its `NODE.md`).
+  A ref at which the recorded path is absent (the folder moved or was retired)
+  refuses naming the re-point remedy.
 - `--template=<path>[@<ref>]` re-points the node at another folder, read at the
   node branch's own tip when the value names no ref: the new path and the commit
   read land in `_template.toml`, with the resolved values and unchanged listing
   -- one explicit command follows a moved template. The re-point prints the same
   root-differs notice init does when the root branch holds a different copy of
-  the folder. Mutually exclusive with `--ref`.
+  the folder or of a shared file it includes. Mutually exclusive with `--ref`.
 - `--force` reseeds even while the node is active or paused.
 
 Reseed rewrites the live steering surface, so without `--force` it refuses over
@@ -355,10 +433,11 @@ init, `node diff`, and `node reseed` alike -- refuses a credential-named file
 anywhere in the template: `auth.json`, `credentials.json`, `*.key`, `*.pem`,
 `*.p12`, `*.pfx`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_ecdsa_sk`,
 `id_ed25519_sk`, `id_dsa`, `*.ppk`, matched case-blind and naming the file,
-whatever commit carried it. A dot-file refuses only under `agents/`, the one
-subtree that deploys into live agent dirs (dot-files hold live agent state and
-credentials, never template content; a template's own tracked dot-files
-elsewhere are not credentials by name). Credentials never deploy from a template
--- a node links its own at seed time. The guard is a name list on the read side,
-not a scanner: a key inlined inside a legitimate config file passes any name
-check and stays review territory.
+whatever commit carried it; a shared file's name is checked against the same
+list. A dot-file refuses only under `agents/`, the one subtree that deploys into
+live agent dirs (dot-files hold live agent state and credentials, never template
+content; a template's own tracked dot-files elsewhere are not credentials by
+name). Credentials never deploy from a template -- a node links its own at seed
+time. The guard is a name list on the read side, not a scanner: a key inlined
+inside a legitimate config file passes any name check and stays review
+territory.

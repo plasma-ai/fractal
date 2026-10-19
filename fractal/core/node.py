@@ -1212,7 +1212,9 @@ class Node:
                 surface it lacks falls back to the inherit-or-package
                 source. Its ``config.json`` preset fills each unset
                 run-config flag (a flag wins over the preset; the preset
-                beats an inherited value).
+                beats an inherited value). A repo-rooted Jinja include
+                (a leading ``/``) reads a shared file at the same commit,
+                recorded beside the folder.
             include: Template-relative output paths to deploy from the template,
                 dropping everything else; a directory entry covers its
                 subtree. Mutually exclusive with ``exclude`` and recorded
@@ -1285,6 +1287,7 @@ class Node:
             materialize,
             read_defaults,
             read_preset,
+            read_shared,
             read_sources,
             root_notice,
             trim,
@@ -1533,6 +1536,15 @@ class Node:
                 )
                 pin = template_values.get('pin')
                 sources = read_sources(bundle)
+                # the shared files the folder includes join the snapshot,
+                # read at the same commit; they never deploy
+                blobs, shared = read_shared(
+                    sources,
+                    worktree=template_worktree,
+                    path=template_path,
+                    commit=template_commit,
+                )
+                sources |= blobs
                 # cut the bundle down to the effective set, so downstream
                 # only sees what the listing keeps -- every check below
                 # judges what actually deploys, so an excluded file can
@@ -1615,6 +1627,7 @@ class Node:
                     root=root,
                     path=template_path,
                     commit=template_commit,
+                    shared=shared,
                 )
                 # record the provenance into the bundle; init.sh places
                 # it with the other bundle surfaces
@@ -1625,6 +1638,7 @@ class Node:
                     values=template_values,
                     include=include,
                     exclude=exclude,
+                    shared=shared,
                 )
                 template_bundle = bundle
             # fill each unset flag from the template's config preset -- the
@@ -2338,7 +2352,8 @@ class Node:
         defaults; defaults supply only new keys on an explicit refresh.
         The listing persists, and the confirmation carries creation's
         root-differs notice when the root branch holds a different copy
-        of the folder (a plain or ``ref`` reseed stays silent).
+        of the folder or of a shared file it includes (a plain or ``ref``
+        reseed stays silent).
 
         Args:
             ref: Committish to read the recorded folder at (default: the
@@ -2369,6 +2384,7 @@ class Node:
             materialize,
             read_defaults,
             read_provenance,
+            read_shared,
             read_sources,
             root_notice,
             trim,
@@ -2461,6 +2477,20 @@ class Node:
                         commit=commit,
                         dest=pathlib.Path(template_tmp),
                     )
+                    defaults = read_defaults(bundle, path=path)
+                    values = record.get('values', {})
+                    if rev is not None:
+                        values = defaults | values
+                    sources = read_sources(bundle)
+                    # the shared files the folder includes join the snapshot,
+                    # read at the same commit; they never deploy
+                    blobs, shared = read_shared(
+                        sources,
+                        worktree=template_worktree,
+                        path=path,
+                        commit=commit,
+                    )
+                    sources |= blobs
                     # a re-point reads a fresh folder choice, so it gets
                     # creation's root-differs notice; a plain or --ref reseed
                     # deliberately re-reads a recorded or named version, silently
@@ -2470,12 +2500,8 @@ class Node:
                             root=self.config.get('root'),
                             path=path,
                             commit=commit,
+                            shared=shared,
                         )
-                    defaults = read_defaults(bundle, path=path)
-                    values = record.get('values', {})
-                    if rev is not None:
-                        values = defaults | values
-                    sources = read_sources(bundle)
                     warnings = trim(
                         bundle,
                         include=record.get('include'),
@@ -2577,6 +2603,7 @@ class Node:
                             values=values,
                             include=record.get('include'),
                             exclude=record.get('exclude'),
+                            shared=shared,
                         )
                     except Exception:
                         self.record.event_end(event_id=event_id, status='failed')
