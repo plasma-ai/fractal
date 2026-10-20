@@ -137,7 +137,9 @@ so charter drift can remain.
   forbids spawns and re-arms from it and tells every seat it is draining
   (`_DRAIN`)
 - **`--max-cost`**: with `--continue`, re-arm the cost cap for the new run;
-  required when the last run ended on its budget
+  required when the last run ended on its budget. It is the one run parameter
+  `start` takes: iterations re-arm from `config.json` (each run counts from 1),
+  so set `max_iters` with `fractal node config set` before the `--continue`
 
 After reading the directive, print, in this order:
 

@@ -249,16 +249,20 @@ pool a cheaper token rate buys more steps, not a lower bill.
    fractal node start <branch>
    ```
 
-   `start` takes no config arguments -- all run parameters come from
-   `config.json` (set at init; adjust a value with
+   Run parameters come from `config.json` (set at init; adjust a value with
    `fractal node config set <key>=<value>`, read one with
    `fractal node config get <key>`, or edit the file directly). A configured
    `max_cost` must be positive; a missing `max_cost` launches uncapped with a
-   loud warning. Add `--continue` only to continue a stopped/exited child. A
-   parent running with `FRACTAL_HEADLESS=true` automatically launches the child
-   in a detached process group, so the command returns immediately and the tree
-   does not require tmux. Use `--tmux` only to override that inherited backend
-   for this child. A headless child has no tmux session:
+   loud warning. Add `--continue` only to continue a stopped/exited child. With
+   `--continue`, `--max-cost=<usd>` re-arms the cost cap for the new run, and a
+   child whose last run ended on its budget refuses a `--continue` without it;
+   it is the one run parameter `start` takes. Iterations re-arm from
+   `config.json` -- each run counts from 1 -- so set `max_iters` with
+   `fractal node config set` before the `--continue`; `start` takes no
+   `--max-iters`. A parent running with `FRACTAL_HEADLESS=true` automatically
+   launches the child in a detached process group, so the command returns
+   immediately and the tree does not require tmux. Use `--tmux` only to override
+   that inherited backend for this child. A headless child has no tmux session:
    `fractal node attach <branch>` refuses and names its log, so follow its
    output with `tail -f <child_node_dir>/headless.log` instead (the log appends
    across launches). A `--continue` follows the same rule -- your seat's
