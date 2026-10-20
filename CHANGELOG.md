@@ -242,6 +242,9 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- `fractal node init --help` describes `--values` as the path to a TOML file of
+  input values. It described literal TOML values, so TOML text passed in place
+  of a path failed with a file name error.
 - The stock `NODE.md` no longer tells nodes that background processes die at the
   step boundary. A step that ends normally ends no process, so any background
   job outlives its step unless the agent ends it. The loop reaps only a step it

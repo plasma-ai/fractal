@@ -153,9 +153,9 @@ def node_init(app: typer.Typer) -> typer.Typer:
     exclude = typer.Option(None, '--exclude', help=exclude_help)
     # values option
     values_help = (
-        'Literal TOML input values for seed-time Jinja rendering, flat or'
-        ' under a [values] table as _template.toml records them (override'
-        " the template's defaults)."
+        'Path to a TOML file of input values for seed-time Jinja rendering,'
+        ' flat or under a [values] table as _template.toml records them'
+        " (override the template's defaults)."
     )
     values = typer.Option(None, '--values', help=values_help)
     # set option
