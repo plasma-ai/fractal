@@ -259,11 +259,10 @@ pool a cheaper token rate buys more steps, not a lower bill.
    it is the one run parameter `start` takes. Iterations re-arm from
    `config.json` -- each run counts from 1 -- so set `max_iters` with
    `fractal node config set` before the `--continue`; `start` takes no
-   `--max-iters`. A
-   parent running with `FRACTAL_HEADLESS=true` automatically launches the child
-   in a detached process group, so the command returns immediately and the tree
-   does not require tmux. Use `--tmux` only to override that inherited backend
-   for this child. A headless child has no tmux session:
+   `--max-iters`. A parent running with `FRACTAL_HEADLESS=true` automatically
+   launches the child in a detached process group, so the command returns
+   immediately and the tree does not require tmux. Use `--tmux` only to override
+   that inherited backend for this child. A headless child has no tmux session:
    `fractal node attach <branch>` refuses and names its log, so follow its
    output with `tail -f <child_node_dir>/headless.log` instead (the log appends
    across launches). A `--continue` follows the same rule -- your seat's
