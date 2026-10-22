@@ -195,7 +195,8 @@ lines, one per content block, and each line carries the reply's usage as it
 stood when written, so the last is the final usage -- and a reply seen in more
 than one file counts once, at its latest line. Each reply is priced at its own
 model; an unpriced model (or a zeroed gateway figure) drops out without voiding
-the rest.
+the rest, and a reply holding tokens at an unpriced model marks the step
+(below).
 
 For a launch whose stream did not end final, the sum lands as a `final=False`
 figure when it exceeds the recorded one -- both undercount a killed launch, so
@@ -237,6 +238,10 @@ reads it from each transcript it opens:
 - an entry it cannot read whole: a reply's usage or a tool id of the wrong
   shape, or a usage count that is not a number (`_usage_cost` prices it as
   nothing and says so, rather than raising);
+- a reply it cannot price: tokens at a model the pricing table lacks, or at no
+  named model, which `_usage_cost` reports the same way. A synthetic reply
+  (Claude Code's `<synthetic>` stand-in for an API error) holds a usage of
+  zeros, so it leaves nothing out; past a result, only a reply after it counts;
 - a sub-agent transcript it cannot read, and, on a launch with no result figure,
   a missing or unreadable session transcript or a settle that raises (the loop
   marks the last itself);
