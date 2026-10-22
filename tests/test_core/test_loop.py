@@ -6042,13 +6042,20 @@ def test_spent_deadline_abandons_the_drop_redispatch(
         '---\nmodel: pinned-model\n---\n# PLAN\n\nWork.\n',
         encoding='utf-8',
     )
-    _configure(loop_node, iter_timeout='1s')
+    wall = 60 * 60
+    _configure(loop_node, iter_timeout=f'{wall}s')
+    # the launch runs a fake clock past the iteration deadline: the loop arms
+    # the deadline in whole seconds, so a short real one can be spent by a
+    # second boundary before the launch ever starts
+    real = time.time
+    overrun: list[float] = []
+    monkeypatch.setattr('fractal.core.loop.time.time', lambda: real() + sum(overrun))
 
     class OverrunningLoop(ServingLoop):
         """Mock loop whose launch completes past the iteration deadline."""
 
         def _launch(self: OverrunningLoop, *args: Any, **kwargs: Any) -> StepResult:
-            time.sleep(1.2)
+            overrun.append(wall + 1)
             return super()._launch(*args, **kwargs)
 
     loop = OverrunningLoop(loop_node, serves=['dropped-model'])
