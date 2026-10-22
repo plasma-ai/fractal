@@ -119,6 +119,19 @@ Cost keys (non-negative USD numbers):
   percent flag value is resolved against `max_cost` and rounded). Default: 10%
   of `max_cost`; absent without `max_cost`.
 
+The reserve's origin rides beside it as the string key `reserve_mode`: `default`
+for the 10% init materializes, `explicit` for a figure set by `--reserve-budget`
+(at init or on `fractal node update`), a template preset, or
+`config set reserve_budget=`. A cap change through `node update --max-cost` or
+`node start --continue --max-cost` re-derives a default reserve that still
+equals 10% of the old cap; every other reserve keeps its figure and records as
+explicit, so a figure the operator chose never moves with the cap, even one at
+exactly 10%. A config with no `reserve_mode` reads as default when its reserve
+equals 10% of its `max_cost`, explicit otherwise; reading never rewrites the
+file, and the next cap change records the reading. Fractal alone writes the key:
+`config set` refuses it, a `reserve_budget` write records `explicit` (or clears
+the mode with a cleared reserve), and the validator refuses any other value.
+
 ## Validation
 
 One merged validator guards every write path -- init flags, the config setters,

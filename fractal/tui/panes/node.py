@@ -75,6 +75,7 @@ _CONFIG_ORDER = (
     'max_iter_cost',
     'max_step_cost',
     'reserve_budget',
+    'reserve_mode',
     'sync',
     'local',
     'detached',
