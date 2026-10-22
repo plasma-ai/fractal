@@ -57,7 +57,11 @@ forks from a committed wiki with merge handling in place (see
 [[features/wiki_system/merge_behavior]]).
 
 Memory starts empty, seeded by `node init` (`fractal/_scripts/init.sh`) with the
-same naming policy; the node lays it out as topical pages as it learns.
+same naming policy; the node lays it out as topical pages as it learns. A file
+the commit refuses as no node record (a binary, an archive, a log; see
+[[features/loop/commit_pipeline]]) still gets a row in memory's index, which
+then links a file the commit left out, so such files belong in the node's `tmp/`
+or in project space.
 
 ## Maintenance at commit
 
