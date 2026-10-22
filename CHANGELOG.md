@@ -239,6 +239,17 @@ may include breaking changes, each listed under a Breaking heading.
   branch at each start or resume. A ladder with a bad shape refuses wherever the
   file is read, and one naming an unregistered agent or listing the agent's own
   levels out of order refuses at the loop's boot.
+- A node's config records where its cleanup reserve came from as `reserve_mode`:
+  `default` for the 10% `node init` materializes, `explicit` for a figure set by
+  `--reserve-budget` (at init or on `node update`), a template preset, or
+  `node config set reserve_budget=`. A cap change through
+  `node update --max-cost` or `node start --continue --max-cost` re-derives only
+  a default reserve that still equals 10% of the old cap, so an explicit reserve
+  keeps its figure even at exactly 10%. A config without the key reads as
+  default when its reserve equals 10% of its cap and as explicit otherwise, and
+  the next cap change records that reading. `config set` refuses `reserve_mode`;
+  a `reserve_budget` write records `explicit`, and clearing the reserve clears
+  its mode.
 
 ### Fixed
 

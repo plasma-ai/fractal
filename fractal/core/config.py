@@ -53,6 +53,7 @@ KEYS = (
     'max_iter_cost',
     'max_step_cost',
     'reserve_budget',
+    'reserve_mode',
     'sync',
     'detached',
     'local',
@@ -127,6 +128,11 @@ MAX_RESERVE_FRACTION = 0.99
 # child_retune's default-detection equality matches what parse_reserve_budget
 # stored; the two sites MUST round identically, so both quote this constant
 RESERVE_PRECISION = 4
+
+#: where a stored reserve's figure came from -- ``default`` is the fraction
+#: init materializes, which a cap change retunes; ``explicit`` is a figure set
+#: by flag, template preset, or ``config set``, which no cap change moves
+RESERVE_MODES = ('default', 'explicit')
 
 # signed 64-bit ceiling for SQLite INTEGER columns; an integer cap at or above
 # this raises a raw "int too large to convert" from the adapter downstream
@@ -382,7 +388,8 @@ class Config:
         comparison), a non-positive ceiling (which makes the subtree check
         finish the node at $0), a per-iter/step cap with no ceiling (which
         the loop cannot enforce once the per-iter budget drains), an
-        out-of-range reserve, a broken ``step <= iter <= run`` cost
+        out-of-range reserve, a reserve mode outside
+        :data:`RESERVE_MODES`, a broken ``step <= iter <= run`` cost
         ordering, a non-integer or degenerate integer cap (a non-positive
         ``max_iters`` reads as unlimited in the loop, and a cap at or past
         the SQLite signed 64-bit ceiling raises raw from the adapter
@@ -486,6 +493,12 @@ class Config:
                         'reserve_budget must be'
                         f' < {MAX_RESERVE_FRACTION:.0%} of max_cost.'
                     )
+        # the reserve's mode must name an origin the retune reads -- any other
+        # value would leave the reserve neither tracking the cap nor pinned
+        reserve_mode = config.get('reserve_mode')
+        if reserve_mode is not None and reserve_mode not in RESERVE_MODES:
+            modes = ' or '.join(repr(mode) for mode in RESERVE_MODES)
+            raise ValueError(f'reserve_mode must be {modes}, not {reserve_mode!r}.')
         # cost ordering: step <= iter <= run
         if max_iter_cost is not None and max_cost is not None:
             if max_iter_cost > max_cost:

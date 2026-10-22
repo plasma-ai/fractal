@@ -50,8 +50,10 @@ manager must keep working after spawning.
 
 `reserve_budget` (default 10% of `max_cost`, materialized to a fixed decimal
 precision in config) is a buffer below the ceiling that steers cleanup before
-the money runs out. During an iteration, the loop enters **RESERVE** when any of
-these hold:
+the money runs out. A cap retune re-derives the default reserve for the new cap,
+while a reserve set by flag, template preset, or `config set` keeps its figure
+(the `reserve_mode` key in [[configuration/config_json]]). During an iteration,
+the loop enters **RESERVE** when any of these hold:
 
 - the run's remaining budget drains into the reserve window (checked before each
   step, so entry can happen mid-iteration);

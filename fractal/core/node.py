@@ -1261,7 +1261,9 @@ class Node:
             reserve_budget: Budget reserved for cleanup: USD or ``N%`` of
                 the merged ``max_cost`` (default: the default reserve
                 fraction of it); shifts when the node enters reserve mode
-                (not enforced).
+                (not enforced). A flag or preset value records as explicit
+                and keeps its figure when the cap changes; the default
+                retunes with the cap.
             sync: Run sync mode before each step.
             detached: Separate agent invocation per step.
             local: Skip pushing to remote after each commit.
@@ -1774,6 +1776,10 @@ class Node:
             # already a USD number, typed as config.json holds it
             usable = (type(max_cost) in (int, float)) and (max_cost > 0)
             ceiling_ok = (max_cost is None) or usable
+            # record the reserve's origin: a flag or preset figure is explicit,
+            # while the default fraction materialized here is default -- only
+            # the latter retunes when the cap changes
+            reserve_mode = 'explicit'
             if reserve_budget is None and 'reserve_budget' in template_preset:
                 # a reserve without a ceiling is inert, so the preset obeys
                 # the same requires-max-cost rule the flag does
@@ -1784,6 +1790,8 @@ class Node:
                     )
                 reserve_budget = template_preset['reserve_budget']
             elif ceiling_ok:
+                if reserve_budget is None:
+                    reserve_mode = 'default'
                 reserve_budget = parse_reserve_budget(reserve_budget, max_cost)
             else:
                 # a degenerate or junk-typed ceiling resolves no reserve -- the
@@ -1895,6 +1903,7 @@ class Node:
                 args.append(f'--max-step-cost={max_step_cost}')
             if reserve_budget is not None:
                 args.append(f'--reserve-budget={reserve_budget}')
+                args.append(f'--reserve-mode={reserve_mode}')
             if sync is True:
                 args.append('--sync')
             if sync is False:
@@ -6142,6 +6151,7 @@ class Node:
         max_iter_cost: Optional[float] = None,
         max_step_cost: Optional[float] = None,
         reserve_budget: Optional[float] = None,
+        reserve_mode: Optional[str] = None,
         step_timeout: Optional[str] = None,
         max_depth: Optional[int] = None,
         max_children: Optional[int] = None,
@@ -6162,6 +6172,9 @@ class Node:
                 child's ``config.json`` (the ``nodes`` table has no column).
             reserve_budget: New cleanup reserve in USD; lives only in the
                 child's ``config.json`` (the ``nodes`` table has no column).
+            reserve_mode: New origin of the reserve (``default`` or
+                ``explicit``); lives only in the child's ``config.json``
+                (the ``nodes`` table has no column).
             step_timeout: New per-step time budget; lives only in the
                 child's ``config.json`` (the ``nodes`` table has no column).
             max_depth: New maximum nesting depth.
@@ -6175,8 +6188,8 @@ class Node:
             raise RuntimeError(
                 'Cannot update a node from a draining run (--drain forbids re-arms).'
             )
-        # initialize updates -- the iter/step caps, the reserve, and the
-        # step timeout are config-only
+        # initialize updates -- the iter/step caps, the reserve and its mode,
+        # and the step timeout are config-only
         data = {}
         if title is not None:
             data['title'] = title
@@ -6195,6 +6208,8 @@ class Node:
             config_only['max_step_cost'] = max_step_cost
         if reserve_budget is not None:
             config_only['reserve_budget'] = reserve_budget
+        if reserve_mode is not None:
+            config_only['reserve_mode'] = reserve_mode
         if step_timeout is not None:
             config_only['step_timeout'] = step_timeout
         if not data and not config_only:
@@ -6234,12 +6249,12 @@ class Node:
         """Retune a child's configuration, validating the merged result.
 
         The policy half over :meth:`child_update` (which writes the registry
-        row and the child's ``config.json`` together): a default-mode reserve
-        (equal to what init's default fraction materialized for the old cap)
-        retunes to track a new cap instead of going stale; per-iter/step caps
-        are validated against the *effective* cap; the merged config is
-        validated as init would (:meth:`Config.validate`); priors are
-        captured before the write.
+        row and the child's ``config.json`` together): a default reserve
+        (init's default fraction, still at that fraction of the old cap)
+        retunes to track a new cap instead of going stale, while an explicit
+        one keeps its figure; per-iter/step caps are validated against the
+        *effective* cap; the merged config is validated as init would
+        (:meth:`Config.validate`); priors are captured before the write.
 
         Args:
             name: Child node name.
@@ -6257,8 +6272,9 @@ class Node:
 
         Returns:
             ``{key: (old, new)}`` for every PROVIDED key -- ``old == new``
-            included, and an implicitly retuned reserve counts as provided --
-            so a confirmation echo shows every requested write.
+            included, an implicitly retuned reserve counts as provided, and
+            the reserve's mode appears whenever the retune changes it -- so a
+            confirmation echo shows every requested write.
 
         Raises:
             ValueError: On a violated cap invariant (user-facing flag
@@ -6273,29 +6289,46 @@ class Node:
         if child_worktree_dir is None:
             raise self._child_worktree_not_found(branch)
         child_config = self.__class__(child_worktree_dir).config
-        # resolve the reserve before validating; a default-mode reserve (equal
-        # to what init's default fraction materialized for the old cap) retunes
-        # to track a new cap instead of going stale
+        # resolve the reserve and its mode before validating; a default
+        # reserve retunes to track a new cap instead of going stale, while an
+        # explicit one (a flag, a template preset, or config set) keeps its
+        # figure even when that figure equals the default
         old_max_cost = child_config.get('max_cost')
         old_reserve = child_config.get('reserve_budget')
+        old_reserve_mode = child_config.get('reserve_mode')
         effective_max_cost = max_cost if max_cost is not None else old_max_cost
-        if reserve_budget is None and old_reserve is not None:
-            # a degenerate cap skips the retune -- the merged-config validation
-            # below owns that rejection and its wording
-            if max_cost is not None and max_cost > 0 and old_max_cost is not None:
-                # both sides round at RESERVE_PRECISION, matching
-                # parse_reserve_budget's materialization -- an unrounded
-                # product would break the default-detection equality and
-                # persist float noise into config.json and the retune echo
+        reserve_mode = old_reserve_mode
+        if reserve_budget is not None:
+            reserve_mode = 'explicit'
+        elif max_cost is not None and old_reserve is not None:
+            # both sides round at RESERVE_PRECISION, matching
+            # parse_reserve_budget's materialization -- an unrounded
+            # product would break the default-detection equality and
+            # persist float noise into config.json and the retune echo
+            at_default = False
+            if old_max_cost is not None:
                 default_reserve = round(
                     DEFAULT_RESERVE_FRACTION * old_max_cost,
                     RESERVE_PRECISION,
                 )
-                if old_reserve == default_reserve:
-                    reserve_budget = round(
-                        DEFAULT_RESERVE_FRACTION * max_cost,
-                        RESERVE_PRECISION,
-                    )
+                at_default = old_reserve == default_reserve
+            # a figure off the old cap's default is explicit whatever the
+            # record says (a recorded default off it had its reserve or cap
+            # edited without a retune), and a config recording no mode is
+            # judged by the figure alone; the cap change records the reading,
+            # so a later one never re-judges a figure this one leaves at the
+            # new cap's default
+            if not at_default:
+                reserve_mode = 'explicit'
+            elif reserve_mode is None:
+                reserve_mode = 'default'
+            # a degenerate cap skips the retune -- the merged-config validation
+            # below owns that rejection and its wording
+            if reserve_mode == 'default' and max_cost > 0:
+                reserve_budget = round(
+                    DEFAULT_RESERVE_FRACTION * max_cost,
+                    RESERVE_PRECISION,
+                )
         # a per-iter/step cap on an effectively uncapped child mirrors init's
         # rejection -- unenforceable once the per-iter budget drains
         if effective_max_cost is None:
@@ -6324,9 +6357,14 @@ class Node:
             'max_iter_cost': effective_iter_cost,
             'max_step_cost': effective_step_cost,
             'reserve_budget': effective_reserve_budget,
+            'reserve_mode': reserve_mode,
             'step_timeout': effective_step_timeout,
         }
         child_config.validate(merged)
+        # the mode is derived, never requested, so it is written (and echoed)
+        # only when the retune changes it
+        if reserve_mode == old_reserve_mode:
+            reserve_mode = None
         # the confirmation echo needs each provided key's stored value from
         # before the write -- a retuned reserve counts even without its flag
         updates = {
@@ -6339,6 +6377,7 @@ class Node:
             'max_children': max_children,
             'max_descendants': max_descendants,
             'reserve_budget': reserve_budget,
+            'reserve_mode': reserve_mode,
         }
         provided = {key: value for key, value in updates.items() if value is not None}
         priors = {key: child_config.get(key) for key in provided}
@@ -6350,6 +6389,7 @@ class Node:
             max_iter_cost=max_iter_cost,
             max_step_cost=max_step_cost,
             reserve_budget=reserve_budget,
+            reserve_mode=reserve_mode,
             step_timeout=step_timeout,
             max_depth=max_depth,
             max_children=max_children,

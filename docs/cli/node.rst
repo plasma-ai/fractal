@@ -286,7 +286,9 @@ node at ``--path``.
    * - ``--reserve-budget <usd|N%>``
      - ``10%`` of ``--max-cost``
      - Budget reserved for cleanup, as USD or a percentage of ``--max-cost``;
-       only meaningful with ``--max-cost`` and must stay below 99% of it.
+       only meaningful with ``--max-cost`` and must stay below 99% of it. A
+       value given here keeps its figure when the cap later changes; the
+       default retunes with the cap.
    * - ``--sync`` / ``--no-sync``
      - enabled
      - Run sync mode (the radio check-in) before each step.
@@ -367,9 +369,10 @@ launch time.
 
 ``--max-cost <usd>``
    With ``--continue``: retune the cost cap before relaunch, echoed
-   ``max_cost: old -> new``. **Required** when the last run ended on its cost
-   budget — runs are isolated and each launch arms the cap anew, so a
-   budget-ended run refuses a bare ``--continue``.
+   ``max_cost: old -> new``, re-deriving a default reserve as ``node update``
+   does. **Required** when the last run ended on its cost budget — runs are
+   isolated and each launch arms the cap anew, so a budget-ended run refuses
+   a bare ``--continue``.
 
 ``--headless`` / ``--tmux``
    Select the runtime backend: ``--headless`` runs the loop in a detached
@@ -1118,10 +1121,14 @@ The options mirror their ``node init`` counterparts: ``--title``,
 ``--max-cost``, ``--max-iter-cost``, ``--max-step-cost``,
 ``--reserve-budget`` (USD or ``N%`` of the effective max-cost),
 ``--step-timeout``, ``--max-depth``, ``--max-children``, and
-``--max-descendants``. When ``--max-cost`` changes and the reserve was left
-at its default, the 10% reserve is re-derived against the new cap. The user
-node cannot be updated (set its config with ``node config set`` from the root
-worktree instead), and the target's parent worktree must exist.
+``--max-descendants``. When ``--max-cost`` changes without
+``--reserve-budget`` and the reserve is init's default, still 10% of the old
+cap, it is re-derived against the new cap; a reserve set by flag, template
+preset, or ``config set`` keeps its figure, even at exactly 10%. A
+``--reserve-budget`` here records the reserve as explicit, echoed
+``reserve_mode: default -> explicit``. The user node cannot be updated (set
+its config with ``node config set`` from the root worktree instead), and the
+target's parent worktree must exist.
 
 .. code-block:: console
 
@@ -1265,6 +1272,11 @@ reserve range, duration suffixes, pacing exclusivity — before anything is
 written; ``init``'s additional flag checks (the agent registry, provider
 support, the base worktree) do not run here. Multi-key sets are checked
 upfront, so no earlier key lands when a later one is rejected.
+
+A ``reserve_budget`` write records the reserve as explicit, so no later cap
+change retunes it, and clearing the reserve clears its mode; the derived
+``reserve_mode`` is echoed when it changes. ``reserve_mode`` itself refuses:
+it records how the reserve was set.
 
 A *change* to the init-fixed keys ``root``, ``user``, and ``project`` always
 refuses: ``<key> is fixed at init and cannot be set.`` (Re-setting the

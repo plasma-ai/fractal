@@ -44,13 +44,15 @@ a budget flag; warn-only otherwise). Starting a node with neither
 a node can run and spend without bound.
 
 While the node runs, watch the headroom and retune mid-flight from the
-parent:
+parent. A reserve set by ``--reserve-budget`` keeps its figure when the cap
+changes, so resize it beside the cap (a reserve left at its default follows
+the cap on its own):
 
 .. code-block:: console
 
    $ fractal node cost remaining parser
    $3.4167
-   $ fractal node update parser --max-cost 100
+   $ fractal node update parser --max-cost 100 --reserve-budget 10%
    max_cost: 10.0 -> 100.0
    reserve_budget: 1.0 -> 10.0
 

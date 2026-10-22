@@ -38,6 +38,7 @@ MAX_COST=""
 MAX_ITER_COST=""
 MAX_STEP_COST=""
 RESERVE_BUDGET=""
+RESERVE_MODE=""
 SYNC=""
 DETACHED=""
 LOCAL=false
@@ -95,6 +96,8 @@ Options:
     --max-iter-cost=<usd>              Maximum cost per iteration in USD
     --max-step-cost=<usd>              Cost per step in USD (warn-only when unenforceable)
     --reserve-budget=<usd>             Budget reserved for cleanup (shifts reserve mode)
+    --reserve-mode=<mode>              Origin of the reserve: default (retunes with
+                                       --max-cost) or explicit (keeps its figure)
     --sync                             Enable sync mode before each step (default)
     --no-sync                          Disable sync mode before each step
     --detached                         Run each step as a separate invocation
@@ -236,6 +239,13 @@ for arg in "$@"; do
             RESERVE_BUDGET="${arg#*=}"
             if [[ ! "$RESERVE_BUDGET" =~ ^[0-9]*\.?[0-9]+$ ]]; then
                 echo "Error: --reserve-budget requires a non-negative number (USD)" >&2
+                exit 1
+            fi
+            ;;
+        --reserve-mode=*)
+            RESERVE_MODE="${arg#*=}"
+            if [[ ! "$RESERVE_MODE" =~ ^(default|explicit)$ ]]; then
+                echo "Error: --reserve-mode requires default or explicit" >&2
                 exit 1
             fi
             ;;
@@ -724,6 +734,7 @@ if [[ "$RESET" == true ]] || [[ ! -f "$NODE_DIR/config.json" ]]; then
         max_iter_cost="${MAX_ITER_COST:-null}" \
         max_step_cost="${MAX_STEP_COST:-null}" \
         reserve_budget="${RESERVE_BUDGET:-null}" \
+        reserve_mode="${RESERVE_MODE:-null}" \
         sync="${SYNC:-null}" \
         detached="${DETACHED:-null}" \
         local="$LOCAL" \
