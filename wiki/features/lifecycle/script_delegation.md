@@ -204,9 +204,14 @@ a helper that cannot run is never read as a deliberate self-pause.
 ## Launch environment
 
 `start.sh` guarantees the same explicit variables on both arms, forwarded via
-`env(1)` argv: `_NODE` (which also drives the re-entry exec), a venv-prefixed
-`PATH`, and `VIRTUAL_ENV`; the headless arm adds `FRACTAL_HEADLESS=true`, the
-record seats re-export so delegated child starts follow the parent's backend.
+`env(1)` argv: `_NODE` (which also drives the re-entry exec) and a venv-prefixed
+`PATH`; the headless arm adds `FRACTAL_HEADLESS=true`, the record seats
+re-export so delegated child starts follow the parent's backend. The venv rides
+`PATH` alone: a `VIRTUAL_ENV` names the repo's own project environment, never a
+node worktree's, so every `uv run` in the worktree would warn that it does not
+match and ignore it. The loop drops any `VIRTUAL_ENV` it inherits (a tmux
+server's global environment, the launching shell) at boot, before `setup.sh`
+runs, and the agent invocation verb unsets it in every launch, chats included.
 The tmux arm additionally forwards `OPENROUTER_API_KEY` and `XAI_API_KEY` via
 `new-session -e`, on a warm server running tmux >= 3.2 only — a cold
 `new-session` becomes the server and would keep any `-e` pair in its `ps(1)`

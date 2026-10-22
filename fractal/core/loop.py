@@ -637,6 +637,11 @@ class Loop:
         # before the re-entry exec, but set it here too so a
         # direct launch self-identifies
         os.environ['_NODE'] = f'{node.node_dir}'
+        # setup.sh and the other worktree processes this loop runs outside
+        # the agent seam inherit its env; an inherited VIRTUAL_ENV names the
+        # launching project's venv, never the worktree's, so uv there would
+        # warn on every call -- PATH alone keeps the venv's bin
+        os.environ.pop('VIRTUAL_ENV', None)
         # a live .step_pgid at boot is a dead boot's orphan probe: the probe
         # runs before the active stamp, so the crashed-active heal never
         # judges it, and this boot's _register_probe would replace its only
