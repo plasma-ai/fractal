@@ -83,8 +83,10 @@ _FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
 # the wiki CLI beside the running interpreter, for the same reason
 _WIKI_BIN = pathlib.Path(sys.executable).parent / 'wiki'
 
-# the memory index of the node every memory index rebuild test spawns
+# the memory index of the node every memory index rebuild test spawns, and
+# the index of the memory folder those tests fill with a refused log alone
 _MEMORY_INDEX = '.fractal/main.task/memory/_index.md'
+_LOGS_INDEX = '.fractal/main.task/memory/logs/_index.md'
 
 # an index stamp far older than any a test run writes
 _AGED_STAMP = '2020-01-01T00:00:00Z'
@@ -1369,9 +1371,10 @@ def test_committed_memory_index_links_no_left_out_file(
     The memory wiki indexes every file on disk, so a binary or a log the
     estate law refuses gains a row -- from the commit's own refresh, or,
     before a backstop save that skips the refresh, from the node's own
-    ``wiki update``. The committed indexes link neither the refused files
-    nor a folder holding only them, the estate warning still names each
-    file, and the working tree reads back clean.
+    ``wiki update``. The committed indexes link none of the refused files:
+    a folder holding only them keeps its index, in the commit and on disk,
+    rebuilt without their rows. The estate warning still names each file,
+    and the working tree reads back clean.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
@@ -1400,14 +1403,16 @@ def test_committed_memory_index_links_no_left_out_file(
     result = node.commit('memory beside refused files', force=force)
 
     assert _head(project_dir) != head_before
-    # the records keep their rows; the refused files and their folder have none
+    # the records keep their rows and the refused files have none; the folder
+    # holding only the log keeps its index, rebuilt without the log's row
     index = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
     assert '[[notes' in index
     assert '[[data.json' in index
     assert 'dump.tar' not in index
-    assert 'logs/' not in index
-    tracked = _git(project_dir, 'ls-files', '.fractal/main.task/memory').stdout
-    assert 'memory/logs/' not in tracked
+    assert '[[logs/_index' in index
+    folder_index = _git(project_dir, 'show', f'HEAD:{_LOGS_INDEX}').stdout
+    assert 'run.log' not in folder_index
+    assert (memory / 'logs' / '_index.md').is_file()
     # the estate warning still names each refused file, beside the rebuild
     refused = next(line for line in result.splitlines() if 'NOT staged' in line)
     for path in ('memory/dump.tar', 'memory/logs/run.log'):
@@ -1464,9 +1469,9 @@ def test_rebuilt_memory_index_is_the_refresh_less_left_out_rows(
     """The rebuilt memory index is the refresh's, less the left-out rows.
 
     The rebuild drops what the commit leaves out and nothing else: a new
-    page's row, every description, and the rest of the index keep the bytes
-    the refresh wrote, and only the rows linking a refused file or a folder
-    holding nothing else go.
+    page's row, every description, a folder holding only refused files, and
+    the rest of each index keep the bytes the refresh wrote, and only the
+    rows linking a refused file go.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
@@ -1496,7 +1501,10 @@ def test_rebuilt_memory_index_is_the_refresh_less_left_out_rows(
         capture_output=True,
         check=True,
     )
-    refreshed = (memory / '_index.md').read_text(encoding='utf-8')
+    refreshed = {
+        index: (memory / index).read_text(encoding='utf-8')
+        for index in ('_index.md', 'logs/_index.md')
+    }
     node.commit('finding beside refused files')
 
     def _lines(text: str) -> list[str]:
@@ -1507,11 +1515,19 @@ def test_rebuilt_memory_index_is_the_refresh_less_left_out_rows(
             if line and not line.startswith('updated:')
         ]
 
+    # each committed index is the refresh's, less its refused file's row
+    for index, path, row in (
+        ('_index.md', _MEMORY_INDEX, '[[dump.tar'),
+        ('logs/_index.md', _LOGS_INDEX, '[[logs/run.log'),
+    ):
+        committed = _git(project_dir, 'show', f'HEAD:{path}').stdout
+        expected = [
+            line for line in _lines(refreshed[index]) if not line.startswith(row)
+        ]
+        assert _lines(committed) == expected, index
     committed = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
     assert '[[finding' in committed
-    left_out = ('[[dump.tar', '[[logs/')
-    expected = [line for line in _lines(refreshed) if not line.startswith(left_out)]
-    assert _lines(committed) == expected
+    assert '[[logs/_index' in committed
 
 
 def test_rebuilt_memory_index_keeps_the_node_edits(tmp_path: pathlib.Path) -> None:

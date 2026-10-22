@@ -429,15 +429,15 @@ may include breaking changes, each listed under a Breaking heading.
   block of its `.wiki/settings.json`, and commit the change for a project wiki.
 - `fractal commit` keeps the files it refuses out of the memory wiki's committed
   indexes: no committed row links a binary, an archive, a log, or any other file
-  the commit leaves out of the node's memory, nor a new folder holding only such
-  files. The commit rebuilds the staged indexes without them, `--force` saves
-  included, and says so beside the warning that names each refused file. An
-  index unchanged but for those rows keeps its committed bytes, `updated:` stamp
-  included, and the node's own edits to an index survive. In the working tree
-  the rows come back at the next `wiki update`. A failed rebuild warns in one
-  line and the commit lands with the indexes as staged. The refresh indexed
-  every file on disk, so each refused file's row dangled in every clean
-  checkout.
+  the commit leaves out of the node's memory, and a folder holding only such
+  files keeps its index, without their rows. The commit rebuilds the staged
+  indexes without them, `--force` saves included, and says so beside the warning
+  that names each refused file. An index unchanged but for those rows keeps its
+  committed bytes, `updated:` stamp included, and the node's own edits to an
+  index survive. In the working tree the rows come back at the next
+  `wiki update`. A failed rebuild warns in one line and the commit lands with
+  the indexes as staged. The refresh indexed every file on disk, so each refused
+  file's row dangled in every clean checkout.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The

@@ -739,9 +739,10 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    node directory never counts as uncommitted. The memory wiki indexes every
    file on disk, so the pipeline then rebuilds the staged memory indexes
    without the files the commit leaves out, in a temp folder outside the
-   repository: no committed row links a refused file or a new folder holding
-   only refused files, and an index unchanged but for those rows keeps its
-   committed bytes, ``updated:`` stamp included. Each rebuilt index is written
+   repository: no committed row links a refused file (a folder holding only
+   refused files keeps its index, without their rows), and an index unchanged
+   but for those rows keeps its committed bytes, ``updated:`` stamp
+   included. Each rebuilt index is written
    to the working tree too, so the tree stays clean, and the rows come back
    there at the next refresh. The output says ``Memory index rebuilt without
    N file(s) the commit leaves out`` beside the warning that names each file.

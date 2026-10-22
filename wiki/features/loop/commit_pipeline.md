@@ -180,10 +180,10 @@ against the repository's `.gitignore` files and `.git/info/exclude`, with
 `core.excludesFile` pinned out, and off when the memory root itself is ignored),
 so a record force-added past a repository rule -- untracked or already tracked
 -- gains no row the refresh never gave it, while a record only a host rule holds
-keeps the row the refresh gives it. A folder new since HEAD whose staged content
-is nothing but generated indexes exists only for its left-out files: its indexes
-stay out of the temp tree and are removed from the commit, so no parent row
-links it.
+keeps the row the refresh gives it. A folder holding only left-out files keeps
+its index, rebuilt like any other without their rows: the commit carries that
+index, so the parent's row links a folder the commit has, and no commit deletes
+an index the node may have written.
 
 Each rebuilt index whose bytes differ from what is staged is written back to the
 git index and the working tree, which keeps the tree clean for the loop's
@@ -192,9 +192,9 @@ from the staged bytes, so the node's own edits to an index's description and to
 the text below its separator survive. An index whose rebuild differs from HEAD's
 copy only in the frontmatter's `updated:` line commits HEAD's bytes, old stamp
 included -- otherwise a refused file sitting in memory would move the stamp at
-every commit. In the working tree a refused file's row (and a new folder index
-holding only refused files) disappears at each commit; the next refresh adds it
-back locally, and the next commit drops it again.
+every commit. In the working tree a refused file's row disappears at each
+commit; the next refresh adds it back locally, and the next commit drops it
+again.
 
 The rebuild runs inside the staging closure, so the hook retry's re-stage redoes
 it. It runs on `--force` saves too, since the node's own refresh writes the rows

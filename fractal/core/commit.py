@@ -99,9 +99,9 @@ def commit(
         ignore_scope: Commit out-of-scope changes but still lint.
         force: Bypass scope and lint checks and git hooks.
         body: Optional paragraph below the subject; a ``force`` commit's
-            body also folds in the record pass's notices, the staged-sweep
-            warnings, and a capped diffstat, so a backstop save describes
-            itself.
+            body also folds in the record pass's notices (the memory index
+            rebuild's among them), the staged-sweep warnings, and a capped
+            diffstat, so a backstop save describes itself.
         iteration: Commit-message iteration number (the loop passes the
             live one); resolved from the node's open iteration row, else
             ``0``, when omitted.
@@ -1328,7 +1328,6 @@ def _rebuild_memory_index(node: Node, unstaged: list[str]) -> list[str]:
         changed = _restage_memory_indexes(
             node,
             prefix,
-            left_out,
             wiki_cli=wiki_cli,
             env=env,
         )
@@ -1348,7 +1347,6 @@ def _rebuild_memory_index(node: Node, unstaged: list[str]) -> list[str]:
 def _restage_memory_indexes(
     node: Node,
     prefix: str,
-    left_out: list[str],
     *,
     wiki_cli: str,
     env: dict[str, str],
@@ -1358,9 +1356,9 @@ def _restage_memory_indexes(
     The staged memory tree -- the bytes about to commit -- is checked out
     into a temp folder outside every repository (inside one, the wiki would
     apply that repository's ignore rules) and ``wiki update`` rebuilds its
-    indexes there, so no row links a file the commit leaves out, nor a
-    folder that holds nothing else. The temp tree leaves out what the
-    wiki's own ignore check skips, so every other row is the refresh's. An
+    indexes there, so no row links a file the commit leaves out. The temp
+    tree leaves out what the wiki's own ignore check skips, so every other
+    row is the refresh's. An
     index whose rebuild differs from HEAD's copy only in its ``updated:``
     stamp keeps HEAD's bytes, so a refused file never moves the stamp. Each
     index whose bytes differ from what is staged is written back to the git
@@ -1370,7 +1368,6 @@ def _restage_memory_indexes(
     Args:
         node: The node whose staged memory to rebuild.
         prefix: The memory wiki's worktree-relative path.
-        left_out: The memory files the staging pass left unstaged.
         wiki_cli: Resolved ``wiki`` executable.
         env: Environment for the wiki invocation.
 
@@ -1382,14 +1379,10 @@ def _restage_memory_indexes(
 
     """
     worktree = node.worktree
-    # the staged memory tree, and which of it is new since HEAD
+    # the staged memory tree: the exact bytes about to commit
     cmd = ['ls-files', '-z', '--', f':(literal){prefix}']
     raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
     staged = [path for path in os.fsdecode(raw).split('\0') if path]
-    cmd = ['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=A', '-z']
-    cmd += ['--', f':(literal){prefix}']
-    raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
-    added = set(filter(None, os.fsdecode(raw).split('\0')))
     # leave out what the wiki's own ignore check skips, so the rebuild
     # indexes exactly what the refresh did: this is the wiki package's
     # Wiki._check_ignore call -- matched on the patterns alone (--no-index,
@@ -1429,20 +1422,7 @@ def _restage_memory_indexes(
     fenced = {os.fsdecode(path) for path in result.stdout.split(b'\0') if path}
     if {prefix, root_index} <= fenced:
         fenced = set()
-    content = [path for path in staged if path not in fenced]
-    # a folder the commit carries only for its left-out files -- new since
-    # HEAD, its staged content nothing but generated indexes -- is one the
-    # commit leaves empty: drop its indexes, so no parent row links it
-    emptied: set[str] = set()
-    for path in left_out:
-        relative = pathlib.PurePosixPath(path).relative_to(prefix)
-        for folder in relative.parents[:-1]:
-            inside = [
-                item for item in content if item.startswith(f'{prefix}/{folder}/')
-            ]
-            if all(item.endswith('/_index.md') and item in added for item in inside):
-                emptied.update(inside)
-    kept = [path for path in content if path not in emptied]
+    kept = [path for path in staged if path not in fenced]
     rebuilt: dict[str, bytes] = {}
     with tempfile.TemporaryDirectory() as tmp:
         # check the kept bytes out of the git index into the temp tree (raw,
@@ -1501,12 +1481,7 @@ def _restage_memory_indexes(
     if written:
         specs = [f':(literal){worktree / path}' for path in written]
         fractal.util.git.run(['add', '-f', *specs], cwd=worktree)
-    # remove the emptied folders' indexes last, so a failure never leaves a
-    # parent row linking a removed index
-    if emptied:
-        specs = [f':(literal){worktree / path}' for path in sorted(emptied)]
-        fractal.util.git.run(['rm', '-f', '--quiet', '--', *specs], cwd=worktree)
-    return bool(written or emptied)
+    return bool(written)
 
 
 #: an index frontmatter's ``updated:`` stamp line
