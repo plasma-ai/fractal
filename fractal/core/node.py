@@ -6584,9 +6584,9 @@ class Node:
             return commit.commit(node=self, message=message, check=True)
         # log each report to the node's scratch before the caller prints it --
         # a caller whose output dies (a shell redirect held by an ended agent
-        # session) loses the warnings and hook output while the commit lands;
-        # --check commits nothing, and a user node's baseline returns above
-        # unlogged (a tracked seed's force-add would stage tmp/ with it)
+        # session) loses the warnings and held-out counts while the commit
+        # lands; --check commits nothing, and a user node's baseline returns
+        # above unlogged (a tracked seed's force-add would stage tmp/ with it)
         cmd = ['rev-parse', 'HEAD']
         head = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
 

@@ -181,14 +181,15 @@ may include breaking changes, each listed under a Breaking heading.
   unstaged: refused on either staging path, or a record the force-add could not
   stage.
 - `fractal commit` appends each report to `tmp/commit.log` in the node's
-  directory before printing it, so the warnings, held-out counts, and hook
-  output survive a caller whose output is lost, such as a shell redirect whose
-  session ended while the commit went on to land. Each entry opens with
-  `=== Commit at <UTC time> (<sha>) ===`, naming the commit it landed, or
-  `(no commit)`; a failed commit's entry holds its `Error:` text and reads
-  `(failed)`. `--check` and a user node's baseline log nothing. The log is
-  git-ignored scratch: it is never committed and survives
-  `node start --continue --clean`.
+  directory before printing it, so the report the command prints survives a
+  caller whose output is lost, such as a shell redirect whose session ended
+  while the commit went on to land: the warnings, held-out counts, git's commit
+  output, the push notice, and, when the commit fails, a failing hook's output
+  in its error. Each entry opens with `=== Commit at <UTC time> (<sha>) ===`,
+  naming the commit it landed, or `(no commit)`; a failed commit's entry holds
+  its `Error:` text and reads `(failed)`. `--check` and a user node's baseline
+  log nothing. The log is git-ignored scratch: it is never committed and
+  survives `node start --continue --clean`.
 - The packaged node charter and memory skill tell a node to name its own files
   through `$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR`, with scratch in
   `$NODE_DIR/tmp/` — a path at the worktree root is the project, not the node,

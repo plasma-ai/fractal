@@ -196,11 +196,15 @@ dirty and fire the backstop every iteration over a file that can never clear.
 ## The report log
 
 The pipeline returns its report -- the lint notices, staging warnings, the
-`Held out` line, the git and hook output, the push notice -- and the CLI prints
-it only after the commit and push are done. A caller whose output is gone by
-then (an agent's shell redirect whose tool session ended mid-commit) loses that
-report while the commit lands: the CLI's broken-pipe handling exits 0 and
-nothing else keeps it. So `Node.commit`, the layer `fractal commit` calls,
+`Held out` line, git's commit output, the push notice -- and the CLI prints it
+only after the commit and push are done. A hook's output reaches it only through
+a failed commit's error text (no pre-commit config to retry from, a re-stage
+that changes nothing, or a retry that fails again); a passing hook writes to
+git's stderr, which `_commit_once` does not keep, and a successful retry reports
+the retried commit, not the first attempt's hook output. A caller whose output
+is gone by then (an agent's shell redirect whose tool session ended mid-commit)
+loses that report while the commit lands: the CLI's broken-pipe handling exits 0
+and nothing else keeps it. So `Node.commit`, the layer `fractal commit` calls,
 appends every child-node report to `<node_dir>/tmp/commit.log` before returning,
 and a failed run's `Error:` text in place of the report. Each entry opens with
 `=== Commit at <UTC time> (<stamp>) ===`; the stamp is the sha HEAD moved to,
