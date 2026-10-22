@@ -31,7 +31,8 @@ memory, so an omitted `--path` silently targets the wrong wiki or errors. Run
 
 Name pages and folders in ascii snake_case (`command_core`, not `command-core`)
 -- both wikis enforce identifier-safe names (the project wiki's mirror the
-source modules they document), so `wiki lint` rejects hyphens and spaces.
+source modules they document), so `wiki lint` rejects hyphens and spaces. The
+rule allows `.`, so a non-markdown file keeps its extension (`controls.json`).
 
 `wiki update` regenerates derived state: each page's entry line in `_index.md`
 (name and description) is pulled from the page's own frontmatter, so fix a

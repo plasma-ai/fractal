@@ -364,8 +364,19 @@ applies the effective set, and compares each bundle surface against the node's
 live copy: `NODE.md`, `steps/`, `scripts/`, and `skills/` in the node data
 directory, and each `agents/<agent>/` file as the live `.<agent>/` file. A live
 symlink (the skills mount, a linked credential) and a file the bundle does not
-carry are never judged; a bundle file the node lacks is drift. Literal braces
-are valid output and do not constitute drift on their own. The command prints a
+carry are never judged; a bundle file the node lacks is drift. Codex trusts the
+project it runs in by appending a `[projects."<path>"]` stanza with
+`trust_level = "trusted"` to the `config.toml` in its `CODEX_HOME`, the node's
+`.codex/`, keyed to the repository's main worktree (the Git common directory's
+checkout, which owns the node's linked worktree). The trust stanza for this
+repository at the end of `.codex/config.toml` is never judged, so any other
+change there diffs without it. Its key unquotes as TOML and matches when it
+resolves to the main worktree or to the node's own worktree, so a symlinked or
+trailing-slash spelling still matches. A stanza trusting any other path, a
+relative one included, is drift: trust enables project-local settings, so an
+unexpected trusted path is worth reporting. A projects table carrying anything
+more than the trusted level, or another level, is drift too. Literal braces are
+valid output and do not constitute drift on their own. The command prints a
 unified diff per drifted file and exits 0 when clean, 1 on drift, and 2 on a
 command error (a node with no template recorded included), so scripts branch on
 the exit code. The recorded commit always resolves while it is reachable, so a

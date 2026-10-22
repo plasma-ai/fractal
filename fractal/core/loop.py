@@ -3267,6 +3267,7 @@ class Loop:
         # background work runs
         if self._step_id is not None:
             after = settled_at if result is not None and result.final else None
+            trailing = result is not None and result.trailing
             try:
                 self._step_partly_unpriced = agent.settle_cost(
                     step_id=self._step_id,
@@ -3274,6 +3275,7 @@ class Loop:
                     ended=fractal.util.time.utc_now(),
                     after=after,
                     replies=capped,
+                    trailing=trailing,
                 )
             except Exception as error:
                 print(
@@ -3281,11 +3283,12 @@ class Loop:
                     file=sys.stderr,
                 )
                 # with no result figure, the stream's estimate leaves out
-                # whatever the failed settle would have added
-                self._step_partly_unpriced = after is None
+                # whatever the failed settle would have added; past one, the
+                # figure leaves out the spend the stream saw after it
+                self._step_partly_unpriced = after is None or trailing
             if self._step_partly_unpriced:
                 print(
-                    "Warning: a reply's spend is missing from the launch's"
+                    "Warning: part of the launch's spend is missing from its"
                     ' record; its step books the spend recorded (partly'
                     ' unpriced)',
                     file=sys.stderr,

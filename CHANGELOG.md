@@ -331,6 +331,13 @@ may include breaking changes, each listed under a Breaking heading.
   ends at the output cap books the usage the stream recorded for it, so a
   thinking-cap kill reads as whole unless the stream reported no usage. A killed
   Codex step still records no cost.
+- A Claude step whose stream shows a sub-agent still running after the result
+  frame is marked `; partly unpriced` when none of that later spend can be
+  priced: its transcript is missing or unreadable, its model is unpriced, or the
+  settle fails. The step booked the result's figure as whole, though the stream
+  had seen spend past it. A step whose stream shows nothing after its result
+  stays whole whatever the settle finds. Claude Code 2.1.300 holds its result
+  until background agents finish, so it streams no such frames.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed
@@ -419,6 +426,14 @@ may include breaking changes, each listed under a Breaking heading.
   skip it, which is safe; committing or moving the file clears the refusal. A
   wiki declared at the worktree root refuses the merge by name, since every
   refresh would walk the whole worktree and leave the target dirty.
+- The wikis fractal creates, the project wiki `fractal init` scaffolds and each
+  node's memory wiki, accept dotted file names such as `controls.json`,
+  `notes.txt`, and `fit.py`: their seeded ascii/identifier naming policy allows
+  `.`. The identifier rule judged a non-markdown file by its whole name,
+  extension included, so `wiki update` skipped the file and `wiki lint` refused
+  it. A name with a hyphen or a space is still refused. An existing wiki keeps
+  its settings: to accept dotted names there, add `"allow": "."` to the `naming`
+  block of its `.wiki/settings.json`, and commit the change for a project wiki.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The
@@ -455,6 +470,14 @@ may include breaking changes, each listed under a Breaking heading.
   `include`, `exclude`) beside the table are ignored, so one node's record can
   seed another, and a `[values]` table beside any other top-level key refuses,
   naming the keys.
+- `fractal node diff` never judges the trust stanza for this repository that
+  Codex appends to a node's `.codex/config.toml` (a `[projects."<path>"]` header
+  keyed to the repository's main worktree, or to the node's own worktree, and
+  `trust_level = "trusted"`), so a node that has run Codex diffs clean instead
+  of reporting drift. Any other change to the file still reports, diffed without
+  the stanza. A stanza trusting any other path is drift, since trust enables
+  project-local settings, as is a projects table carrying more than the trusted
+  level.
 - The billing breaker no longer counts a step refused before its launch — a cost
   cap over a model the price table cannot price, or a per-step agent or provider
   that cannot run — as an instant zero-cost failure: such a refusal bought no
@@ -513,6 +536,10 @@ may include breaking changes, each listed under a Breaking heading.
   its scope from outside it, naming the old path, as the merge's footprint check
   does. The scope check read git's rename-detecting diff, which names only a
   rename's new path, so the deletion outside the scope committed unchecked.
+- `fractal destroy --help` and `fractal reset --help` say the command deletes
+  the tree's local node branches, unmerged work included, while the root branch
+  and remote branches remain. Only the confirmation prompt said so, and
+  `--force` skips it.
 - A user node's `fractal commit --init` baseline on a tracked seed commits only
   the seed's records. It stages the seed by the rules a child's node directory
   commits by, so the runtime files fractal's exclude block holds (`tmp/`, an

@@ -108,6 +108,7 @@ __all__ = [
     'test_killed_launch_settles_after_dropping_its_group_handle',
     'test_a_settle_never_lowers_the_streamed_figure',
     'test_a_failed_settle_leaves_the_killed_launch_as_booked',
+    'test_a_failed_settle_marks_sub_agent_spend_after_the_result',
     'test_every_kill_prices_the_launch_from_its_transcript',
     'test_resumed_launch_books_only_its_own_spend',
     'test_unsettled_result_figure_books_the_launch_record_instead',
@@ -3097,7 +3098,7 @@ def test_cut_off_mid_reply_books_recorded_spend_partly_unpriced(
     loop_node.record.step_cost(step_id=killed_row['step_id'], cost=recorded)
     assert _step_rows(loop_node)[0].endswith('; partly unpriced')
     err = capsys.readouterr().err
-    assert "Warning: a reply's spend is missing from the launch's record" in err
+    assert "Warning: part of the launch's spend is missing from its record" in err
 
 
 def test_kill_during_a_tool_call_is_fully_priced(
@@ -3430,6 +3431,42 @@ def test_a_failed_settle_leaves_the_killed_launch_as_booked(
     ]
     err = capsys.readouterr().err
     assert 'Warning: pricing the ended launch failed (transcript gone)' in err
+
+
+def test_a_failed_settle_marks_sub_agent_spend_after_the_result(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A settle that raises marks a launch whose sub-agent ran past its result.
+
+    The stream leaves a sub-agent's spend after the result to the settle,
+    so a settle that fails leaves spend the stream saw out of the figure.
+    The pane warns.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    background = {'input_tokens': 2_000, 'output_tokens': 700}
+    streamed = _assistant_frame('msg_late', background)
+    streamed['parent_tool_use_id'] = 'toolu_bg'
+    agent = scripted_claude(
+        [
+            _claude_script(_INIT, _RESULT, streamed),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+
+    def _settle_cost(session: str, **kwargs: Any) -> Optional[float]:
+        raise OSError('transcript gone')
+
+    monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/completed/partly unpriced',
+        'EXECUTE/completed/',
+    ]
+    err = capsys.readouterr().err
+    assert "Warning: part of the launch's spend is missing from its record" in err
 
 
 @pytest.mark.parametrize(
