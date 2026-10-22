@@ -168,6 +168,15 @@ def _config_set(
             raise typer.BadParameter(
                 f'Unknown config key: {key!r}. Valid keys: {valid}.'
             )
+        # the reserve's mode records how the reserve was set, so the operator
+        # path (check=True) never writes it -- a chosen figure marked default
+        # would move with the next cap change; init.sh's private write
+        # (check=False) records init's own mode beside its reserve
+        if check and key == 'reserve_mode':
+            raise typer.BadParameter(
+                'reserve_mode records how the reserve was set and cannot be'
+                ' set; set reserve_budget instead.'
+            )
         # an empty value is a mistake; 'null' is the explicit way to clear
         if value == '':
             raise typer.BadParameter(
@@ -242,6 +251,13 @@ def _config_set(
     # private `config _set` passes check=False because it writes the very
     # config.json the guard checks, so it must resolve a not-yet-init node
     node = resolve_node(path, check=check)
+    # a reserve written here is a chosen figure, so it records as explicit (no
+    # cap change retunes it), and a cleared reserve clears its mode; the mode
+    # is derived, so it is written (and echoed) only when it changes
+    if 'reserve_budget' in config and 'reserve_mode' not in config:
+        reserve_mode = 'explicit' if config['reserve_budget'] is not None else None
+        if reserve_mode != node.config.get('reserve_mode'):
+            config['reserve_mode'] = reserve_mode
     # validate the resulting config the way init does (the one merged
     # validator) -- this setter must not store a value init would reject (a
     # non-positive ceiling, an out-of-range reserve, a broken step<=iter<=run

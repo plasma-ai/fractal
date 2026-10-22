@@ -46,10 +46,9 @@ may include breaking changes, each listed under a Breaking heading.
   the paused worktree during the merge. A step frozen inside a git operation (a
   conflicted merge, squash, cherry-pick, or revert, a rebase stopped part-way,
   or a git command's `index.lock`) refuses the merge before anything changes,
-  naming the operation. `fractal resume` waits for a running merge before
-  relaunching a paused node, saying once that it waits, and a commit the node
-  makes during the merge refuses it. A live node, or a child landing into a live
-  or paused parent, still refuses.
+  naming the operation. A resumed loop waits for a running merge before it goes
+  `active`, and a commit the node makes during the merge refuses it. A live
+  node, or a child landing into a live or paused parent, still refuses.
 - `fractal node merge --message=<text>` sets the squash commit's text in place
   of `merge <branch>`, so a descriptive message needs no amend (an amended
   squash orphans the merge-base advance recorded against it).
@@ -236,6 +235,17 @@ may include breaking changes, each listed under a Breaking heading.
   `wiki update` on wikis of several thousand pages, and 1.7 keeps a row one side
   deleted out of the merged index and leaves a clean merge's rows in the order
   `wiki update` writes them, the behavior fractal's merge tests pin.
+- The worktree-root `.gitattributes` passes as init's own edit — at a child's
+  `fractal commit --init` baseline, at a scoped commit, and at the `node merge`
+  footprint check — when HEAD's content is followed by the wiki tool's four-line
+  merge-driver block (`# Wiki index merge driver`, `**/_index.md merge=wiki`,
+  `# Wiki page merge driver`, `**/*.md merge=wiki`), by its last two lines over
+  a file already holding `**/_index.md merge=wiki`, or by its first two lines
+  alone, as a wiki tool without the page driver writes them. Any other added or
+  removed line still makes the file an ordinary out-of-scope path.
+  `fractal init` on an adopted wiki warns when `.gitattributes` lacks
+  `**/_index.md merge=wiki` or `**/*.md merge=wiki` as a whole line, naming the
+  missing ones to append and commit.
 - A Claude step stuck at a thinking cap is steered one effort level lower: a
   `max` step's steer runs at `xhigh`, an `xhigh` step's at `high`. The step's
   effort is its `effort:` frontmatter, else the node's `effort`, else Claude's
@@ -249,6 +259,18 @@ may include breaking changes, each listed under a Breaking heading.
   branch at each start or resume. A ladder with a bad shape refuses wherever the
   file is read, and one naming an unregistered agent or listing the agent's own
   levels out of order refuses at the loop's boot.
+- A node's config records where its cleanup reserve came from as `reserve_mode`:
+  `default` for the 10% `node init` materializes, `explicit` for a figure set by
+  `--reserve-budget` (at init or on `node update`), a template preset, or
+  `node config set reserve_budget=`. A cap change through
+  `node update --max-cost` or `node start --continue --max-cost` re-derives only
+  a default reserve that still equals 10% of the old cap, so an explicit reserve
+  keeps its figure even at exactly 10%. A config without the key reads as
+  default when its reserve equals 10% of its cap and as explicit otherwise, and
+  the next cap change records that reading. `config set` refuses `reserve_mode`;
+  a `reserve_budget` write records `explicit`, and clearing the reserve clears
+  its mode. Both packaged `fractal` skills say to pass `--reserve-budget` again
+  to change an explicit reserve with the cap.
 
 ### Fixed
 
@@ -279,6 +301,11 @@ may include breaking changes, each listed under a Breaking heading.
   judgement, and the merge-base advance all take that commit, so a commit the
   node makes during the merge skips the advance with a warning instead of being
   reverted by it.
+- Every loop boot (a start, a `--continue`, or a resume) waits for a running
+  `node merge` before its continue clean-up and before it goes `active`, saying
+  so on its output before each wait. A merge refuses only an `active` node, so a
+  boot that landed mid-merge could have its worktree reset or carried by the
+  merge while its agent started.
 - `fractal node list` no longer shows `PAUSED: billing` for a run of instant,
   unpriced failures the loop judged provider outages, such as codex's
   model-at-capacity refusals: the failed step row's reason now leads with

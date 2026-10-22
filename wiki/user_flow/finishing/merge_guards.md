@@ -21,18 +21,22 @@ target's own loop, which merges its settled children as part of its normal
 iteration), and while the target worktree has uncommitted changes. Merges are
 serialized per repository: `fractal node merge` holds a repo-wide merge lock
 while the script runs, so two sibling merges into one target queue instead of
-interleaving their index writes.
+interleaving their index writes. The merge re-reads the node's status once it
+holds the lock and refuses a node that changed status while it waited. A merge
+can rewrite the worktree of any node that is not active, so every loop boot
+(start, continue, or resume) takes the same lock for its continue clean-up and
+its `active` stamp, and says so on its output before it waits: no boot writes to
+the worktree or goes live while a merge runs.
 
 ## Paused nodes
 
 A paused node merges without leaving `paused`: it runs no loop and no agent, and
 its run, iteration, and step rows stay open for `fractal resume` to adopt. A
-resume relaunches the loop only under the merge lock, so it waits for a running
-merge (saying so once before it waits, since a merge's validation can run long),
-and the merge re-reads the node's status once it holds the lock, refusing a node
-that left `paused` while it waited; a commit the node gains during the merge
-anyway (a hand commit) refuses the merge (`<node> moved during the merge`),
-since the advance would revert it.
+resumed loop waits for a running merge before it goes `active`, as every boot
+does, so the merge never carries the worktree under a starting agent; a merge
+that waited while the node left `paused` refuses, and a commit the node gains
+during the merge anyway (a hand commit) refuses the merge
+(`<node> moved during the merge`), since the advance would revert it.
 
 Only committed work lands. A frozen step that stopped inside a git operation — a
 merge, squash merge, cherry-pick, or revert stopped on a conflict, a rebase
@@ -131,14 +135,14 @@ code; when the target is not restored, the error names the
 Before committing, the merge judges the staged paths outside `.fractal/` (the
 restore has already settled those) by the node's commit boundaries — its scope
 roots and its project wiki, plus the worktree-root `.gitattributes` only when it
-is init's own `**/_index.md merge=wiki` edit (a repo-root node with no scope is
-unrestricted; a sub-project node with no scope is bounded to its project
-directory) — the same law `fractal commit` applies, and refuses when any path
-falls outside them. The refusal names the paths and both remedies: widen the
-scope with `fractal node config set scope=<dirs> --path=<node worktree>` and
-commit it with `fractal commit "widen scope" --path=<node worktree>` (an
-uncommitted config change makes the rerun skip the merge-base advance), or rerun
-with `fractal node merge --ignore-scope`, which lands the paths. A fresh merge
+is init's own `merge=wiki` edit (a repo-root node with no scope is unrestricted;
+a sub-project node with no scope is bounded to its project directory) — the same
+law `fractal commit` applies, and refuses when any path falls outside them. The
+refusal names the paths and both remedies: widen the scope with
+`fractal node config set scope=<dirs> --path=<node worktree>` and commit it with
+`fractal commit "widen scope" --path=<node worktree>` (an uncommitted config
+change makes the rerun skip the merge-base advance), or rerun with
+`fractal node merge --ignore-scope`, which lands the paths. A fresh merge
 restores the target on refusal. A `--continue` leaves the staged squash in
 place, and its remedies differ: re-run with `--continue --ignore-scope`, or
 widen the scope (config set, then commit) and redo the squash

@@ -135,8 +135,8 @@ no-fast-forward merge carrying grandchild commits no check saw), so the squash
 is the one point that sees the node's whole offering: the staged paths outside
 `.fractal/` are judged by the node's boundaries — its scope roots and the
 project wiki, with the worktree-root `.gitattributes` admitted only as init's
-own `**/_index.md merge=wiki` edit, exactly as `fractal commit` judges them —
-and a path outside them is refused there with the paths named and
+own `merge=wiki` edit, exactly as `fractal commit` judges them — and a path
+outside them is refused there with the paths named and
 `node merge --ignore-scope` as the override. The merge refuses over a dirty,
 active, or paused target — the squash mutates the target's worktree, and its
 recovery path resets hard, so it must never run where it could destroy someone's
