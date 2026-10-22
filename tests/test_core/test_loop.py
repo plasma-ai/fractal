@@ -10,6 +10,8 @@ launches with stubbed agents -- lives in ``test_cli/test_run_modes.py``.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import itertools
 import json
 import logging
@@ -1477,7 +1479,6 @@ def test_boot_waits_for_a_running_merge(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path_factory: pytest.TempPathFactory,
-    capsys: pytest.CaptureFixture,
     boot: str,
 ) -> None:
     """A booting loop goes live only once a running merge lets go.
@@ -1529,36 +1530,48 @@ def test_boot_waits_for_a_running_merge(
         [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
     )
     notice = 'Waiting for a running merge to finish...'
-    try:
-        _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
-        booter.start()
-        # the boot says once that it waits, then blocks behind the held lock
-        booter.join(timeout=3)
-        assert booter.is_alive()
-        assert capsys.readouterr().out.count(notice) == 1
-        # nothing went live, launched, or touched the worktree meanwhile
-        assert node.status() == status
-        assert loop.launched == []
-        assert readme.read_text(encoding='utf-8') == content
-        # the holder dies, the kernel releases the lock, and the boot runs
-        holder.kill()
-        holder.wait(timeout=5)
-        booter.join(timeout=60)
-        assert not booter.is_alive()
-    finally:
-        # the holder is a single leaf process, so a pid kill reaps it fully
-        if holder.poll() is None:
+    # the boot prints into a buffer the polls read without truncating, so no
+    # line the boot thread writes between two reads is lost
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        try:
+            _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
+            booter.start()
+            # the notice prints just before the boot blocks on the held lock
+            deadline = time.monotonic() + 60
+            while notice not in output.getvalue() and booter.is_alive():
+                assert time.monotonic() < deadline, 'the boot never reached the lock'
+                time.sleep(0.02)
+            assert notice in output.getvalue(), 'the boot ran on without the lock'
+            # nothing went live, launched, or touched the worktree meanwhile
+            assert node.status() == status
+            assert loop.launched == []
+            assert readme.read_text(encoding='utf-8') == content
+            # the holder dies, the kernel releases the lock, and the boot
+            # launches its first step on the active node
             holder.kill()
-            holder.wait()
-        if booter.is_alive():
+            holder.wait(timeout=5)
+            deadline = time.monotonic() + 60
+            while not launched_as and booter.is_alive():
+                assert time.monotonic() < deadline, 'the boot never launched a step'
+                time.sleep(0.02)
+            assert launched_as, 'the boot ended without launching a step'
+            assert launched_as[0] == 'active'
             booter.join(timeout=60)
+            assert not booter.is_alive(), 'the run never ended'
+        finally:
+            # the holder is a single leaf process, so a pid kill reaps it fully
+            if holder.poll() is None:
+                holder.kill()
+                holder.wait()
+            if booter.is_alive():
+                booter.join(timeout=60)
 
-    # the steps ran on an active node with no second wait, and a continue's
-    # clean-up discarded the last run's dirt
+    # every step ran on the active node with no second wait, and a
+    # continue's clean-up discarded the last run's dirt
     assert codes == [0]
-    assert loop.launched
     assert set(launched_as) == {'active'}
-    assert notice not in capsys.readouterr().out
+    assert output.getvalue().count(notice) == 1
     assert readme.read_text(encoding='utf-8') == '# test\n'
 
 
