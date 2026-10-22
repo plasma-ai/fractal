@@ -435,7 +435,13 @@ def reset(app: typer.Typer) -> typer.Typer:
         force: bool = force,
         path: str = path,
     ) -> None:
-        """Reset a tree: remove its node worktrees, keep the history."""
+        """Reset a tree: remove its node worktrees, keep the history.
+
+        Removes the node worktrees, their local branches -- unmerged work
+        included -- and their registrations; the user node's data and the
+        central database stay. The tree's root branch and remote branches
+        remain; push or copy a node branch first to keep it.
+        """
         # the confirmation names the repo, resolved from any cwd inside it
         # (the agent's NODE_DIR, a worktree, or the repo root)
         repo_dir = Node(path).repo_dir
