@@ -152,16 +152,18 @@ Fractal's footprint
    ``fractal untrack`` toggle this).
 
 ``.gitattributes``
-   ``fractal init`` writes the wiki tool's merge-driver rules into the
-   repo-root ``.gitattributes`` for the wiki it creates, each under a
-   one-line comment: ``**/_index.md merge=wiki`` for wiki indexes and, from a
-   wiki tool with a page driver, ``**/*.md merge=wiki`` for wiki pages. It
-   creates the file when absent and appends the missing rules otherwise (one
-   with uncommitted edits is left alone), so wiki files merge through the
-   wiki merge driver. An adopted wiki gets no write: init warns and names the
-   lines to append and commit instead. The rules are ordinary committed
-   content: the ``fractal commit --init`` baseline picks them up while they
-   are still init's own uncommitted edit. The driver itself is
+   ``fractal init`` writes the wiki tool's merge-driver rules for the wiki it
+   creates, each under a one-line comment: ``**/_index.md merge=wiki`` for
+   wiki indexes into the repo-root ``.gitattributes`` and, from a wiki tool
+   with a page driver, ``*.md merge=wiki`` for wiki pages into the wiki's own
+   ``.gitattributes`` (``wiki/.gitattributes``; a node's memory wiki gets one
+   too, committed with the node's data). It creates each file when absent and
+   appends the missing rule otherwise (one with uncommitted edits is left
+   alone), so wiki files merge through the wiki merge driver. An adopted wiki
+   gets no write: init warns and names the lines to append and commit
+   instead. The rules are ordinary committed content: the
+   ``fractal commit --init`` baseline picks them up while they are still
+   init's own uncommitted edit. The driver itself is
    registered in repo-local git config (``merge.wiki.driver``), which a clone
    does not carry — run ``wiki config --path=wiki`` after cloning to register
    it again.

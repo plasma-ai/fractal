@@ -289,6 +289,18 @@ reads it from each transcript it opens:
   table does not carry, so the step books the tokens alone. A web fetch
   (`web_fetch_requests`) bills only its tokens, so it leaves nothing out; past a
   result, only a reply after it counts;
+- a reply billed above the pricing table's rates. Claude Code bills a reply
+  whose usage names `inference_geo: "us"` at 1.1 times its token cost (no other
+  geography, `global` included, costs more on 2.1.300). It also bills a reply
+  whose prompt is above a long-prompt threshold at higher rates. The threshold
+  is the one the model's table entry names in an
+  `input_cost_per_token_above_<N>k_tokens` key, and the prompt is the input with
+  its cache reads and writes, strictly above `N` thousand tokens, as Claude Code
+  counts it. Few Claude models name one (`claude-haiku-5-5` names 100k, as
+  Claude Code's own catalog does), and a model that names none is never marked
+  for its prompt's size. Neither the premium nor the long-prompt rates are
+  priced, so the step books the base rates. Past a result, only a reply after it
+  counts;
 - a sub-agent transcript it cannot read, and, on a launch with no result figure,
   a missing or unreadable session transcript or a settle that raises (the loop
   marks the last itself);

@@ -45,13 +45,15 @@ prefix, and the estates prefix) resolved by `scope_boundaries` and judged by
 `out_of_scope` -- a sub-project node with no roots is bounded to its project
 dir, a repo-root node with no roots is unbounded. The worktree-root
 `.gitattributes` sits outside every root and is admitted only while the whole
-change is init's own edit -- HEAD's content followed by the part of the wiki
-tool's four-line merge-driver block (`# Wiki index merge driver`,
-`**/_index.md merge=wiki`, `# Wiki page merge driver`, `**/*.md merge=wiki`; one
-definition, `_ATTRIBUTES_INIT_LINES`) the tool appends: the whole block, its
-page lines over a base already mapping the index, or its index lines alone from
-a tool without the page driver; any other added or removed line makes the file
-an ordinary out-of-scope path. The same record backs `merge.sh`'s footprint
+change is init's own edit -- HEAD's content followed by the index lines the wiki
+tool appends there (`# Wiki index merge driver`, `**/_index.md merge=wiki`), by
+those lines and page lines (`# Wiki page merge driver`, `**/*.md merge=wiki`),
+or by the page lines alone over a base already mapping the index (one
+definition, `_ATTRIBUTES_INIT_LINES`). The tool writes its page mapping
+(`*.md merge=wiki`) into each wiki root's own `.gitattributes`, not this one;
+root page lines pass because they assign only the wiki's merge driver. Lines
+compare in either line ending, and any other added or removed line makes the
+file an ordinary out-of-scope path. The same record backs `merge.sh`'s footprint
 check through the private `fractal node _scope` command -- the staged paths
 outside `.fractal/`, with `--attributes-ok` passed under the same whole-change
 rule applied to the target's staged copy -- so a squash is judged by exactly the
@@ -139,13 +141,18 @@ canon-required surfaces -- the estate root's `NODE.md`, `config.json`, and
 suffixes a record is written in, so no pass can stage a key, a certificate, an
 archive, or a binary. Beside them sits the estate's own tool state, which is
 committed content rather than machine state: git's empty-directory placeholder
-(`.gitkeep`), which exists only so a bare record dir survives a clone, and the
-wiki tool's settings directory (`.wiki/`), whose declared-root marker the wiki
-CLI reads the memory wiki back through (the tool's derived cache self-ignores,
-and its plugin binaries install to an ignored `.obsidian/`). Every other
-dot-named path is machine or agent state and stays out. Only new content is
-judged: what an estate already tracks keeps committing, so the law gates what
-enters history and never the upkeep of history a node already owns.
+(`.gitkeep`), which exists only so a bare record dir survives a clone, the wiki
+tool's settings directory (`.wiki/`), whose declared-root marker the wiki CLI
+reads the memory wiki back through (the tool's derived cache self-ignores, and
+its plugin binaries install to an ignored `.obsidian/`), and the page merge
+attributes the wiki tool writes at the memory wiki's root
+(`memory/.gitattributes`, `_TOOL_STATE_PATHS`), which a clone needs to merge
+memory pages through the driver. That file is admitted only there, where the
+tool writes it: an attributes file anywhere else in the estate is no tool's
+state, and would change how git merges and checks out the records beside it.
+Every other dot-named path is machine or agent state and stays out. Only new
+content is judged: what an estate already tracks keeps committing, so the law
+gates what enters history and never the upkeep of history a node already owns.
 
 Content the law refuses is withheld from the sweeps by name and reported, never
 staged and never silently dropped. The refused paths themselves are named as
@@ -181,7 +188,9 @@ sits outside every repository because inside one the wiki would apply that
 repository's ignore rules. The temp tree leaves out what the wiki's own ignore
 check skips (the wiki's `Wiki._check_ignore`: `git check-ignore --no-index`
 against the repository's `.gitignore` files and `.git/info/exclude`, with
-`core.excludesFile` pinned out, and off when the memory root itself is ignored),
+`core.excludesFile` pinned out, and off when the memory root itself is ignored;
+each path is probed as `./<path>`, since git reads a `--stdin` path opening with
+`:` -- every memory path under a `:`-named project folder -- as pathspec magic),
 so a record force-added past a repository rule -- untracked or already tracked
 -- gains no row the refresh never gave it, while a record only a host rule holds
 keeps the row the refresh gives it. A folder holding only left-out files keeps

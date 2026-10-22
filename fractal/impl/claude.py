@@ -53,6 +53,10 @@ _TURNS = frozenset({'user', 'assistant'})
 # a reply's final transcript line: its usage, model, and write instant
 _Reply = tuple[dict[str, Any], Optional[str], dt.datetime]
 
+# a price table key naming a model's long-prompt threshold, in thousands of
+# tokens, above which the model's replies bill at higher rates
+_LONG_PROMPT = re.compile(r'input_cost_per_token_above_(\d+)k_tokens')
+
 # Claude Code's provider-outage shapes, as its failed result frame names them
 # once its own API retries are spent: an `API Error: <status>` line (529
 # overloaded, a 5xx, a 429 rate limit), its own `API Error:` text for a
@@ -682,8 +686,9 @@ class ClaudeAgent(Agent):
         unreadable session transcript on a launch with no result figure, a
         sub-agent transcript that cannot be read, a reply whose usage
         holds a count the pricing cannot read, a reply holding tokens at a
-        model with no price, and a reply that searched the web, whose
-        per-search fee the price table does not carry.
+        model with no price, and a reply whose spend runs past the price
+        table's rates (a web search's fee, the ``us`` geography's premium,
+        or a prompt above the model's long-prompt threshold).
 
         With ``after``, the result frame's figure stands and only the
         replies completing after it price: claude counts a reply's cost
@@ -1124,7 +1129,11 @@ def _usage_cost(
     figure that results is partial. A model with no price (or none named)
     prices nothing, which leaves out every count above zero. A web search
     (``server_tool_use.web_search_requests``) bills a fee the price table
-    does not carry, so a reply that searched is never whole.
+    does not carry, so a reply that searched is never whole. Neither is one
+    whose spend runs past the table's rates: a reply served in the ``us``
+    inference geography, billed at a premium, or one whose prompt is above
+    a long-prompt threshold the model's entry names, billed at higher rates
+    (the ``_above_<N>k_tokens`` keys, not priced here).
 
     Returns:
         The cost (``None`` for an unknown or unpriced model), and whether
@@ -1166,6 +1175,10 @@ def _usage_cost(
             whole = False
     elif tools is not None:
         whole = False
+    # claude bills a reply served in the us inference geography at a premium
+    # over its token cost, which the price table does not carry
+    if usage.get('inference_geo') == 'us':
+        whole = False
     # look up per-token rates (missing cache rates fall back to the input rate);
     # with none, every count is unpriced, though a usage of zeros (a synthetic
     # reply's) holds nothing to price
@@ -1175,6 +1188,14 @@ def _usage_cost(
             input_tokens + cache_read_tokens + cache_creation_tokens + output_tokens
         )
         return None, whole and not tokens
+    # a prompt (its input with the cache reads and writes, as claude counts
+    # it) above a threshold the table names bills at long-prompt rates,
+    # which are not priced here
+    prompt = input_tokens + cache_read_tokens + cache_creation_tokens
+    for key in rates:
+        matched = _LONG_PROMPT.fullmatch(key)
+        if matched and prompt > 1_000 * int(matched[1]):
+            whole = False
     input_rate = rates.get('input_cost_per_token', 0.0)
     cache_read_rate = rates.get('cache_read_input_token_cost', input_rate)
     cache_creation_rate = rates.get('cache_creation_input_token_cost', input_rate)
