@@ -495,7 +495,12 @@ def destroy(app: typer.Typer) -> typer.Typer:
         force: bool = force,
         path: str = path,
     ) -> None:
-        """Destroy a fractal tree, or the whole fractal with ``--all``."""
+        """Destroy a fractal tree, or the whole fractal with ``--all``.
+
+        Removes the node worktrees, their local branches -- unmerged work
+        included -- and the fractal data. The tree's root branch and remote
+        branches remain; push or copy a node branch first to keep it.
+        """
         # exactly one scope: a bare destroy is ambiguous between "this tree"
         # and "everything", so the caller must name one
         if (name is not None) == all_:

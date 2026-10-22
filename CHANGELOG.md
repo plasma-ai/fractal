@@ -491,6 +491,9 @@ may include breaking changes, each listed under a Breaking heading.
   its scope from outside it, naming the old path, as the merge's footprint check
   does. The scope check read git's rename-detecting diff, which names only a
   rename's new path, so the deletion outside the scope committed unchecked.
+- `fractal destroy --help` says the command deletes the tree's local node
+  branches, unmerged work included, while the root branch and remote branches
+  remain. Only the confirmation prompt said so, and `--force` skips it.
 
 ## [1.3.0] - 2026-09-17
 
