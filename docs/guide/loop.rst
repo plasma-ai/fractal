@@ -730,7 +730,8 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``steps/`` files with a text suffix (``.md``, ``.json``, ``.py``, ``.sh``,
    ``.toml``, ``.yaml``/``.yml``, ``.csv``/``.tsv``, ``.txt``,
    ``.diff``/``.patch``) plus, inside
-   those directories, the tool state ``.wiki/`` and ``.gitkeep``. Anything
+   those directories, the tool state ``.wiki/`` and ``.gitkeep``, and the
+   memory wiki's own ``memory/.gitattributes``. Anything
    else a node parks there — a key, a ``.env`` file, an archive, a
    dot-directory, any other file at the root — is withheld by name and
    reported, on the plain add (``Warning: N estate file(s) are not node

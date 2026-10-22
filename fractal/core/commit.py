@@ -898,30 +898,33 @@ def _scope_check(node: Node, bounds: Scope) -> None:
         raise RuntimeError(f'Changes outside node scope ({roots}):\n{listing}')
 
 
-#: the merge-driver block the wiki tool writes to the worktree-root
-#: .gitattributes at init: its index lines, then its page lines, which it
-#: appends alone to a file already mapping the index; merge.sh's footprint
-#: check mirrors it for the target's staged copy
+#: the merge-driver lines a worktree-root .gitattributes may gain as init's
+#: edit: the index lines the wiki tool writes there, then page lines, which
+#: assign only the wiki's merge driver; merge.sh's footprint check mirrors
+#: them for the target's staged copy
 _ATTRIBUTES_INIT_LINES = (
     '# Wiki index merge driver',
     '**/_index.md merge=wiki',
     '# Wiki page merge driver',
     '**/*.md merge=wiki',
 )
+#: the page merge-driver block the wiki tool writes to each wiki root's own
+#: .gitattributes
+_WIKI_ROOT_ATTRIBUTES_LINES = ('# Wiki page merge driver', '*.md merge=wiki')
 
 
 def _attributes_is_init_edit(node: Node) -> bool:
     """Return whether ``.gitattributes`` is init's uncommitted ``merge=wiki`` edit.
 
-    Init writes the memory wiki's ``merge=wiki`` attributes at the worktree
-    root when the base lacks them -- an artifact outside every scope root,
-    committable exactly while it is init's own uncommitted edit: HEAD's
-    content followed by the part of the block the wiki tool appends. That is
-    the whole block, its page lines over a base already mapping the index,
-    or its index lines alone from a tool without the page driver. The match
-    is line-exact and covers the whole change, so an attribute line
-    assigning some other merge driver, or any other line riding beside
-    init's, makes the file an ordinary out-of-scope path.
+    Init writes the memory wiki's index ``merge=wiki`` attribute at the
+    worktree root when the base lacks it -- an artifact outside every scope
+    root, committable exactly while it is init's own uncommitted edit:
+    HEAD's content followed by the block's index lines, its index and page
+    lines, or its page lines alone over a base already mapping the index.
+    The match is line-exact, in either line ending, and covers the whole
+    change, so an attribute line assigning some other merge driver, or any
+    other line riding beside init's, makes the file an ordinary
+    out-of-scope path.
 
     Args:
         node: The node whose worktree to check.
@@ -977,6 +980,9 @@ _TOOL_STATE_DIRS = ('.wiki',)
 #: dot-named files a record dir may carry: git's empty-directory
 #: placeholder, whose only purpose is to check a bare record dir out
 _TOOL_STATE_FILES = ('.gitkeep',)
+#: estate-relative dot-named files admitted at one place alone: the page
+#: merge attributes the wiki tool writes at the memory wiki's root
+_TOOL_STATE_PATHS = ('memory/.gitattributes',)
 
 
 def _is_committable(relpath: str, estate: str) -> bool:
@@ -1014,7 +1020,7 @@ def _is_committable(relpath: str, estate: str) -> bool:
     # the leaf is either named tool state or a record at a text suffix, so
     # no pass can stage a key, a certificate, an archive, or a binary
     if parts[-1].startswith('.'):
-        return parts[-1] in _TOOL_STATE_FILES
+        return parts[-1] in _TOOL_STATE_FILES or inside.as_posix() in _TOOL_STATE_PATHS
     return inside.suffix in _RECORD_SUFFIXES
 
 
@@ -1409,9 +1415,11 @@ def _restage_memory_indexes(
             for part in pathlib.PurePosixPath(path).relative_to(prefix).parts
         )
     ]
+    # probe each path as ./<path>: git reads a --stdin path opening with ':'
+    # (under a ':'-named project folder) as pathspec magic, not as the path
     root_index = f'{prefix}/_index.md'
     payload = b''.join(
-        os.fsencode(path) + b'\0' for path in [prefix, root_index, *walked]
+        os.fsencode(f'./{path}') + b'\0' for path in [prefix, root_index, *walked]
     )
     cmd = [
         'git',
@@ -1430,7 +1438,12 @@ def _restage_memory_indexes(
     # exit 1 is a clean probe that matched nothing
     if result.returncode not in (0, 1):
         raise RuntimeError(f'git check-ignore failed (exit {result.returncode})')
-    fenced = {os.fsdecode(path) for path in result.stdout.split(b'\0') if path}
+    # git echoes each path as it was given, so drop the ./ again
+    fenced = {
+        os.fsdecode(path).removeprefix('./')
+        for path in result.stdout.split(b'\0')
+        if path
+    }
     if {prefix, root_index} <= fenced:
         fenced = set()
     kept = [path for path in staged if path not in fenced]

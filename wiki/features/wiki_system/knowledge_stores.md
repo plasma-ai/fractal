@@ -46,25 +46,30 @@ frontmatter stamps (no `created:` line) is flagged with a warning naming the
 remedy: run `wiki update --path=wiki` and commit the result before initializing
 nodes, since siblings forking from an unstamped index each stamp their own copy
 and then conflict on the `created:` line, which the merge driver cannot
-regenerate. A second warning fires when the worktree-root `.gitattributes` lacks
-either mapping line of the merge-driver block `wiki init` writes for a fresh
-wiki (`**/_index.md merge=wiki`, `**/*.md merge=wiki`), naming the missing ones
-— git reads the attributes from the target's own tree, so an adopted wiki
-without one conflicts on the pages it maps at the first merge where both sides
-changed them; append the lines and commit before initializing nodes. A line
-counts only when present whole, as the wiki tool judges it before appending, so
-a narrower rule such as `docs/**/*.md merge=wiki` does not stand in for it. The
-user node's baseline commit (`fractal/core/commit.py`) then commits the fresh
-wiki along with the `.gitattributes` merge attributes that `wiki init` writes,
-so every child branch forks from a committed wiki with merge handling in place
-(see [[features/wiki_system/merge_behavior]]).
+regenerate. A second warning fires when a mapping line `wiki init` writes for a
+fresh wiki is missing from its file: `**/_index.md merge=wiki` from the
+worktree-root `.gitattributes`, or `*.md merge=wiki` from the wiki's own
+(`wiki/.gitattributes`). It names each missing line and its file — git reads the
+attributes from the target's own tree, so an adopted wiki without one conflicts
+on the pages it maps at the first merge where both sides changed them; append
+the lines and commit before initializing nodes. A line counts only when present
+whole in its own file, as the wiki tool judges it before appending, so a
+narrower rule such as `notes/*.md merge=wiki`, or a page rule in the root file,
+does not stand in for it. The user node's baseline commit
+(`fractal/core/commit.py`) then commits the fresh wiki, its own `.gitattributes`
+included, along with the root `.gitattributes` merge attribute that `wiki init`
+writes, so every child branch forks from a committed wiki with merge handling in
+place (see [[features/wiki_system/merge_behavior]]).
 
 Memory starts empty, seeded by `node init` (`fractal/_scripts/init.sh`) with the
-same naming policy; the node lays it out as topical pages as it learns. A file
-the commit refuses as no node record (a binary, an archive, a log; see
-[[features/loop/commit_pipeline]]) stays out of the committed index, and its row
-comes back in memory's local index at the next refresh. Such files belong in the
-node's `tmp/` or in project space, since no commit carries them.
+same naming policy; the node lays it out as topical pages as it learns. From a
+wiki tool with a page driver, `wiki init` also writes the memory root's own
+`.gitattributes` (`*.md merge=wiki`), which the node's `--init` baseline commits
+as the memory's tool state. A file the commit refuses as no node record (a
+binary, an archive, a log; see [[features/loop/commit_pipeline]]) stays out of
+the committed index, and its row comes back in memory's local index at the next
+refresh. Such files belong in the node's `tmp/` or in project space, since no
+commit carries them.
 
 ## Maintenance at commit
 

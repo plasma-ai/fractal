@@ -5,10 +5,10 @@ resolve its ``wiki`` step off its own interpreter, leave a repairable state
 behind a failed wiki step, refuse to adopt a pre-existing docs directory,
 refuse a slash branch with the rule named, record a sub-project target under
 its subdir, flag an adopted wiki index that lacks the tool's frontmatter
-stamps or a ``.gitattributes`` that lacks the wiki merge driver line without
-rewriting either, and sweep everything init itself wrote -- never the user's
-own pending edits, never the wiki's per-machine Obsidian config -- into the
-baseline commit.
+stamps or ``.gitattributes`` files that lack their wiki merge driver lines
+without rewriting either, and sweep everything init itself wrote -- never the
+user's own pending edits, never the wiki's per-machine Obsidian config -- into
+the baseline commit.
 """
 
 from __future__ import annotations
@@ -245,30 +245,38 @@ def test_init_warns_about_an_unstamped_wiki_index(
 
 
 @pytest.mark.parametrize(
-    argnames=('attributes', 'missing'),
+    argnames=('root', 'wiki', 'missing'),
     argvalues=[
         pytest.param(
             None,
-            ['**/_index.md merge=wiki', '**/*.md merge=wiki'],
+            None,
+            [
+                ('**/_index.md merge=wiki', '.gitattributes'),
+                ('*.md merge=wiki', 'wiki/.gitattributes'),
+            ],
             id='absent',
         ),
         pytest.param(
             '*.png binary\n',
-            ['**/_index.md merge=wiki', '**/*.md merge=wiki'],
-            id='without-the-lines',
+            '# Wiki page merge driver\n*.md merge=wiki\n',
+            [('**/_index.md merge=wiki', '.gitattributes')],
+            id='without-the-index-line',
         ),
         pytest.param(
-            '*.png binary\n**/_index.md merge=wiki\n',
-            ['**/*.md merge=wiki'],
+            '*.png binary\n# Wiki index merge driver\n**/_index.md merge=wiki\n',
+            None,
+            [('*.md merge=wiki', 'wiki/.gitattributes')],
             id='without-the-page-line',
         ),
         pytest.param(
-            '**/_index.md merge=wiki\ndocs/**/*.md merge=wiki\n',
-            ['**/*.md merge=wiki'],
-            id='with-a-narrower-page-line',
+            '**/_index.md merge=wiki\n**/*.md merge=wiki\n',
+            'notes/*.md merge=wiki\n',
+            [('*.md merge=wiki', 'wiki/.gitattributes')],
+            id='with-the-page-line-elsewhere',
         ),
         pytest.param(
-            '*.png binary\n**/_index.md merge=wiki\n**/*.md merge=wiki\n',
+            '# Wiki index merge driver\n**/_index.md merge=wiki\n',
+            '# Wiki page merge driver\n*.md merge=wiki\n',
             [],
             id='with-the-lines',
         ),
@@ -276,45 +284,50 @@ def test_init_warns_about_an_unstamped_wiki_index(
 )
 def test_init_warns_about_a_missing_wiki_merge_driver_line(
     tmp_path: pathlib.Path,
-    attributes: Optional[str],
-    missing: list[str],
+    root: Optional[str],
+    wiki: Optional[str],
+    missing: list[tuple[str, str]],
 ) -> None:
     """``init`` flags an adopted wiki without the wiki merge driver attributes.
 
-    ``wiki init`` writes ``**/_index.md merge=wiki`` and ``**/*.md
-    merge=wiki`` to ``.gitattributes`` for a fresh wiki, but an adopted wiki
-    skips that step, and git reads the attributes from the target's own tree
-    -- so wiki pages that diverge on both sides conflict when they merge.
-    Init leaves tracked files alone, so it warns with exactly the missing
-    lines to append instead of writing them, whether the file is missing or
-    merely lacks a line, and the tree stays clean. Each line counts only
-    when present as a whole line, as the wiki tool judges it before
-    appending; a ``.gitattributes`` already carrying both draws no warning.
+    ``wiki init`` writes ``**/_index.md merge=wiki`` to the repo-root
+    ``.gitattributes`` and ``*.md merge=wiki`` to the wiki's own for a fresh
+    wiki, but an adopted wiki skips that step, and git reads the attributes
+    from the target's own tree -- so wiki pages that diverge on both sides
+    conflict when they merge. Init leaves tracked files alone, so it warns
+    with exactly the missing lines to append and the file each belongs in,
+    instead of writing them, whether a file is missing or merely lacks its
+    line, and the tree stays clean. Each line counts only when present as a
+    whole line in its own file, as the wiki tool judges it before appending:
+    a page line in the root file or a narrower one in the wiki's does not
+    stand in. Both files carrying their lines draw no warning.
     """
     repo = _init_repo(tmp_path / 'repo')
-    wiki = repo / 'wiki'
-    wiki.mkdir()
+    wiki_dir = repo / 'wiki'
+    wiki_dir.mkdir()
     # a stamped index, so the attributes are the only thing init can flag
-    (wiki / '_index.md').write_text(
+    (wiki_dir / '_index.md').write_text(
         '---\nname: wiki\ndesc: The project wiki.\n'
         'created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n'
         '---\n\n# wiki\n\n***\n',
         encoding='utf-8',
     )
-    if attributes is not None:
-        (repo / '.gitattributes').write_text(attributes, encoding='utf-8')
+    if root is not None:
+        (repo / '.gitattributes').write_text(root, encoding='utf-8')
+    if wiki is not None:
+        (wiki_dir / '.gitattributes').write_text(wiki, encoding='utf-8')
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-m', 'adopted wiki')
     result = _run(repo, 'init')
     assert result.returncode == 0, result.stderr
 
-    # the missing lines are flagged with the remedy, present ones are not,
-    # and nothing is written either way
-    listing = ', '.join(f"'{line}'" for line in missing)
+    # the missing lines are flagged with their files and the remedy, present
+    # ones are not, and nothing is written either way
+    listing = ', '.join(f"'{line}' in {path}" for line, path in missing)
     warning = (
-        'Warning: .gitattributes lacks wiki merge driver lines; append'
-        f' {listing} to it and commit before initializing nodes, or wiki pages'
-        ' that diverge on both sides conflict when they merge'
+        f'Warning: wiki merge driver lines are missing ({listing}); append each'
+        ' to its file and commit before initializing nodes, or wiki pages that'
+        ' diverge on both sides conflict when they merge'
     )
     if missing:
         assert warning in result.stderr, result.stderr

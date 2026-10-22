@@ -1255,13 +1255,17 @@ if [[ "$IGNORE_SCOPE" != true ]]; then
         fail_target "listing the paths of $BRANCH's squash failed"
     fi
     # the worktree-root .gitattributes is admitted only as init's own edit --
-    # HEAD's content followed by the part of the wiki tool's merge-driver
-    # block it appends: the whole block, its page lines, or its index lines
-    # alone -- the same whole-change rule fractal commit applies (mirrors
+    # HEAD's content followed by the merge-driver block's index lines, its
+    # index and page lines, or its page lines alone -- the same whole-change
+    # rule fractal commit applies (mirrors
     # fractal.core.commit._attributes_is_init_edit); any other added or
-    # removed line makes it an ordinary out-of-scope path
-    STAGED_ATTRIBUTES=$(git -C "$PARENT_WORKTREE_DIR" show :.gitattributes 2>/dev/null || true)
-    HEAD_ATTRIBUTES=$(git -C "$PARENT_WORKTREE_DIR" show HEAD:.gitattributes 2>/dev/null || true)
+    # removed line makes it an ordinary out-of-scope path; each line's
+    # trailing CR is dropped from both copies, so a CRLF file compares line
+    # for line, as there
+    STAGED_ATTRIBUTES=$(git -C "$PARENT_WORKTREE_DIR" show :.gitattributes 2>/dev/null \
+        | sed $'s/\r$//' || true)
+    HEAD_ATTRIBUTES=$(git -C "$PARENT_WORKTREE_DIR" show HEAD:.gitattributes 2>/dev/null \
+        | sed $'s/\r$//' || true)
     ATTRIBUTES_FLAG=()
     ADDED_ATTRIBUTES="${STAGED_ATTRIBUTES#"$HEAD_ATTRIBUTES"}"
     ADDED_LINES=$(printf '%s\n' "$ADDED_ATTRIBUTES" | grep -v '^$' || true)
