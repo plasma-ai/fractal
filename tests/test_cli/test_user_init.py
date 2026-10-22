@@ -245,36 +245,56 @@ def test_init_warns_about_an_unstamped_wiki_index(
 
 
 @pytest.mark.parametrize(
-    argnames=('attributes', 'warned'),
+    argnames=('attributes', 'missing'),
     argvalues=[
-        pytest.param(None, True, id='absent'),
-        pytest.param('*.png binary\n', True, id='without-the-line'),
+        pytest.param(
+            None,
+            ['**/_index.md merge=wiki', '**/*.md merge=wiki'],
+            id='absent',
+        ),
+        pytest.param(
+            '*.png binary\n',
+            ['**/_index.md merge=wiki', '**/*.md merge=wiki'],
+            id='without-the-lines',
+        ),
         pytest.param(
             '*.png binary\n**/_index.md merge=wiki\n',
-            False,
-            id='with-the-line',
+            ['**/*.md merge=wiki'],
+            id='without-the-page-line',
+        ),
+        pytest.param(
+            '**/_index.md merge=wiki\ndocs/**/*.md merge=wiki\n',
+            ['**/*.md merge=wiki'],
+            id='with-a-narrower-page-line',
+        ),
+        pytest.param(
+            '*.png binary\n**/_index.md merge=wiki\n**/*.md merge=wiki\n',
+            [],
+            id='with-the-lines',
         ),
     ],
 )
 def test_init_warns_about_a_missing_wiki_merge_driver_line(
     tmp_path: pathlib.Path,
     attributes: Optional[str],
-    warned: bool,
+    missing: list[str],
 ) -> None:
-    """``init`` flags an adopted wiki without the wiki merge driver attribute.
+    """``init`` flags an adopted wiki without the wiki merge driver attributes.
 
-    ``wiki init`` writes ``**/_index.md merge=wiki`` to ``.gitattributes``
-    for a fresh wiki, but an adopted wiki skips that step, and git reads the
-    attribute from the target's own tree -- so wiki indexes that diverge on
-    both sides conflict when they merge. Init leaves tracked files alone, so
-    it warns with the line to append instead of writing it, whether the file
-    is missing or merely lacks the line, and the tree stays clean; a
-    ``.gitattributes`` already carrying the line draws no warning.
+    ``wiki init`` writes ``**/_index.md merge=wiki`` and ``**/*.md
+    merge=wiki`` to ``.gitattributes`` for a fresh wiki, but an adopted wiki
+    skips that step, and git reads the attributes from the target's own tree
+    -- so wiki pages that diverge on both sides conflict when they merge.
+    Init leaves tracked files alone, so it warns with exactly the missing
+    lines to append instead of writing them, whether the file is missing or
+    merely lacks a line, and the tree stays clean. Each line counts only
+    when present as a whole line, as the wiki tool judges it before
+    appending; a ``.gitattributes`` already carrying both draws no warning.
     """
     repo = _init_repo(tmp_path / 'repo')
     wiki = repo / 'wiki'
     wiki.mkdir()
-    # a stamped index, so the attribute is the only thing init can flag
+    # a stamped index, so the attributes are the only thing init can flag
     (wiki / '_index.md').write_text(
         '---\nname: wiki\ndesc: The project wiki.\n'
         'created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n'
@@ -288,14 +308,18 @@ def test_init_warns_about_a_missing_wiki_merge_driver_line(
     result = _run(repo, 'init')
     assert result.returncode == 0, result.stderr
 
-    # the missing line is flagged with the remedy, the present one is not,
+    # the missing lines are flagged with the remedy, present ones are not,
     # and nothing is written either way
+    listing = ', '.join(f"'{line}'" for line in missing)
     warning = (
-        'Warning: .gitattributes lacks the wiki index merge driver line; append'
-        " '**/_index.md merge=wiki' to it and commit before initializing nodes,"
-        ' or wiki indexes that diverge on both sides conflict when they merge'
+        'Warning: .gitattributes lacks wiki merge driver lines; append'
+        f' {listing} to it and commit before initializing nodes, or wiki pages'
+        ' that diverge on both sides conflict when they merge'
     )
-    assert (warning in result.stderr) is warned, result.stderr
+    if missing:
+        assert warning in result.stderr, result.stderr
+    else:
+        assert 'merge driver' not in result.stderr, result.stderr
     assert _git(repo, 'status', '--porcelain').stdout == ''
 
 
