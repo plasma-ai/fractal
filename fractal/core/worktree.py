@@ -634,7 +634,7 @@ def ensure_project_wiki(
         ``True`` if the wiki was created, ``False`` if it already existed.
 
     """
-    from .commit import _ATTRIBUTES_INIT_LINES
+    from .commit import _ATTRIBUTES_INIT_LINES, _WIKI_ROOT_ATTRIBUTES_LINES
 
     # resolve the project wiki directory
     if path == '.':
@@ -658,19 +658,28 @@ def ensure_project_wiki(
         # likewise the merge attributes `wiki init` writes for a fresh wiki:
         # git reads them from the target's own tree, so an adopted wiki
         # lacking one conflicts on the pages it maps at the first divergent
-        # merge; a mapping counts only as a whole line, as the wiki tool
-        # judges it before appending
-        attributes = worktree / '.gitattributes'
-        text = attributes.read_text(encoding='utf-8') if attributes.is_file() else ''
-        lines = text.splitlines()
-        mappings = [line for line in _ATTRIBUTES_INIT_LINES if not line.startswith('#')]
-        missing = [line for line in mappings if line not in lines]
+        # merge; the index mapping lives in the repo-root file and the page
+        # mapping in the wiki root's own, each counting only as a whole line
+        # there, as the wiki tool judges it before appending
+        mappings = (
+            (worktree / '.gitattributes', _ATTRIBUTES_INIT_LINES[1]),
+            (wiki_dir / '.gitattributes', _WIKI_ROOT_ATTRIBUTES_LINES[1]),
+        )
+        missing = []
+        for attributes, mapping in mappings:
+            text = ''
+            if attributes.is_file():
+                text = attributes.read_text(encoding='utf-8')
+            if mapping not in text.splitlines():
+                relative = attributes.relative_to(worktree).as_posix()
+                missing.append(f"'{mapping}' in {relative}")
         if missing:
-            listing = ', '.join(f"'{line}'" for line in missing)
+            listing = ', '.join(missing)
             logger.warning(
-                'Warning: .gitattributes lacks wiki merge driver lines; append'
-                f' {listing} to it and commit before initializing nodes, or wiki'
-                ' pages that diverge on both sides conflict when they merge'
+                f'Warning: wiki merge driver lines are missing ({listing});'
+                ' append each to its file and commit before initializing nodes,'
+                ' or wiki pages that diverge on both sides conflict when they'
+                ' merge'
             )
         return False
     # refuse to adopt a pre-existing docs directory: `wiki init` rewrites

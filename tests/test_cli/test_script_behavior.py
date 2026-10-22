@@ -379,8 +379,8 @@ __all__ = [
     'test_delete_does_not_warn_on_merge_regenerated_wiki_state',
 ]
 
-# the wiki tool's merge-driver block for .gitattributes, as its index lines
-# and its page lines
+# the merge-driver lines a worktree-root .gitattributes passes with as init's
+# edit: the index lines the wiki tool writes there, and the page lines
 _WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
 _WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
 
@@ -5391,6 +5391,18 @@ def test_merge_admits_init_attributes_over_a_targets_own_lines(
         ),
         pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
         pytest.param(
+            '*.png binary\r\n',
+            '\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
+            True,
+            id='crlf-index-lines',
+        ),
+        pytest.param(
+            '*.png binary\r\n*.jpg binary',
+            '\r\n\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
+            True,
+            id='crlf-without-a-final-newline',
+        ),
+        pytest.param(
             None,
             _WIKI_INDEX_LINES + _WIKI_PAGE_LINES + '*.bin binary\n',
             False,
@@ -5412,18 +5424,19 @@ def test_merge_admits_only_the_wiki_attributes_edit(
 ) -> None:
     """The footprint check admits ``.gitattributes`` only as the wiki tool's edit.
 
-    The wiki tool appends whatever its four-line merge-driver block lacks to
-    the file: the whole block, or only the page lines when the index lines
-    are already there; a tool without the page driver appends the index
-    lines alone. A scoped node's first squash carries that edit to the
-    target, and the footprint check admits it as init's own, so the landing
-    succeeds with the target's file as its original plus the edit. A foreign
-    line beside the block, or the block with a line changed, is out of scope
-    like any other path, and the merge is refused naming the file.
+    The wiki tool appends its index lines to the file, in the file's own
+    line ending: CRLF when the file already holds a CRLF line. That is
+    init's own edit, and so are the page lines, after the index lines or
+    alone over a file already mapping the index. A scoped node's first
+    squash carries the edit to the target, and the footprint check admits
+    it, so the landing succeeds with the target's file as its original plus
+    the edit, byte for byte. A foreign line beside the block, or the block
+    with a line changed, is out of scope like any other path, and the merge
+    is refused naming the file.
     """
     repo = _init_tree(tmp_path / 'attrsrepo')
     if attributes is not None:
-        (repo / '.gitattributes').write_text(attributes, encoding='utf-8')
+        (repo / '.gitattributes').write_bytes(attributes.encode())
         _git(repo, 'add', '.gitattributes')
         _git(repo, 'commit', '-m', 'own attributes')
     init = _run(
@@ -5442,9 +5455,7 @@ def test_merge_admits_only_the_wiki_attributes_edit(
     (worktree / 'docs').mkdir()
     (worktree / 'docs' / 'a.md').write_text('# a\n', encoding='utf-8')
     # stand in for the wiki tool's write: the target's copy followed by the edit
-    (worktree / '.gitattributes').write_text(
-        (attributes or '') + edit, encoding='utf-8'
-    )
+    (worktree / '.gitattributes').write_bytes(((attributes or '') + edit).encode())
     # raw git: a first squash carries the edit beside the seed and the
     # in-scope work
     _git(worktree, 'add', '-A')
@@ -5453,10 +5464,11 @@ def test_merge_admits_only_the_wiki_attributes_edit(
 
     if lands:
         # the scoped landing succeeded, and the target's .gitattributes is
-        # its original followed by the edit
+        # its original followed by the edit, byte for byte
         assert result.returncode == 0, (result.stdout, result.stderr)
-        landed = _git(repo, 'show', 'HEAD:.gitattributes').stdout
-        assert landed == (attributes or '') + edit
+        cmd = ['git', 'show', 'HEAD:.gitattributes']
+        landed = subprocess.run(cmd, cwd=repo, capture_output=True).stdout
+        assert landed == ((attributes or '') + edit).encode()
         assert _git(repo, 'status', '--porcelain').stdout == ''
     else:
         # refused, naming the file

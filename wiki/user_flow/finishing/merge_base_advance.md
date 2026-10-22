@@ -101,11 +101,9 @@ base tracks, so first check
 The steps: `git checkout <base> -- . ':(exclude,glob)**/.fractal/**'`, `git rm`
 any path
 `git diff --name-only <base> -- . ':(exclude,glob)**/.fractal/**' ':(exclude).gitattributes'`
-still lists, then append the part of the wiki tool's merge-driver block
-`.gitattributes` lacks (all four lines, `# Wiki index merge driver`,
-`**/_index.md merge=wiki`, `# Wiki page merge driver`, `**/*.md merge=wiki`,
-when it maps neither; the last two when it has `**/_index.md merge=wiki`), and
-commit; then, before the base moves again, run
+still lists, then, if `.gitattributes` lacks `**/_index.md merge=wiki`, append
+the wiki tool's index lines (`# Wiki index merge driver`,
+`**/_index.md merge=wiki`), and commit; then, before the base moves again, run
 `git -C <node worktree> merge -s ours --no-edit <base>` — the node's tree
 already equals the base's, so recording the base's tip as a parent gives a
 correct merge-base with correct content. The step records that tip only when the

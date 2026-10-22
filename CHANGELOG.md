@@ -235,17 +235,22 @@ may include breaking changes, each listed under a Breaking heading.
   `wiki update` on wikis of several thousand pages, and 1.7 keeps a row one side
   deleted out of the merged index and leaves a clean merge's rows in the order
   `wiki update` writes them, the behavior fractal's merge tests pin.
-- The worktree-root `.gitattributes` passes as init's own edit — at a child's
+- Merge-driver attributes follow the wiki tool's layout: the index mapping
+  (`**/_index.md merge=wiki`) sits in the worktree-root `.gitattributes`, and
+  the page mapping (`*.md merge=wiki`) in each wiki root's own `.gitattributes`.
+  The worktree-root file passes as init's own edit — at a child's
   `fractal commit --init` baseline, at a scoped commit, and at the `node merge`
-  footprint check — when HEAD's content is followed by the wiki tool's four-line
-  merge-driver block (`# Wiki index merge driver`, `**/_index.md merge=wiki`,
-  `# Wiki page merge driver`, `**/*.md merge=wiki`), by its last two lines over
-  a file already holding `**/_index.md merge=wiki`, or by its first two lines
-  alone, as a wiki tool without the page driver writes them. Any other added or
-  removed line still makes the file an ordinary out-of-scope path.
-  `fractal init` on an adopted wiki warns when `.gitattributes` lacks
-  `**/_index.md merge=wiki` or `**/*.md merge=wiki` as a whole line, naming the
-  missing ones to append and commit.
+  footprint check — when HEAD's content is followed by the wiki tool's index
+  lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`), by those lines
+  and page lines (`# Wiki page merge driver`, `**/*.md merge=wiki`), or by the
+  page lines alone over a file already holding `**/_index.md merge=wiki`, with
+  LF or CRLF line endings. Any other added or removed line still makes the file
+  an ordinary out-of-scope path. The memory wiki's own `.gitattributes` commits
+  with the node's records, so a child's baseline carries it; a `.gitattributes`
+  anywhere else in a node's data directory is withheld and named. `fractal init`
+  on an adopted wiki warns when the repo-root `.gitattributes` lacks
+  `**/_index.md merge=wiki` or the wiki's own `.gitattributes` lacks
+  `*.md merge=wiki` as a whole line, naming each missing line and its file.
 - A Claude step stuck at a thinking cap is steered one effort level lower: a
   `max` step's steer runs at `xhigh`, an `xhigh` step's at `high`. The step's
   effort is its `effort:` frontmatter, else the node's `effort`, else Claude's

@@ -31,6 +31,7 @@ __all__ = [
     'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_child_baseline_carries_only_its_seed',
     'test_child_baseline_refuses_a_file_moved_into_its_seed',
+    'test_child_baseline_commits_its_memory_wiki_attributes',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
     'test_commit_excludes_project_registry_sidecars',
@@ -56,6 +57,7 @@ __all__ = [
     'test_rebuilt_memory_index_is_the_refresh_less_left_out_rows',
     'test_rebuilt_memory_index_keeps_the_node_edits',
     'test_rebuilt_memory_index_follows_the_wiki_ignore_check',
+    'test_rebuilt_memory_index_reads_a_colon_path_literally',
     'test_memory_index_rebuild_waits_for_a_left_out_file',
     'test_a_failed_memory_index_rebuild_never_fails_the_commit',
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
@@ -98,10 +100,13 @@ _SHADOW_WARNING = (
     ' are project files, ignore this warning:'
 )
 
-# the wiki tool's merge-driver block for .gitattributes, as its index lines
-# and its page lines
+# the merge-driver lines a worktree-root .gitattributes passes with as init's
+# edit: the index lines the wiki tool writes there, and the page lines
 _WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
 _WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
+# the page merge-driver block the wiki tool writes to each wiki root's own
+# .gitattributes
+_WIKI_ROOT_PAGE_LINES = '# Wiki page merge driver\n*.md merge=wiki\n'
 
 
 # ------ baselines and pushes
@@ -331,6 +336,64 @@ def test_child_baseline_refuses_a_file_moved_into_its_seed(
     listing = str(refused.value).splitlines()[1:]
     assert listing == ['README.md']
     assert _head(project_dir) == head
+
+
+@pytest.mark.parametrize(
+    argnames=('folder', 'admitted'),
+    argvalues=[
+        pytest.param('memory', True, id='memory-wiki-root'),
+        pytest.param('memory/notes', False, id='memory-folder'),
+        pytest.param('plans', False, id='plans'),
+    ],
+)
+def test_child_baseline_commits_its_memory_wiki_attributes(
+    tmp_path: pathlib.Path,
+    folder: str,
+    admitted: bool,
+) -> None:
+    """A child's baseline commits the page merge attributes its memory wiki gains.
+
+    ``wiki init`` writes the page merge-driver block into each wiki root's
+    own ``.gitattributes``, so the memory wiki init seeds gains one at
+    ``memory/``, beside the index block the tool writes to the worktree
+    root. The file is the wiki tool's own state, which a clone needs to
+    merge the memory's pages through the driver, so the baseline commits it
+    byte for byte with no refusal notice and the tree reads back clean. The
+    estate admits it only where the tool writes it: a ``.gitattributes``
+    anywhere else in the estate is withheld by name, like any dot file.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # stand in for the wiki tool's writes: the index block in the new
+    # worktree-root file, the page block in the folder's own
+    (project_dir / '.gitattributes').write_bytes(_WIKI_INDEX_LINES.encode())
+    attributes = node.node_dir / folder / '.gitattributes'
+    attributes.parent.mkdir(parents=True, exist_ok=True)
+    attributes.write_bytes(_WIKI_ROOT_PAGE_LINES.encode())
+    result = node.commit('configure', init=True)
+
+    relpath = attributes.relative_to(project_dir).as_posix()
+    tracked = _git(project_dir, 'ls-files').stdout.splitlines()
+    assert '.gitattributes' in tracked
+    if admitted:
+        # committed byte for byte, with nothing withheld or left over
+        cmd = ['git', 'show', f'HEAD:{relpath}']
+        committed = subprocess.run(cmd, cwd=project_dir, capture_output=True).stdout
+        assert committed == _WIKI_ROOT_PAGE_LINES.encode()
+        assert 'NOT staged' not in result
+        assert _git(project_dir, 'status', '--porcelain').stdout == ''
+    else:
+        # withheld and named
+        assert relpath not in tracked
+        refused = next(line for line in result.splitlines() if 'NOT staged' in line)
+        assert relpath in refused
+    # either way the tree reads back clean
+    node.commit(check=True)
 
 
 # ------ events, staging, and subjects
@@ -1633,6 +1696,66 @@ def test_rebuilt_memory_index_follows_the_wiki_ignore_check(
         assert 'dump.tar' not in index, revision
 
 
+@pytest.mark.parametrize(
+    argnames=('rule', 'indexed'),
+    argvalues=[
+        pytest.param(
+            '/:app/.fractal/main.task/memory/held.md',
+            False,
+            id='rule-on-the-path',
+        ),
+        pytest.param(
+            '/app/.fractal/main.task/memory/held.md',
+            True,
+            id='rule-on-the-path-without-its-colon',
+        ),
+    ],
+)
+def test_rebuilt_memory_index_reads_a_colon_path_literally(
+    tmp_path: pathlib.Path,
+    rule: str,
+    indexed: bool,
+) -> None:
+    """A memory path opening with ``:`` meets the ignore rules for that path.
+
+    git reads a ``check-ignore --stdin`` path opening with ``:`` as pathspec
+    magic and matches what follows it, so in a project folder named
+    ``:app`` every memory path the rebuild probes would meet the rules for
+    ``app/`` instead. The wiki's own check reads each path literally, so the
+    rebuild must too: a rule on the record's real path keeps it out of the
+    committed index, and a rule on the path without its colon does not.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # a committed wiki for the colon-named project -- the init's precondition
+    app_wiki = repo / ':app' / 'wiki' / '_index.md'
+    app_wiki.parent.mkdir(parents=True)
+    app_wiki.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+    _git(repo, 'add', ':(literal):app')
+    _git(repo, 'commit', '-m', 'add app wiki')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True, path=':app')
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    node.commit('baseline', init=True)
+    # a repository rule, and a refused archive so the rebuild runs
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write(f'{rule}\n')
+    memory = node.node_dir / 'memory'
+    (memory / 'held.md').write_text(
+        '---\nname: held\ndesc: A held record.\n---\n\n# held\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    result = node.commit('record beside a refused archive')
+
+    assert 'Memory index rebuilt' in result
+    index = _git(project_dir, 'show', f'HEAD::app/{_MEMORY_INDEX}').stdout
+    assert ('[[held' in index) == indexed
+
+
 def test_memory_index_rebuild_waits_for_a_left_out_file(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2186,6 +2309,18 @@ def test_scoped_child_baseline_commits_init_gitattributes(
         ),
         pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
         pytest.param(
+            '*.png binary\r\n',
+            '\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
+            True,
+            id='crlf-index-lines',
+        ),
+        pytest.param(
+            '*.png binary\r\n*.jpg binary',
+            '\r\n\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
+            True,
+            id='crlf-without-a-final-newline',
+        ),
+        pytest.param(
             None,
             _WIKI_INDEX_LINES + _WIKI_PAGE_LINES + '*.bin binary\n',
             False,
@@ -2207,18 +2342,18 @@ def test_scoped_child_baseline_admits_only_the_wiki_attributes_edit(
 ) -> None:
     """A child's baseline admits ``.gitattributes`` only as the wiki tool's edit.
 
-    The wiki tool appends whatever its four-line merge-driver block lacks to
-    HEAD's copy: the whole block, or only the page lines when the index
-    lines are already there; a tool without the page driver appends the
-    index lines alone. Each is init's own edit, which a scoped child's
-    baseline sweeps in although the file sits outside every scope root. A
+    The wiki tool appends its index lines to HEAD's copy, in the file's own
+    line ending: CRLF when the file already holds a CRLF line. That is
+    init's own edit, and so are the page lines, after the index lines or
+    alone over a file already mapping the index. A scoped child's baseline
+    sweeps the edit in although the file sits outside every scope root. A
     foreign line beside the block, or the block with a line changed, makes
     the file an ordinary out-of-scope path, which the baseline refuses by
     name.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     if base is not None:
-        (repo / '.gitattributes').write_text(base, encoding='utf-8')
+        (repo / '.gitattributes').write_bytes(base.encode())
         _git(repo, 'add', '.gitattributes')
         _git(repo, 'commit', '-m', 'own attributes')
     Node(repo).init(agent='claude', user=True)
@@ -2235,14 +2370,15 @@ def test_scoped_child_baseline_admits_only_the_wiki_attributes_edit(
     node = Node(project_dir)
     # stand in for the wiki tool's write: HEAD's copy followed by the edit
     attributes = project_dir / '.gitattributes'
-    attributes.write_text((base or '') + edit, encoding='utf-8')
+    attributes.write_bytes(((base or '') + edit).encode())
 
     if admitted:
-        # the baseline commits the edit and leaves the file clean
+        # the baseline commits the edit byte for byte and leaves the file clean
         node.commit('baseline', init=True)
-        result = _git(project_dir, 'show', 'HEAD:.gitattributes')
+        cmd = ['git', 'show', 'HEAD:.gitattributes']
+        result = subprocess.run(cmd, cwd=project_dir, capture_output=True)
         committed = result.stdout
-        assert committed == (base or '') + edit
+        assert committed == ((base or '') + edit).encode()
         result = _git(project_dir, 'status', '--porcelain', '--', '.gitattributes')
         status = result.stdout
         assert status == ''
