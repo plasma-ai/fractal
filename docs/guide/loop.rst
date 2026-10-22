@@ -278,7 +278,9 @@ in the worktree would warn about it on every call. The loop drops it before
 ``scripts/setup.sh`` runs, and every agent launch, ``fractal node chat``
 included, runs without it. ``PATH`` keeps the venv's bin (a node start puts
 the repo's ``.venv/bin`` first when it exists), so ``fractal`` and its helper
-tools still resolve from the installation.
+tools still resolve from the installation. With no repo ``.venv`` and a venv
+activated outside the repo, ``uv pip install`` in ``setup.sh`` cannot find that
+venv; ``pip`` and every CLI on ``PATH`` still resolve from it.
 
 Step frontmatter
 ----------------
