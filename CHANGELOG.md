@@ -338,6 +338,12 @@ may include breaking changes, each listed under a Breaking heading.
   had seen spend past it. A step whose stream shows nothing after its result
   stays whole whatever the settle finds. Claude Code 2.1.300 holds its result
   until background agents finish, so it streams no such frames.
+- A Claude step priced from its transcripts is marked `; partly unpriced` when a
+  reply in them holds tokens at a model with no price entry. That reply drops
+  out of the sum and the others still book, so the step read as whole while
+  missing its spend. This holds for a killed launch and, past a result, for a
+  reply after it. A synthetic reply, Claude Code's stand-in for an API error,
+  holds no tokens and leaves the step whole.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed
