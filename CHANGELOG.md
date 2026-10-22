@@ -294,6 +294,9 @@ may include breaking changes, each listed under a Breaking heading.
   so on its output before each wait. A merge refuses only an `active` node, so a
   boot that landed mid-merge could have its worktree reset or carried by the
   merge while its agent started.
+- A resume boot whose `active` stamp fails says the node reads `paused` for the
+  run, which it keeps. The banner said `idle (starting)`, which only a start
+  keeps.
 - `fractal node list` no longer shows `PAUSED: billing` for a run of instant,
   unpriced failures the loop judged provider outages, such as codex's
   model-at-capacity refusals: the failed step row's reason now leads with

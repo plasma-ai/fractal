@@ -76,6 +76,7 @@ __all__ = [
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
     'test_boot_gate_vets_the_recorded_group',
     'test_boot_waits_for_a_running_merge',
+    'test_a_failed_active_stamp_names_the_status_the_node_keeps',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
@@ -1574,6 +1575,50 @@ def test_boot_waits_for_a_running_merge(
     assert set(launched_as) == {'active'}
     assert output.getvalue().count(notice) == 1
     assert readme.read_text(encoding='utf-8') == '# test\n'
+
+
+@pytest.mark.parametrize(
+    argnames=('boot', 'kept', 'live'),
+    argvalues=[
+        ('start', 'idle (starting)', '--live still reads it active'),
+        ('resume', 'paused', '--live reads it paused too'),
+    ],
+)
+def test_a_failed_active_stamp_names_the_status_the_node_keeps(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    boot: str,
+    kept: str,
+    live: str,
+) -> None:
+    """A boot whose active stamp fails says which status the node keeps.
+
+    The stamp is guarded so a transient failure never aborts the run, and
+    nothing re-stamps a missed one: a start keeps its ``idle``, which the
+    boot-window rule reads as ``active`` under ``--live``, while a resume
+    keeps the ``paused`` the pause left, which no reading relabels.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    if boot == 'resume':
+        node.status_set('active')
+        node.record.run_start()
+        node.status_set('paused')
+    status_set = node.status_set
+
+    def _refuse_active(status: str, *args: Any, **kwargs: Any) -> None:
+        if status == 'active':
+            raise OSError('status write refused')
+        status_set(status, *args, **kwargs)
+
+    monkeypatch.setattr(node, 'status_set', _refuse_active)
+    loop = MockLoop(node, resume=boot == 'resume')
+    loop.run()
+    out = capsys.readouterr().out
+    banner = next(line for line in out.splitlines() if 'Active stamp failed' in line)
+    assert f'the node reads {kept} for this run' in banner
+    assert live in banner
 
 
 def test_continue_restore_lands_config_all_or_nothing(

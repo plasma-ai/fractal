@@ -722,8 +722,10 @@ class Loop:
         # to reap, and overwriting it here would activate a node the kill
         # already reported dead; guarded so a transient failure (a DB
         # contended under wide fan-out) never aborts the run -- nothing
-        # re-stamps a missed one, so .status stays 'idle' for the whole run
-        # and reads 'idle (starting)' while --live still reads it active
+        # re-stamps a missed one, so .status keeps the boot's own status for
+        # the whole run: a start's 'idle', read 'idle (starting)' while --live
+        # still reads it active, or a resume's 'paused', which no reading
+        # relabels
         stood_down = ''
         try:
             with worktree.merge_lock(node.repo_dir, waiting=_waiting):
@@ -733,10 +735,11 @@ class Loop:
                     else:
                         node.status_set('active')
         except Exception as error:
-            print(
-                f'=== Active stamp failed ({error}): the node reads idle (starting)'
-                f' for this run; --live still reads it active ==='
-            )
+            if self._resume:
+                kept = 'paused for this run; --live reads it paused too'
+            else:
+                kept = 'idle (starting) for this run; --live still reads it active'
+            print(f'=== Active stamp failed ({error}): the node reads {kept} ===')
         if stood_down:
             print(f'=== Stood down at boot: node was {stood_down} ===')
             try:
