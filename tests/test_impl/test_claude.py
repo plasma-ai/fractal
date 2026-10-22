@@ -77,6 +77,8 @@ __all__ = [
     'test_settle_marks_an_entry_it_cannot_read_whole',
     'test_settle_marks_a_reply_it_cannot_price',
     'test_settle_marks_a_reply_that_searched_the_web',
+    'test_settle_marks_a_reply_billed_in_the_us_geography',
+    'test_settle_marks_a_reply_above_a_long_prompt_threshold',
     'test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result',
     'test_settle_prices_a_recorded_launch_as_its_cost_record_does',
     'test_cost_baseline_is_the_total_a_resume_restores',
@@ -2082,6 +2084,127 @@ def test_settle_marks_a_reply_that_searched_the_web(
     assert verdict is marked
     row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(booked + _USAGE_SECOND_COST)
+
+
+@pytest.mark.parametrize(
+    argnames=('after', 'geo', 'marked'),
+    argvalues=[
+        # a killed launch's reply served in the us geography
+        pytest.param(None, 'us', True, id='killed-us'),
+        # past a result, a reply after it served in the us geography
+        pytest.param(_AFTER, 'us', True, id='after-us'),
+        # a reply served anywhere bills its tokens alone
+        pytest.param(None, 'global', False, id='global'),
+    ],
+)
+def test_settle_marks_a_reply_billed_in_the_us_geography(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after: Optional[str],
+    geo: str,
+    marked: bool,
+) -> None:
+    """A reply served in the us geography books its tokens, marked for the premium.
+
+    Claude Code bills a reply whose usage names the ``us`` inference
+    geography at a premium over its token cost, which the price table does
+    not carry, so the step books the tokens and is marked partly unpriced
+    -- killed, or past a result.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    usage = {**_USAGE_SECOND, 'inference_geo': geo}
+    content = _transcript_line('msg_a', _USAGE_FIRST)
+    content += _transcript_line('msg_b', usage, stamp=_LATE)
+    backend, step_id = _settling(node_with_db, tmp_path, monkeypatch, content)
+    # past a result, its figure covers the reply before it
+    booked = _USAGE_FIRST_COST
+    if after is not None:
+        booked = 0.01
+        node_with_db.record.step_cost(step_id=step_id, cost=booked)
+    verdict = backend.settle_cost(
+        step_id,
+        started=_OPENED,
+        ended=_CLOSED,
+        after=after,
+    )
+    assert verdict is marked
+    row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(booked + _USAGE_SECOND_COST)
+
+
+@pytest.mark.parametrize(
+    argnames=('after', 'model', 'cached', 'marked'),
+    argvalues=[
+        # a killed launch's prompt one token over its model's threshold
+        pytest.param(None, 'claude-haiku-5-5', 99_001, True, id='killed-above'),
+        # past a result, a reply after it over the threshold
+        pytest.param(_AFTER, 'claude-haiku-5-5', 99_001, True, id='after-above'),
+        # a prompt at the threshold bills at the base rates
+        pytest.param(None, 'claude-haiku-5-5', 99_000, False, id='at-threshold'),
+        # a model whose table names no threshold bills any prompt at its rates
+        pytest.param(None, 'claude-fable-5', 99_001, False, id='no-threshold'),
+    ],
+)
+def test_settle_marks_a_reply_above_a_long_prompt_threshold(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after: Optional[str],
+    model: str,
+    cached: int,
+    marked: bool,
+) -> None:
+    """A prompt over its model's threshold books at the base rates, marked.
+
+    A model's table entry can name a long-prompt threshold
+    (``input_cost_per_token_above_100k_tokens``), above which its replies
+    bill at higher rates. The prompt is the reply's input with its cache
+    reads and writes, as Claude Code counts it. Those rates are not priced
+    here, so a reply over the threshold books at the base rates and is
+    marked partly unpriced -- killed, or past a result.
+    """
+    rates = {
+        **_PRICING,
+        'claude-haiku-5-5': {
+            'input_cost_per_token': 1e-6,
+            'output_cost_per_token': 5e-6,
+            'cache_read_input_token_cost': 1e-7,
+            'input_cost_per_token_above_100k_tokens': 2e-6,
+            'output_cost_per_token_above_100k_tokens': 1e-5,
+        },
+    }
+    monkeypatch.setattr(pricing, '_load', lambda: rates)
+    # a prompt of a thousand input tokens and its cache reads
+    usage = {
+        'input_tokens': 1_000,
+        'cache_read_input_tokens': cached,
+        'output_tokens': 100,
+    }
+    content = _transcript_line('msg_a', _USAGE_FIRST)
+    content += _transcript_line('msg_b', usage, stamp=_LATE, model=model)
+    backend, step_id = _settling(node_with_db, tmp_path, monkeypatch, content)
+    # past a result, its figure covers the reply before it
+    booked = _USAGE_FIRST_COST
+    if after is not None:
+        booked = 0.01
+        node_with_db.record.step_cost(step_id=step_id, cost=booked)
+    verdict = backend.settle_cost(
+        step_id,
+        started=_OPENED,
+        ended=_CLOSED,
+        after=after,
+    )
+    assert verdict is marked
+    # the reply books at its model's base rates
+    rate = rates[model]
+    base = (
+        1_000 * rate['input_cost_per_token']
+        + cached * rate['cache_read_input_token_cost']
+        + 100 * rate['output_cost_per_token']
+    )
+    row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(booked + base)
 
 
 @pytest.mark.parametrize(
