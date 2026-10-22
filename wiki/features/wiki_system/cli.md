@@ -21,7 +21,8 @@ interface to both knowledge stores. Its verbs:
   to the project (cwd) name or the `--path` folder name; naming is lenient by
   default, and stricter policies are opt-in per wiki via `naming.validate` in
   `.wiki/settings.json`, which `--settings` seeds at creation (fractal seeds the
-  strict ascii/identifier policy).
+  strict ascii/identifier policy, with `.` allowed so a non-markdown file's
+  extension passes).
 - `wiki read <name>` — print a named entry verbatim with no appended newline, so
   redirected output round-trips byte-for-byte for LF files (reads normalize
   CRLF); `--lines`/`--words`/ `--chars` slice the body by 0-indexed half-open

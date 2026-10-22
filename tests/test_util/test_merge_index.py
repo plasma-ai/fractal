@@ -441,7 +441,7 @@ def test_union_above_carries_both_links_and_update_prunes_stale_rows(
     _wiki(
         wiki_dir,
         'init',
-        '--settings={"naming": {"validate": ["ascii", "identifier"]}}',
+        '--settings={"naming": {"validate": ["ascii", "identifier"], "allow": "."}}',
     )
     (wiki_dir / 'a.md').write_text('# a\n\nAlpha.\n', encoding='utf-8')
     _wiki(wiki_dir, 'update')

@@ -356,7 +356,10 @@ From the user's point of view:
   estimate for the missing part, its row's metadata gains
   ``; partly unpriced``, and the loop prints a ``Warning:`` line. A
   resumed ``claude`` step whose result figure was refused is marked the
-  same way, since its transcript's figure stands in for the result's.
+  same way, since its transcript's figure stands in for the result's. So
+  is a ``claude`` step whose stream showed a sub-agent still running
+  after the result when none of that later spend could be priced (its
+  transcript missing or unreadable, or its model unpriced).
   ``cost spent`` and ``cost breakdown`` disclose how many such steps
   their sums count at recorded spend. A launch killed while a tool runs,
   or a workflow sub-agent ending on its structured output, is whole;
@@ -416,6 +419,10 @@ By default the chat runs a fresh session. Options:
 The resulting session id is echoed to stderr as ``session: <id>``, so the
 thread can be continued with ``--session <id> --resume``. A chat records
 nothing in the database — it never disturbs the node's rows or budgets.
+The reply's closing line shows the turn's own cost: a resumed or forked
+``claude`` session's result figure counts on from the total Claude Code
+saved for the session, which the chat takes off as the loop does (``$?``
+when that total cannot be read).
 Because ``codex`` cannot fork, ``--current`` and the forking
 ``--session`` form fail on ``codex`` nodes; continue a ``codex`` thread
 with ``--session <id> --resume``.

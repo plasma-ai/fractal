@@ -4,7 +4,7 @@ desc: |
   The iteration loop: the step sequence, prompt assembly, plans, the commit
   pipeline, and run and iteration accounting.
 created: 2026-07-21T04:35:35Z
-updated: 2026-10-15T00:53:51Z
+updated: 2026-10-22T19:45:22Z
 ---
 
 # features/loop
@@ -17,8 +17,8 @@ exit codes, and how pauses credit time back to deadlines.
 
 [[features/loop/commit_pipeline|commit_pipeline]]: The work-product commit
 pipeline behind fractal commit: scope enforcement, wiki index refresh and lint,
-staging excludes and warnings, subject composition, the hook retry, and the
-force-commit backstop.
+staging excludes and warnings, subject composition, the hook retry, the
+force-commit backstop, and the report log.
 
 [[features/loop/plans|plans]]: Plan files: the per-iteration planning artifacts
 under the node's plans directory, the fractal plan CLI that creates and lists
