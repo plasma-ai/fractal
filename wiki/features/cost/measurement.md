@@ -242,6 +242,12 @@ reads it from each transcript it opens:
   named model, which `_usage_cost` reports the same way. A synthetic reply
   (Claude Code's `<synthetic>` stand-in for an API error) holds a usage of
   zeros, so it leaves nothing out; past a result, only a reply after it counts;
+- a reply that searched the web (a nonzero
+  `server_tool_use.web_search_requests`): Claude Code's own cost record charges
+  each search a fee beside the tokens ($0.01 on 2.1.300), which the pricing
+  table does not carry, so the step books the tokens alone. A web fetch
+  (`web_fetch_requests`) bills only its tokens, so it leaves nothing out; past a
+  result, only a reply after it counts;
 - a sub-agent transcript it cannot read, and, on a launch with no result figure,
   a missing or unreadable session transcript or a settle that raises (the loop
   marks the last itself);

@@ -354,6 +354,8 @@ From the user's point of view:
   transcript missing or unreadable, or its model unpriced). So is a
   ``claude`` step whose record holds a reply on a model with no price:
   that reply drops out of the figure, and the other replies still count.
+  So is a ``claude`` step with a reply that searched the web: the step
+  books the reply's tokens, but not the per-search fee.
   ``cost spent`` and ``cost breakdown`` disclose how many such steps
   their sums count at recorded spend. A launch killed while a tool runs,
   or a workflow sub-agent ending on its structured output, is whole;
