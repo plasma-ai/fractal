@@ -190,12 +190,19 @@ summed from its own log at its own served model, so the step's cost includes
 its children's spend while the step's model stays the parent's; a log that
 cannot be bound to the step's process, a child log the window cannot bind to
 the turn, or a log from ``codex`` older than 0.153, which carries no
-per-response usage, records no cost and logs the reason. ``codex`` sessions
-(threads) cannot be forked — resume them in place instead. When an explicit
-model is configured, ``fractal node start`` runs a bounded probe invocation
-before the run, because some accounts reject models the pricing table can
-price — a rejection relays ``codex``'s own diagnostic. Supports the
-``openrouter`` route.
+per-response usage, records no cost and logs the reason. A step ``codex``
+ends non-zero — a request refused because the model is at capacity, a
+crash, or a kill — is priced from the same logs by their cumulative token
+counters: the thread counter's growth since the launch, plus each sub-agent
+log's, at their own served models, so a failed attempt counts toward the
+node's spend and its cost caps. A refused request is not billed; a request
+still in flight when ``codex`` died is in no counter, so the step books what
+was recorded, marked partly unpriced, or no cost when nothing was.
+``codex`` sessions (threads) cannot be forked — resume them in place
+instead. When an explicit model is configured, ``fractal node start`` runs a
+bounded probe invocation before the run, because some accounts reject models
+the pricing table can price — a rejection relays ``codex``'s own diagnostic.
+Supports the ``openrouter`` route.
 
 grok
 ~~~~
@@ -299,8 +306,9 @@ Costs
 Every step row carries the spend the backend reported. Cost-reporting
 backends flush each figure as it arrives — a killed or timed-out step
 keeps the last figure recorded — while ``codex`` prices the whole
-invocation once its process exits cleanly, so an interrupted ``codex``
-step records no cost. A ``claude`` step that ends without its result frame
+invocation once its process exits: a clean exit from the per-response usage
+in its session log, and a failed or killed step from the growth of the log's
+token counters. A ``claude`` step that ends without its result frame
 is priced again from Claude Code's own session transcript and the
 transcripts it keeps for the session's sub-agents, a workflow's included:
 each reply written during the launch counts at its final token usage and
@@ -359,8 +367,10 @@ From the user's point of view:
   ``cost spent`` and ``cost breakdown`` disclose how many such steps
   their sums count at recorded spend. A launch killed while a tool runs,
   or a workflow sub-agent ending on its structured output, is whole;
-  past a result frame only what follows the result counts; and a killed
-  ``codex`` step stays unpriced.
+  past a result frame only what follows the result counts. A ``codex``
+  step that ends non-zero is marked the same way when its session log, or
+  a sub-agent's, ends on a request in flight; a request refused at
+  capacity is not billed and leaves the step whole.
 - **The figure's source varies by backend.** ``claude`` (native),
   ``grok``, ``opencode``, and ``omp`` report their own spend on the
   stream; ``codex`` — and ``claude`` behind ``openrouter`` — are priced

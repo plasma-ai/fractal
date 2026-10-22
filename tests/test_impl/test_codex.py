@@ -39,6 +39,7 @@ from typing import Any, NoReturn, Optional
 import pytest
 
 import fractal.util.process
+import fractal.util.time
 from fractal.cli.utils import StreamRenderer
 from fractal.core import pricing
 from fractal.core.agent import Invocation, StreamEvent, StreamResult
@@ -77,6 +78,8 @@ __all__ = [
     'test_a_driven_fork_is_read_from_its_captured_length',
     'test_an_unopenable_child_rollout_leaves_the_step_unpriced',
     'test_nonzero_exit_closes_unpriced_and_silent',
+    'test_failed_launch_books_its_rollout_counter_growth',
+    'test_unbound_failed_rollout_leaves_the_attempt_unpriced',
     'test_stream_recovers_error_frames_inside_a_completed_turn',
     'test_recovered_error_frames_without_rollout_evidence_stay_unpriced',
     'test_unrecovered_error_frames_fail_the_step',
@@ -248,6 +251,14 @@ _SPAWN_WIRE = [
     {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'DONE'}},
     {'type': 'turn.completed', 'usage': _SPAWN_USAGE[-1]['thread_token_usage']},
 ]
+# codex's refusal of a request while the served model is at capacity: the
+# error frame its stdout prints, and the error record its rollout keeps
+_AT_CAPACITY = 'Selected model is at capacity. Please try a different model.'
+_CAPACITY_FRAME = {'type': 'error', 'message': _AT_CAPACITY}
+_CAPACITY_RECORD = {
+    'type': 'event_msg',
+    'payload': {'type': 'error', 'message': _AT_CAPACITY},
+}
 
 # the offline stand-in for codex: appends the given rollout records under the
 # node's codex home (or damages the file first), opens or grows the child
@@ -1433,6 +1444,179 @@ def test_nonzero_exit_closes_unpriced_and_silent(
     assert 'unpriced' not in caplog.text
 
 
+@pytest.mark.parametrize(
+    argnames='case',
+    argvalues=[
+        'capacity',
+        'sub-agents',
+        'resumed',
+        'in-flight',
+        'child-in-flight',
+        'refused-at-once',
+        'killed-at-once',
+        'clean',
+    ],
+)
+def test_failed_launch_books_its_rollout_counter_growth(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+) -> None:
+    """A launch codex ends non-zero books what its rollouts' counters grew by.
+
+    Its stream closes unpriced, but each rollout's cumulative counter grew
+    by the attempt's spend: the settle books the thread's growth past the
+    spawn, and each sub-agent's, at their served models' rates. A request
+    refused at capacity is not billed, so the attempt reads whole; one in
+    flight when codex died is in no counter, so the attempt books what was
+    recorded and reads cut off, or books nothing when nothing was. A clean
+    exit is priced by its stream, and the settle adds nothing past it.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
+    parent_cost = _price(_SPAWN_USAGE[1]['thread_token_usage'])
+    # the run through its second response and the tool result codex sends on
+    # its third request, and the turn opened before its first response
+    paid = _through_result(spawning_thread, 2)
+    opened = copy.deepcopy(
+        spawning_thread[: _find(spawning_thread, 'turn_context') + 1]
+    )
+    # by default codex refuses the third request at capacity and exits 1
+    records: list[dict] = [*paid, _CAPACITY_RECORD]
+    wire: list[Any] = [*_SPAWN_WIRE[:2], _CAPACITY_FRAME]
+    children: list[Any] = []
+    exit_code, resume = 1, False
+    expected: Optional[float] = parent_cost
+    cut_off = False
+    if case == 'sub-agents':
+        children = [spawned_thread]
+        expected = parent_cost + _price(_CHILD_USAGE)
+    # the retry resumes the thread past its completed turn and books only the
+    # counter's growth since its own spawn
+    elif case == 'resumed':
+        command = _command(backend, spawning_thread, _SPAWN_WIRE, thread=_SPAWN_SESSION)
+        _drive(backend, command, model=_SPAWN_MODEL)
+        records = [*_through_result(_second_turn(spawning_thread), 2), _CAPACITY_RECORD]
+        resume = True
+    # codex dies with the third request in flight, or with its sub-agent's
+    # first request in flight
+    elif case == 'in-flight':
+        records, wire, cut_off = paid, _SPAWN_WIRE[:2], True
+    elif case == 'child-in-flight':
+        children = [spawned_thread[: _find(spawned_thread, 'token_usage_record')]]
+        cut_off = True
+    # codex refuses the turn's first request, or dies sending it
+    elif case == 'refused-at-once':
+        records, expected = [*opened, _CAPACITY_RECORD], 0.0
+    elif case == 'killed-at-once':
+        records, wire, expected, cut_off = opened, _SPAWN_WIRE[:2], None, True
+    elif case == 'clean':
+        records, wire, exit_code = spawning_thread, _SPAWN_WIRE, 0
+        expected = _price(_SPAWN_USAGE[-1]['thread_token_usage'])
+    refused = _CAPACITY_FRAME in wire
+    step = _named_step(backend, 'ATTEMPT')
+    command = _command(
+        backend=backend,
+        records=records,
+        wire=wire,
+        thread=_SPAWN_SESSION,
+        children=children,
+        resume=resume,
+        exit_code=exit_code,
+    )
+    started = fractal.util.time.utc_now()
+    if refused:
+        with pytest.raises(AgentStreamError, match='at capacity'):
+            _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
+    else:
+        _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
+    ended = fractal.util.time.utc_now()
+    # a clean exit's result figure arrived as the stream closed
+    after = ended if case == 'clean' else None
+    settled = backend.settle_cost(step, started=started, ended=ended, after=after)
+    cost = backend.node.db.read('steps', where={'step_id': step})[0]['cost']
+    if expected is None:
+        assert cost is None
+    else:
+        assert cost == pytest.approx(expected)
+    assert settled is cut_off
+    assert 'unpriced' not in caplog.text
+
+
+@pytest.mark.parametrize(
+    argnames=('fault', 'diagnostic'),
+    argvalues=[
+        # the attempt's own rollout is not there
+        ('missing', 'No rollout names the thread'),
+        # a grown rollout the window cannot place, or a child's row riding
+        # another turn
+        ('unexplained', 'cannot explain'),
+        ('foreign_turn', 'rides another turn'),
+        # a token count past the usage records: codex older than 0.153 keeps
+        # no per-response records
+        ('no_records', 'runs past the usage records'),
+        # the served model has no rates
+        ('no_rates', 'has no pricing entry'),
+    ],
+    ids=['missing', 'unexplained', 'foreign-turn', 'no-records', 'no-rates'],
+)
+def test_unbound_failed_rollout_leaves_the_attempt_unpriced(
+    backend: CodexAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fault: str,
+    diagnostic: str,
+) -> None:
+    """An attempt whose rollouts cannot be bound or priced records NULL and logs why.
+
+    The settle is lenient about the turn alone: the rollout must still be
+    the attempt's own, every new or grown rollout one the window can place,
+    each counter whole, and each served model priced.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: {_SPAWN_MODEL: _RATES})
+    records = [*_through_result(spawning_thread, 2), _CAPACITY_RECORD]
+    child = copy.deepcopy(spawned_thread)
+    options: dict[str, Any] = {}
+    # each fault damages the evidence in one place
+    if fault == 'missing':
+        options['missing'] = True
+    elif fault == 'unexplained':
+        child[0]['type'] = 'response_item'
+    elif fault == 'foreign_turn':
+        usage = child[_find(child, 'token_usage_record')]['payload']
+        usage['root_turn_id'] = 'elsewhere'
+    elif fault == 'no_records':
+        records = [
+            record for record in records if record['type'] != 'token_usage_record'
+        ]
+    elif fault == 'no_rates':
+        monkeypatch.setattr(pricing, '_load', lambda: {})
+    step = _named_step(backend, 'ATTEMPT')
+    command = _command(
+        backend=backend,
+        records=records,
+        wire=[*_SPAWN_WIRE[:2], _CAPACITY_FRAME],
+        thread=_SPAWN_SESSION,
+        children=[child],
+        exit_code=1,
+        **options,
+    )
+    with pytest.raises(AgentStreamError, match='at capacity'):
+        _drive(backend, command, step_id=step, model=_SPAWN_MODEL)
+    now = fractal.util.time.utc_now()
+    assert not backend.settle_cost(step, started=now, ended=now)
+    assert backend.node.db.read('steps', where={'step_id': step})[0]['cost'] is None
+    # the failed stream's own events log at warning beside the reason
+    warnings = [
+        record.message
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and record.message.startswith('codex usage unpriced: ')
+    ]
+    assert len(warnings) == 1
+    assert diagnostic in warnings[0]
+
+
 def test_stream_recovers_error_frames_inside_a_completed_turn(
     backend: CodexAgent,
     caplog: pytest.LogCaptureFixture,
@@ -2260,6 +2444,24 @@ def _named_step(backend: CodexAgent, name: str) -> int:
     run = node.record.run_start()
     iteration = node.record.iter_start(run_id=run, iter=1)
     return node.record.step_start(run_id=run, iter_id=iteration, step=1, step_name=name)
+
+
+def _through_result(records: list[dict], response: int) -> list[dict]:
+    """Copy a turn's records through the tool result answering response ``response``.
+
+    The result is the input codex sends on the next request, so the copy
+    ends as that request opens.
+    """
+    counters = [
+        index
+        for index, record in enumerate(records)
+        if record['type'] == 'token_usage_record'
+    ]
+    start = counters[response - 1]
+    end = start + _find(
+        records[start:], 'response_item', subtype='function_call_output'
+    )
+    return copy.deepcopy(records[: end + 1])
 
 
 def _split(records: list[dict]) -> tuple[list[dict], list[dict]]:
