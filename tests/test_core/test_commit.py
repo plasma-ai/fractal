@@ -29,6 +29,7 @@ __all__ = [
     'test_user_node_commit_init_commits_baseline',
     'test_commit_pushes_unless_local',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_user_init_baseline_fails_when_its_seed_cannot_stage',
     'test_child_baseline_carries_only_its_seed',
     'test_child_baseline_refuses_a_file_moved_into_its_seed',
     'test_child_baseline_commits_its_memory_wiki_attributes',
@@ -134,6 +135,10 @@ def test_user_node_commit_init_commits_baseline(
     top-level branch by default, so it is committed only after ``fractal track``
     opts the tree in. A project naming another folder in its settings file
     baselines the wiki init created there, and the settings file itself.
+    Runtime files in the seed never ride the baseline, tracked or not: the
+    seed answers to the work commits' estate law, so fractal's own exclude
+    block holds even past the force-add, and a file the law refuses is
+    withheld and named.
     """
     if wiki != 'wiki':
         settings = git_repo / '.fractal' / '.settings.json'
@@ -162,6 +167,16 @@ def test_user_node_commit_init_commits_baseline(
     system = git_repo / '.fractal' / 'main' / 'skills' / '.system' / 'imagegen'
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
+    # runtime files fractal's own exclude block holds sit in the seed: the
+    # scratch log, an agent's stderr capture, and a bytecode cache
+    for runtime in ('tmp/commit.log', 'claude.err', '__pycache__/hook.cpython.pyc'):
+        path = git_repo / '.fractal' / 'main' / runtime
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('runtime\n', encoding='utf-8')
+    # a file no ignore rule holds but the estate law refuses (no record)
+    (git_repo / '.fractal' / 'main' / 'parked.pem').write_text(
+        'key\n', encoding='utf-8'
+    )
     # the wiki tool's self-ignored derived cache sits inside the staged wiki
     cache = git_repo / wiki / '.wiki' / 'cache'
     cache.mkdir(parents=True, exist_ok=True)
@@ -171,7 +186,7 @@ def test_user_node_commit_init_commits_baseline(
     # lean on a block written at init -- the runtime artifacts beside the
     # seed must stay out of the commit on their own
     (git_repo / '.git' / 'info' / 'exclude').unlink()
-    node.commit('configure', init=True)
+    output = node.commit('configure', init=True)
     # a tracked tree makes a real commit (the seed is new), and so does a
     # configured folder (init created its wiki); untracked, the default wiki
     # is already committed by the fixture, so the baseline is legitimately a
@@ -187,6 +202,12 @@ def test_user_node_commit_init_commits_baseline(
     assert '.db' not in tracked
     assert 'config.json.lock' not in tracked
     assert 'skills/.system' not in tracked
+    assert 'tmp/' not in tracked
+    assert 'claude.err' not in tracked
+    assert '__pycache__' not in tracked
+    assert 'parked.pem' not in tracked
+    # the law's refusal is named, as on a work commit
+    assert ('parked.pem' in output) == track
     # the wiki's derived cache stays self-ignored past the force-add
     assert '.wiki/cache' not in tracked
 
@@ -263,6 +284,43 @@ def test_user_init_baseline_survives_a_hostile_external_ignore(
     # runtime state still never rides the baseline
     assert '.status' not in tracked
     assert '.db' not in tracked
+
+
+def test_user_init_baseline_fails_when_its_seed_cannot_stage(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A seed the add cannot stage fails the baseline, never lands without it.
+
+    The seed's plain add tolerates only git's refusal of an ignored seed --
+    the hold the record pass overrides, as the hostile-ignore case shows.
+    Any other failure (here an unreadable record) raises with git's message,
+    before anything is staged, rather than commit a baseline missing its
+    seed.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    _git(repo, 'config', 'user.email', 'test@test.com')
+    _git(repo, 'config', 'user.name', 'Test')
+    Node(repo).init(agent='claude', user=True)
+    subprocess.run(
+        [f'{_FRACTAL_BIN}', 'track'],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    record = repo / '.fractal' / 'main' / 'memory' / 'notes.md'
+    record.parent.mkdir(parents=True)
+    record.write_text('root notes\n', encoding='utf-8')
+    record.chmod(0)
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    try:
+        with pytest.raises(RuntimeError, match=r'git add of \.fractal/main failed'):
+            Node(repo).commit('configure', init=True)
+    finally:
+        record.chmod(0o644)
+    # nothing committed and nothing left staged
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'diff', '--cached', '--name-only').stdout == ''
 
 
 def test_child_baseline_carries_only_its_seed(tmp_path: pathlib.Path) -> None:

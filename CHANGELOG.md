@@ -186,9 +186,9 @@ may include breaking changes, each listed under a Breaking heading.
   output, the push notice, and, when the commit fails, a failing hook's output
   in its error. Each entry opens with `=== Commit at <UTC time> (<sha>) ===`,
   naming the commit it landed, or `(no commit)`; a failed commit's entry holds
-  its `Error:` text and reads `(failed)`. `--check` and a user node's baseline
-  log nothing. The log is git-ignored scratch: it is never committed and
-  survives `node start --continue --clean`.
+  its `Error:` text and reads `(failed)`. `--check` logs nothing. The log is
+  git-ignored scratch: it is never committed and survives
+  `node start --continue --clean`.
 - The packaged node charter and memory skill tell a node to name its own files
   through `$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR`, with scratch in
   `$NODE_DIR/tmp/` — a path at the worktree root is the project, not the node,
@@ -624,6 +624,14 @@ may include breaking changes, each listed under a Breaking heading.
   node worktree uses the worktree's project environment without warning on every
   call that `VIRTUAL_ENV` does not match it. `fractal node chat` launches its
   agent the same way, and the repo venv's bin stays first on `PATH`.
+- A user node's `fractal commit --init` baseline on a tracked seed commits only
+  the seed's records. It stages the seed by the rules a child's node directory
+  commits by, so the runtime files fractal's exclude block holds (`tmp/`, an
+  agent's `.err` capture, `.session`, `setup.log`, `__pycache__/`) stay out,
+  while a record held out only by a machine-local ignore rule is still
+  force-added, and the baseline's output names it. The baseline force-added the
+  whole seed directory, so every ignored file in it rode the commit onto the
+  top-level branch.
 
 ## [1.3.0] - 2026-09-17
 

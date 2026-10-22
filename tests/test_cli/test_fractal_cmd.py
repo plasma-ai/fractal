@@ -37,6 +37,7 @@ __all__ = [
     'test_commit_logs_a_failed_commits_error',
     'test_commit_log_appends_one_entry_per_commit',
     'test_commit_lands_when_its_report_cannot_be_logged',
+    'test_user_baseline_logs_and_never_commits_its_log',
     'test_reset_force_tears_worktrees_and_keeps_history',
     'test_destroy_all_force_tears_the_fractal_down',
     'test_destroy_aborts_when_the_prompt_is_declined',
@@ -329,6 +330,32 @@ def test_commit_lands_when_its_report_cannot_be_logged(
     warnings = [line for line in result.stderr.splitlines() if 'commit.log' in line]
     assert len(warnings) == 1
     assert warnings[0].startswith('Warning: ')
+
+
+def test_user_baseline_logs_and_never_commits_its_log(tmp_path: pathlib.Path) -> None:
+    """A user node's baseline logs like any commit and never commits the log.
+
+    A tracked seed stages under the work commits' estate law, so the log the
+    first baseline writes into the seed's ``tmp/`` stays out of the second
+    baseline, which carries only the wiki page beside it.
+    """
+    repo = _seed_repo(tmp_path / 'tracked')
+    assert _run(repo, 'track').returncode == 0
+    expected = []
+    for name in ('first', 'second'):
+        page = repo / 'wiki' / f'{name}.md'
+        page.write_text(f'# {name}\n', encoding='utf-8')
+        result = _run(repo, 'commit', f'configure {name}', '--init')
+        assert result.returncode == 0, result.stderr
+        sha = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        expected.append((sha, result.stdout.rstrip('\n')))
+    assert _commit_log(repo) == expected
+    # the second baseline committed its page and nothing from the seed
+    changed = _git(repo, 'show', '--name-only', '--format=', 'HEAD').stdout
+    assert changed.split() == ['wiki/second.md']
+    log = Node(repo).node_dir / 'tmp' / 'commit.log'
+    relpath = log.relative_to(repo).as_posix()
+    assert _git(repo, 'log', '--all', '--format=%H', '--', relpath).stdout == ''
 
 
 def test_reset_force_tears_worktrees_and_keeps_history(
