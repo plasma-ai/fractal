@@ -985,9 +985,12 @@ step attempt, its duration, cost, and metadata reason — with ``--limit``,
 TUI (:doc:`/tui`) presents the same data interactively across the whole tree.
 
 Diagnostics persist in the node directory: ``setup.log`` holds the
-last setup output, ``<agent>.err`` the last launch's live stderr capture, and
+last setup output, ``<agent>.err`` the last launch's live stderr capture,
 ``tmp/err/<run>-<iter>-<step>.err`` a durable per-failure stderr snapshot for
-every failed or timed-out launch (retries add a ``-N`` serial).
+every failed or timed-out launch (retries add a ``-N`` serial), and
+``tmp/commit.log`` the report or error of every ``fractal commit`` run on the
+node, each under a banner naming its time and sha (see :doc:`/cli/fractal`);
+the loop's backstop saves describe themselves in their commit bodies instead.
 
 Steering a running loop
 -----------------------

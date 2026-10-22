@@ -3,7 +3,7 @@ name: features/loop/commit_pipeline
 desc: |
   The work-product commit pipeline behind fractal commit: scope enforcement,
   wiki index refresh and lint, staging excludes and warnings, subject
-  composition, the hook retry, and the force-commit backstop.
+  composition, the hook retry, the force-commit backstop, and the report log.
 created: 2026-07-21T05:04:14Z
 updated: 2026-07-21T05:04:14Z
 ---
@@ -192,3 +192,39 @@ commits nothing and errors if uncommitted changes exist -- counting only work
 the stage could commit, so the stage's own excludes and the estate content law
 both ride along: dirt no pass may ever stage would otherwise read as permanently
 dirty and fire the backstop every iteration over a file that can never clear.
+
+## The report log
+
+The pipeline returns its report -- the lint notices, staging warnings, the
+`Held out` line, the git and hook output, the push notice -- and the CLI prints
+it only after the commit and push are done. A caller whose output is gone by
+then (an agent's shell redirect whose tool session ended mid-commit) loses that
+report while the commit lands: the CLI's broken-pipe handling exits 0 and
+nothing else keeps it. So `Node.commit`, the layer `fractal commit` calls,
+appends every child-node report to `<node_dir>/tmp/commit.log` before returning,
+and a failed run's `Error:` text in place of the report. Each entry opens with
+`=== Commit at <UTC time> (<stamp>) ===`; the stamp is the sha HEAD moved to,
+read before and after the pipeline, so the pipeline keeps returning the report
+alone and the commit event's `metadata` stays the bare sha the `Files` anchors
+read. A run that moved nothing stamps `no commit`, or `failed` when it raised; a
+failed push after a landed commit still stamps that commit's sha.
+
+`--check` commits nothing and logs nothing -- the loop's per-iteration dirty
+check calls the pipeline directly either way. The loop's backstop saves also
+call the pipeline directly and stay unlogged: they bypass hooks and fold their
+notices, warnings, and diffstat into the commit body, so they describe
+themselves in git history. A child's `--init` baseline logs like any commit. A
+user node's baseline (`commit_user_init`) does not: on a tracked seed its
+`git add -f` over the seed dir honors only the stage excludes, which do not list
+`tmp/`, so a logged baseline would sweep the log into the next baseline on the
+base branch.
+
+`tmp/` sits in fractal's managed `info/exclude` block, and the estate content
+law refuses it on both staging paths (it is no record dir), so the log never
+rides a work commit or counts in `Held out`. The `--continue` restore runs
+`git clean -fd` without `-x`, which leaves ignored files alone, so the log
+survives `--clean`. It appends without a size bound, as `headless.log` and the
+`tmp/err/` snapshots do; nothing in the node directory rotates. A failed write
+-- an unwritable `tmp/` -- warns on stderr in one line through the node's logger
+and never fails the commit it describes, mirroring the commit event's
+best-effort insert.
