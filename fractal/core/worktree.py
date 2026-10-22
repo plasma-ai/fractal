@@ -634,6 +634,8 @@ def ensure_project_wiki(
         ``True`` if the wiki was created, ``False`` if it already existed.
 
     """
+    from .commit import _ATTRIBUTES_INIT_LINES
+
     # resolve the project wiki directory
     if path == '.':
         wiki_dir = worktree / wiki
@@ -653,17 +655,22 @@ def ensure_project_wiki(
                 ' before initializing nodes, or sibling nodes conflict on the'
                 ' index when they merge'
             )
-        # likewise the merge attribute `wiki init` writes for a fresh wiki:
-        # git reads it from the target's own tree, so an adopted wiki without
-        # it conflicts on its index at the first divergent merge
+        # likewise the merge attributes `wiki init` writes for a fresh wiki:
+        # git reads them from the target's own tree, so an adopted wiki
+        # lacking one conflicts on the pages it maps at the first divergent
+        # merge; a mapping counts only as a whole line, as the wiki tool
+        # judges it before appending
         attributes = worktree / '.gitattributes'
-        lines = attributes.read_text(encoding='utf-8') if attributes.is_file() else ''
-        if '**/_index.md merge=wiki' not in lines:
+        text = attributes.read_text(encoding='utf-8') if attributes.is_file() else ''
+        lines = text.splitlines()
+        mappings = [line for line in _ATTRIBUTES_INIT_LINES if not line.startswith('#')]
+        missing = [line for line in mappings if line not in lines]
+        if missing:
+            listing = ', '.join(f"'{line}'" for line in missing)
             logger.warning(
-                'Warning: .gitattributes lacks the wiki index merge driver line;'
-                " append '**/_index.md merge=wiki' to it and commit before"
-                ' initializing nodes, or wiki indexes that diverge on both sides'
-                ' conflict when they merge'
+                'Warning: .gitattributes lacks wiki merge driver lines; append'
+                f' {listing} to it and commit before initializing nodes, or wiki'
+                ' pages that diverge on both sides conflict when they merge'
             )
         return False
     # refuse to adopt a pre-existing docs directory: `wiki init` rewrites

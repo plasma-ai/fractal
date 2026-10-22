@@ -283,15 +283,16 @@ same-named subtrees at any depth, such as a node's committable
 `.fractal/<node>/artifacts/`.
 
 `fractal init` also wires the wiki merge driver: the committed `.gitattributes`
-assigns `merge=wiki` to the generated wiki `_index.md` files, while the driver
-itself lives in repo-local git config, so merges of branches carrying wiki pages
-auto-resolve the generated index sections. Local config does not survive a clone
-— on a fresh clone the attribute is present but the driver is not, and
-`_index.md` merges fall back to git's default and may conflict on generated
-content; run `wiki config --path=wiki` (or `--path=<path>/wiki` for a
-sub-project, with the configured folder in place of `wiki`) to register it
-(verify with `git config --get merge.wiki.driver`) — `fractal init` only wires
-it when it creates the wiki.
+assigns `merge=wiki` to the generated wiki `_index.md` files
+(`**/_index.md merge=wiki`) and, from a wiki tool with a page driver, to wiki
+pages (`**/*.md merge=wiki`), while the driver itself lives in repo-local git
+config, so merges of branches carrying wiki pages auto-resolve the generated
+sections. Local config does not survive a clone — on a fresh clone the
+attributes are present but the driver is not, and wiki merges fall back to git's
+default and may conflict on generated content; run `wiki config --path=wiki` (or
+`--path=<path>/wiki` for a sub-project, with the configured folder in place of
+`wiki`) to register it (verify with `git config --get merge.wiki.driver`) —
+`fractal init` only wires it when it creates the wiki.
 
 The output includes the project directory (worktree root) and the node data
 directory. Read these from the output to use in later steps (e.g.
