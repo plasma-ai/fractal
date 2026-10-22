@@ -386,6 +386,14 @@ may include breaking changes, each listed under a Breaking heading.
   reply's tokens and read as whole while missing the fee. This holds for a
   killed launch and, past a result, for a reply after it. A web fetch bills only
   its tokens and leaves the step whole.
+- A Claude step priced from its transcripts is marked `; partly unpriced` when a
+  reply in them bills above the price table's rates: Claude Code bills a reply
+  served in the `us` inference geography at 1.1 times its token cost, and a
+  prompt above a long-prompt threshold the table names for the model (such as
+  `input_cost_per_token_above_100k_tokens`) at higher rates. The step books the
+  base rates, so it read as whole while missing the difference. This holds for a
+  killed launch and, past a result, for a reply after it. A `global` reply, and
+  a large prompt at a model whose table entry names no threshold, stay whole.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed
