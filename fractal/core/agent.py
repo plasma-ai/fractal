@@ -345,6 +345,8 @@ class StreamResult:
     #   step row keeps only the last, so a mid-stream substitution that
     #   recovers before the stream ends is visible here alone
     models: tuple[str, ...] = ()
+    # the stream saw spend past its final figure and left it to the settle
+    trailing: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -374,6 +376,7 @@ class StreamParser:
         self.models: list[str] = []  # every distinct stream-named served model
         self.cost: Optional[float] = None  # running figure (None = no fact yet)
         self.final: bool = False  # a result frame settled the cost
+        self.trailing: bool = False  # spend past the final figure, left to the settle
         # a resumed session's spend before the launch, which the provider's
         # result figure can count on from (None = unreadable)
         self.baseline: Optional[float] = 0.0
@@ -889,6 +892,7 @@ class Agent:
             # parser state is raw wire text -- sanitize here like session
             # and model above, or a lone-surrogate model name reaches SQLite
             models=tuple(_sanitize(model) for model in parser.models),
+            trailing=parser.trailing,
         )
 
     def record_session(
@@ -1035,6 +1039,7 @@ class Agent:
         ended: str,
         after: Optional[str] = None,
         replies: Sequence[dict[str, Any]] = (),
+        trailing: bool = False,
     ) -> bool:
         """Price a launch's spend past its recorded figure.
 
@@ -1053,7 +1058,9 @@ class Agent:
         it: the process lives on while background work runs. With
         ``after``, the instant that figure arrived, the hook prices only
         the spend completing after it, which lands added to the recorded
-        figure, again as an estimate.
+        figure, again as an estimate. A stream that saw such spend leaves
+        it to the hook (``trailing``), so a hook that books none leaves it
+        out of the figure.
 
         A launch the loop ends on a reply's own stop (the thinking cap)
         can die before the provider records that reply, so the stream's
@@ -1067,10 +1074,13 @@ class Agent:
                 (ISO 8601 UTC), or ``None`` when none did.
             replies: The replies the stream recorded whole, in the
                 backend's own reply shape.
+            trailing: Whether the stream saw spend past its final figure
+                (``StreamResult.trailing``), which only the hook can book.
 
         Returns:
-            Whether the record leaves part of a reply out: the step books
-            the spend recorded, which misses that part.
+            Whether the step's figure leaves spend out: the record misses
+            part of a reply, or the hook booked none of the ``trailing``
+            spend. The step books the spend recorded.
 
         """
         rows = self.node.db.read('steps', where={'step_id': step_id}, limit=1)
@@ -1083,15 +1093,17 @@ class Agent:
             after=after,
             replies=replies,
         )
+        # spend the stream left to the hook is missing when the hook books none
+        unbooked = settled.cut_off or trailing
         if settled.cost is None:
-            return settled.cut_off
+            return unbooked
         # a launch can't have negative spend (as in record_cost)
         cost = max(0.0, settled.cost)
         recorded = rows[0]['cost']
         if after is not None:
             # the result's figure plus the spend past it
             if not cost:
-                return settled.cut_off
+                return unbooked
             cost += recorded or 0.0
         elif recorded is not None and recorded >= cost:
             return settled.cut_off

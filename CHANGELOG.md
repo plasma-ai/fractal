@@ -318,6 +318,13 @@ may include breaking changes, each listed under a Breaking heading.
   ends at the output cap books the usage the stream recorded for it, so a
   thinking-cap kill reads as whole unless the stream reported no usage. A killed
   Codex step still records no cost.
+- A Claude step whose stream shows a sub-agent still running after the result
+  frame is marked `; partly unpriced` when none of that later spend can be
+  priced: its transcript is missing or unreadable, its model is unpriced, or the
+  settle fails. The step booked the result's figure as whole, though the stream
+  had seen spend past it. A step whose stream shows nothing after its result
+  stays whole whatever the settle finds. Claude Code 2.1.300 holds its result
+  until background agents finish, so it streams no such frames.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed

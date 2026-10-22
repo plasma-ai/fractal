@@ -61,7 +61,9 @@ delegates to its private hook, which the subclass implements:
   completing past its result frame, with the stream's own `replies` (a capped
   reply) over the record's -- and returns a `Settlement` naming the cost and
   whether the record leaves part of a reply out; it defaults to no cost, leaving
-  the stream's figure standing;
+  the stream's figure standing. A parser that leaves spend past its final figure
+  to the hook sets its `trailing` flag, and the launch is marked when the hook
+  books none;
 - the cost-baseline hook (behind `Agent.cost_baseline`) reads, before a launch
   that resumes a session spawns, the spend the session carries in, for a
   provider whose result figure counts on from the session's earlier spend

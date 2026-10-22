@@ -230,6 +230,10 @@ reads it from each transcript it opens:
 - a sub-agent transcript it cannot read, and, on a launch with no result figure,
   a missing or unreadable session transcript or a settle that raises (the loop
   marks the last itself);
+- on a launch whose result frame named its figure, a sub-agent the stream saw
+  running after the result (below) when the settle books no spend past it: its
+  transcript missing or unreadable, its usage unpriced, or the settle raising
+  (the loop marks the last itself);
 - a result figure the baseline could not settle (above), which the loop marks
   itself: the window stands in for a figure that can hold spend no transcript
   records.
@@ -244,14 +248,20 @@ after which the agent retries. Entries of types other than `user` and
 result frame's figure already covers the spend before it, so only a partial
 reply, an unanswered last turn or a malformed entry stamped after that instant
 counts; a completed launch with a partial line or an interrupted sub-agent
-before its result reads as whole, and a missing session transcript leaves out no
-spend the settle knows of.
+before its result reads as whole, and a missing session transcript leaves out
+only the spend the stream saw after the result (below).
 
 Past a result frame the transcript is the one source for further spend: the
 parser stops pricing sub-agent frames once its figure is final (only a new
 top-level reply reopens it), since Claude Code also streams a background
 sub-agent's replies with `parent_tool_use_id` set, and the settle adds them from
-the transcript.
+the transcript. Any sub-agent frame while the figure is final sets the parser's
+`trailing` flag, which the next result frame clears, since its figure covers
+every frame before it. `Agent.stream` carries the flag on
+`StreamResult.trailing`, and the loop passes it to `settle_cost`, which marks
+the step when the settle books nothing past the result; a launch nothing follows
+past its result stays whole whatever the settle finds. On Claude Code 2.1.300,
+`-p` holds its result until background agents finish, so no frame follows it.
 
 The step books what was recorded, with no estimate for the missing part:
 `_settle_cost` returns a `Settlement` (`cost`, `cut_off`), `Agent.settle_cost`
