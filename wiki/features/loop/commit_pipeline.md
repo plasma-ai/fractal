@@ -2,8 +2,9 @@
 name: features/loop/commit_pipeline
 desc: |
   The work-product commit pipeline behind fractal commit: scope enforcement,
-  wiki index refresh and lint, staging excludes and warnings, subject
-  composition, the hook retry, the force-commit backstop, and the report log.
+  wiki index refresh and lint, staging excludes and warnings, the memory index
+  rebuild, subject composition, the hook retry, the force-commit backstop, and
+  the report log.
 created: 2026-07-21T05:04:14Z
 updated: 2026-07-21T05:04:14Z
 ---
@@ -164,6 +165,50 @@ record it can: a record the add cannot take -- vanished after the snapshot,
 unreadable on disk -- is named in a warning rather than aborting the commit, and
 both notices report worktree-relative paths, since a force commit folds them
 into its body.
+
+## The memory index rebuild
+
+The memory wiki indexes every file on disk, so a file the estate law refuses (a
+binary, an archive, a log) gains a row in memory's index -- from the commit's
+own refresh, or from the node's own `wiki update` between commits -- linking a
+file the commit leaves out. After staging, `_rebuild_memory_index` reads the
+staging pass's own list of estate files left unstaged; when none sit under the
+node's `memory/` it stops, so an ordinary commit pays nothing. Otherwise
+`_restage_memory_indexes` checks the staged memory tree -- the exact bytes about
+to commit, `.wiki/settings.json` included -- out of the git index into a temp
+folder under the system temp directory and runs `wiki update` there. The folder
+sits outside every repository because inside one the wiki would apply that
+repository's ignore rules. The temp tree leaves out what the wiki's own ignore
+check skips (the wiki's `Wiki._check_ignore`: `git check-ignore --no-index`
+against the repository's `.gitignore` files and `.git/info/exclude`, with
+`core.excludesFile` pinned out, and off when the memory root itself is ignored),
+so a record force-added past a repository rule -- untracked or already tracked
+-- gains no row the refresh never gave it, while a record only a host rule holds
+keeps the row the refresh gives it. A folder holding only left-out files keeps
+its index, rebuilt like any other without their rows: the commit carries that
+index, so the parent's row links a folder the commit has, and no commit deletes
+an index the node may have written.
+
+Each rebuilt index whose bytes differ from what is staged is written back to the
+git index and the working tree, which keeps the tree clean for the loop's
+`--check`; page writes are discarded with the temp folder. The rebuild starts
+from the staged bytes, so the node's own edits to an index's description and to
+the text below its separator survive. An index whose rebuild differs from HEAD's
+copy only in the frontmatter's `updated:` line commits HEAD's bytes, old stamp
+included -- otherwise a refused file sitting in memory would move the stamp at
+every commit. In the working tree a refused file's row disappears at each
+commit; the next refresh adds it back locally, and the next commit drops it
+again.
+
+The rebuild runs inside the staging closure, so the hook retry's re-stage redoes
+it. It runs on `--force` saves too, since the node's own refresh writes the rows
+a backstop would otherwise commit; the `--init` baseline skips it (its memory is
+the fresh seed), and so does a commit with no `wiki` CLI. A rebuild that changes
+an index adds `Memory index rebuilt without N file(s) the commit leaves out`
+beside the unchanged estate warning that names each file. Any failure warns in
+one line (`Warning: memory index not rebuilt (...)`) and the commit proceeds
+with the indexes as staged. Both lines ride with the record pass's notices, so a
+force commit folds them into its body.
 
 ## Commit, retry, and the backstop
 

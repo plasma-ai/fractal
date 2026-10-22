@@ -744,7 +744,19 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    block (its ``tmp/`` and ``__pycache__/`` lines among them) or by a
    self-ignoring directory stay silent and are not counted in ``Held out``.
    ``--check`` applies the same law, so a refused untracked file under the
-   node directory never counts as uncommitted.
+   node directory never counts as uncommitted. The memory wiki indexes every
+   file on disk, so the pipeline then rebuilds the staged memory indexes
+   without the files the commit leaves out, in a temp folder outside the
+   repository: no committed row links a refused file (a folder holding only
+   refused files keeps its index, without their rows), and an index unchanged
+   but for those rows keeps its committed bytes, ``updated:`` stamp
+   included. Each rebuilt index is written
+   to the working tree too, so the tree stays clean, and the rows come back
+   there at the next refresh. The output says ``Memory index rebuilt without
+   N file(s) the commit leaves out`` beside the warning that names each file.
+   The rebuild also runs on ``--force`` saves and skips ``--init``; a failure
+   warns (``Warning: memory index not rebuilt (...)``) and never fails the
+   commit.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
    rules and staged files of 10 MB or more. The ignore warning names the first
    ten eaten paths, each with the rule that ate it as ``git check-ignore -v``

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import subprocess
 import sys
@@ -50,6 +51,13 @@ __all__ = [
     'test_force_commit_body_describes_the_sweep',
     'test_commit_warns_on_a_root_path_shadowing_the_node_folder',
     'test_a_failing_shadow_check_never_fails_the_commit',
+    'test_committed_memory_index_links_no_left_out_file',
+    'test_unchanged_memory_index_keeps_its_committed_bytes',
+    'test_rebuilt_memory_index_is_the_refresh_less_left_out_rows',
+    'test_rebuilt_memory_index_keeps_the_node_edits',
+    'test_rebuilt_memory_index_follows_the_wiki_ignore_check',
+    'test_memory_index_rebuild_waits_for_a_left_out_file',
+    'test_a_failed_memory_index_rebuild_never_fails_the_commit',
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
     'test_multi_scope_commit_boundary',
     'test_dot_scope_root_bounds_the_whole_project',
@@ -72,6 +80,16 @@ __all__ = [
 # the console script beside the running interpreter -- a bare name would
 # resolve through a shim to whatever install the ambient PATH front-runs
 _FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
+# the wiki CLI beside the running interpreter, for the same reason
+_WIKI_BIN = pathlib.Path(sys.executable).parent / 'wiki'
+
+# the memory index of the node every memory index rebuild test spawns, and
+# the index of the memory folder those tests fill with a refused log alone
+_MEMORY_INDEX = '.fractal/main.task/memory/_index.md'
+_LOGS_INDEX = '.fractal/main.task/memory/logs/_index.md'
+
+# an index stamp far older than any a test run writes
+_AGED_STAMP = '2020-01-01T00:00:00Z'
 
 # the commit warning's header over the root paths shadowing node folder entries
 _SHADOW_WARNING = (
@@ -1345,6 +1363,359 @@ def test_a_failing_shadow_check_never_fails_the_commit(
     assert _git(project_dir, 'ls-files', 'plans/x.md').stdout.strip() == 'plans/x.md'
 
 
+# ------ the memory index rebuild
+
+
+@pytest.mark.parametrize('force', [False, True], ids=['plain', 'force'])
+def test_committed_memory_index_links_no_left_out_file(
+    tmp_path: pathlib.Path,
+    force: bool,
+) -> None:
+    """No committed memory index row links a file the commit leaves out.
+
+    The memory wiki indexes every file on disk, so a binary or a log the
+    estate law refuses gains a row -- from the commit's own refresh, or,
+    before a backstop save that skips the refresh, from the node's own
+    ``wiki update``. The committed indexes link none of the refused files:
+    a folder holding only them keeps its index, in the commit and on disk,
+    rebuilt without their rows. The estate warning still names each file,
+    and the working tree reads back clean.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # records beside a refused archive, and a folder holding only a refused log
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'data.json').write_text('{}\n', encoding='utf-8')
+    (memory / 'dump.tar').write_bytes(b'binary')
+    (memory / 'logs').mkdir()
+    (memory / 'logs' / 'run.log').write_text('ran\n', encoding='utf-8')
+    if force:
+        subprocess.run(
+            [_WIKI_BIN, 'update', f'--path={memory}'],
+            capture_output=True,
+            check=True,
+        )
+    head_before = _head(project_dir)
+    result = node.commit('memory beside refused files', force=force)
+
+    assert _head(project_dir) != head_before
+    # the records keep their rows and the refused files have none; the folder
+    # holding only the log keeps its index, rebuilt without the log's row
+    index = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert '[[notes' in index
+    assert '[[data.json' in index
+    assert 'dump.tar' not in index
+    assert '[[logs/_index' in index
+    folder_index = _git(project_dir, 'show', f'HEAD:{_LOGS_INDEX}').stdout
+    assert 'run.log' not in folder_index
+    assert (memory / 'logs' / '_index.md').is_file()
+    # the estate warning still names each refused file, beside the rebuild
+    refused = next(line for line in result.splitlines() if 'NOT staged' in line)
+    for path in ('memory/dump.tar', 'memory/logs/run.log'):
+        assert f'.fractal/main.task/{path}' in refused, path
+    assert 'Memory index rebuilt without 2 file(s) the commit leaves out' in result
+    node.commit(check=True)
+
+
+def test_unchanged_memory_index_keeps_its_committed_bytes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A memory index unchanged but for a refused file keeps HEAD's bytes.
+
+    Every refresh adds the refused file's row back and re-stamps the index,
+    so a rebuild without the row would move the ``updated:`` stamp on each
+    commit while the rows stand still. An index whose rebuild matches HEAD's
+    but for that stamp commits HEAD's bytes, old stamp included.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    node.commit('notes beside a refused archive')
+    # age the committed stamps, so a re-stamp within the same second shows
+    index = memory / '_index.md'
+    text = index.read_text(encoding='utf-8')
+    aged = re.sub(r'(?m)^(created|updated): .*$', rf'\1: {_AGED_STAMP}', text)
+    index.write_text(aged, encoding='utf-8')
+    _git(project_dir, 'add', f'{index}')
+    _git(project_dir, 'commit', '-m', 'age the memory index')
+    # work elsewhere, with memory untouched and the archive still in it
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    node.commit('more work')
+
+    committed = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert committed == _git(project_dir, 'show', f'HEAD~1:{_MEMORY_INDEX}').stdout
+    assert f'updated: {_AGED_STAMP}' in committed
+    assert 'dump.tar' not in committed
+    node.commit(check=True)
+
+
+def test_rebuilt_memory_index_is_the_refresh_less_left_out_rows(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The rebuilt memory index is the refresh's, less the left-out rows.
+
+    The rebuild drops what the commit leaves out and nothing else: a new
+    page's row, every description, a folder holding only refused files, and
+    the rest of each index keep the bytes the refresh wrote, and only the
+    rows linking a refused file go.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    node.commit('notes')
+    # a new page beside a refused archive and a folder holding only a log
+    (memory / 'finding.md').write_text(
+        '---\nname: finding\ndesc: A finding.\n---\n\n# finding\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    (memory / 'logs').mkdir()
+    (memory / 'logs' / 'run.log').write_text('ran\n', encoding='utf-8')
+    # the refresh the commit runs, taken ahead of it so its bytes are in hand
+    # (the commit's own refresh then finds nothing left to do)
+    subprocess.run(
+        [_WIKI_BIN, 'update', f'--path={memory}'],
+        capture_output=True,
+        check=True,
+    )
+    refreshed = {
+        index: (memory / index).read_text(encoding='utf-8')
+        for index in ('_index.md', 'logs/_index.md')
+    }
+    node.commit('finding beside refused files')
+
+    def _lines(text: str) -> list[str]:
+        # an index's content lines, blank lines and the stamp aside
+        return [
+            line
+            for line in text.splitlines()
+            if line and not line.startswith('updated:')
+        ]
+
+    # each committed index is the refresh's, less its refused file's row
+    for index, path, row in (
+        ('_index.md', _MEMORY_INDEX, '[[dump.tar'),
+        ('logs/_index.md', _LOGS_INDEX, '[[logs/run.log'),
+    ):
+        committed = _git(project_dir, 'show', f'HEAD:{path}').stdout
+        expected = [
+            line for line in _lines(refreshed[index]) if not line.startswith(row)
+        ]
+        assert _lines(committed) == expected, index
+    committed = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert '[[finding' in committed
+    assert '[[logs/_index' in committed
+
+
+def test_rebuilt_memory_index_keeps_the_node_edits(tmp_path: pathlib.Path) -> None:
+    """A node's own edits to a memory index survive the rebuild.
+
+    The wiki regenerates an index's link rows but keeps its description and
+    the text below its separator from the file it reads, and both are the
+    node's to write. The rebuild starts from the bytes the commit stages, so
+    the edits land in the commit and stay on disk while the refused row goes.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    node.commit('notes')
+    # the node describes its memory and adds a line below the separator, with
+    # a refused archive beside the pages
+    index = memory / '_index.md'
+    text = index.read_text(encoding='utf-8')
+    text = text.replace('desc: ...', 'desc: What the node knows.')
+    index.write_text(f'{text}\nRead the notes page first.\n', encoding='utf-8')
+    (memory / 'dump.tar').write_bytes(b'binary')
+    node.commit('describe memory beside a refused archive')
+
+    committed = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    on_disk = index.read_text(encoding='utf-8')
+    for text in (committed, on_disk):
+        assert 'desc: What the node knows.' in text
+        assert 'Read the notes page first.' in text
+        assert 'dump.tar' not in text
+    node.commit(check=True)
+
+
+@pytest.mark.parametrize(
+    argnames=('source', 'rule', 'indexed'),
+    argvalues=[
+        pytest.param('info/exclude', 'held.md', False, id='repository-rule'),
+        pytest.param('core.excludesFile', 'held.md', True, id='host-rule'),
+        pytest.param('info/exclude', '/.fractal/', True, id='ignored-root'),
+    ],
+)
+def test_rebuilt_memory_index_follows_the_wiki_ignore_check(
+    tmp_path: pathlib.Path,
+    source: str,
+    rule: str,
+    indexed: bool,
+) -> None:
+    """A force-added memory record keeps exactly the row the refresh gives it.
+
+    The record pass force-adds a record a machine-local ignore rule holds
+    out, but the wiki's own ignore check decides whether the refresh indexes
+    it: the repository's rules alone, read from the patterns, so a tracked
+    file counts too. A repository rule keeps the record out of the index; a
+    host rule does not, and neither does a rule that ignores the memory wiki
+    itself, which turns the check off. The rebuild, which runs outside the
+    repository, applies the same check, both at the commit that force-adds
+    the record and at a later one that finds it tracked.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # a machine-local rule holds the record out of the plain adds
+    if source == 'info/exclude':
+        exclude = repo / '.git' / 'info' / 'exclude'
+        with exclude.open('a', encoding='utf-8') as handle:
+            handle.write(f'{rule}\n')
+    else:
+        excludes = tmp_path / 'global_ignore'
+        excludes.write_text(f'{rule}\n', encoding='utf-8')
+        _git(project_dir, 'config', 'core.excludesFile', f'{excludes}')
+    memory = node.node_dir / 'memory'
+    (memory / 'held.md').write_text(
+        '---\nname: held\ndesc: A held record.\n---\n\n# held\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    result = node.commit('record held by an ignore rule')
+    assert '.fractal/main.task/memory/held.md' in result
+    # a later commit finds the record tracked, the archive still refused
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    node.commit('work beside the tracked record')
+
+    for revision in ('HEAD~1', 'HEAD'):
+        index = _git(project_dir, 'show', f'{revision}:{_MEMORY_INDEX}').stdout
+        assert ('[[held' in index) == indexed, revision
+        assert 'dump.tar' not in index, revision
+
+
+def test_memory_index_rebuild_waits_for_a_left_out_file(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing left out, the commit carries the refresh's index untouched.
+
+    The rebuild exists for the files a commit leaves out, so an ordinary
+    commit never starts it: no wiki run outside the repository, no notice,
+    and the committed memory index is byte for byte what the refresh wrote.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'data.json').write_text('{}\n', encoding='utf-8')
+    rebuilds = _watch_rebuilds(monkeypatch, project_dir, fail=False)
+    result = node.commit('notes and data')
+
+    assert rebuilds == []
+    assert 'Memory index rebuilt' not in result
+    cmd = ['git', 'show', f'HEAD:{_MEMORY_INDEX}']
+    committed = subprocess.run(cmd, cwd=project_dir, capture_output=True).stdout
+    assert committed == (memory / '_index.md').read_bytes()
+    assert b'[[data.json' in committed
+
+
+@pytest.mark.parametrize('force', [False, True], ids=['plain', 'force'])
+def test_a_failed_memory_index_rebuild_never_fails_the_commit(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force: bool,
+) -> None:
+    """A failed rebuild warns in one line, and the commit lands without it.
+
+    The rebuild is upkeep, so a failure inside it must never cost the save,
+    least of all the loop's backstop. The commit carries the memory index
+    as staged, refused row and all, and the warning says the rebuild did not
+    happen.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    # the node's own refresh, so both modes stage the refused row
+    subprocess.run(
+        [_WIKI_BIN, 'update', f'--path={memory}'],
+        capture_output=True,
+        check=True,
+    )
+    rebuilds = _watch_rebuilds(monkeypatch, project_dir, fail=True)
+    head_before = _head(project_dir)
+    result = node.commit('notes beside a refused archive', force=force)
+
+    assert _head(project_dir) != head_before
+    assert len(rebuilds) == 1
+    warnings = [
+        line
+        for line in result.splitlines()
+        if line.startswith('Warning: memory index not rebuilt')
+    ]
+    assert len(warnings) == 1, result
+    assert 'update refused' in warnings[0]
+    index = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert '[[dump.tar' in index
+
+
 # ------ scope boundaries
 
 
@@ -2181,3 +2552,32 @@ def _head(project_dir: pathlib.Path) -> str:
     """The checked-out worktree's HEAD sha."""
     result = _git(project_dir, 'rev-parse', 'HEAD')
     return result.stdout.strip()
+
+
+def _watch_rebuilds(
+    monkeypatch: pytest.MonkeyPatch,
+    worktree: pathlib.Path,
+    *,
+    fail: bool,
+) -> list[str]:
+    """Record each ``wiki update`` run outside ``worktree``, failing it on ``fail``.
+
+    The memory index rebuild is the only wiki run outside the repository, so
+    the record lists its runs, and a refused run stands in for any failure
+    inside the rebuild.
+    """
+    real_run = subprocess.run
+    paths: list[str] = []
+
+    def _run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        is_update = isinstance(cmd, list) and cmd[1:2] == ['update']
+        if is_update and pathlib.Path(cmd[0]).name == 'wiki':
+            path = cmd[2].removeprefix('--path=')
+            if not pathlib.Path(path).is_relative_to(worktree):
+                paths.append(path)
+                if fail:
+                    return subprocess.CompletedProcess(cmd, 1, '', 'update refused')
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', _run)
+    return paths
