@@ -57,6 +57,7 @@ titled "Build the parser" looks like:
      "max_iter_cost": 2.0,
      "max_step_cost": null,
      "reserve_budget": 1.0,
+     "reserve_mode": "default",
      "sync": null,
      "detached": null,
      "local": false,
@@ -106,6 +107,10 @@ directory; pass ``--path <dir>`` to target another worktree.
   accept their directories comma- or space-joined and store a JSON list, each
   entry in canonical form (``./src``, ``src/``, ``a//b`` land as ``src``,
   ``a/b``).
+- ``reserve_budget=`` records the reserve as explicit, so no later cap change
+  retunes it, and the echo names the change (``reserve_mode: default ->
+  explicit``); ``reserve_budget=null`` clears the mode with the reserve.
+  ``reserve_mode`` itself is refused: it records how the reserve was set.
 - The merged result is checked by the validator (see `Validation`_) before
   anything is written, so ``set`` cannot store a value the validator rejects.
   ``node init``'s additional flag checks — the agent registry, provider
@@ -185,6 +190,9 @@ silently no-ops. Per key:
    * - ``max_cost``, ``max_iter_cost``, ``max_step_cost``, ``reserve_budget``
      - The next iteration's pricing, and live at every budget boundary
        probe.
+   * - ``reserve_mode``
+     - The next cap retune (``node update --max-cost`` or ``node start
+       --continue --max-cost``); the loop never reads it.
    * - ``max_depth``, ``max_children``, ``max_descendants``
      - At once for the spawn gate, which reads them from the file at every
        spawn; the next step's prompt and environment.
@@ -292,6 +300,13 @@ Plain values
      - Reasoning-effort override, passed through the agent CLI's effort flag.
        Not validated by fractal — unknown levels surface as the agent's own
        error.
+   * - ``reserve_mode``
+     - ``default`` for init's own reserve, ``explicit`` for a flag or preset
+       one; absent without a reserve
+     - Where the stored ``reserve_budget`` came from: a cap change retunes a
+       ``default`` reserve and leaves an ``explicit`` one (see
+       `The cleanup reserve`_). Recorded by fractal; ``config set`` refuses
+       it.
 
 Booleans
 ~~~~~~~~
@@ -631,9 +646,20 @@ Defaulting and rounding:
   noise persists into ``config.json``.
 - An explicit reserve requires ``max_cost`` and must sit in the range from 0
   (inclusive) to 99% of ``max_cost`` (exclusive).
-- On ``node update --max-cost`` without ``--reserve-budget``, a reserve that
-  equals the old cap's 10% default is re-derived against the new cap instead
-  of going stale; an explicitly set reserve is left alone.
+- The reserve's origin is recorded beside it as ``reserve_mode``:
+  ``default`` for the 10% init materializes, ``explicit`` for a figure set by
+  ``--reserve-budget`` (at init or on ``node update``), a template preset, or
+  ``config set reserve_budget=``.
+- On ``node update --max-cost`` or ``node start --continue --max-cost``
+  without a new ``--reserve-budget``, a default reserve that still equals 10%
+  of the old cap is re-derived against the new cap instead of going stale.
+  Every other reserve keeps its figure: an explicit one, even at exactly 10%,
+  and one moved off the default by a hand edit or by ``config set
+  max_cost=`` (which changes the cap alone); the retune records such a
+  reserve as explicit.
+- A config with no ``reserve_mode`` reads as default when its reserve equals
+  10% of its ``max_cost``, and as explicit otherwise. Reading never rewrites
+  the file; the next cap change records the reading.
 
 Validation
 ----------
@@ -647,7 +673,8 @@ It rejects:
 - non-numeric or non-finite cost values, and non-positive cost ceilings;
 - ``max_iter_cost`` or ``max_step_cost`` without ``max_cost``, and any
   violation of the ``step <= iter <= run`` cost ordering;
-- a reserve outside ``[0, 99% of max_cost)``;
+- a reserve outside ``[0, 99% of max_cost)``, and a ``reserve_mode`` other
+  than ``default`` or ``explicit``;
 - non-integer or negative values for the integer caps, integer caps at or
   past SQLite's signed 64-bit ceiling (2**63), and ``max_iters <= 0``;
 - non-boolean values for the mode flags;

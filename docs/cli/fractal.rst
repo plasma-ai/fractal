@@ -68,9 +68,11 @@ An existing project wiki (``wiki/``, or the folder the project's settings
 file names, carrying ``_index.md``) is adopted as is — init rewrites nothing
 in it. It warns when that ``_index.md`` carries no frontmatter stamps (run
 ``wiki update --path=<folder>`` and commit the result before initializing
-nodes) and when ``.gitattributes`` lacks the ``**/_index.md merge=wiki`` line
-(append it and commit), since sibling nodes otherwise conflict on the index
-when they merge.
+nodes), since sibling nodes otherwise conflict on the index when they merge.
+It also warns when ``.gitattributes`` lacks the ``**/_index.md merge=wiki`` or
+``**/*.md merge=wiki`` line, naming the missing ones to append and commit,
+since git reads them from the target's own tree and wiki pages that diverge on
+both sides otherwise conflict when they merge.
 
 The shared project wiki is the one folder every node may commit to
 regardless of its scope. It is ``wiki/`` unless the project's committed

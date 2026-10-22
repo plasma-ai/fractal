@@ -78,6 +78,12 @@ _EFFORT_KEYS = (
 # step pin's flag or the session's own settings, never ambient env
 _MODEL_KEYS = ('CLAUDE_CODE_SUBAGENT_MODEL',)
 
+# ambient venv activation, unset the same way: an inherited VIRTUAL_ENV names
+# the launching project's environment, never the node worktree's, so every
+# `uv run` there warns that it does not match the project environment; the
+# installation's CLIs resolve through PATH, which keeps the venv's bin
+_VENV_KEYS = ('VIRTUAL_ENV',)
+
 
 def command_base(command: str) -> str:
     """Return an agent command's base word, refusing shell quoting.
@@ -570,7 +576,8 @@ class Agent:
                 base ``os.environ``, then the overlay, then
                 ``_invocation``'s provider-specific keys, with any key
                 whose merged value is ``None`` popped and the ambient
-                effort vars (``_EFFORT_KEYS``) always unset; ``spawn``
+                effort, model-forcing, and venv vars (``_EFFORT_KEYS``,
+                ``_MODEL_KEYS``, ``_VENV_KEYS``) always unset; ``spawn``
                 kwargs stay supervision-only.
 
         Returns:
@@ -626,15 +633,16 @@ class Agent:
         # win on collision (codex's CODEX_HOME must survive). _invocation
         # returns only its reserved keys, so the ambient snapshot never
         # re-clobbers the overlay; the composed dict is the full Popen env
-        # an ambient effort or model-forcing var forces composition, so the
-        # scrub lands even for a backend that reserves no env keys of its own
-        scrub_keys = (*_EFFORT_KEYS, *_MODEL_KEYS)
-        ambient_effort = any(key in os.environ for key in scrub_keys)
-        if env is not None or result.env is not None or ambient_effort:
-            # pin the ambient effort and model-forcing vars to None over
-            # every layer -- the pop below unsets them, so the only effort
-            # or model signal reaching the session is the step pin's own
-            # flag (see _EFFORT_KEYS / _MODEL_KEYS)
+        # an ambient effort, model-forcing, or venv var forces composition, so
+        # the scrub lands even for a backend that reserves no env keys of its own
+        scrub_keys = (*_EFFORT_KEYS, *_MODEL_KEYS, *_VENV_KEYS)
+        ambient_scrub = any(key in os.environ for key in scrub_keys)
+        if env is not None or result.env is not None or ambient_scrub:
+            # pin the ambient effort, model-forcing, and venv vars to None
+            # over every layer -- the pop below unsets them, so the only
+            # effort or model signal reaching the session is the step pin's
+            # own flag, and no foreign venv reaches the worktree (see
+            # _EFFORT_KEYS / _MODEL_KEYS / _VENV_KEYS)
             merged = {
                 **os.environ,
                 **(env or {}),

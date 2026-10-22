@@ -47,21 +47,24 @@ remedy: run `wiki update --path=wiki` and commit the result before initializing
 nodes, since siblings forking from an unstamped index each stamp their own copy
 and then conflict on the `created:` line, which the merge driver cannot
 regenerate. A second warning fires when the worktree-root `.gitattributes` lacks
-the `**/_index.md merge=wiki` line `wiki init` writes for a fresh wiki — git
-reads the attribute from the target's own tree, so an adopted wiki without it
-conflicts on its index at the first merge where both sides changed the index;
-append the line and commit before initializing nodes. The user node's baseline
-commit (`fractal/core/commit.py`) then commits the fresh wiki along with the
-`.gitattributes` merge attribute that `wiki init` writes, so every child branch
-forks from a committed wiki with merge handling in place (see
-[[features/wiki_system/merge_behavior]]).
+either mapping line of the merge-driver block `wiki init` writes for a fresh
+wiki (`**/_index.md merge=wiki`, `**/*.md merge=wiki`), naming the missing ones
+— git reads the attributes from the target's own tree, so an adopted wiki
+without one conflicts on the pages it maps at the first merge where both sides
+changed them; append the lines and commit before initializing nodes. A line
+counts only when present whole, as the wiki tool judges it before appending, so
+a narrower rule such as `docs/**/*.md merge=wiki` does not stand in for it. The
+user node's baseline commit (`fractal/core/commit.py`) then commits the fresh
+wiki along with the `.gitattributes` merge attributes that `wiki init` writes,
+so every child branch forks from a committed wiki with merge handling in place
+(see [[features/wiki_system/merge_behavior]]).
 
 Memory starts empty, seeded by `node init` (`fractal/_scripts/init.sh`) with the
 same naming policy; the node lays it out as topical pages as it learns. A file
 the commit refuses as no node record (a binary, an archive, a log; see
-[[features/loop/commit_pipeline]]) still gets a row in memory's index, which
-then links a file the commit left out, so such files belong in the node's `tmp/`
-or in project space.
+[[features/loop/commit_pipeline]]) stays out of the committed index, and its row
+comes back in memory's local index at the next refresh. Such files belong in the
+node's `tmp/` or in project space, since no commit carries them.
 
 ## Maintenance at commit
 
@@ -71,9 +74,12 @@ node's memory before linting and staging, and a failed update fails the commit �
 a broken wiki must never land. Backstop saves (`--force`) and baseline commits
 (`--init`) skip the refresh, since it may block neither a fail-safe save nor the
 setup save a node starts from, which carries only fractal's own setup; project
-content takes an ordinary commit, which refreshes and lints. The project wiki is
-always committable regardless of the node's scope: scoped commits admit the
-project wiki alongside the scope directories.
+content takes an ordinary commit, which refreshes and lints. Memory's index
+lists every file on disk, so after staging the pipeline rebuilds memory's staged
+indexes without the files the commit leaves out, backstop saves included, and no
+committed row links a refused file. The project wiki is always committable
+regardless of the node's scope: scoped commits admit the project wiki alongside
+the scope directories.
 
 ## The project wiki folder
 

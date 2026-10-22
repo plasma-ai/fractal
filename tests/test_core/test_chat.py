@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import pathlib
 import subprocess
 import threading
@@ -31,6 +32,7 @@ __all__ = [
     'test_chat_nonzero_exit_raises',
     'test_chat_reaps_a_blocked_writer_when_streaming_raises',
     'test_chat_applies_the_configured_effort',
+    'test_chat_spawns_without_an_inherited_virtual_env',
 ]
 
 # minimal agent streams carrying a session id for capture
@@ -348,6 +350,29 @@ def test_chat_applies_the_configured_effort(node_with_db: Node) -> None:
     argv = node.chat_command('hi').argv
     assert '--effort' in argv
     assert argv[argv.index('--effort') + 1] == 'xhigh'
+
+
+def test_chat_spawns_without_an_inherited_virtual_env(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A chat's agent never sees the launching shell's ``VIRTUAL_ENV``.
+
+    The shell's venv belongs to its own project, never the node worktree,
+    so the agent runs without it, like a loop step's; the venv's bin stays
+    first on ``PATH``.
+    """
+    venv = tmp_path / 'repo' / '.venv'
+    monkeypatch.setenv('VIRTUAL_ENV', f'{venv}')
+    monkeypatch.setenv('PATH', f'{venv / "bin"}{os.pathsep}{os.environ["PATH"]}')
+    captured = _patch_popen(monkeypatch)
+
+    node_with_db.chat('hello')
+
+    env = captured['env']
+    seen = (env.get('VIRTUAL_ENV'), env['PATH'].split(os.pathsep)[0])
+    assert seen == (None, f'{venv / "bin"}')
 
 
 # ------ helpers

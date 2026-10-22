@@ -99,9 +99,9 @@ def commit(
         ignore_scope: Commit out-of-scope changes but still lint.
         force: Bypass scope and lint checks and git hooks.
         body: Optional paragraph below the subject; a ``force`` commit's
-            body also folds in the record pass's notices, the staged-sweep
-            warnings, and a capped diffstat, so a backstop save describes
-            itself.
+            body also folds in the record pass's notices (the memory index
+            rebuild's among them), the staged-sweep warnings, and a capped
+            diffstat, so a backstop save describes itself.
         iteration: Commit-message iteration number (the loop passes the
             live one); resolved from the node's open iteration row, else
             ``0``, when omitted.
@@ -240,6 +240,12 @@ def commit(
             wiki_prefix=wiki_prefix,
             fractal_prefix=fractal_prefix,
         )
+        # the memory wiki indexes every file on disk, so restage its indexes
+        # without the files the commit leaves out (backstops included: the
+        # node's own refresh writes those rows too); the --init baseline's
+        # memory is the fresh seed
+        if not init:
+            record_notices.extend(_rebuild_memory_index(node, unstaged))
 
     _stage_changes()
     output.extend(record_notices)
@@ -921,19 +927,28 @@ def _scope_check(node: Node, bounds: Scope) -> None:
         raise RuntimeError(f'Changes outside node scope ({roots}):\n{listing}')
 
 
-#: the lines the wiki tool appends to the worktree-root .gitattributes at
-#: init; merge.sh's footprint check mirrors them for the target's staged copy
-_ATTRIBUTES_INIT_LINES = ('# Wiki index merge driver', '**/_index.md merge=wiki')
+#: the merge-driver block the wiki tool writes to the worktree-root
+#: .gitattributes at init: its index lines, then its page lines, which it
+#: appends alone to a file already mapping the index; merge.sh's footprint
+#: check mirrors it for the target's staged copy
+_ATTRIBUTES_INIT_LINES = (
+    '# Wiki index merge driver',
+    '**/_index.md merge=wiki',
+    '# Wiki page merge driver',
+    '**/*.md merge=wiki',
+)
 
 
 def _attributes_is_init_edit(node: Node) -> bool:
     """Return whether ``.gitattributes`` is init's uncommitted ``merge=wiki`` edit.
 
-    Init writes the memory wiki's ``**/_index.md merge=wiki`` attribute at
-    the worktree root when the base lacks it -- an artifact outside every
-    scope root, committable exactly while it is init's own uncommitted edit:
-    HEAD's content followed by exactly the lines the wiki tool appends. The
-    match is line-exact and covers the whole change, so an attribute line
+    Init writes the memory wiki's ``merge=wiki`` attributes at the worktree
+    root when the base lacks them -- an artifact outside every scope root,
+    committable exactly while it is init's own uncommitted edit: HEAD's
+    content followed by the part of the block the wiki tool appends. That is
+    the whole block, its page lines over a base already mapping the index,
+    or its index lines alone from a tool without the page driver. The match
+    is line-exact and covers the whole change, so an attribute line
     assigning some other merge driver, or any other line riding beside
     init's, makes the file an ordinary out-of-scope path.
 
@@ -957,7 +972,9 @@ def _attributes_is_init_edit(node: Node) -> bool:
     if lines[: len(committed_lines)] != committed_lines:
         return False
     added = [line for line in lines[len(committed_lines) :] if line]
-    return added == list(_ATTRIBUTES_INIT_LINES)
+    # the whole block, its page lines, or its index lines alone
+    block = list(_ATTRIBUTES_INIT_LINES)
+    return added in (block, block[2:], block[:2])
 
 
 #: estate subdirectories whose contents are node records canon requires
@@ -1320,6 +1337,225 @@ def _stage_records(
             f' were NOT staged: {listing}'
         )
     return notices, refused + failed
+
+
+def _rebuild_memory_index(node: Node, unstaged: list[str]) -> list[str]:
+    """Restage the memory wiki's indexes without the files the commit leaves out.
+
+    The memory wiki indexes every file on disk -- through the commit's own
+    refresh, or the node's own ``wiki update`` before a backstop save -- so
+    a file the estate content law refuses gains a row linking a file the
+    commit never carries. When the staging pass left any memory file
+    unstaged, the staged indexes are rebuilt outside the repository
+    (:func:`_restage_memory_indexes`). The rebuild is upkeep and must never
+    cost the save, so a failure warns in one line and leaves the staged
+    indexes as they were.
+
+    Args:
+        node: The node whose staged memory to rebuild.
+        unstaged: Every estate file the staging pass left unstaged.
+
+    Returns:
+        The rebuild's notice or a failure's warning; nothing when no memory
+        file was left out or no staged index changed.
+
+    """
+    memory = node.node_dir / 'memory'
+    prefix = memory.relative_to(node.worktree).as_posix()
+    left_out = [path for path in unstaged if path.startswith(f'{prefix}/')]
+    if not left_out or not (memory / '_index.md').is_file():
+        return []
+    # resolve the wiki CLI as the refresh does, and skip where it would
+    env = fractal.util.system.prepend_bin_path()
+    wiki_cli = shutil.which('wiki', path=env['PATH'])
+    if wiki_cli is None:
+        return []
+    try:
+        changed = _restage_memory_indexes(
+            node,
+            prefix,
+            wiki_cli=wiki_cli,
+            env=env,
+        )
+    except Exception as error:
+        reason = ' '.join(f'{error}'.split())
+        return [
+            f'Warning: memory index not rebuilt ({reason}); it may link'
+            ' file(s) the commit leaves out'
+        ]
+    if not changed:
+        return []
+    return [
+        f'Memory index rebuilt without {len(left_out)} file(s) the commit leaves out'
+    ]
+
+
+def _restage_memory_indexes(
+    node: Node,
+    prefix: str,
+    *,
+    wiki_cli: str,
+    env: dict[str, str],
+) -> bool:
+    """Rebuild the staged memory indexes in a temp tree and restage the changes.
+
+    The staged memory tree -- the bytes about to commit -- is checked out
+    into a temp folder outside every repository (inside one, the wiki would
+    apply that repository's ignore rules) and ``wiki update`` rebuilds its
+    indexes there, so no row links a file the commit leaves out. The temp
+    tree leaves out what the wiki's own ignore check skips, so every other
+    row is the refresh's. An
+    index whose rebuild differs from HEAD's copy only in its ``updated:``
+    stamp keeps HEAD's bytes, so a refused file never moves the stamp. Each
+    index whose bytes differ from what is staged is written back to the git
+    index and the working tree alike, keeping the tree clean for the
+    loop's dirty check; page writes are discarded with the temp tree.
+
+    Args:
+        node: The node whose staged memory to rebuild.
+        prefix: The memory wiki's worktree-relative path.
+        wiki_cli: Resolved ``wiki`` executable.
+        env: Environment for the wiki invocation.
+
+    Returns:
+        Whether any staged index changed.
+
+    Raises:
+        RuntimeError: When a git or wiki call fails.
+
+    """
+    worktree = node.worktree
+    # the staged memory tree: the exact bytes about to commit
+    cmd = ['ls-files', '-z', '--', f':(literal){prefix}']
+    raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
+    staged = [path for path in os.fsdecode(raw).split('\0') if path]
+    # leave out what the wiki's own ignore check skips, so the rebuild
+    # indexes exactly what the refresh did: this is the wiki package's
+    # Wiki._check_ignore call -- matched on the patterns alone (--no-index,
+    # so a tracked file reads as ignored too), the personal core.excludesFile
+    # pinned out -- with Wiki._gitignore_fence's exemption, which turns the
+    # check off when the root and its index both read as ignored; the wiki
+    # walks no dot path, so its settings always ride along
+    walked = [
+        path
+        for path in staged
+        if not any(
+            part.startswith('.')
+            for part in pathlib.PurePosixPath(path).relative_to(prefix).parts
+        )
+    ]
+    root_index = f'{prefix}/_index.md'
+    payload = b''.join(
+        os.fsencode(path) + b'\0' for path in [prefix, root_index, *walked]
+    )
+    cmd = [
+        'git',
+        '-C',
+        f'{worktree}',
+        '-c',
+        f'core.excludesFile={os.devnull}',
+        'check-ignore',
+        '-z',
+        '--stdin',
+        '--no-index',
+    ]
+    # raw git call bypassing util.git.run -- the helper feeds no stdin; -z
+    # both ways so a non-ASCII path round-trips unquoted
+    result = subprocess.run(cmd, input=payload, capture_output=True)
+    # exit 1 is a clean probe that matched nothing
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f'git check-ignore failed (exit {result.returncode})')
+    fenced = {os.fsdecode(path) for path in result.stdout.split(b'\0') if path}
+    if {prefix, root_index} <= fenced:
+        fenced = set()
+    kept = [path for path in staged if path not in fenced]
+    rebuilt: dict[str, bytes] = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        # check the kept bytes out of the git index into the temp tree (raw,
+        # like the probe, for its --stdin)
+        payload = b''.join(os.fsencode(path) + b'\0' for path in kept)
+        cmd = [
+            'git',
+            '-C',
+            f'{worktree}',
+            'checkout-index',
+            '-z',
+            '--stdin',
+            f'--prefix={tmp}/',
+        ]
+        result = subprocess.run(cmd, input=payload, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(f'git checkout-index failed (exit {result.returncode})')
+        indexes = [path for path in kept if path.endswith('/_index.md')]
+        before = {path: (pathlib.Path(tmp) / path).read_bytes() for path in indexes}
+        root = pathlib.Path(tmp) / prefix
+        result = subprocess.run(
+            [wiki_cli, 'update', f'--path={root}'],
+            capture_output=True,
+            text=True,
+            cwd=tmp,
+            env=env,
+        )
+        if result.returncode != 0:
+            # join both streams -- the CLI reports refusals to stderr but its
+            # file summaries to stdout
+            error = '\n'.join(
+                stream.strip()
+                for stream in (result.stdout, result.stderr)
+                if stream.strip()
+            )
+            raise RuntimeError(
+                f'wiki update failed (exit {result.returncode}): {error!r}'
+            )
+        # collect the rebuilt indexes outside the wiki tool's dot dirs
+        for index in root.rglob('_index.md'):
+            relative = index.relative_to(root)
+            if any(part.startswith('.') for part in relative.parts):
+                continue
+            rebuilt[f'{prefix}/{relative.as_posix()}'] = index.read_bytes()
+    # write back each index whose bytes differ from what is staged -- HEAD's
+    # bytes where the rebuild matches them but for the stamp
+    written = []
+    for path, data in sorted(rebuilt.items()):
+        committed = _tree_bytes(node, 'HEAD', path)
+        if committed is not None and _same_but_stamp(data, committed):
+            data = committed
+        if data == before.get(path):
+            continue
+        fractal.util.filesystem.write_atomic(worktree / path, data)
+        written.append(path)
+    if written:
+        specs = [f':(literal){worktree / path}' for path in written]
+        fractal.util.git.run(['add', '-f', *specs], cwd=worktree)
+    return bool(written)
+
+
+#: an index frontmatter's ``updated:`` stamp line
+_STAMP_LINE = re.compile(rb'^updated:.*$', re.MULTILINE)
+
+
+def _same_but_stamp(rebuilt: bytes, committed: bytes) -> bool:
+    """Return whether two index texts differ at most in their ``updated:`` stamp.
+
+    Only the frontmatter block's stamp line is set aside -- the block runs
+    from the opening fence to the first closing ``---`` line -- so a body
+    line spelled like a stamp still counts as content.
+
+    Args:
+        rebuilt: The rebuilt index's bytes.
+        committed: HEAD's bytes for the same index.
+
+    Returns:
+        Whether the texts match once each block's stamp line is set aside.
+
+    """
+    masked = []
+    for text in (rebuilt, committed):
+        block, fence, body = text.partition(b'\n---\n')
+        if text.startswith(b'---\n') and fence:
+            block = _STAMP_LINE.sub(b'updated:', block, count=1)
+        masked.append(block + fence + body)
+    return masked[0] == masked[1]
 
 
 def _hook_retry(

@@ -114,7 +114,8 @@ __all__ = [
     'test_update_rewrites_child_config',
     'test_update_changes_title',
     'test_update_rejects_unknown_child_and_negatives',
-    'test_update_max_cost_retunes_default_reserve',
+    'test_update_max_cost_retunes_only_a_default_reserve',
+    'test_update_max_cost_reads_a_reserve_without_a_mode_by_its_figure',
     'test_update_resolves_short_name',
     'test_update_validates_config_like_init',
     'test_update_retunes_iter_and_step_cost',
@@ -3604,46 +3605,134 @@ def test_update_rejects_unknown_child_and_negatives(repo: dict) -> None:
     assert 'max-cost' in (negative.stdout + negative.stderr)
 
 
-def test_update_max_cost_retunes_default_reserve(repo: dict) -> None:
-    """``update --max-cost`` keeps a default-mode reserve at 10% of the cap.
+@pytest.mark.parametrize(
+    argnames=('flags', 'setup', 'expected'),
+    argvalues=[
+        # init's own default fraction tracks the new cap
+        pytest.param((), (), '0.8', id='init-default'),
+        # a reserve the operator set stays put, even at exactly the default
+        # fraction of the old cap -- by flag at init, in either grammar
+        pytest.param(('--reserve-budget', '10%'), (), '0.4', id='init-percent'),
+        pytest.param(('--reserve-budget', '0.4'), (), '0.4', id='init-usd'),
+        # ...or over the default afterwards, through either setter
+        pytest.param(
+            (),
+            ('node', 'update', 'main.reserved', '--reserve-budget', '0.4'),
+            '0.4',
+            id='update',
+        ),
+        pytest.param(
+            (),
+            (
+                'node',
+                'config',
+                'set',
+                'reserve_budget=0.4',
+                '--path',
+                '.worktrees/main.reserved',
+            ),
+            '0.4',
+            id='config-set',
+        ),
+    ],
+)
+def test_update_max_cost_retunes_only_a_default_reserve(
+    repo: dict,
+    flags: tuple[str, ...],
+    setup: tuple[str, ...],
+    expected: str,
+) -> None:
+    """``update --max-cost`` retunes a default reserve and leaves an explicit one.
 
-    Init materializes the default reserve once (10% of the initial cap); an
-    ``update --max-cost`` that ignored it would leave a reserve sized for the
-    old cap, with lowering the cap under a stale reserve rejected outright.
+    Init materializes the default reserve as 10% of the cap, and a cap change
+    re-derives it so it never sits sized for the old cap. A reserve the
+    operator set keeps its figure through the cap change, even a figure equal
+    to the default -- it is the operator's number, not the default's.
     """
     root = repo['root']
     spawn = _run(
         root,
         'node',
         'init',
-        'retuned',
+        'reserved',
         '--agent',
         'claude',
         '--max-cost',
         '4',
+        *flags,
     )
     assert spawn.returncode == 0, spawn.stderr
-    node = root / '.worktrees' / 'main.retuned'
-    assert _config(node, 'reserve_budget') == '0.4'
+    node = root / '.worktrees' / 'main.reserved'
     try:
-        # a default-mode reserve tracks the retuned cap
-        updated = _run(root, 'node', 'update', 'main.retuned', '--max-cost', '8')
+        # every case holds the same figure before the cap change
+        if setup:
+            prepared = _run(root, *setup)
+            assert prepared.returncode == 0, prepared.stderr
+        assert _config(node, 'reserve_budget') == '0.4'
+        updated = _run(root, 'node', 'update', 'main.reserved', '--max-cost', '8')
         assert updated.returncode == 0, updated.stderr
-        assert _config(node, 'reserve_budget') == '0.8'
-        # an explicit reserve is settable directly
-        explicit = _run(
-            root,
-            'node',
-            'update',
-            'main.retuned',
-            '--reserve-budget',
-            '1.2',
-        )
-        assert explicit.returncode == 0, explicit.stderr
-        assert _config(node, 'reserve_budget') == '1.2'
+        assert _config(node, 'reserve_budget') == expected
     finally:
         # clean up so the shared module fixture is left as other tests expect
-        assert _run(root, 'node', 'delete', 'main.retuned', '--force').returncode == 0
+        assert _run(root, 'node', 'delete', 'main.reserved', '--force').returncode == 0
+
+
+@pytest.mark.parametrize(
+    argnames=('flags', 'caps', 'expected'),
+    argvalues=[
+        # a reserve at the default fraction of its cap reads as default and
+        # tracks each new cap
+        pytest.param((), ('8', '20'), ('0.8', '2.0'), id='default-figure'),
+        # any other figure reads as explicit and stays put, even once a cap
+        # change leaves it at the new cap's default fraction
+        pytest.param(
+            ('--reserve-budget', '1.0'),
+            ('10', '20'),
+            ('1.0', '1.0'),
+            id='other-figure',
+        ),
+    ],
+)
+def test_update_max_cost_reads_a_reserve_without_a_mode_by_its_figure(
+    repo: dict,
+    flags: tuple[str, ...],
+    caps: tuple[str, ...],
+    expected: tuple[str, ...],
+) -> None:
+    """A config that records no ``reserve_mode`` is judged by its reserve's figure.
+
+    Such a config reads as default when its reserve equals the default
+    fraction of its cap, and as explicit otherwise; nothing is rewritten on
+    read. The first cap change records that reading, so a later one never
+    re-judges a figure the first left at the new cap's default fraction.
+    """
+    root = repo['root']
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'modeless',
+        '--agent',
+        'claude',
+        '--max-cost',
+        '4',
+        *flags,
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    node = root / '.worktrees' / 'main.modeless'
+    config_path = node / '.fractal' / 'main.modeless' / 'config.json'
+    try:
+        # drop the recorded mode, leaving the reserve's figure alone
+        config = json.loads(config_path.read_text(encoding='utf-8'))
+        config.pop('reserve_mode', None)
+        config_path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+        for cap, reserve in zip(caps, expected, strict=True):
+            updated = _run(root, 'node', 'update', 'main.modeless', '--max-cost', cap)
+            assert updated.returncode == 0, updated.stderr
+            assert _config(node, 'reserve_budget') == reserve
+    finally:
+        # clean up so the shared module fixture is left as other tests expect
+        assert _run(root, 'node', 'delete', 'main.modeless', '--force').returncode == 0
 
 
 def test_update_resolves_short_name(repo: dict) -> None:

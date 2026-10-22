@@ -18,10 +18,10 @@ Sibling nodes evolve the same project wiki on parallel git branches (the merge
 topology: [[architecture/worktrees]]), so `_index.md` files — whose generated
 link blocks churn on every update — would conflict constantly under plain
 three-way merging. The wiki ships a custom git merge driver for them, wired by
-`.gitattributes` (`**/_index.md merge=wiki`) and registered in the repo-local
-git config by `wiki init` and `wiki config`. Fractal commits the attribute in
-the user node's baseline, so every branch in the tree merges indexes through the
-driver.
+`.gitattributes` (`**/_index.md merge=wiki`, and `**/*.md merge=wiki` from a
+wiki tool with a page driver) and registered in the repo-local git config by
+`wiki init` and `wiki config`. Fractal commits the attributes in the user node's
+baseline, so every branch in the tree merges indexes through the driver.
 
 ## What the driver does
 
