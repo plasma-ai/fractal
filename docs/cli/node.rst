@@ -554,7 +554,7 @@ Before committing, the merge holds the squash to the node's commit scope: the
 staged paths outside ``.fractal/`` are judged by the node's ``scope`` roots
 and its project wiki (``wiki/`` unless the project's settings file names
 another folder), with the worktree-root ``.gitattributes`` admitted
-only as init's own ``**/_index.md merge=wiki`` edit (a repo-root node without
+only as init's own ``merge=wiki`` edit (a repo-root node without
 a scope is unrestricted; a sub-project node without one is bounded to its
 project directory) — the same law ``fractal commit`` applies — and a path
 outside them refuses the merge. The refusal names the paths and both

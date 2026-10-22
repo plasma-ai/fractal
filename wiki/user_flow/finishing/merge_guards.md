@@ -135,14 +135,14 @@ code; when the target is not restored, the error names the
 Before committing, the merge judges the staged paths outside `.fractal/` (the
 restore has already settled those) by the node's commit boundaries — its scope
 roots and its project wiki, plus the worktree-root `.gitattributes` only when it
-is init's own `**/_index.md merge=wiki` edit (a repo-root node with no scope is
-unrestricted; a sub-project node with no scope is bounded to its project
-directory) — the same law `fractal commit` applies, and refuses when any path
-falls outside them. The refusal names the paths and both remedies: widen the
-scope with `fractal node config set scope=<dirs> --path=<node worktree>` and
-commit it with `fractal commit "widen scope" --path=<node worktree>` (an
-uncommitted config change makes the rerun skip the merge-base advance), or rerun
-with `fractal node merge --ignore-scope`, which lands the paths. A fresh merge
+is init's own `merge=wiki` edit (a repo-root node with no scope is unrestricted;
+a sub-project node with no scope is bounded to its project directory) — the same
+law `fractal commit` applies, and refuses when any path falls outside them. The
+refusal names the paths and both remedies: widen the scope with
+`fractal node config set scope=<dirs> --path=<node worktree>` and commit it with
+`fractal commit "widen scope" --path=<node worktree>` (an uncommitted config
+change makes the rerun skip the merge-base advance), or rerun with
+`fractal node merge --ignore-scope`, which lands the paths. A fresh merge
 restores the target on refusal. A `--continue` leaves the staged squash in
 place, and its remedies differ: re-run with `--continue --ignore-scope`, or
 widen the scope (config set, then commit) and redo the squash

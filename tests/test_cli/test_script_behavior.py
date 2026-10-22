@@ -148,14 +148,16 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   the node's scope roots (its project wiki excepted, every ``.fractal/`` path
   left out of the listing, and the worktree-root ``.gitattributes`` admitted
   only as init's own edit -- HEAD's content, leading blank line or trailing
-  whitespace included, plus exactly the two lines the wiki tool appends, so
-  a foreign line beside them is out of scope even on a target with no
-  ``.gitattributes`` at all), naming the paths and both remedies, in both
-  arms -- a fresh merge restores the target, a ``--continue`` leaves the
-  staged squash -- unless ``--ignore-scope`` is passed; a repo-root node
-  with no scope is unrestricted, a sub-project node with none is bounded to
-  its project dir (its own wiki in, the repo-root wiki out), and one with
-  roots to ``<project>/<root>``.
+  whitespace included, plus the part of the wiki tool's merge-driver block
+  it appends (the whole block, its page lines, or its index lines alone),
+  so a foreign line beside them, or the block with a line changed, is out
+  of scope even on a target with no ``.gitattributes`` at all), naming the
+  paths and both remedies, in both arms -- a fresh merge restores the
+  target, a ``--continue`` leaves the staged squash -- unless
+  ``--ignore-scope`` is passed; a repo-root node with no scope is
+  unrestricted, a sub-project node with none is bounded to its project dir
+  (its own wiki in, the repo-root wiki out), and one with roots to
+  ``<project>/<root>``.
 - **``merge.sh`` wiki-folder check** recomputes the node's project-wiki folder
   by the spawn rule before the footprint judges it: a ``config.json``
   hand-edited to another folder refuses, a depth-1 node's parent resolves as
@@ -350,6 +352,7 @@ __all__ = [
     'test_merge_ignoring_scope_refreshes_the_folder_the_spawn_gave',
     'test_merge_refuses_a_node_whose_project_setting_changed_since_spawn',
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
+    'test_merge_admits_only_the_wiki_attributes_edit',
     'test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal',
     'test_merge_continue_refuses_a_squash_outside_the_nodes_scope',
     'test_merge_lands_a_scoped_nodes_template_edit_for_later_spawns',
@@ -375,6 +378,11 @@ __all__ = [
     'test_delete_warns_on_unmerged_wiki_page_work',
     'test_delete_does_not_warn_on_merge_regenerated_wiki_state',
 ]
+
+# the wiki tool's merge-driver block for .gitattributes, as its index lines
+# and its page lines
+_WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
+_WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
 
 
 # ------ init.sh: worktree paths with spaces
@@ -4843,9 +4851,9 @@ def test_merge_refuses_a_squash_outside_the_nodes_scope(
     paths and both remedies -- widening the scope, with the ``fractal
     commit`` that records it, or ``--ignore-scope`` -- and a fresh merge
     restores the target. The worktree-root ``.gitattributes`` is admitted
-    only as init's own edit -- the target's content plus exactly the two
-    lines the wiki tool appends, which a first squash carries to a target
-    that lacks them; a foreign attribute line beside them is out of scope
+    only as init's own edit -- the target's content plus the wiki tool's
+    merge-driver lines, which a first squash carries to a target that
+    lacks them; a foreign attribute line beside them is out of scope
     like any other path, even when the target has no ``.gitattributes`` for
     it to be told apart from. ``--ignore-scope`` lands the offering as it
     is, and a repo-root node with no scope is unrestricted.
@@ -5363,6 +5371,98 @@ def test_merge_admits_init_attributes_over_a_targets_own_lines(
     ]
     assert (repo / 'docs' / 'a.md').read_text(encoding='utf-8') == '# a\n'
     assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+@pytest.mark.parametrize(
+    argnames=('attributes', 'edit', 'lands'),
+    argvalues=[
+        pytest.param(None, _WIKI_INDEX_LINES + _WIKI_PAGE_LINES, True, id='block'),
+        pytest.param(
+            '* text=auto\n',
+            '\n' + _WIKI_INDEX_LINES + _WIKI_PAGE_LINES,
+            True,
+            id='block-after-own-lines',
+        ),
+        pytest.param(
+            '* text=auto\n\n' + _WIKI_INDEX_LINES,
+            _WIKI_PAGE_LINES,
+            True,
+            id='page-lines',
+        ),
+        pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + _WIKI_PAGE_LINES + '*.bin binary\n',
+            False,
+            id='foreign-line',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + _WIKI_PAGE_LINES.replace('=wiki', '=union'),
+            False,
+            id='changed-line',
+        ),
+    ],
+)
+def test_merge_admits_only_the_wiki_attributes_edit(
+    tmp_path: pathlib.Path,
+    attributes: Optional[str],
+    edit: str,
+    lands: bool,
+) -> None:
+    """The footprint check admits ``.gitattributes`` only as the wiki tool's edit.
+
+    The wiki tool appends whatever its four-line merge-driver block lacks to
+    the file: the whole block, or only the page lines when the index lines
+    are already there; a tool without the page driver appends the index
+    lines alone. A scoped node's first squash carries that edit to the
+    target, and the footprint check admits it as init's own, so the landing
+    succeeds with the target's file as its original plus the edit. A foreign
+    line beside the block, or the block with a line changed, is out of scope
+    like any other path, and the merge is refused naming the file.
+    """
+    repo = _init_tree(tmp_path / 'attrsrepo')
+    if attributes is not None:
+        (repo / '.gitattributes').write_text(attributes, encoding='utf-8')
+        _git(repo, 'add', '.gitattributes')
+        _git(repo, 'commit', '-m', 'own attributes')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'docs',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'docs').mkdir()
+    (worktree / 'docs' / 'a.md').write_text('# a\n', encoding='utf-8')
+    # stand in for the wiki tool's write: the target's copy followed by the edit
+    (worktree / '.gitattributes').write_text(
+        (attributes or '') + edit, encoding='utf-8'
+    )
+    # raw git: a first squash carries the edit beside the seed and the
+    # in-scope work
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work with init scaffolding')
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    if lands:
+        # the scoped landing succeeded, and the target's .gitattributes is
+        # its original followed by the edit
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        landed = _git(repo, 'show', 'HEAD:.gitattributes').stdout
+        assert landed == (attributes or '') + edit
+        assert _git(repo, 'status', '--porcelain').stdout == ''
+    else:
+        # refused, naming the file
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert 'outside its scope' in result.stderr, result.stderr
+        assert '.gitattributes' in result.stderr, result.stderr
 
 
 def test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal(
