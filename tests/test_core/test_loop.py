@@ -37,7 +37,7 @@ from fractal.constants import (
     STEP_PGID_FILE,
 )
 from fractal.core import loop as loop_module, pricing, worktree
-from fractal.core.agent import Agent, Invocation, StreamEvent, StreamResult
+from fractal.core.agent import Agent, Invocation, Settlement, StreamEvent, StreamResult
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
@@ -2808,8 +2808,9 @@ def test_killed_claude_launch_prices_from_its_transcript(
     split across lines that grow -- and a sub-agent's own transcript
     beside it holds that agent's reply at its own model, so the step books
     their sum as an estimate. Entries stamped outside the launch window
-    and an unpriced model stay out of the sum. The steered relaunch, whose
-    result frame names its cost, keeps that figure over its own transcript
+    stay out of the sum, and so does a reply at an unpriced model, which
+    marks the step partly unpriced. The steered relaunch, whose result
+    frame names its cost, keeps that figure over its own transcript
     entries.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
@@ -2857,7 +2858,7 @@ def test_killed_claude_launch_prices_from_its_transcript(
     # each reply's final usage, the sub-agent's at its own model's rates
     settled = _price(final) + _price(second) + _price(sidechain, 'claude-haiku-5')
     assert _step_rows(loop_node) == [
-        'PLAN/stopped/steered: no action for 1s',
+        'PLAN/stopped/steered: no action for 1s; partly unpriced',
         'PLAN/completed/steer',
         'EXECUTE/completed/',
     ]
@@ -3423,7 +3424,7 @@ def test_killed_launch_settles_after_dropping_its_group_handle(
     handles: list[bool] = []
     settle = agent._settle_cost
 
-    def _settle_cost(session: str, **kwargs: Any) -> Optional[float]:
+    def _settle_cost(session: str, **kwargs: Any) -> Settlement:
         handles.append((loop_node.node_dir / STEP_PGID_FILE).exists())
         return settle(session, **kwargs)
 
@@ -3494,7 +3495,7 @@ def test_a_failed_settle_leaves_the_killed_launch_as_booked(
         ]
     )
 
-    def _settle_cost(session: str, **kwargs: Any) -> Optional[float]:
+    def _settle_cost(session: str, **kwargs: Any) -> Settlement:
         raise OSError('transcript gone')
 
     monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
@@ -3531,7 +3532,7 @@ def test_a_failed_settle_marks_sub_agent_spend_after_the_result(
         ]
     )
 
-    def _settle_cost(session: str, **kwargs: Any) -> Optional[float]:
+    def _settle_cost(session: str, **kwargs: Any) -> Settlement:
         raise OSError('transcript gone')
 
     monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
