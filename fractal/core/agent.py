@@ -626,8 +626,8 @@ class Agent:
         # an ambient effort, model-forcing, or venv var forces composition, so
         # the scrub lands even for a backend that reserves no env keys of its own
         scrub_keys = (*_EFFORT_KEYS, *_MODEL_KEYS, *_VENV_KEYS)
-        ambient_effort = any(key in os.environ for key in scrub_keys)
-        if env is not None or result.env is not None or ambient_effort:
+        ambient_scrub = any(key in os.environ for key in scrub_keys)
+        if env is not None or result.env is not None or ambient_scrub:
             # pin the ambient effort, model-forcing, and venv vars to None
             # over every layer -- the pop below unsets them, so the only
             # effort or model signal reaching the session is the step pin's
