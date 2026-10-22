@@ -1203,7 +1203,7 @@ one run, iteration, or step. Prints ``untracked`` when the scope ran only
 cost-untracked steps; when ended steps carry no recorded cost, a stderr
 disclosure notes how many unpriced steps were excluded, and another notes
 how many steps count only their recorded spend because the record leaves
-part of a reply out.
+part of their spend out (a reply cut off, or a result figure refused).
 
 ``cost breakdown``
 ~~~~~~~~~~~~~~~~~~

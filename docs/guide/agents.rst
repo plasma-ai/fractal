@@ -406,6 +406,10 @@ By default the chat runs a fresh session. Options:
 The resulting session id is echoed to stderr as ``session: <id>``, so the
 thread can be continued with ``--session <id> --resume``. A chat records
 nothing in the database — it never disturbs the node's rows or budgets.
+The reply's closing line shows the turn's own cost: a resumed or forked
+``claude`` session's result figure counts on from the total Claude Code
+saved for the session, which the chat takes off as the loop does (``$?``
+when that total cannot be read).
 Because ``codex`` cannot fork, ``--current`` and the forking
 ``--session`` form fail on ``codex`` nodes; continue a ``codex`` thread
 with ``--session <id> --resume``.

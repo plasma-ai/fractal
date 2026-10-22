@@ -218,6 +218,16 @@ class ChatTurn:
     def events(self: ChatTurn) -> Iterator[ChatEvent]:
         """Yield the turn's events; spawns on first iteration, never raises."""
         started = time.monotonic()
+        # a resumed or forked session's result figure can count on from the
+        # session's earlier spend: read what it carries before the turn adds
+        # to it, so the close shows the turn's own cost (an unreadable
+        # baseline refuses the figure, closing on '$?')
+        if self._command.mode != 'fresh':
+            try:
+                self._parser.baseline = self._agent.cost_baseline(self._command.session)
+            except Exception as error:
+                self._parser.baseline = None
+                yield ChatEvent(kind='error', text=f'cost baseline error: {error}')
         # launch through the seam's spawn triad (a host's _spawn override
         # covers this surface too); the base hook wires argv/cwd/env,
         # stdin=DEVNULL, and stdout=PIPE in text mode -- the TUI pipes stderr

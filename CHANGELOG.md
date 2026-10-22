@@ -333,6 +333,15 @@ may include breaking changes, each listed under a Breaking heading.
   A step whose record leaves spend out and holds no figure, such as a waiting
   SYNC whose failed launch left no transcript, is now marked `; unpriced` even
   when it completed.
+- `fractal node chat` and the cockpit's chat pane show a reply on a resumed or
+  forked Claude session at the turn's own cost instead of the session's running
+  total. A fork counts its result figure on from the source session's saved
+  total just as a resume does, so the turn reads that total before it spawns and
+  shows the figure less it, as the loop books a resumed step, or `$?` when the
+  total cannot be read. The partly unpriced disclosure of
+  `fractal node cost spent` and `breakdown` reads
+  `(some spend missing from the record)`, since it also counts steps whose
+  result figure was refused.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the
