@@ -831,7 +831,11 @@ each file is compared against the node's live copy: ``NODE.md``, ``steps/``,
 ``scripts/``, ``skills/``, and — for each ``agents/<agent>/`` file — the
 live ``.<agent>/`` copy, all in the node's data directory. A live symlink
 and a file the template does not carry are never judged; a template file the
-node lacks is drift. Literal braces are valid output and are compared like any
+node lacks is drift. Codex trusts each project it runs in by appending a
+``[projects."<path>"]`` stanza with ``trust_level = "trusted"`` to
+``.codex/config.toml``; a run of them at the end of that file is never judged,
+so any other change there diffs without them. Literal braces are valid output
+and are compared like any
 other text. Source defaults are not merged again; deleting a required recorded
 input causes a rendering refusal. The recorded commit resolves as long as it
 is reachable, so a template folder

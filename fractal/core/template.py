@@ -45,6 +45,16 @@ _COMMIT_SHA = re.compile(r'[0-9a-f]{40}')
 # the node verbs' own resolve sites raise it, so the wording stays identical
 _UNRESOLVED_REF = 'Template ref does not resolve to a commit: {ref!r}.'
 
+# codex trusts each project it runs in by appending a stanza to the
+# config.toml in its CODEX_HOME (the node's .codex/): a blank line, a
+# [projects.<path>] header quoting the path as a TOML basic or literal
+# string, and trust_level = "trusted" -- diff never judges a trailing run
+_CODEX_CONFIG = '.codex/config.toml'
+_CODEX_TRUST = re.compile(
+    rb'(?:\n\[projects\.(?:"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')\]\n'
+    rb'trust_level = "trusted"\n)+\Z'
+)
+
 #: config keys a template preset may carry -- the budget, limit, duration,
 #: model, and mode subset of a node's config keys; identity and immutable
 #: keys (title, scope, base, ...) refuse at init by name
@@ -1198,8 +1208,9 @@ def diff(
     surface against the node's live copy: ``NODE.md``, ``steps/``,
     ``scripts/``, and ``skills/`` in the node data directory, and each
     ``agents/<agent>/`` file as the live ``.<agent>/`` file. A live
-    symlink and a file the bundle does not carry are never judged; a
-    bundle file the node lacks is drift. Literal braces are ordinary
+    symlink, a file the bundle does not carry, and the trust stanzas
+    codex appends to its ``config.toml`` are never judged; a bundle
+    file the node lacks is drift. Literal braces are ordinary
     output and are judged only by the byte comparison. The shared files
     the folder includes re-read at the recorded commit too.
 
@@ -1278,6 +1289,9 @@ def diff(
                 continue
             rendered = entry.read_bytes()
             actual = live.read_bytes()
+            # cut codex's trust stanzas, so only other drift reports
+            if target == _CODEX_CONFIG:
+                actual = _CODEX_TRUST.sub(b'', actual)
             if actual == rendered:
                 continue
             rendered_lines = rendered.decode('utf-8').splitlines(keepends=True)

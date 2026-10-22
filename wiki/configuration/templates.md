@@ -364,14 +364,19 @@ applies the effective set, and compares each bundle surface against the node's
 live copy: `NODE.md`, `steps/`, `scripts/`, and `skills/` in the node data
 directory, and each `agents/<agent>/` file as the live `.<agent>/` file. A live
 symlink (the skills mount, a linked credential) and a file the bundle does not
-carry are never judged; a bundle file the node lacks is drift. Literal braces
-are valid output and do not constitute drift on their own. The command prints a
-unified diff per drifted file and exits 0 when clean, 1 on drift, and 2 on a
-command error (a node with no template recorded included), so scripts branch on
-the exit code. The recorded commit always resolves while it is reachable, so a
-folder moved or deleted on a later commit still diffs at its recorded sha. The
-shared files the folder includes re-read at that commit too, so a hand edit to
-an included part of the live charter is drift like any other.
+carry are never judged; a bundle file the node lacks is drift. Codex trusts each
+project it runs in by appending a `[projects."<path>"]` stanza with
+`trust_level = "trusted"` to the `config.toml` in its `CODEX_HOME`, the node's
+`.codex/`. A run of those stanzas at the end of `.codex/config.toml` is never
+judged, so any other change there diffs without them; a projects table carrying
+anything more, or another level, is drift. Literal braces are valid output and
+do not constitute drift on their own. The command prints a unified diff per
+drifted file and exits 0 when clean, 1 on drift, and 2 on a command error (a
+node with no template recorded included), so scripts branch on the exit code.
+The recorded commit always resolves while it is reachable, so a folder moved or
+deleted on a later commit still diffs at its recorded sha. The shared files the
+folder includes re-read at that commit too, so a hand edit to an included part
+of the live charter is drift like any other.
 
 Diff uses exactly the recorded values, without merging source defaults again.
 Removing a required value from the record causes a rendering refusal.

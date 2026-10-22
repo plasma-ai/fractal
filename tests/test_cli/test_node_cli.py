@@ -91,6 +91,7 @@ __all__ = [
     'test_diff_stays_clean_after_the_template_folder_moves',
     'test_diff_never_judges_a_root_file_named_like_a_surface',
     'test_diff_reports_drift_in_a_shared_include',
+    'test_diff_never_judges_the_codex_trust_stanzas',
     'test_diff_and_reseed_name_the_record_remedy_for_a_missing_value',
     'test_reseed_keeps_recorded_values_and_adds_new_defaults',
     'test_reseed_restores_the_seed_surfaces_and_records_the_event',
@@ -2237,6 +2238,86 @@ def test_diff_reports_drift_in_a_shared_include(repo: dict) -> None:
         assert '+doctrine, hand-edited' in drifted.stdout
     finally:
         _run(root, 'node', 'delete', 'main.shareddiff', '--force')
+
+
+def test_diff_never_judges_the_codex_trust_stanzas(repo: dict) -> None:
+    """Codex's trust stanzas at the end of ``.codex/config.toml`` are not drift.
+
+    Codex trusts each project it runs in by appending a stanza to the
+    ``config.toml`` in its ``CODEX_HOME`` (the node's ``.codex/``): a
+    blank line, a ``[projects.<path>]`` header, and a trusted level. The
+    seeded config plus a trailing run of them diffs clean, the path in
+    either quoted TOML form. Any other difference still reports: a
+    changed or removed seeded line diffs without the stanza, while a
+    projects table carrying more than the trusted level, or another
+    level, is drift itself.
+    """
+    root = repo['root']
+    seeded = 'model = "gpt-5.5"\n\n[analytics]\nenabled = false\n'
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'agents/codex/config.toml': seeded,
+    }
+    _commit_template(root, 'templates/codextrust', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'codextrust',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/codextrust',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        worktree = root / '.worktrees' / 'main.codextrust'
+        config = worktree / '.fractal' / 'main.codextrust' / '.codex' / 'config.toml'
+        assert config.read_text(encoding='utf-8') == seeded
+        # the stanza as codex appends it, plus a basic-string path with an
+        # escape and a literal-string path
+        trust = f'\n[projects."{worktree}"]\ntrust_level = "trusted"\n'
+        escaped = '\n[projects."/srv/a \\"b\\""]\ntrust_level = "trusted"\n'
+        literal = '\n[projects.\'/srv/a\\b\']\ntrust_level = "trusted"\n'
+        # the seed plus one or more trailing stanzas is clean
+        for text in (seeded + trust, seeded + trust + escaped + literal):
+            config.write_text(text, encoding='utf-8')
+            clean = _run(root, 'node', 'diff', 'main.codextrust')
+            assert clean.returncode == 0, clean.stdout + clean.stderr
+            assert clean.stdout.strip() == 'No drift from the recorded template.'
+        # a changed or removed seeded line reports without the stanza; a
+        # projects table carrying more, or another level, is drift itself
+        changed = seeded.replace('gpt-5.5', 'gpt-5.4')
+        removed = seeded.replace('enabled = false\n', '')
+        extra = trust + 'sandbox_mode = "danger-full-access"\n'
+        untrusted = trust.replace('"trusted"', '"untrusted"')
+        cases = [
+            (
+                changed + trust,
+                ['-model = "gpt-5.5"', '+model = "gpt-5.4"'],
+                ['trust_level'],
+            ),
+            (removed + trust, ['-enabled = false'], ['trust_level']),
+            (
+                seeded + extra,
+                ['+trust_level = "trusted"', '+sandbox_mode = "danger-full-access"'],
+                [],
+            ),
+            (seeded + untrusted, ['+trust_level = "untrusted"'], []),
+        ]
+        for text, present, absent in cases:
+            config.write_text(text, encoding='utf-8')
+            drifted = _run(root, 'node', 'diff', 'main.codextrust')
+            assert drifted.returncode == 1, drifted.stdout + drifted.stderr
+            assert '--- template/.codex/config.toml' in drifted.stdout
+            assert '+++ node/.codex/config.toml' in drifted.stdout
+            for line in present:
+                assert line in drifted.stdout, drifted.stdout
+            for line in absent:
+                assert line not in drifted.stdout, drifted.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.codextrust', '--force')
 
 
 def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
