@@ -501,16 +501,18 @@ def commit_user_init(node: Node, message: str) -> str:
     sub-project), the settings file naming its folder when the project has
     one, and the ``.gitattributes`` merge attribute ``wiki init`` wrote; on
     a tree opted in via ``fractal track`` the node's seed dir rides along
-    too. Everything is committed with a pathspec, so the user's other
-    staged work is never swept in, and does not push. A node worktree
-    branched later then starts from a committed tree.
+    too, staged under the work commits' estate law, so the runtime files
+    fractal's own exclude block holds stay out. Everything is committed
+    with a pathspec, so the user's other staged work is never swept in,
+    and does not push. A node worktree branched later then starts from a
+    committed tree.
 
     Args:
         node: The user node to baseline.
         message: Short description appended to the commit message.
 
     Returns:
-        Confirmation message.
+        The estate pass's notices and a confirmation message.
 
     Raises:
         ValueError: If the project's settings file is invalid or names
@@ -541,8 +543,11 @@ def commit_user_init(node: Node, message: str) -> str:
     # so the base ref has a committed wiki, and with it the settings file
     # naming its folder
     paths = []
+    seed_dir = f'{seed}/{node.branch}'
+    estates = []
     if worktree.seed_tracked(node.node_dir):
-        paths.append(f'{seed}/{node.branch}')
+        paths.append(seed_dir)
+        estates.append(node.node_dir)
     if (node.worktree / wiki).is_dir():
         paths.append(wiki)
     if (node.worktree / seed / SETTINGS_FILE).is_file():
@@ -568,20 +573,40 @@ def commit_user_init(node: Node, message: str) -> str:
     # are the first layer keeping runtime files out of a tracked seed, and a
     # fresh clone starts with no info/exclude at all
     worktree.exclude_update(node.repo_dir)
+    # the estate pass's notices ride the confirmation, as they ride a work
+    # commit's output; the hook retry re-stages through the closure below,
+    # so the latest pass's notices are the ones reported
+    notices: list[str] = []
 
     # stage the pathspec; closure so the hook-rewrite recovery can re-use it
     def _stage_paths() -> None:
-        # -f mirrors the work commits' record pass: the baseline's paths are
+        # -f mirrors the work commits' record pass: the wiki's paths are
         # explicit and exclude-filtered, so an external ignore rule cannot
-        # silently eat the seed or the wiki
-        cmd = ['add', '-f', '--', *specs]
-        fractal.util.git.run(cmd, cwd=node.worktree)
+        # silently eat the wiki
+        forced = [f':(literal){path}' for path in paths if path != seed_dir]
+        if forced:
+            cmd = ['add', '-f', '--', *forced, *_STAGE_EXCLUDES]
+            fractal.util.git.run(cmd, cwd=node.worktree)
+        if not estates:
+            return
+        # the seed answers to the work commits' estate law instead of -f: a
+        # plain add withholding what the law refuses, then the record pass's
+        # force-add of the records only a machine-local layer holds -- so
+        # fractal's own exclude block (tmp/, *.err, __pycache__/) keeps its
+        # hold on the runtime files beside the records; the plain add may
+        # fail (everything under it ignored) without failing the baseline
+        denied = _estate_denied(node, seed, estates)
+        withheld = [f':(exclude,literal){path}' for path in denied]
+        cmd = ['add', '--', f':(literal){seed_dir}', *_STAGE_EXCLUDES, *withheld]
+        fractal.util.git.run(cmd, cwd=node.worktree, check=False)
+        notices[:], _ = _stage_records(node, seed, estates, denied)
 
     _stage_paths()
     # benign no-op when nothing in scope changed (already committed)
     cmd = ['diff', '--cached', '--name-only', '--', *specs]
     if not fractal.util.git.run(cmd, cwd=node.worktree):
-        return f'User node baseline already committed on {node.branch}.'
+        confirmation = f'User node baseline already committed on {node.branch}.'
+        return '\n'.join([*notices, confirmation])
     # commit only fractal's artifacts (pathspec) so other staged work stays
     # staged; no push -- the user owns pushing their own base branch
     msg = f'{node.branch}: init ({message})'
@@ -605,7 +630,8 @@ def commit_user_init(node: Node, message: str) -> str:
             generated=(f'{wiki}/', f'{seed}/'),
             retry=False,
         )
-    return f'Committed user node baseline on {node.branch}.'
+    confirmation = f'Committed user node baseline on {node.branch}.'
+    return '\n'.join([*notices, confirmation])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1059,7 +1085,8 @@ def _stage(
     # paths (never a whole estate) keeps the sweeps whole -- an exclude
     # matching an ignored path fails the add outright, and an ignored path
     # is already outside the sweep anyway
-    denied = _estate_denied(node, fractal_prefix)
+    estates = _estate_roots(node, fractal_prefix)
+    denied = _estate_denied(node, fractal_prefix, estates)
     withheld = [f':(exclude,literal){path}' for path in denied]
     # heal a baseline that force-tracked the wiki tool's self-ignored derived
     # cache: drop it from the index -- never the disk, the tool owns the bytes
@@ -1103,7 +1130,7 @@ def _stage(
     else:
         cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
         fractal.util.git.run(cmd, cwd=worktree)
-    notices, unstaged = _stage_records(node, fractal_prefix, denied)
+    notices, unstaged = _stage_records(node, fractal_prefix, estates, denied)
     return notices, denied + unstaged
 
 
@@ -1131,7 +1158,11 @@ def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
     ]
 
 
-def _estate_denied(node: Node, fractal_prefix: str) -> list[str]:
+def _estate_denied(
+    node: Node,
+    fractal_prefix: str,
+    estates: list[pathlib.Path],
+) -> list[str]:
     """Return the estate content the law refuses to let a plain add stage.
 
     The plain adds would otherwise take anything a node parked in its
@@ -1144,12 +1175,12 @@ def _estate_denied(node: Node, fractal_prefix: str) -> list[str]:
     Args:
         node: The node whose worktree to judge.
         fractal_prefix: The fractal data folder prefix.
+        estates: The estate directories to judge.
 
     Returns:
         Worktree-relative paths the sweeps must withhold.
 
     """
-    estates = _estate_roots(node, fractal_prefix)
     if not estates:
         return []
     specs = [f':(literal){entry}' for entry in estates]
@@ -1162,6 +1193,7 @@ def _estate_denied(node: Node, fractal_prefix: str) -> list[str]:
 def _stage_records(
     node: Node,
     fractal_prefix: str,
+    estates: list[pathlib.Path],
     denied: list[str],
 ) -> tuple[list[str], list[str]]:
     """Force-stage estate records an external ignore rule held out.
@@ -1188,6 +1220,7 @@ def _stage_records(
     Args:
         node: The node whose worktree to stage.
         fractal_prefix: The fractal data folder prefix.
+        estates: The estate directories the pass owns.
         denied: Estate content the law already withheld from the plain
             adds, reported here so both refusals read together.
 
@@ -1197,7 +1230,6 @@ def _stage_records(
         could not stage.
 
     """
-    estates = _estate_roots(node, fractal_prefix)
     forced: list[str] = []
     failed: list[str] = []
     refused: list[str] = []

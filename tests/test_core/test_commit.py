@@ -106,6 +106,9 @@ def test_user_node_commit_init_commits_baseline(
     top-level branch by default, so it is committed only after ``fractal track``
     opts the tree in. A project naming another folder in its settings file
     baselines the wiki init created there, and the settings file itself.
+    Runtime files in the seed never ride the baseline, tracked or not: the
+    seed answers to the work commits' estate law, so fractal's own exclude
+    block holds even past the force-add.
     """
     if wiki != 'wiki':
         settings = git_repo / '.fractal' / '.settings.json'
@@ -134,6 +137,12 @@ def test_user_node_commit_init_commits_baseline(
     system = git_repo / '.fractal' / 'main' / 'skills' / '.system' / 'imagegen'
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
+    # runtime files fractal's own exclude block holds sit in the seed: the
+    # scratch log, an agent's stderr capture, and a bytecode cache
+    for runtime in ('tmp/commit.log', 'claude.err', '__pycache__/hook.cpython.pyc'):
+        path = git_repo / '.fractal' / 'main' / runtime
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('runtime\n', encoding='utf-8')
     # the wiki tool's self-ignored derived cache sits inside the staged wiki
     cache = git_repo / wiki / '.wiki' / 'cache'
     cache.mkdir(parents=True, exist_ok=True)
@@ -159,6 +168,9 @@ def test_user_node_commit_init_commits_baseline(
     assert '.db' not in tracked
     assert 'config.json.lock' not in tracked
     assert 'skills/.system' not in tracked
+    assert 'tmp/' not in tracked
+    assert 'claude.err' not in tracked
+    assert '__pycache__' not in tracked
     # the wiki's derived cache stays self-ignored past the force-add
     assert '.wiki/cache' not in tracked
 

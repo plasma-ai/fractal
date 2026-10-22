@@ -245,12 +245,16 @@ On a **user node** only the ``--init`` baseline is accepted. The baseline
 commits fractal's own artifacts — the project wiki, plus the seed directory
 when the tree is tracked — using an explicit pathspec, so any other staged
 work is never swept in, and it does not push. Its subject is
-``<branch>: init (<message>)``.
+``<branch>: init (<message>)``. A tracked seed directory stages by the rules
+a child's node directory commits by: its records commit, a record held out
+only by a machine-local ignore rule is force-added and named, and the
+runtime files fractal's exclude block holds (``tmp/``, an agent's ``.err``
+capture, ``.session``, ``setup.log``, ``__pycache__/``) stay out.
 
-On a **child node** every commit, ``--init`` included, appends its full
-report to ``tmp/commit.log`` in the node directory before printing it, so
-the report survives a caller whose output is lost — a shell redirect whose
-session ended while the commit went on to land. The report is what the
+Every commit, ``--init`` and a user node's baseline included, appends its
+full report to ``tmp/commit.log`` in the node directory before printing it,
+so the report survives a caller whose output is lost — a shell redirect
+whose session ended while the commit went on to land. The report is what the
 command prints: the warnings, the held-out counts, git's commit output, the
 push notice, and, when the commit fails (a failed retry included), a failing
 hook's output in its error. A passing hook's output goes to git's stderr,
@@ -259,8 +263,8 @@ the UTC time: ``=== Commit at <time> (<sha>) ===`` names the commit HEAD
 moved to, and ``(no commit)`` marks a run that committed nothing. A failed
 run's entry holds its ``Error:`` text in place of the report, and its
 banner reads ``(failed)``, or the sha when the commit landed before the
-failure (a failed push). ``--check`` and a user node's baseline log
-nothing. The log is git-ignored scratch, so it is never committed, survives
+failure (a failed push). ``--check`` logs nothing. The log is git-ignored
+scratch, so it is never committed, survives
 ``node start --continue --clean``, and appends without a size bound. A
 failed write prints one ``Warning:`` line on stderr and never fails the
 commit.

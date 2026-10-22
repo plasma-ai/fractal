@@ -6518,11 +6518,10 @@ class Node:
         """Commit the current iteration's work.
 
         Delegates to the ``core.commit`` pipeline (scope check, lint, stage,
-        commit, and push unless ``local`` is set). A child node's commit,
-        ``init`` included, appends its report -- or, on failure, its error --
-        to ``tmp/commit.log`` in the node directory before returning, stamped
-        with the UTC time and the sha HEAD moved to; ``check`` and a user
-        node's baseline log nothing.
+        commit, and push unless ``local`` is set). Every commit but
+        ``check``, a user node's baseline included, appends its report -- or,
+        on failure, its error -- to ``tmp/commit.log`` in the node directory
+        before returning (:meth:`_commit_logged`).
 
         Args:
             message: Short description appended to the commit message.
@@ -6556,7 +6555,8 @@ class Node:
                 raise ValueError('--init cannot be used with --ignore-scope.')
             if force:
                 raise ValueError('--init cannot be used with --force.')
-            return commit.commit_user_init(self, message)
+            run = functools.partial(commit.commit_user_init, self, message)
+            return self._commit_logged(run)
         # handle mutually exclusive configurations
         if init and ignore_scope:
             raise ValueError('--init cannot be used with --ignore-scope.')
@@ -6582,11 +6582,39 @@ class Node:
         # active run/iter/step context
         if check:
             return commit.commit(node=self, message=message, check=True)
+        run = functools.partial(
+            commit.commit,
+            node=self,
+            message=message,
+            init=init,
+            check=check,
+            ignore_scope=ignore_scope,
+            force=force,
+        )
+        return self._commit_logged(run)
+
+    def _commit_logged(self: Node, run: Callable[[], str]) -> str:
+        """Run a commit and append its report to ``tmp/commit.log``.
+
+        Each entry opens with a banner stamped with the UTC time and the sha
+        HEAD moved to (``no commit`` when it did not move, ``failed`` when
+        the commit raised); a failed commit's ``Error:`` text stands in for
+        the report. A failed write warns and never fails the commit.
+
+        Args:
+            run: The commit to run, returning its report.
+
+        Returns:
+            The commit's report.
+
+        Raises:
+            Exception: Whatever ``run`` raises, once its error is logged.
+
+        """
         # log each report to the node's scratch before the caller prints it --
         # a caller whose output dies (a shell redirect held by an ended agent
         # session) loses the warnings and held-out counts while the commit
-        # lands; --check commits nothing, and a user node's baseline returns
-        # above unlogged (a tracked seed's force-add would stage tmp/ with it)
+        # lands; --check commits nothing, so it never comes through here
         cmd = ['rev-parse', 'HEAD']
         head = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
 
@@ -6615,14 +6643,7 @@ class Node:
                 )
 
         try:
-            output = commit.commit(
-                node=self,
-                message=message,
-                init=init,
-                check=check,
-                ignore_scope=ignore_scope,
-                force=force,
-            )
+            output = run()
         except Exception as error:
             _log_report(f'Error: {error}', failed=True)
             raise
