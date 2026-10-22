@@ -85,37 +85,44 @@ def test_chat_streams_and_returns_the_captured_session(
 
 
 @pytest.mark.parametrize(
-    argnames=('kwargs', 'saved', 'cost'),
+    argnames=('kwargs', 'record', 'cost'),
     argvalues=[
         # a thread continued in place
         pytest.param(
             {'session': 'past-1', 'resume': True},
-            True,
+            'saved',
             f'${_RUNNING_TOTAL - _SAVED_TOTAL:.4f}',
             id='resume',
         ),
         # a fork restores the source session's saved total too
         pytest.param(
             {'session': 'past-1'},
-            True,
+            'saved',
             f'${_RUNNING_TOTAL - _SAVED_TOTAL:.4f}',
             id='fork',
         ),
         pytest.param(
             {'current': True},
-            True,
+            'saved',
             f'${_RUNNING_TOTAL - _SAVED_TOTAL:.4f}',
             id='fork-current',
         ),
         # a fresh session carries nothing in, so its figure is its own
-        pytest.param({}, True, f'${_RUNNING_TOTAL:.4f}', id='fresh'),
+        pytest.param({}, 'saved', f'${_RUNNING_TOTAL:.4f}', id='fresh'),
         # a continued session whose transcript cannot be found has no total
         # to take off, so the figure is refused rather than shown whole
         pytest.param(
             {'session': 'past-1', 'resume': True},
-            False,
+            'missing',
             '$?',
             id='no-transcript',
+        ),
+        # a baseline read that raises refuses the figure, never the reply
+        pytest.param(
+            {'session': 'past-1', 'resume': True},
+            'raises',
+            '$?',
+            id='baseline-raises',
         ),
     ],
 )
@@ -125,7 +132,7 @@ def test_chat_shows_a_continued_sessions_turn_its_own_cost(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
     kwargs: dict,
-    saved: bool,
+    record: str,
     cost: str,
 ) -> None:
     """A chat turn continuing a Claude session shows its own spend.
@@ -134,15 +141,22 @@ def test_chat_shows_a_continued_sessions_turn_its_own_cost(
     launch exits, and a resume or a fork counts the result figure on from
     it. The reply's closing line shows the figure less that total, as the
     loop books a resumed step, never the session's running total. A total
-    that cannot be read refuses the figure (``$?``).
+    that cannot be read refuses the figure (``$?``), and a read that
+    raises warns on stderr while the reply still streams.
     """
     node = node_with_db
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
     if kwargs.get('current'):
         _activate(node, 'past-1')
-    if saved:
+    if record != 'missing':
         transcript = pathlib.Path(node.agent().transcript('past-1')['path'])
         _save_cost_state(transcript, 'past-1', _SAVED_TOTAL)
+    if record == 'raises':
+
+        def raise_reading(self: object, session: str) -> None:
+            raise OSError('transcript store offline')
+
+        monkeypatch.setattr(type(node.agent()), '_cost_baseline', raise_reading)
     stream = (
         json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess_new'})
         + '\n'
@@ -160,7 +174,10 @@ def test_chat_shows_a_continued_sessions_turn_its_own_cost(
 
     node.chat('what changed?', **kwargs, render=StreamRenderer())
 
-    assert f'— 1 turns, 0.0s, {cost}' in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert f'— 1 turns, 0.0s, {cost}' in captured.out
+    warning = 'Warning: reading the session cost baseline failed'
+    assert (warning in captured.err) is (record == 'raises')
 
 
 @pytest.mark.parametrize(

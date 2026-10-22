@@ -167,9 +167,10 @@ closing line shows the same figure. A fork restores the source session's latest
 record just as a resume does, so `Node.chat` and the cockpit's `ChatTurn` read
 `Agent.cost_baseline` of the invocation's session before spawning whenever its
 `mode` is `resume` or `fork` (the public `invocation` verb stamps it), and hand
-it to the parser. A refused figure closes the turn on `$?`. In the cockpit, a
-baseline hook that raises adds an error line and refuses the figure, since a
-turn never raises.
+it to the parser. A refused figure closes the turn on `$?`. A baseline read that
+raises refuses the figure without stopping the reply: `Node.chat` prints the
+loop's `Warning: reading the session cost baseline failed (...)` line, and the
+cockpit's turn, which never raises, adds an error line.
 
 A Claude launch that ends without its result frame -- killed by a deadline, a
 stall or thinking cap, a pause, or a dead stream -- carries only the stream's
