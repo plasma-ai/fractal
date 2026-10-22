@@ -91,7 +91,7 @@ __all__ = [
     'test_diff_stays_clean_after_the_template_folder_moves',
     'test_diff_never_judges_a_root_file_named_like_a_surface',
     'test_diff_reports_drift_in_a_shared_include',
-    'test_diff_never_judges_the_codex_trust_stanzas',
+    'test_diff_never_judges_the_trust_stanza_for_this_repository',
     'test_diff_and_reseed_name_the_record_remedy_for_a_missing_value',
     'test_reseed_keeps_recorded_values_and_adds_new_defaults',
     'test_reseed_restores_the_seed_surfaces_and_records_the_event',
@@ -2240,17 +2240,23 @@ def test_diff_reports_drift_in_a_shared_include(repo: dict) -> None:
         _run(root, 'node', 'delete', 'main.shareddiff', '--force')
 
 
-def test_diff_never_judges_the_codex_trust_stanzas(repo: dict) -> None:
-    """Codex's trust stanzas at the end of ``.codex/config.toml`` are not drift.
+def test_diff_never_judges_the_trust_stanza_for_this_repository(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Codex's trust stanza for this repository is not drift.
 
-    Codex trusts each project it runs in by appending a stanza to the
+    Codex trusts the project it runs in by appending a stanza to the
     ``config.toml`` in its ``CODEX_HOME`` (the node's ``.codex/``): a
-    blank line, a ``[projects.<path>]`` header, and a trusted level. The
-    seeded config plus a trailing run of them diffs clean, the path in
-    either quoted TOML form. Any other difference still reports: a
-    changed or removed seeded line diffs without the stanza, while a
-    projects table carrying more than the trusted level, or another
-    level, is drift itself.
+    blank line, a ``[projects.<path>]`` header keyed to the repository's
+    main worktree, and a trusted level. The seed plus a run of them
+    diffs clean, keyed to the main worktree or the node's own worktree,
+    in either quoted TOML form, through a symlink, or with a trailing
+    slash. Any other difference still reports: a changed or removed
+    seeded line diffs without the stanza, while a stanza trusting a
+    foreign path, the repository's parent, or a relative path, a
+    projects table carrying more than the trusted level, and another
+    level are drift themselves.
     """
     root = repo['root']
     seeded = 'model = "gpt-5.5"\n\n[analytics]\nenabled = false\n'
@@ -2275,21 +2281,31 @@ def test_diff_never_judges_the_codex_trust_stanzas(repo: dict) -> None:
         worktree = root / '.worktrees' / 'main.codextrust'
         config = worktree / '.fractal' / 'main.codextrust' / '.codex' / 'config.toml'
         assert config.read_text(encoding='utf-8') == seeded
-        # the stanza as codex appends it, plus a basic-string path with an
-        # escape and a literal-string path
-        trust = f'\n[projects."{worktree}"]\ntrust_level = "trusted"\n'
-        escaped = '\n[projects."/srv/a \\"b\\""]\ntrust_level = "trusted"\n'
-        literal = '\n[projects.\'/srv/a\\b\']\ntrust_level = "trusted"\n'
-        # the seed plus one or more trailing stanzas is clean
-        for text in (seeded + trust, seeded + trust + escaped + literal):
+        stanza = '\n[projects.{}]\ntrust_level = "trusted"\n'.format
+        # the stanza codex appends keys the repository's main worktree
+        trust = stanza(f'"{root}"')
+        # links to the main worktree whose names take an escaped basic
+        # string and a literal string
+        quoted = tmp_path / 'a "quoted" link'
+        quoted.symlink_to(root)
+        literal = tmp_path / 'a\\literal link'
+        literal.symlink_to(root)
+        escaped = str(quoted).replace('"', '\\"')
+        accepted = (
+            stanza(f'"{worktree}"') + stanza(f'"{escaped}/"') + stanza(f"'{literal}'")
+        )
+        # the seed plus a run of stanzas for this repository is clean
+        for text in (seeded + trust, seeded + trust + accepted):
             config.write_text(text, encoding='utf-8')
             clean = _run(root, 'node', 'diff', 'main.codextrust')
             assert clean.returncode == 0, clean.stdout + clean.stderr
             assert clean.stdout.strip() == 'No drift from the recorded template.'
         # a changed or removed seeded line reports without the stanza; a
-        # projects table carrying more, or another level, is drift itself
+        # stanza for another path, a projects table carrying more, or
+        # another level is drift itself
         changed = seeded.replace('gpt-5.5', 'gpt-5.4')
         removed = seeded.replace('enabled = false\n', '')
+        foreign = stanza('"/srv/elsewhere"')
         extra = trust + 'sandbox_mode = "danger-full-access"\n'
         untrusted = trust.replace('"trusted"', '"untrusted"')
         cases = [
@@ -2299,6 +2315,17 @@ def test_diff_never_judges_the_codex_trust_stanzas(repo: dict) -> None:
                 ['trust_level'],
             ),
             (removed + trust, ['-enabled = false'], ['trust_level']),
+            (
+                seeded + trust + foreign,
+                ['+[projects."/srv/elsewhere"]', '+trust_level = "trusted"'],
+                [f'[projects."{root}"]'],
+            ),
+            (
+                seeded + stanza(f'"{root.parent}"'),
+                [f'+[projects."{root.parent}"]'],
+                [],
+            ),
+            (seeded + stanza('"."'), ['+[projects."."]'], []),
             (
                 seeded + extra,
                 ['+trust_level = "trusted"', '+sandbox_mode = "danger-full-access"'],

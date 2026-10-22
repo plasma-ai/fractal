@@ -433,12 +433,14 @@ may include breaking changes, each listed under a Breaking heading.
   `include`, `exclude`) beside the table are ignored, so one node's record can
   seed another, and a `[values]` table beside any other top-level key refuses,
   naming the keys.
-- `fractal node diff` never judges the trust stanzas Codex appends to a node's
-  `.codex/config.toml` (a `[projects."<path>"]` header and
-  `trust_level = "trusted"` for each project it runs in), so a node that has run
-  Codex diffs clean instead of reporting drift. Any other change to the file
-  still reports, diffed without the stanzas; a projects table carrying more than
-  the trusted level is drift.
+- `fractal node diff` never judges the trust stanza for this repository that
+  Codex appends to a node's `.codex/config.toml` (a `[projects."<path>"]` header
+  keyed to the repository's main worktree, or to the node's own worktree, and
+  `trust_level = "trusted"`), so a node that has run Codex diffs clean instead
+  of reporting drift. Any other change to the file still reports, diffed without
+  the stanza. A stanza trusting any other path is drift, since trust enables
+  project-local settings, as is a projects table carrying more than the trusted
+  level.
 - The billing breaker no longer counts a step refused before its launch — a cost
   cap over a model the price table cannot price, or a per-step agent or provider
   that cannot run — as an instant zero-cost failure: such a refusal bought no

@@ -2229,7 +2229,8 @@ def test_init_template_defaults_and_includes_replay(
         'items': ['first', 'second'],
         'details': {'nested': {'name': 'example'}, 'label': 'report'},
     }
-    assert diff(node_dir=node_dir, repo_dir=git_repo) == ([], [])
+    worktree = git_repo / '.worktrees' / 'main.crew'
+    assert diff(node_dir=node_dir, worktree=worktree, repo_dir=git_repo) == ([], [])
 
 
 def test_init_template_shared_include_reads_the_template_commit(

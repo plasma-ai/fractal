@@ -937,7 +937,11 @@ def node_diff(app: typer.Typer) -> typer.Typer:
         exit code rather than parse the output.
         """
         node = resolve_target(path, node)
-        reports, warnings = diff(node_dir=node.node_dir, repo_dir=node.repo_dir)
+        reports, warnings = diff(
+            node_dir=node.node_dir,
+            worktree=node.worktree,
+            repo_dir=node.repo_dir,
+        )
         for warning in warnings:
             typer.echo(f'Warning: {warning}', err=True)
         if not reports:

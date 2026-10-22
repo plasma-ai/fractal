@@ -45,15 +45,19 @@ _COMMIT_SHA = re.compile(r'[0-9a-f]{40}')
 # the node verbs' own resolve sites raise it, so the wording stays identical
 _UNRESOLVED_REF = 'Template ref does not resolve to a commit: {ref!r}.'
 
-# codex trusts each project it runs in by appending a stanza to the
+# codex trusts the project it runs in by appending a stanza to the
 # config.toml in its CODEX_HOME (the node's .codex/): a blank line, a
 # [projects.<path>] header quoting the path as a TOML basic or literal
-# string, and trust_level = "trusted" -- diff never judges a trailing run
+# string, and trust_level = "trusted", keyed to the repository's main
+# worktree. Diff never judges the trust stanza for this repository at the
+# end of the file (the node's own worktree is accepted too); one trusting
+# any other path is drift, since trust enables project-local settings
 _CODEX_CONFIG = '.codex/config.toml'
-_CODEX_TRUST = re.compile(
-    rb'(?:\n\[projects\.(?:"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')\]\n'
-    rb'trust_level = "trusted"\n)+\Z'
+_CODEX_STANZA = re.compile(
+    rb'\n\[projects\.(?:"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')\]\n'
+    rb'trust_level = "trusted"\n'
 )
+_CODEX_TRUST = re.compile(rb'(?:' + _CODEX_STANZA.pattern + rb')+\Z')
 
 #: config keys a template preset may carry -- the budget, limit, duration,
 #: model, and mode subset of a node's config keys; identity and immutable
@@ -1196,9 +1200,52 @@ def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
     return data
 
 
+def _cut_trust(
+    live: bytes,
+    *,
+    worktree: pathlib.Path,
+    repo_dir: pathlib.Path,
+) -> bytes:
+    """Cut the trust stanza for this repository from a live codex config.
+
+    Reads only the run of stanzas ending the file. Each key unquotes
+    through a TOML parse and is cut when it resolves to the main repo
+    root or the node's worktree, so a symlinked or trailing-slash
+    spelling still matches; a stanza for any other path, a relative one
+    included, stays in the bytes and is judged.
+
+    Args:
+        live: The live ``.codex/config.toml`` bytes.
+        worktree: The node's worktree.
+        repo_dir: Main repo root.
+
+    Returns:
+        The live bytes without the trust stanzas for this repository.
+
+    """
+    run = _CODEX_TRUST.search(live)
+    if run is None:
+        return live
+    roots = {worktree.resolve(), repo_dir.resolve()}
+    kept: list[bytes] = []
+    for stanza in _CODEX_STANZA.finditer(live, run.start()):
+        # a key that fails to parse or resolve names no root, and neither
+        # does a relative key, which would resolve against the shell's cwd
+        try:
+            projects = tomllib.loads(stanza.group().decode('utf-8'))['projects']
+            path = pathlib.Path(next(iter(projects)))
+            trusted = path.is_absolute() and path.resolve() in roots
+        except ValueError:
+            trusted = False
+        if not trusted:
+            kept.append(stanza.group())
+    return live[: run.start()] + b''.join(kept)
+
+
 def diff(
     *,
     node_dir: pathlib.Path,
+    worktree: pathlib.Path,
     repo_dir: pathlib.Path,
 ) -> tuple[list[str], list[str]]:
     """Diff a node's live seed surfaces against its rendered template.
@@ -1208,15 +1255,17 @@ def diff(
     surface against the node's live copy: ``NODE.md``, ``steps/``,
     ``scripts/``, and ``skills/`` in the node data directory, and each
     ``agents/<agent>/`` file as the live ``.<agent>/`` file. A live
-    symlink, a file the bundle does not carry, and the trust stanzas
-    codex appends to its ``config.toml`` are never judged; a bundle
-    file the node lacks is drift. Literal braces are ordinary
+    symlink, a file the bundle does not carry, and the trust stanza for
+    this repository that codex appends to its ``config.toml``
+    (:func:`_cut_trust`) are never judged; a bundle file the node lacks
+    is drift. Literal braces are ordinary
     output and are judged only by the byte comparison. The shared files
     the folder includes re-read at the recorded commit too.
 
     Args:
         node_dir: The node data directory (the live surfaces and the
             provenance record).
+        worktree: The node's worktree (a codex trust key it may carry).
         repo_dir: Main repo root (the recorded commit resolves there).
 
     Returns:
@@ -1289,9 +1338,9 @@ def diff(
                 continue
             rendered = entry.read_bytes()
             actual = live.read_bytes()
-            # cut codex's trust stanzas, so only other drift reports
+            # cut the trust stanza for this repository; other drift reports
             if target == _CODEX_CONFIG:
-                actual = _CODEX_TRUST.sub(b'', actual)
+                actual = _cut_trust(actual, worktree=worktree, repo_dir=repo_dir)
             if actual == rendered:
                 continue
             rendered_lines = rendered.decode('utf-8').splitlines(keepends=True)
