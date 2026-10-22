@@ -259,6 +259,18 @@ may include breaking changes, each listed under a Breaking heading.
   branch at each start or resume. A ladder with a bad shape refuses wherever the
   file is read, and one naming an unregistered agent or listing the agent's own
   levels out of order refuses at the loop's boot.
+- A node's config records where its cleanup reserve came from as `reserve_mode`:
+  `default` for the 10% `node init` materializes, `explicit` for a figure set by
+  `--reserve-budget` (at init or on `node update`), a template preset, or
+  `node config set reserve_budget=`. A cap change through
+  `node update --max-cost` or `node start --continue --max-cost` re-derives only
+  a default reserve that still equals 10% of the old cap, so an explicit reserve
+  keeps its figure even at exactly 10%. A config without the key reads as
+  default when its reserve equals 10% of its cap and as explicit otherwise, and
+  the next cap change records that reading. `config set` refuses `reserve_mode`;
+  a `reserve_budget` write records `explicit`, and clearing the reserve clears
+  its mode. Both packaged `fractal` skills say to pass `--reserve-budget` again
+  to change an explicit reserve with the cap.
 
 ### Fixed
 
@@ -564,6 +576,11 @@ may include breaking changes, each listed under a Breaking heading.
   the tree's local node branches, unmerged work included, while the root branch
   and remote branches remain. Only the confirmation prompt said so, and
   `--force` skips it.
+- A node's agents and its `setup.sh` run without a `VIRTUAL_ENV`, whether a node
+  start, the tmux server, or the launching shell supplied it, so `uv run` in a
+  node worktree uses the worktree's project environment without warning on every
+  call that `VIRTUAL_ENV` does not match it. `fractal node chat` launches its
+  agent the same way, and the repo venv's bin stays first on `PATH`.
 
 ## [1.3.0] - 2026-09-17
 

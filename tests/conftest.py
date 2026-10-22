@@ -125,14 +125,15 @@ def _restore_loop_env() -> Iterator[None]:
     """Restore the loop's exported env around every test.
 
     An in-process ``Loop`` run exports ``_NODE`` into its own process env
-    so child launches inherit it -- correct in the dedicated ``node _loop``
-    process, which exits when the run ends, but in the suite the export
-    outlives the test: every later test on the same worker then resolves
-    the fixture node via ``resolve_caller`` and attributes its events to
-    it. Snapshot the loop vars before each test and restore them after,
-    so no test inherits another's loop.
+    so child launches inherit it, and pops ``VIRTUAL_ENV`` from it --
+    correct in the dedicated ``node _loop`` process, which exits when the
+    run ends, but in the suite both outlive the test: every later test on
+    the same worker then resolves the fixture node via ``resolve_caller``
+    and attributes its events to it, and runs without the worker's venv.
+    Snapshot the loop vars and ``VIRTUAL_ENV`` before each test and restore
+    them after, so no test inherits another's loop.
     """
-    saved = {var: os.environ.get(var) for var in _LOOP_ENV_VARS}
+    saved = {var: os.environ.get(var) for var in (*_LOOP_ENV_VARS, 'VIRTUAL_ENV')}
     yield
     for var, value in saved.items():
         if value is None:

@@ -97,7 +97,9 @@ continue (a continue re-arms the cap at start, not init).
 - **`max-step-cost`**: per-step cost ceiling in USD (warn-only when
   unenforceable)
 - **`reserve-budget`**: budget reserved for cleanup; USD or N% of `max-cost`
-  (default: 10%)
+  (default: 10%, which follows the cap when it changes); an explicit reserve —
+  this flag, a template preset, or `config set` — keeps its figure when the cap
+  changes, so pass `--reserve-budget` again to change it with the cap
 - **`sync`**: enable (default) or disable radio sync before each step
 - **`detached`**: run each step as a separate agent session (default: one
   continuous session)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import fcntl
+import json
 import os
 import pathlib
 import signal
@@ -23,7 +24,7 @@ import fractal.core.node
 import fractal.core.worktree
 from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, LOCK_FILE, PGID_FILE
 from fractal.core.node import Node
-from tests._helpers import _files, _git, _stub_run_script
+from tests._helpers import _commit_template, _files, _git, _stub_run_script
 
 from .conftest import (
     _active_run,
@@ -59,6 +60,7 @@ __all__ = [
     'test_start_continue_re_arms_after_drained_run',
     'test_start_continue_refuses_after_budget_end',
     'test_start_continue_rolls_back_retune_on_refusal_or_failed_launch',
+    'test_start_continue_max_cost_retunes_only_a_default_reserve',
     'test_start_without_max_cost_warns_and_runs',
     'test_start_continue_reconciles_crashed_active',
     'test_finish_rejects_non_active',
@@ -886,6 +888,49 @@ def test_start_continue_rolls_back_retune_on_refusal_or_failed_launch(
     assert child.config.get('max_cost') is None
     assert child.db.read('nodes', where={'node': child.branch})[0]['max_cost'] is None
     assert child.status() == 'exited'
+
+
+@pytest.mark.parametrize(
+    argnames=('preset', 'reserve_budget', 'expected'),
+    argvalues=[
+        # init's own default fraction of the preset cap tracks the new cap
+        pytest.param({'max_cost': 4}, None, 0.8, id='default'),
+        # a flag or preset reserve at exactly that fraction stays put
+        pytest.param({'max_cost': 4}, '10%', 0.4, id='flag'),
+        pytest.param({'max_cost': 4, 'reserve_budget': 0.4}, None, 0.4, id='preset'),
+    ],
+)
+def test_start_continue_max_cost_retunes_only_a_default_reserve(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preset: dict[str, float],
+    reserve_budget: Optional[str],
+    expected: float,
+) -> None:
+    """A continue's ``max_cost`` retunes a default reserve and leaves an explicit one.
+
+    The continue retunes through the parent like ``node update``, so it
+    obeys the same rule: init's default reserve tracks the new cap, while a
+    reserve set by flag or template preset keeps its figure, even one equal
+    to the default fraction of the old cap.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    _commit_template(
+        git_repo,
+        'templates/funded',
+        {'config.json': json.dumps(preset) + '\n'},
+    )
+    template = f'{git_repo}/templates/funded'
+    Node(git_repo).init(name='kid', template=template, reserve_budget=reserve_budget)
+    child = Node(git_repo / '.worktrees' / 'main.kid')
+    assert child.config.get('reserve_budget') == 0.4
+    # continue a settled child under a doubled cap
+    child.status_set('completed')
+    run_scripts = _stub_run_script(monkeypatch, child)
+    child.start(continue_run=True, clean=True, max_cost=8.0)
+    assert run_scripts
+    assert child.config.get('max_cost') == 8.0
+    assert child.config.get('reserve_budget') == expected
 
 
 def test_start_without_max_cost_warns_and_runs(

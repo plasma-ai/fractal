@@ -166,7 +166,9 @@ Cost semantics in depth live in the `wiki/features/cost/` branch; the flags:
   there is no reserve. The reserve is not an enforced floor: it shifts the point
   where the node enters reserve mode -- the budget is treated as drained
   `reserve_budget` USD before `--max-cost` is reached, so the run winds down
-  with cleanup headroom left.
+  with cleanup headroom left. A value given here (or by a template preset)
+  records as explicit and keeps its figure when the cap later changes; the
+  default retunes with the cap (see [[configuration/config_json]]).
 
 Ceilings must be positive, and the caps must order `step <= iter <= run`. An
 explicit reserve must stay below 99% of `--max-cost`.
