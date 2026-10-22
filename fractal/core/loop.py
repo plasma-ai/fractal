@@ -647,8 +647,19 @@ class Loop:
         _, probe_entry = node._records_snapshot()
         if probe_entry is not None:
             node._reap_orphan((None, probe_entry))
+
+        # say once per wait why the boot blocks: a merge's validation can run long
+        def _waiting() -> None:
+            print('Waiting for a running merge to finish...')
+
+        # Node.merge refuses only an active node and can rewrite any other's
+        # worktree, re-reading the status under the merge flock -- so the
+        # continue clean-up and the active stamp below hold that flock too,
+        # taken before any .worktrees flock (merge.sh shells into verbs that
+        # take that one)
         if self._continue:
-            self._clean_worktree()
+            with worktree.merge_lock(node.repo_dir, waiting=_waiting):
+                self._clean_worktree()
         self._labels()
         try:
             self._preflight()
@@ -703,7 +714,8 @@ class Loop:
             (node.node_dir / PGID_FILE).write_text(f'{pgid}\n', encoding='utf-8')
         except OSError:
             pass
-        # stamp the node active -- under the .worktrees flock, so a retire
+        # stamp the node active -- under the merge flock (see the continue
+        # clean-up above) and inside it the .worktrees flock, so a retire
         # or kill that won the boot window (its flock-guarded read legally
         # saw 'idle' after start's checks but before this stamp) is honored
         # instead of clobbered: an idle kill stamps 'killed' with no session
@@ -714,11 +726,12 @@ class Loop:
         # and reads 'idle (starting)' while --live still reads it active
         stood_down = ''
         try:
-            with worktree.lock(node.repo_dir):
-                if node.status() in ('retired', 'killed'):
-                    stood_down = node.status()
-                else:
-                    node.status_set('active')
+            with worktree.merge_lock(node.repo_dir, waiting=_waiting):
+                with worktree.lock(node.repo_dir):
+                    if node.status() in ('retired', 'killed'):
+                        stood_down = node.status()
+                    else:
+                        node.status_set('active')
         except Exception as error:
             print(
                 f'=== Active stamp failed ({error}): the node reads idle (starting)'
@@ -3267,6 +3280,7 @@ class Loop:
         # background work runs
         if self._step_id is not None:
             after = settled_at if result is not None and result.final else None
+            trailing = result is not None and result.trailing
             try:
                 self._step_partly_unpriced = agent.settle_cost(
                     step_id=self._step_id,
@@ -3274,6 +3288,7 @@ class Loop:
                     ended=fractal.util.time.utc_now(),
                     after=after,
                     replies=capped,
+                    trailing=trailing,
                 )
             except Exception as error:
                 print(
@@ -3281,11 +3296,12 @@ class Loop:
                     file=sys.stderr,
                 )
                 # with no result figure, the stream's estimate leaves out
-                # whatever the failed settle would have added
-                self._step_partly_unpriced = after is None
+                # whatever the failed settle would have added; past one, the
+                # figure leaves out the spend the stream saw after it
+                self._step_partly_unpriced = after is None or trailing
             if self._step_partly_unpriced:
                 print(
-                    "Warning: a reply's spend is missing from the launch's"
+                    "Warning: part of the launch's spend is missing from its"
                     ' record; its step books the spend recorded (partly'
                     ' unpriced)',
                     file=sys.stderr,

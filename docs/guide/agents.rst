@@ -348,7 +348,12 @@ From the user's point of view:
   estimate for the missing part, its row's metadata gains
   ``; partly unpriced``, and the loop prints a ``Warning:`` line. A
   resumed ``claude`` step whose result figure was refused is marked the
-  same way, since its transcript's figure stands in for the result's.
+  same way, since its transcript's figure stands in for the result's. So
+  is a ``claude`` step whose stream showed a sub-agent still running
+  after the result when none of that later spend could be priced (its
+  transcript missing or unreadable, or its model unpriced). So is a
+  ``claude`` step whose record holds a reply on a model with no price:
+  that reply drops out of the figure, and the other replies still count.
   ``cost spent`` and ``cost breakdown`` disclose how many such steps
   their sums count at recorded spend. A launch killed while a tool runs,
   or a workflow sub-agent ending on its structured output, is whole;

@@ -141,6 +141,10 @@ class ClaudeParser(StreamParser):
                 )
         message_type = message.get('type')
         top_level = message.get('parent_tool_use_id') is None
+        # a sub-agent running past a result spends past its figure, which
+        # only the settle books (see the assistant frames below)
+        if self.final and not top_level:
+            self.trailing = True
         # assistant text deltas and tool-use headers
         if message_type == 'stream_event':
             event = message.get('event') or {}
@@ -304,6 +308,8 @@ class ClaudeParser(StreamParser):
             if cost is not None:
                 self.cost = cost
                 self.final = True
+                # the figure covers every sub-agent frame before it
+                self.trailing = False
             # a --max-budget-usd hit is a clean budget stop, not an agent
             # error, even though claude exits non-zero on it
             subtype = message.get('subtype')
@@ -674,8 +680,9 @@ class ClaudeAgent(Agent):
 
         Whatever the figure leaves out marks the launch: an absent or
         unreadable session transcript on a launch with no result figure, a
-        sub-agent transcript that cannot be read, and a reply whose usage
-        holds a count the pricing cannot read.
+        sub-agent transcript that cannot be read, a reply whose usage
+        holds a count the pricing cannot read, and a reply holding tokens
+        at a model with no price.
 
         With ``after``, the result frame's figure stands and only the
         replies completing after it price: claude counts a reply's cost
@@ -1109,11 +1116,12 @@ def _usage_cost(
     usage: dict[str, Any],
     model: Optional[str] = None,
 ) -> tuple[Optional[float], bool]:
-    """Price claude token usage, and say whether every count was read.
+    """Price claude token usage, and say whether every count was priced.
 
     The pricing behind ``_compute_cost``. A count present but not a number
     (wire noise) is left out of the cost rather than raising, so the
-    figure that results is partial.
+    figure that results is partial. A model with no price (or none named)
+    prices nothing, which leaves out every count above zero.
 
     Returns:
         The cost (``None`` for an unknown or unpriced model), and whether
@@ -1147,12 +1155,15 @@ def _usage_cost(
         cache_hour_tokens = min(cache_hour_tokens, cache_creation_tokens)
     elif split is not None:
         whole = False
-    if model is None:
-        return None, whole
-    # look up per-token rates (missing cache rates fall back to the input rate)
-    rates = _rates(model)
+    # look up per-token rates (missing cache rates fall back to the input rate);
+    # with none, every count is unpriced, though a usage of zeros (a synthetic
+    # reply's) holds nothing to price
+    rates = _rates(model) if model is not None else None
     if rates is None:
-        return None, whole
+        tokens = (
+            input_tokens + cache_read_tokens + cache_creation_tokens + output_tokens
+        )
+        return None, whole and not tokens
     input_rate = rates.get('input_cost_per_token', 0.0)
     cache_read_rate = rates.get('cache_read_input_token_cost', input_rate)
     cache_creation_rate = rates.get('cache_creation_input_token_cost', input_rate)

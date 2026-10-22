@@ -395,6 +395,11 @@ stored config the launch re-validation rejects. Continuing from ``killed``
 surfaces the recorded kill attribution as a notice. An uncapped start is
 allowed but warns loudly.
 
+A merge can rewrite the worktree of any node that is not ``active``, so every
+loop launch — a start, a continue, or a resume — waits for a merge in progress
+anywhere in the repository before the continue's worktree restore and before
+it goes ``active``, saying so on its output before each wait.
+
 .. code-block:: console
 
    $ fractal node start parser
@@ -475,9 +480,9 @@ run — same budgets and iteration count, the interrupted step re-entered
 (resuming the recorded agent session when one exists) — and run and iteration
 deadlines are credited for the paused span. A node still parking gets its
 pending pause withdrawn instead. Resuming refuses when the node is not paused
-or when an ancestor is still paused. A relaunch waits for a merge in progress
-anywhere in the repository, since a paused node's merge rewrites its worktree,
-and says so once before it waits.
+or when an ancestor is still paused. ``resume`` returns once the loops are
+relaunched; a relaunched loop waits for a merge in progress before it goes
+``active``, as every launch does (see ``start``).
 
 .. code-block:: console
 
@@ -549,7 +554,7 @@ Before committing, the merge holds the squash to the node's commit scope: the
 staged paths outside ``.fractal/`` are judged by the node's ``scope`` roots
 and its project wiki (``wiki/`` unless the project's settings file names
 another folder), with the worktree-root ``.gitattributes`` admitted
-only as init's own ``**/_index.md merge=wiki`` edit (a repo-root node without
+only as init's own ``merge=wiki`` edit (a repo-root node without
 a scope is unrestricted; a sub-project node without one is bounded to its
 project directory) — the same law ``fractal commit`` applies — and a path
 outside them refuses the merge. The refusal names the paths and both

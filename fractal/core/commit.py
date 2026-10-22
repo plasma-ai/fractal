@@ -898,19 +898,28 @@ def _scope_check(node: Node, bounds: Scope) -> None:
         raise RuntimeError(f'Changes outside node scope ({roots}):\n{listing}')
 
 
-#: the lines the wiki tool appends to the worktree-root .gitattributes at
-#: init; merge.sh's footprint check mirrors them for the target's staged copy
-_ATTRIBUTES_INIT_LINES = ('# Wiki index merge driver', '**/_index.md merge=wiki')
+#: the merge-driver block the wiki tool writes to the worktree-root
+#: .gitattributes at init: its index lines, then its page lines, which it
+#: appends alone to a file already mapping the index; merge.sh's footprint
+#: check mirrors it for the target's staged copy
+_ATTRIBUTES_INIT_LINES = (
+    '# Wiki index merge driver',
+    '**/_index.md merge=wiki',
+    '# Wiki page merge driver',
+    '**/*.md merge=wiki',
+)
 
 
 def _attributes_is_init_edit(node: Node) -> bool:
     """Return whether ``.gitattributes`` is init's uncommitted ``merge=wiki`` edit.
 
-    Init writes the memory wiki's ``**/_index.md merge=wiki`` attribute at
-    the worktree root when the base lacks it -- an artifact outside every
-    scope root, committable exactly while it is init's own uncommitted edit:
-    HEAD's content followed by exactly the lines the wiki tool appends. The
-    match is line-exact and covers the whole change, so an attribute line
+    Init writes the memory wiki's ``merge=wiki`` attributes at the worktree
+    root when the base lacks them -- an artifact outside every scope root,
+    committable exactly while it is init's own uncommitted edit: HEAD's
+    content followed by the part of the block the wiki tool appends. That is
+    the whole block, its page lines over a base already mapping the index,
+    or its index lines alone from a tool without the page driver. The match
+    is line-exact and covers the whole change, so an attribute line
     assigning some other merge driver, or any other line riding beside
     init's, makes the file an ordinary out-of-scope path.
 
@@ -934,7 +943,9 @@ def _attributes_is_init_edit(node: Node) -> bool:
     if lines[: len(committed_lines)] != committed_lines:
         return False
     added = [line for line in lines[len(committed_lines) :] if line]
-    return added == list(_ATTRIBUTES_INIT_LINES)
+    # the whole block, its page lines, or its index lines alone
+    block = list(_ATTRIBUTES_INIT_LINES)
+    return added in (block, block[2:], block[:2])
 
 
 #: estate subdirectories whose contents are node records canon requires

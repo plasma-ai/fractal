@@ -75,6 +75,8 @@ __all__ = [
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
     'test_settle_marks_a_record_missing_part_of_a_reply',
     'test_settle_marks_an_entry_it_cannot_read_whole',
+    'test_settle_marks_a_reply_it_cannot_price',
+    'test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result',
     'test_cost_baseline_is_the_total_a_resume_restores',
 ]
 
@@ -1940,6 +1942,140 @@ def test_settle_marks_an_entry_it_cannot_read_whole(
 
 
 @pytest.mark.parametrize(
+    argnames=('after', 'model', 'extra', 'marked'),
+    argvalues=[
+        # a killed launch's reply at a model the pricing table lacks
+        pytest.param(None, 'claude-mystery-9', 0.0, True, id='killed-unpriced'),
+        # past a result, a reply after it at a model the table lacks
+        pytest.param(_AFTER, 'claude-mystery-9', 0.0, True, id='after-unpriced'),
+        # claude's stand-in for an API error names no priced model, and no tokens
+        pytest.param(None, '<synthetic>', 0.0, False, id='synthetic'),
+        # a reply priced normally
+        pytest.param(None, 'claude-fable-5', _USAGE_SECOND_COST, False, id='priced'),
+    ],
+)
+def test_settle_marks_a_reply_it_cannot_price(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after: Optional[str],
+    model: str,
+    extra: float,
+    marked: bool,
+) -> None:
+    """A reply at a model with no price leaves its spend out, and the rest still book.
+
+    Each reply prices at its own model, so one whose model has no price
+    drops out of the sum, and the step books the priced replies, marked
+    partly unpriced -- killed, or past a result. A synthetic reply holds
+    no tokens, so it leaves nothing out.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    # real-shaped (claude 2.1.300): a synthetic reply's usage is all zero
+    usage = _USAGE_SECOND
+    if model == '<synthetic>':
+        usage = {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'cache_creation_input_tokens': 0,
+            'cache_read_input_tokens': 0,
+            'cache_creation': {
+                'ephemeral_1h_input_tokens': 0,
+                'ephemeral_5m_input_tokens': 0,
+            },
+        }
+    # a reply before the result, a priced one after it, then the reply under test
+    content = _transcript_line('msg_a', _USAGE_FIRST)
+    content += _transcript_line('msg_b', _USAGE_SECOND, stamp=_LATE)
+    content += _transcript_line('msg_c', usage, stamp=_LATE, model=model)
+    backend, step_id = _settling(node_with_db, tmp_path, monkeypatch, content)
+    # past a result, its figure covers the reply before it
+    booked = _USAGE_FIRST_COST
+    if after is not None:
+        booked = 0.01
+        node_with_db.record.step_cost(step_id=step_id, cost=booked)
+    verdict = backend.settle_cost(
+        step_id,
+        started=_OPENED,
+        ended=_CLOSED,
+        after=after,
+    )
+    assert verdict is marked
+    row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(booked + _USAGE_SECOND_COST + extra)
+
+
+@pytest.mark.parametrize(
+    argnames=('after_result', 'record', 'marked'),
+    argvalues=[
+        # the settle finds no record of the sub-agent's spend
+        pytest.param('sub-agent', None, True, id='no-transcript'),
+        # the record holds the spend at a model the pricing cannot price
+        pytest.param('sub-agent', 'unpriced', True, id='unpriced'),
+        # the settle books the spend past the result
+        pytest.param('sub-agent', 'priced', False, id='priced'),
+        # nothing follows the result, whose figure is whole
+        pytest.param('nothing', None, False, id='nothing-after'),
+        # a later result's figure covers the sub-agent's spend before it
+        pytest.param('later result', None, False, id='later-result'),
+    ],
+)
+def test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after_result: str,
+    record: Optional[str],
+    marked: bool,
+) -> None:
+    """A sub-agent streaming past the result marks a settle that books none of it.
+
+    Claude Code can outlive its result while a background sub-agent runs.
+    The stream leaves that spend to the settle, which books it from the
+    sub-agent's transcript; when the settle cannot (no record, or one it
+    cannot price), the step's figure misses spend the stream saw. A result
+    nothing follows, or one a later result covers, is whole.
+    """
+    rates = {} if record == 'unpriced' else _PRICING
+    monkeypatch.setattr(pricing, '_load', lambda: rates)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude')
+    session = str(uuid.uuid4())
+    (step_id,) = _steps(node, 1)
+    # the capture's turn through its result, then a sub-agent's reply (the
+    # capture's own reply frame, re-parented), then the wake-up's own result
+    with _BACKGROUND_WAIT.open(encoding='utf-8') as file:
+        capture = [line.replace('@SESSION@', session) for line in file]
+    lines = capture[:18]
+    if after_result != 'nothing':
+        reply = json.loads(capture[13])
+        reply['message']['id'] = 'msg_late'
+        reply['parent_tool_use_id'] = 'toolu_bg'
+        lines.append(json.dumps(reply) + '\n')
+    if after_result == 'later result':
+        lines += capture[18:]
+    result = backend.stream(lines, step_id=step_id)
+    # the sub-agent's transcript holds its reply, completed past the result
+    if record is not None:
+        transcript = pathlib.Path(backend.transcript(session)['path'])
+        subagents = transcript.with_suffix('') / 'subagents'
+        subagents.mkdir(parents=True)
+        main = _transcript_line('msg_main', _USAGE_FIRST)
+        transcript.write_text(main, encoding='utf-8')
+        late = _transcript_line('msg_late', _USAGE_SECOND, stamp=_LATE)
+        (subagents / 'agent-a.jsonl').write_text(late, encoding='utf-8')
+    verdict = backend.settle_cost(
+        step_id,
+        started=_OPENED,
+        ended=_CLOSED,
+        after=_AFTER,
+        trailing=result.trailing,
+    )
+    assert verdict is marked
+
+
+@pytest.mark.parametrize(
     argnames=('saved', 'provider', 'baseline'),
     argvalues=[
         # claude resumes only from a transcript, so a missing one is unknown
@@ -2146,6 +2282,7 @@ def _transcript_line(
     stop_reason: Optional[str] = 'end_turn',
     blocks: Optional[list[dict[str, Any]]] = None,
     stamp: str = _WRITTEN,
+    model: str = 'claude-fable-5',
 ) -> str:
     """Return one claude transcript line of a reply, stamped inside the window.
 
@@ -2157,7 +2294,7 @@ def _transcript_line(
         'type': 'assistant',
         'timestamp': stamp,
         'message': {
-            'model': 'claude-fable-5',
+            'model': model,
             'id': message_id,
             'role': 'assistant',
             'content': blocks or [{'type': 'text', 'text': text}],

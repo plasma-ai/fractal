@@ -45,25 +45,29 @@ prefix, and the estates prefix) resolved by `scope_boundaries` and judged by
 `out_of_scope` -- a sub-project node with no roots is bounded to its project
 dir, a repo-root node with no roots is unbounded. The worktree-root
 `.gitattributes` sits outside every root and is admitted only while the whole
-change is init's own edit -- HEAD's content followed by exactly the two lines
-the wiki tool appends (`# Wiki index merge driver`, `**/_index.md merge=wiki`);
-any other added or removed line makes the file an ordinary out-of-scope path.
-The same record backs `merge.sh`'s footprint check through the private
-`fractal node _scope` command -- the staged paths outside `.fractal/`, with
-`--attributes-ok` passed under the same whole-change rule applied to the
-target's staged copy -- so a squash is judged by exactly the law the commit
-enforces (see [[user_flow/finishing/_index|user_flow/finishing]]). Before it
-judges, `_scope` runs `Node.check_wiki`, which recomputes the node's wiki folder
-by the spawn rule and refuses a `config.json` hand-edited to another folder,
-which would otherwise move the exemption (or, for a node held to its project's
-committed setting, a setting changed on the root branch since the spawn).
-`--ignore-scope` commits out-of-scope changes but still lints; `--force`
-bypasses scope, lint, and git hooks alike. Before staging, the pipeline
-refreshes both wiki indexes (the project wiki and the node's memory) with the
-`wiki` CLI and fails the commit if a refresh fails -- a broken wiki must never
-land -- then runs the node's `lint.sh` and surfaces its notices instead of
-dropping them. Helper CLIs are resolved from the invoking installation, not
-ambient PATH, so a foreign install cannot answer the hook's reads.
+change is init's own edit -- HEAD's content followed by the part of the wiki
+tool's four-line merge-driver block (`# Wiki index merge driver`,
+`**/_index.md merge=wiki`, `# Wiki page merge driver`, `**/*.md merge=wiki`; one
+definition, `_ATTRIBUTES_INIT_LINES`) the tool appends: the whole block, its
+page lines over a base already mapping the index, or its index lines alone from
+a tool without the page driver; any other added or removed line makes the file
+an ordinary out-of-scope path. The same record backs `merge.sh`'s footprint
+check through the private `fractal node _scope` command -- the staged paths
+outside `.fractal/`, with `--attributes-ok` passed under the same whole-change
+rule applied to the target's staged copy -- so a squash is judged by exactly the
+law the commit enforces (see
+[[user_flow/finishing/_index|user_flow/finishing]]). Before it judges, `_scope`
+runs `Node.check_wiki`, which recomputes the node's wiki folder by the spawn
+rule and refuses a `config.json` hand-edited to another folder, which would
+otherwise move the exemption (or, for a node held to its project's committed
+setting, a setting changed on the root branch since the spawn). `--ignore-scope`
+commits out-of-scope changes but still lints; `--force` bypasses scope, lint,
+and git hooks alike. Before staging, the pipeline refreshes both wiki indexes
+(the project wiki and the node's memory) with the `wiki` CLI and fails the
+commit if a refresh fails -- a broken wiki must never land -- then runs the
+node's `lint.sh` and surfaces its notices instead of dropping them. Helper CLIs
+are resolved from the invoking installation, not ambient PATH, so a foreign
+install cannot answer the hook's reads.
 
 A node's `--init` baseline (`fractal commit "configure <name>" --init`, the
 child's configured seed before its start) skips the refresh and the lint, so it

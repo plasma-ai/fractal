@@ -67,7 +67,7 @@ __all__ = [
     'test_commit_refuses_an_invalid_stored_wiki',
     'test_scoped_commit_handles_non_ascii_and_whitespace_paths',
     'test_scoped_child_baseline_commits_init_gitattributes',
-    'test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes',
+    'test_scoped_child_baseline_admits_only_the_wiki_attributes_edit',
     'test_commit_check_detects_untracked_work',
     'test_commit_surfaces_hook_aborted_commit',
     'test_commit_retries_after_reformat_hook',
@@ -97,6 +97,11 @@ _SHADOW_WARNING = (
     ' folder; if these are node files, move them under {node_folder}/; if they'
     ' are project files, ignore this warning:'
 )
+
+# the wiki tool's merge-driver block for .gitattributes, as its index lines
+# and its page lines
+_WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
+_WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
 
 
 # ------ baselines and pushes
@@ -2163,19 +2168,59 @@ def test_scoped_child_baseline_commits_init_gitattributes(
     assert lines[-2:] == ['# Wiki index merge driver', '**/_index.md merge=wiki']
 
 
-def test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes(
+@pytest.mark.parametrize(
+    argnames=('base', 'edit', 'admitted'),
+    argvalues=[
+        pytest.param(None, _WIKI_INDEX_LINES + _WIKI_PAGE_LINES, True, id='block'),
+        pytest.param(
+            '*.md text\n',
+            '\n' + _WIKI_INDEX_LINES + _WIKI_PAGE_LINES,
+            True,
+            id='block-after-own-lines',
+        ),
+        pytest.param(
+            '*.md text\n\n' + _WIKI_INDEX_LINES,
+            _WIKI_PAGE_LINES,
+            True,
+            id='page-lines',
+        ),
+        pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + _WIKI_PAGE_LINES + '*.bin binary\n',
+            False,
+            id='foreign-line',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + _WIKI_PAGE_LINES.replace('=wiki', '=union'),
+            False,
+            id='changed-line',
+        ),
+    ],
+)
+def test_scoped_child_baseline_admits_only_the_wiki_attributes_edit(
     tmp_path: pathlib.Path,
+    base: Optional[str],
+    edit: str,
+    admitted: bool,
 ) -> None:
-    """A foreign line in init's uncommitted ``.gitattributes`` puts it out of scope.
+    """A child's baseline admits ``.gitattributes`` only as the wiki tool's edit.
 
-    Init's ``.gitattributes`` edit is admitted past the scope check as a
-    whole: HEAD's content followed by exactly the two lines the wiki tool
-    appends. Any other line riding beside them -- an attribute an agent adds
-    while the init edit is still uncommitted -- makes the file an ordinary
-    out-of-scope path, so a scoped node's commit refuses it naming the file;
-    with the foreign line gone, the same baseline sweeps the edit in.
+    The wiki tool appends whatever its four-line merge-driver block lacks to
+    HEAD's copy: the whole block, or only the page lines when the index
+    lines are already there; a tool without the page driver appends the
+    index lines alone. Each is init's own edit, which a scoped child's
+    baseline sweeps in although the file sits outside every scope root. A
+    foreign line beside the block, or the block with a line changed, makes
+    the file an ordinary out-of-scope path, which the baseline refuses by
+    name.
     """
     repo = _make_git_repo(tmp_path / 'repo')
+    if base is not None:
+        (repo / '.gitattributes').write_text(base, encoding='utf-8')
+        _git(repo, 'add', '.gitattributes')
+        _git(repo, 'commit', '-m', 'own attributes')
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(
         name='task',
@@ -2188,18 +2233,23 @@ def test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes(
     _git(project_dir, 'config', 'user.email', 'test@test.com')
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
+    # stand in for the wiki tool's write: HEAD's copy followed by the edit
     attributes = project_dir / '.gitattributes'
-    init_edit = attributes.read_text(encoding='utf-8')
-    # a foreign attribute beside init's lines refuses, naming the file
-    attributes.write_text(init_edit + '*.bin binary\n', encoding='utf-8')
-    with pytest.raises(RuntimeError, match=r'\.gitattributes'):
+    attributes.write_text((base or '') + edit, encoding='utf-8')
+
+    if admitted:
+        # the baseline commits the edit and leaves the file clean
         node.commit('baseline', init=True)
-    # init's edit alone sweeps in
-    attributes.write_text(init_edit, encoding='utf-8')
-    node.commit('baseline', init=True)
-    result = _git(project_dir, 'ls-files', '.gitattributes')
-    tracked = result.stdout
-    assert '.gitattributes' in tracked
+        result = _git(project_dir, 'show', 'HEAD:.gitattributes')
+        committed = result.stdout
+        assert committed == (base or '') + edit
+        result = _git(project_dir, 'status', '--porcelain', '--', '.gitattributes')
+        status = result.stdout
+        assert status == ''
+    else:
+        # the baseline refuses, naming the file
+        with pytest.raises(RuntimeError, match=r'\.gitattributes'):
+            node.commit('baseline', init=True)
 
 
 # ------ the dirty-tree check

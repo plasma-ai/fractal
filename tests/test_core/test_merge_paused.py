@@ -15,7 +15,7 @@ import pytest
 
 from fractal.constants import MERGE_LOCK_FILE, WORKTREES_FOLDER
 from fractal.core.node import Node
-from tests._helpers import _git, _stub_run_script
+from tests._helpers import _LOCK_HOLDER, _await_ready, _git
 
 from .conftest import _parse_project_dir
 
@@ -26,7 +26,6 @@ __all__ = [
     'test_paused_merge_refuses_an_unfinished_git_operation',
     'test_paused_merge_refuses_a_branch_that_moved_mid_merge',
     'test_paused_merge_refuses_a_node_that_left_paused_while_it_waited',
-    'test_resume_waits_for_a_running_merge',
     'test_paused_continue_rollback_keeps_the_staged_resolution',
     'test_paused_no_op_continue_refusal_keeps_the_squash_message',
     'test_paused_merge_rolls_back_both_sides_after_the_commit',
@@ -48,17 +47,6 @@ FROZEN_UNTRACKED = 'frozen scratch\n'
 SHARED = 'shared at the fork\n'
 SHARED_EDIT = 'shared, edited by a sibling\n'
 SIBLING = 'landed by a sibling\n'
-
-# a standalone holder of the real merge lock file: acquire an exclusive
-# fcntl.flock on argv[1], signal readiness via argv[2], then block -- the same
-# lock and mode Node.merge and Node._resume contend
-_LOCK_HOLDER = (
-    'import fcntl, sys, time; '
-    "f = open(sys.argv[1], 'a'); "
-    'fcntl.flock(f, fcntl.LOCK_EX); '
-    "open(sys.argv[2], 'w').close(); "
-    'time.sleep(120)'
-)
 
 
 def test_paused_merge_lands_twice_and_carries_the_frozen_step(
@@ -338,57 +326,6 @@ def test_paused_merge_refuses_a_node_that_left_paused_while_it_waited(
         ' waited. Merge again.'
     ]
     assert _snapshot(git_repo, node) == before
-
-
-def test_resume_waits_for_a_running_merge(
-    git_repo: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path_factory: pytest.TempPathFactory,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A resume relaunches a paused node only once a running merge lets go.
-
-    A merge's carried advance rewrites the paused node's worktree, so the
-    relaunch takes the repo's merge lock first: while another process holds
-    it the relaunch says once that it waits, and it runs once the lock is
-    released.
-    """
-    root, node = _paused_child(git_repo)
-    # only the resume's own notices count
-    caplog.clear()
-    run_scripts = _stub_run_script(monkeypatch, Node)
-    lock_file = git_repo / WORKTREES_FOLDER / MERGE_LOCK_FILE
-    ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
-    holder = subprocess.Popen(
-        [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
-    )
-    resumer = threading.Thread(target=root.resume)
-    try:
-        _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
-        resumer.start()
-        # the relaunch waits behind the held lock
-        resumer.join(timeout=3)
-        assert resumer.is_alive()
-        assert run_scripts == []
-        notice = (
-            'Waiting for a merge in progress to finish before resuming'
-            f' {node.branch}...'
-        )
-        assert caplog.messages == [notice], caplog.messages
-        # the holder dies, the kernel releases the lock, and the relaunch runs
-        holder.kill()
-        holder.wait(timeout=5)
-        resumer.join(timeout=60)
-        assert not resumer.is_alive()
-        assert [call[0] for call in run_scripts] == ['resume.sh']
-        assert caplog.messages == [notice], caplog.messages
-    finally:
-        # the holder is a single leaf process, so a pid kill reaps it fully
-        if holder.poll() is None:
-            holder.kill()
-            holder.wait()
-        if resumer.is_alive():
-            resumer.join(timeout=60)
 
 
 def test_paused_continue_rollback_keeps_the_staged_resolution(
@@ -933,19 +870,6 @@ def _assert_frozen(node: Node) -> None:
     status = _git(node.worktree, 'status', '--porcelain').stdout.splitlines()
     for entry in (' M README.md', 'A  staged.txt', '?? scratch.txt'):
         assert entry in status, status
-
-
-def _await_ready(
-    marker: pathlib.Path,
-    *,
-    proc: subprocess.Popen,
-    deadline: float,
-) -> None:
-    """Block (bounded) until ``marker`` appears, failing if ``proc`` dies first."""
-    while not marker.exists():
-        assert proc.poll() is None, 'holder exited before acquiring the lock'
-        assert time.monotonic() < deadline, 'holder never signalled ready'
-        time.sleep(0.02)
 
 
 def _shim(
