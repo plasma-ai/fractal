@@ -4086,30 +4086,17 @@ class Node:
         # worktree whose info/exclude predates the current block heals here
         # and the adopted run's cleanup and commits see fresh ignores
         self._git_exclude()
-
-        # say once why the relaunch waits: a merge's validation can run long
-        def _waiting() -> None:
-            self.log(
-                message=(
-                    'Waiting for a merge in progress to finish before resuming'
-                    f' {self.branch}...'
-                ),
-                level=logging.WARNING,
-            )
-
-        # a merge's carried advance rewrites a paused node's worktree, so the
-        # relaunch waits for one in flight by taking the merge flock, as
-        # reseed does
-        with worktree.merge_lock(self.repo_dir, waiting=_waiting):
-            # the resume event lands before the relaunch so the booting loop's
-            # deadline credit sees the pause..resume span closed
-            event_id = self.record.event_start('resume')
-            try:
-                self._run_script('resume.sh', f'{self._root}')
-            except Exception:
-                self.record.event_end(event_id=event_id, status='failed')
-                raise
-            self.record.event_end(event_id=event_id, status='completed')
+        # the resume event lands before the relaunch so the booting loop's
+        # deadline credit sees the pause..resume span closed; a merge in
+        # flight is the booting loop's to wait for, under the merge flock
+        # around its active stamp
+        event_id = self.record.event_start('resume')
+        try:
+            self._run_script('resume.sh', f'{self._root}')
+        except Exception:
+            self.record.event_end(event_id=event_id, status='failed')
+            raise
+        self.record.event_end(event_id=event_id, status='completed')
 
     def pause_latched(
         self: Node,
@@ -4213,19 +4200,20 @@ class Node:
 
         A paused node merges without leaving ``paused``: it runs no loop and
         no agent, and its run, iteration, and step rows stay open for
-        :meth:`resume` to adopt. A resume relaunches the loop only under the
-        merge lock, and the merge re-reads the node's status once it holds
-        that lock, refusing a node that changed status while it waited; a
-        commit the node gains during the merge anyway refuses it, since the
-        advance would revert that commit. Only committed work lands; the
-        advance carries the frozen step's uncommitted state the way
-        ``git checkout`` moves a branch, refusing the whole merge when it
-        would touch a dirty path or an untracked or ignored file, and rolling
-        the target and the node back when anything fails after the commit (a
-        continue keeps its staged resolution). A frozen step stopped inside a
-        git operation -- a merge, squash merge, cherry-pick, revert, or
-        rebase, or a git command still running or killed with its
-        ``index.lock`` held -- refuses the merge before anything changes.
+        :meth:`resume` to adopt. A booting loop holds the merge lock for its
+        ``--continue`` clean-up and its ``active`` stamp, and the merge
+        re-reads the node's status once it holds that lock, refusing a node
+        that changed status while it waited; a commit the node gains during
+        the merge anyway refuses it, since the advance would revert that
+        commit. Only committed work lands; the advance carries the frozen
+        step's uncommitted state the way ``git checkout`` moves a branch,
+        refusing the whole merge when it would touch a dirty path or an
+        untracked or ignored file, and rolling the target and the node back
+        when anything fails after the commit (a continue keeps its staged
+        resolution). A frozen step stopped inside a git operation -- a merge,
+        squash merge, cherry-pick, revert, or rebase, or a git command still
+        running or killed with its ``index.lock`` held -- refuses the merge
+        before anything changes.
 
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
@@ -4305,8 +4293,8 @@ class Node:
         # same target interleave their index writes and leave it half-merged
         with worktree.merge_lock(self.repo_dir):
             # the status the arguments were built from must still hold: a
-            # resume relaunches a paused node only under this lock, so no
-            # relaunch starts while the script runs
+            # booting loop holds this lock for its continue clean-up and its
+            # active stamp, so no loop goes live while the script runs
             if (status := self.status()) != current:
                 raise RuntimeError(
                     f'Cannot merge: the node went from {current} to {status}'

@@ -37,7 +37,10 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
 `merge.sh` runs under a separate repo-wide merge flock
 (`.worktrees/.merge.lock`) — separate because the script shells back into
 `fractal` verbs that take the `.worktrees` lock — so two merges into one target
-queue instead of interleaving their index writes.
+queue instead of interleaving their index writes. Writers a merge's advance
+would race take the merge flock too, always before the `.worktrees` lock and
+never inside it: `reseed`, and every loop boot for its continue clean-up and its
+`active` stamp.
 
 ## What the scripts do
 
