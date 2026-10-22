@@ -17,12 +17,21 @@ import time
 import tomllib
 import typing
 import weakref
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any, BinaryIO, Optional
 
 import fractal.core.pricing
 import fractal.util
-from fractal.core.agent import Agent, Invocation, StreamEvent, StreamParser
+from fractal.core.agent import (
+    Agent,
+    Invocation,
+    Settlement,
+    StreamEvent,
+    StreamParser,
+)
+
+if typing.TYPE_CHECKING:
+    from fractal.core.node import Node
 
 __all__ = [
     'CodexParser',
@@ -231,6 +240,10 @@ class CodexParser(StreamParser):
 class CodexAgent(Agent):
     """Codex CLI backend (token-priced, agent-minted threads, no fork).
 
+    A launch that exits non-zero -- failed or killed -- is priced from its
+    rollout window once it has exited (``_settle_cost``), so a failed
+    attempt records its spend.
+
     Todo:
         Support forking once codex ships ``codex exec fork``:
         https://github.com/openai/codex/issues/11750 and
@@ -238,9 +251,6 @@ class CodexAgent(Agent):
 
         Report the agent's control (``reports_progress``) from the exec
         stream, so the no-progress watchdog arms for codex steps.
-
-        Price a killed launch from its rollout window (``_settle_cost``),
-        so an interrupted step records its spend.
 
     """
 
@@ -254,6 +264,22 @@ class CodexAgent(Agent):
     providers = ('openrouter',)
 
     __parser__ = CodexParser
+
+    def __init__(
+        self: CodexAgent,
+        node: Node,
+        command: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Initialize ``CodexAgent``.
+
+        Bind the agent, then open the store of windows awaiting a settle.
+        """
+        super().__init__(node, command, provider)
+        # the rollout window of each launch that exited non-zero, keyed by its
+        # thread -- the post-exit settle takes it, since its stream priced
+        # nothing
+        self._unsettled: dict[str, UsageWindow] = {}
 
     def _spawn(
         self: CodexAgent,
@@ -280,13 +306,23 @@ class CodexAgent(Agent):
         """Price the invocation from its rollout window once codex exits 0.
 
         A non-zero exit is the loop's to attribute, so the stream closes
-        unpriced and silent; a clean exit first clears the error frames the
+        unpriced and silent, keeping the window for the post-exit settle
+        (``_settle_cost``); a clean exit first clears the error frames the
         completed turn recovered from (``recover_errors``), then prices; a
         clean exit whose usage cannot be bound to the process logs the
         reason at WARNING and leaves the cost ``None``.
         """
         parser = typing.cast(CodexParser, parser)
-        if process is None or process.returncode != 0:
+        if process is None:
+            return parser.finish()
+        if process.returncode != 0:
+            # key the window by the thread the step row names: the stream's,
+            # or the resumed one when the stream died before naming it
+            window = _WINDOWS.pop(process, None)
+            if window is not None:
+                thread = parser.session or window.session
+                if thread is not None:
+                    self._unsettled[thread] = window
             return parser.finish()
         parser.recover_errors()
         events: list[StreamEvent] = []
@@ -327,6 +363,65 @@ class CodexAgent(Agent):
         except (OSError, ValueError) as e:
             self.log(f'codex usage unpriced: {e}', logging.WARNING)
         return [*events, *parser.finish()]
+
+    def _settle_cost(
+        self: CodexAgent,
+        session: str,
+        *,
+        started: str,
+        ended: str,
+        after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
+    ) -> Settlement:
+        """Price a launch that exited non-zero from its rollout window.
+
+        Its stream closed unpriced (``_finish_stream``), but its rollouts
+        keep cumulative counters, so the window kept for it is read
+        leniently (``UsageWindow.settle``): the thread's counter growth
+        since the spawn, and each sub-agent rollout's, each priced at its
+        own served model. The record leaves part of a reply out when a
+        rollout ends on a request in flight; a window that then grew no
+        counter prices nothing, never $0. A window that cannot be bound or
+        priced logs ``codex usage unpriced: <reason>`` and prices nothing.
+
+        With ``after``, or with no window kept (a clean exit keeps none),
+        nothing is added: a clean exit is priced by its stream, and codex
+        spends nothing past its result.
+        """
+        window = self._unsettled.pop(session, None)
+        if after is not None or window is None:
+            return Settlement(cost=None)
+        try:
+            usage, model, children, cut_off = window.settle(session)
+            # price the thread's growth, then each spawned thread's at its own
+            # served model's rates; a rollout that grew nothing adds nothing
+            cost = 0.0
+            grew = False
+            if model is not None:
+                priced = _compute_cost(usage, model)
+                if priced is None:
+                    raise ValueError(f'Model {model!r} has no pricing entry.')
+                cost += priced
+                grew = True
+            for child, (spent, served) in children.items():
+                if served is None:
+                    continue
+                priced = _compute_cost(spent, served)
+                if priced is None:
+                    raise ValueError(
+                        f'Child rollout {child.name!r}:'
+                        f' model {served!r} has no pricing entry.'
+                    )
+                cost += priced
+                grew = True
+        except (OSError, ValueError) as e:
+            self.log(f'codex usage unpriced: {e}', logging.WARNING)
+            return Settlement(cost=None)
+        # a request in flight over counters that never grew spent an unknown
+        # amount, which a $0 figure would misstate
+        if cut_off and not grew:
+            return Settlement(cost=None, cut_off=True)
+        return Settlement(cost=cost, cut_off=cut_off)
 
     def _invocation(
         self: CodexAgent,
@@ -595,11 +690,13 @@ class UsageWindow:
     codex appends to its session log
     (``CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl``) while the process
     runs, bound to that process by this window: ``capture`` runs before the
-    process starts and ``reconcile`` after it exits, so the records between
-    the two are the invocation's own. A sub-agent thread the invocation
-    spawns or drives writes its own rollout beside the thread's, and the
-    rows it appends within the window are the step's spend too, summed at
-    the child's own served model. The window reads the dated
+    process starts and ``reconcile`` after it exits 0, so the records between
+    the two are the invocation's own; an invocation codex ends non-zero is
+    read by ``settle`` instead, from the counters alone, its turns complete
+    or not. A sub-agent thread the invocation spawns or drives writes its
+    own rollout beside the thread's, and the rows it appends within the
+    window are the step's spend too, summed at the child's own served
+    model. The window reads the dated
     ``sessions/*/*/*/rollout-*.jsonl`` tree alone: a rollout codex archives
     or writes at another depth is invisible to it.
     """
@@ -621,7 +718,7 @@ class UsageWindow:
     path: Optional[pathlib.Path] = None
     identity: Optional[tuple[int, int]] = None
     prefix_sha256: Optional[str] = None
-    # why the capture failed -- reconcile re-raises it
+    # why the capture failed -- reconcile and settle re-raise it
     error: Optional[str] = None
     # the resumed rollout's captured byte length
     size: int = 0
@@ -683,46 +780,11 @@ class UsageWindow:
                 root's.
 
         """
-        if self.error is not None:
-            raise ValueError(self.error)
-        if self.session not in (None, session):
-            raise ValueError(
-                f'stdout names thread {session!r}, not the resumed {self.session!r}.'
-            )
-        path = _find_rollout(self.home, session)
-        # a rollout new or grown since capture that opens as a thread this one
-        # spawned holds sub-agent spend the step owns; one the window cannot
-        # place refuses the step
-        spawned = _spawned_rollouts(self.home, session, known=self.existing, own=path)
+        path, spawned = self._locate(session)
         # stream the rollout once: the bound prefix is hashed as it is read and
         # the window decodes only the lines a counted kind can ride
         with path.open('rb') as handle:
-            if self.path is None:
-                # a fresh thread's rollout is new and opens with its session metadata
-                if path in self.existing:
-                    raise ValueError('Rollout predates the spawn.')
-                first = handle.readline()
-                meta = json.loads(first) if first else None
-                if not isinstance(meta, dict) or (meta.get('type') != 'session_meta'):
-                    raise ValueError('Rollout does not open with session metadata.')
-                if _read_payload(meta).get('id') != session:
-                    raise ValueError('Rollout metadata names another thread.')
-            else:
-                # the resumed rollout is the captured inode, grown, its prefix intact
-                stat = os.fstat(handle.fileno())
-                identity = (stat.st_dev, stat.st_ino)
-                if (path != self.path) or (identity != self.identity):
-                    raise ValueError('Resumed rollout was replaced.')
-                digest = hashlib.sha256()
-                remaining = self.size
-                while remaining:
-                    chunk = handle.read(min(remaining, _CHUNK))
-                    if not chunk:
-                        raise ValueError('Resumed rollout was truncated.')
-                    digest.update(chunk)
-                    remaining -= len(chunk)
-                if digest.hexdigest() != self.prefix_sha256:
-                    raise ValueError('Resumed rollout prefix changed.')
+            self._enter(handle, path=path, session=session)
             usage, model, turns = _window(
                 _counted(handle),
                 session=session,
@@ -752,6 +814,118 @@ class UsageWindow:
             except (OSError, ValueError) as e:
                 raise ValueError(f'Child rollout {child.name!r}: {e}') from e
         return usage, model, children
+
+    def settle(
+        self: UsageWindow,
+        session: str,
+    ) -> tuple[
+        dict[str, int],
+        Optional[str],
+        dict[pathlib.Path, tuple[dict[str, int], Optional[str]]],
+        bool,
+    ]:
+        """Return the spend of an invocation codex ended non-zero, and any open request.
+
+        The lenient ``reconcile``: the invocation's turns need not complete,
+        and an interrupted or refused one is no fault, so each rollout's
+        spend is its counter's growth past the captured state, its served
+        model ``None`` when it grew none (see ``_spent``). The pairs lead as
+        in ``reconcile``; the flag says whether any rollout ends on a
+        request in flight.
+
+        Raises:
+            ValueError: When a rollout cannot be bound to the invocation as
+                ``reconcile`` binds it, a record names another thread or a
+                child's row another turn, a counter falls below its captured
+                state or behind the token count, or a rollout that grew
+                names no one served model.
+
+        """
+        path, spawned = self._locate(session)
+        with path.open('rb') as handle:
+            self._enter(handle, path=path, session=session)
+            usage, model, turns, in_flight = _spent(
+                handle,
+                owners=(session, session),
+                baseline=self.baseline,
+            )
+        # read each spawned thread's segment past its captured length, as
+        # reconcile does, its rows riding this invocation's turns
+        children: dict[pathlib.Path, tuple[dict[str, int], Optional[str]]] = {}
+        for child, (thread, size, start) in spawned.items():
+            try:
+                with child.open('rb') as handle:
+                    baseline, _ = _counter_at(handle, size)
+                    # a grown rollout's copied history lies in its captured prefix
+                    if size:
+                        lines = handle
+                    # a rollout the turn opened is read past a fork's copied history
+                    else:
+                        lines = itertools.islice(handle, start, None)
+                    spent, served, _, open_request = _spent(
+                        lines,
+                        owners=(thread, session),
+                        baseline=baseline,
+                        rides=turns,
+                    )
+            except (OSError, ValueError) as e:
+                raise ValueError(f'Child rollout {child.name!r}: {e}') from e
+            children[child] = (spent, served)
+            in_flight = in_flight or open_request
+        return usage, model, children, in_flight
+
+    def _locate(
+        self: UsageWindow,
+        session: str,
+    ) -> tuple[pathlib.Path, dict[pathlib.Path, tuple[str, int, int]]]:
+        """Return the rollout for ``session`` and the rollouts it spawned."""
+        if self.error is not None:
+            raise ValueError(self.error)
+        if self.session not in (None, session):
+            raise ValueError(
+                f'stdout names thread {session!r}, not the resumed {self.session!r}.'
+            )
+        path = _find_rollout(self.home, session)
+        # a rollout new or grown since capture that opens as a thread this one
+        # spawned holds sub-agent spend the step owns; one the window cannot
+        # place refuses the step
+        spawned = _spawned_rollouts(self.home, session, known=self.existing, own=path)
+        return path, spawned
+
+    def _enter(
+        self: UsageWindow,
+        handle: BinaryIO,
+        *,
+        path: pathlib.Path,
+        session: str,
+    ) -> None:
+        """Bind the open rollout to the capture, reading ``handle`` to the window."""
+        if self.path is None:
+            # a fresh thread's rollout is new and opens with its session metadata
+            if path in self.existing:
+                raise ValueError('Rollout predates the spawn.')
+            first = handle.readline()
+            meta = json.loads(first) if first else None
+            if not isinstance(meta, dict) or (meta.get('type') != 'session_meta'):
+                raise ValueError('Rollout does not open with session metadata.')
+            if _read_payload(meta).get('id') != session:
+                raise ValueError('Rollout metadata names another thread.')
+        else:
+            # the resumed rollout is the captured inode, grown, its prefix intact
+            stat = os.fstat(handle.fileno())
+            identity = (stat.st_dev, stat.st_ino)
+            if (path != self.path) or (identity != self.identity):
+                raise ValueError('Resumed rollout was replaced.')
+            digest = hashlib.sha256()
+            remaining = self.size
+            while remaining:
+                chunk = handle.read(min(remaining, _CHUNK))
+                if not chunk:
+                    raise ValueError('Resumed rollout was truncated.')
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if digest.hexdigest() != self.prefix_sha256:
+                raise ValueError('Resumed rollout prefix changed.')
 
 
 # ------ helper functions
@@ -1142,6 +1316,98 @@ def _bind(
             f' {growth!r}.'
         )
     return total, model
+
+
+def _spent(
+    lines: Iterable[bytes],
+    *,
+    owners: tuple[str, str],
+    baseline: dict[str, int],
+    rides: Optional[set[str]] = None,
+) -> tuple[dict[str, int], Optional[str], set[str], bool]:
+    """Read one rollout's segment of a failed invocation, its turns complete or not.
+
+    Returns the counter's growth past ``baseline``, the served model the
+    segment's ``turn_context`` records name (``None`` when it grew none),
+    the turn ids they name, and whether the segment ends on a request in
+    flight. Its usage rows must name ``owners`` (see ``_read_response``)
+    and, with ``rides`` (the parent window's turns), ride one of them.
+
+    A request is in flight from a turn's start, or from a response item
+    past the last counter -- a tool's result codex sends next, or a reply
+    it was streaming -- until a counter closes it with its usage, the turn
+    completes, or an ``error`` record refuses it: a refused request is not
+    billed. A response item is told by its kind's quoted name, never
+    decoded.
+    """
+    in_flight = False
+    turns: set[str] = set()
+    models: set[str] = set()
+    counter = baseline
+    reported = baseline
+    for line in lines:
+        # a line of no counted kind is skipped undecoded; a response item
+        # among them is a request under way
+        if not any(marker in line for marker in _MARKERS):
+            if b'"response_item"' in line:
+                in_flight = True
+            continue
+        record = _read_record(line)
+        kind = record.get('type')
+        if kind not in _KINDS:
+            if kind == 'response_item':
+                in_flight = True
+            continue
+        payload = _read_payload(record)
+        # open a request at the turn's start, close it at the turn's end or
+        # its refusal, and note the token count the thread reports
+        if kind == 'event_msg':
+            event = payload.get('type')
+            if event == 'task_started':
+                in_flight = True
+            elif event in ('task_complete', 'error'):
+                in_flight = False
+            elif event == 'token_count':
+                info = payload.get('info')
+                if isinstance(info, dict):
+                    reported = _validate_usage(info.get('total_token_usage'))
+        # note the served model and the turn
+        elif kind == 'turn_context':
+            model = payload.get('model')
+            if not isinstance(model, str) or not model:
+                raise ValueError('Turn context names no served model.')
+            models.add(model)
+            turn = payload.get('turn_id')
+            if isinstance(turn, str):
+                turns.add(turn)
+        # close the request on its counter, refusing another thread's or turn's
+        else:
+            _, _, counter = _read_response(payload, owners=owners)
+            if rides is not None:
+                root = payload.get('root_turn_id')
+                if not isinstance(root, str) or (root not in rides):
+                    raise ValueError(f'Usage record rides another turn: {root!r}')
+            in_flight = False
+    # a token count past the counter is a response with no usage record (codex
+    # older than 0.153 writes none), whose spend the growth would leave out
+    if any(reported[key] > counter[key] for key in _BUCKETS):
+        raise ValueError(
+            f'Token count {reported!r} runs past the usage records {counter!r}.'
+        )
+    growth = {key: counter[key] - baseline[key] for key in _BUCKETS}
+    if any(count < 0 for count in growth.values()):
+        raise ValueError(
+            f'Thread counter {counter!r} fell below its baseline {baseline!r}.'
+        )
+    # a segment that grew is priced at its one served model
+    if not any(growth.values()):
+        return growth, None, turns, in_flight
+    if len(models) != 1:
+        raise ValueError(
+            f'Rollout does not name exactly one served model: {sorted(models)!r}'
+        )
+    (model,) = models
+    return growth, model, turns, in_flight
 
 
 def _config_instructions(config: pathlib.Path) -> Optional[pathlib.Path]:
