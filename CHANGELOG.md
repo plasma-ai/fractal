@@ -371,6 +371,12 @@ may include breaking changes, each listed under a Breaking heading.
   missing its spend. This holds for a killed launch and, past a result, for a
   reply after it. A synthetic reply, Claude Code's stand-in for an API error,
   holds no tokens and leaves the step whole.
+- A Claude step priced from its transcripts is marked `; partly unpriced` when a
+  reply in them searched the web. Claude Code charges each search a fee beside
+  the tokens, and the price table does not carry it, so the step books the
+  reply's tokens and read as whole while missing the fee. This holds for a
+  killed launch and, past a result, for a reply after it. A web fetch bills only
+  its tokens and leaves the step whole.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed

@@ -681,8 +681,9 @@ class ClaudeAgent(Agent):
         Whatever the figure leaves out marks the launch: an absent or
         unreadable session transcript on a launch with no result figure, a
         sub-agent transcript that cannot be read, a reply whose usage
-        holds a count the pricing cannot read, and a reply holding tokens
-        at a model with no price.
+        holds a count the pricing cannot read, a reply holding tokens at a
+        model with no price, and a reply that searched the web, whose
+        per-search fee the price table does not carry.
 
         With ``after``, the result frame's figure stands and only the
         replies completing after it price: claude counts a reply's cost
@@ -1121,7 +1122,9 @@ def _usage_cost(
     The pricing behind ``_compute_cost``. A count present but not a number
     (wire noise) is left out of the cost rather than raising, so the
     figure that results is partial. A model with no price (or none named)
-    prices nothing, which leaves out every count above zero.
+    prices nothing, which leaves out every count above zero. A web search
+    (``server_tool_use.web_search_requests``) bills a fee the price table
+    does not carry, so a reply that searched is never whole.
 
     Returns:
         The cost (``None`` for an unknown or unpriced model), and whether
@@ -1154,6 +1157,14 @@ def _usage_cost(
         cache_hour_tokens = count(split.get('ephemeral_1h_input_tokens'))
         cache_hour_tokens = min(cache_hour_tokens, cache_creation_tokens)
     elif split is not None:
+        whole = False
+    # claude bills each web search a fee beside the tokens, which the price
+    # table does not carry; a web fetch bills only its tokens
+    tools = usage.get('server_tool_use')
+    if isinstance(tools, dict):
+        if count(tools.get('web_search_requests')):
+            whole = False
+    elif tools is not None:
         whole = False
     # look up per-token rates (missing cache rates fall back to the input rate);
     # with none, every count is unpriced, though a usage of zeros (a synthetic
