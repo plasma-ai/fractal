@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import pathlib
 import subprocess
 import threading
 from typing import Any, Optional
@@ -20,9 +21,11 @@ import pytest
 
 from fractal.cli.utils import StreamRenderer
 from fractal.core.node import Node
+from tests._helpers import _save_cost_state
 
 __all__ = [
     'test_chat_streams_and_returns_the_captured_session',
+    'test_chat_shows_a_continued_sessions_turn_its_own_cost',
     'test_chat_seeds_prompt_docs_per_fresh_fork_and_resume',
     'test_chat_guards_reject_invalid_requests',
     'test_chat_nonzero_exit_raises',
@@ -40,6 +43,11 @@ _CLAUDE_STREAM = (
     + '\n'
 )
 _CODEX_STREAM = json.dumps({'type': 'thread.started', 'thread_id': 'thr_new'}) + '\n'
+
+# one claude session's saved total before a turn, and the running total its
+# result frame names after it: the turn's own spend is the growth
+_SAVED_TOTAL = 0.5483
+_RUNNING_TOTAL = 0.6520
 
 
 @pytest.mark.parametrize(
@@ -74,6 +82,102 @@ def test_chat_streams_and_returns_the_captured_session(
     assert captured['stdin'] == subprocess.DEVNULL
     # the resulting session id is captured from the stream
     assert result == expected
+
+
+@pytest.mark.parametrize(
+    argnames=('kwargs', 'record', 'cost'),
+    argvalues=[
+        # a thread continued in place
+        pytest.param(
+            {'session': 'past-1', 'resume': True},
+            'saved',
+            f'${_RUNNING_TOTAL - _SAVED_TOTAL:.4f}',
+            id='resume',
+        ),
+        # a fork restores the source session's saved total too
+        pytest.param(
+            {'session': 'past-1'},
+            'saved',
+            f'${_RUNNING_TOTAL - _SAVED_TOTAL:.4f}',
+            id='fork',
+        ),
+        pytest.param(
+            {'current': True},
+            'saved',
+            f'${_RUNNING_TOTAL - _SAVED_TOTAL:.4f}',
+            id='fork-current',
+        ),
+        # a fresh session carries nothing in, so its figure is its own
+        pytest.param({}, 'saved', f'${_RUNNING_TOTAL:.4f}', id='fresh'),
+        # a continued session whose transcript cannot be found has no total
+        # to take off, so the figure is refused rather than shown whole
+        pytest.param(
+            {'session': 'past-1', 'resume': True},
+            'missing',
+            '$?',
+            id='no-transcript',
+        ),
+        # a baseline read that raises refuses the figure, never the reply
+        pytest.param(
+            {'session': 'past-1', 'resume': True},
+            'raises',
+            '$?',
+            id='baseline-raises',
+        ),
+    ],
+)
+def test_chat_shows_a_continued_sessions_turn_its_own_cost(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    kwargs: dict,
+    record: str,
+    cost: str,
+) -> None:
+    """A chat turn continuing a Claude session shows its own spend.
+
+    Claude Code saves a session's running total to its transcript as each
+    launch exits, and a resume or a fork counts the result figure on from
+    it. The reply's closing line shows the figure less that total, as the
+    loop books a resumed step, never the session's running total. A total
+    that cannot be read refuses the figure (``$?``), and a read that
+    raises warns on stderr while the reply still streams.
+    """
+    node = node_with_db
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    if kwargs.get('current'):
+        _activate(node, 'past-1')
+    if record != 'missing':
+        transcript = pathlib.Path(node.agent().transcript('past-1')['path'])
+        _save_cost_state(transcript, 'past-1', _SAVED_TOTAL)
+    if record == 'raises':
+
+        def raise_reading(self: object, session: str) -> None:
+            raise OSError('transcript store offline')
+
+        monkeypatch.setattr(type(node.agent()), '_cost_baseline', raise_reading)
+    stream = (
+        json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess_new'})
+        + '\n'
+        + json.dumps(
+            {
+                'type': 'result',
+                'duration_ms': 1,
+                'total_cost_usd': _RUNNING_TOTAL,
+                'num_turns': 1,
+            }
+        )
+        + '\n'
+    )
+    _patch_popen(monkeypatch, stdout_text=stream)
+
+    node.chat('what changed?', **kwargs, render=StreamRenderer())
+
+    captured = capsys.readouterr()
+    assert f'— 1 turns, 0.0s, {cost}' in captured.out
+    warning = 'Warning: reading the session cost baseline failed'
+    assert (warning in captured.err) is (record == 'raises')
 
 
 @pytest.mark.parametrize(
