@@ -359,8 +359,9 @@ may include breaking changes, each listed under a Breaking heading.
   whose result frame named its cost counts only what follows the result, booked
   once from the transcript rather than also from the stream. A reply the loop
   ends at the output cap books the usage the stream recorded for it, so a
-  thinking-cap kill reads as whole unless the stream reported no usage. A killed
-  Codex step still records no cost.
+  thinking-cap kill reads as whole unless the stream reported no usage. A Codex
+  step that ends non-zero is marked the same way when its session log ends on a
+  request in flight.
 - A Claude step whose stream shows a sub-agent still running after the result
   frame is marked `; partly unpriced` when none of that later spend can be
   priced: its transcript is missing or unreadable, its model is unpriced, or the
@@ -522,7 +523,19 @@ may include breaking changes, each listed under a Breaking heading.
   retries a stream error and then completes the turn — no longer fails a step
   whose process exits 0; the recovered step is priced normally. A `turn.failed`
   frame, an error frame outside the active turn, an error frame in a turn that
-  never completes, or a non-zero exit still fails the step unpriced.
+  never completes, or a non-zero exit still fails the step.
+- A `codex` step that ends non-zero — a request refused because the model is at
+  capacity, a crash, or a kill — books its spend instead of no cost. Once the
+  process exits, the step is priced from the growth of its session log's
+  cumulative token counters since the launch, plus each sub-agent log's, at
+  their own served models, so a failed attempt and its retry both count toward
+  the run's spend and its cost caps, and a run of repeated provider failures can
+  end on its budget. A refused request is not billed, so a refused attempt books
+  what came before the refusal, or `$0`; a request in flight when codex died is
+  in no counter, so the step books what was recorded and is marked
+  `; partly unpriced`, or keeps no cost when nothing was. A log that cannot be
+  bound to the launch or priced leaves the step without a cost and logs
+  `codex usage unpriced: <reason>`.
 - A `--values` file in the provenance shape — a `[values]` table holding the
   inputs, as `_template.toml` records them and a commission file is written — is
   read as the input table, instead of as one input named `values` holding a
