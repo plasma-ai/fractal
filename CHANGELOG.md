@@ -249,7 +249,8 @@ may include breaking changes, each listed under a Breaking heading.
   default when its reserve equals 10% of its cap and as explicit otherwise, and
   the next cap change records that reading. `config set` refuses `reserve_mode`;
   a `reserve_budget` write records `explicit`, and clearing the reserve clears
-  its mode.
+  its mode. Both packaged `fractal` skills say to pass `--reserve-budget` again
+  to change an explicit reserve with the cap.
 
 ### Fixed
 

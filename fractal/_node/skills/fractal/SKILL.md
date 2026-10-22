@@ -62,9 +62,13 @@ refuses `node start --continue` without an explicit new `--max-cost`) is
 strongly recommended for every child -- without one the child launches uncapped,
 with a loud warning at start and bounded only by `--max-iters`/`--timeout`; a
 non-positive `--max-cost` is rejected. Set it at init (`--max-cost`, \<= your
-remaining when `$COST_BUDGET` is finite) and optionally `--max-iter-cost`.
-Allocate conservatively; you may over-allocate across children optimistically,
-but monitor (`fractal node cost spent`, `fractal node cost breakdown`) and kill
+remaining when `$COST_BUDGET` is finite) and optionally `--max-iter-cost`. The
+default reserve (10% of `--max-cost`) follows the cap when
+`node update --max-cost` or `node start --continue --max-cost` changes it; an
+explicit reserve (`--reserve-budget`, a template preset, or `config set`) keeps
+its figure, so pass `--reserve-budget` again to change it with the cap. Allocate
+conservatively; you may over-allocate across children optimistically, but
+monitor (`fractal node cost spent`, `fractal node cost breakdown`) and kill
 over-spenders. Caps are **soft** -- a child is not *hard*-stopped when it nears
 `--max-cost`; once it drains into the reserve it gets cleanup guidance to wind
 down the remainder of the current iteration cheaply, then the loop ends its run
