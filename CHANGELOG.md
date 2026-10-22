@@ -419,6 +419,14 @@ may include breaking changes, each listed under a Breaking heading.
   skip it, which is safe; committing or moving the file clears the refusal. A
   wiki declared at the worktree root refuses the merge by name, since every
   refresh would walk the whole worktree and leave the target dirty.
+- The wikis fractal creates, the project wiki `fractal init` scaffolds and each
+  node's memory wiki, accept dotted file names such as `controls.json`,
+  `notes.txt`, and `fit.py`: their seeded ascii/identifier naming policy allows
+  `.`. The identifier rule judged a non-markdown file by its whole name,
+  extension included, so `wiki update` skipped the file and `wiki lint` refused
+  it. A name with a hyphen or a space is still refused. An existing wiki keeps
+  its settings: to accept dotted names there, add `"allow": "."` to the `naming`
+  block of its `.wiki/settings.json`, and commit the change for a project wiki.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The

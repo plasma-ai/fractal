@@ -13,6 +13,7 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import tomllib
 from typing import Any, Optional
 
@@ -36,6 +37,7 @@ __all__ = [
     'test_init_creates_node_structure',
     'test_init_scope_places_node_dir_at_project_root',
     'test_init_sets_the_worktree_commit_identity',
+    'test_init_seeds_wikis_that_accept_dotted_file_names',
     'test_init_populates_skills_and_supports_reset',
     'test_reset_reseeds_scripts',
     'test_reset_clears_stale_registry_caps',
@@ -239,6 +241,68 @@ def test_init_sets_the_worktree_commit_identity(git_repo: pathlib.Path) -> None:
     # the main checkout keeps the user's own identity
     author = _git(git_repo, 'log', '-1', '--format=%an')
     assert author.stdout.strip() == 'Test'
+
+
+@pytest.mark.parametrize(argnames='extension', argvalues=['json', 'txt', 'py'])
+def test_init_seeds_wikis_that_accept_dotted_file_names(
+    tmp_path: pathlib.Path,
+    extension: str,
+) -> None:
+    """Both wikis fractal creates accept a dotted file name under the identifier rule.
+
+    User init creates the project wiki and node init the node's memory, each
+    seeded with the strict ascii/identifier naming policy, which judges a
+    non-markdown file by its whole name. A dotted name is indexed and lints
+    clean, while a name the rule forbids -- a hyphen, a space -- is still
+    refused.
+    """
+    # a repo with no project wiki, so the user init creates one
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-b', 'main')
+    _git(repo, 'config', 'user.email', 'test@test.com')
+    _git(repo, 'config', 'user.name', 'Test')
+    (repo / 'README.md').write_text('# test\n', encoding='utf-8')
+    _git(repo, 'add', '.')
+    _git(repo, 'commit', '-m', 'init')
+    node = Node(repo)
+    node.init(agent='claude', user=True)
+    node.commit('configure', init=True)
+    output = node.init(name='task', agent='claude')
+    project_dir = _parse_project_dir(output)
+    branch = _resolve_branch(project_dir)
+    for wiki_dir in (
+        project_dir / 'wiki',
+        project_dir / '.fractal' / branch / 'memory',
+    ):
+        # a dotted file name is indexed, and the wiki lints clean
+        page = f'controls.{extension}'
+        (wiki_dir / page).write_text('data\n', encoding='utf-8')
+        subprocess.run(
+            ['wiki', 'update', f'--path={wiki_dir}'],
+            capture_output=True,
+            check=True,
+        )
+        lint = subprocess.run(
+            ['wiki', 'lint', f'--path={wiki_dir}'],
+            capture_output=True,
+            text=True,
+        )
+        assert lint.returncode == 0, lint.stdout
+        index = (wiki_dir / '_index.md').read_text(encoding='utf-8')
+        assert f'[[{page}|{page}]]' in index
+        # a hyphen or a space still breaks the identifier rule
+        refused = [f'bad-name.{extension}', f'bad name.{extension}']
+        for name in refused:
+            (wiki_dir / name).write_text('data\n', encoding='utf-8')
+        lint = subprocess.run(
+            ['wiki', 'lint', f'--path={wiki_dir}'],
+            capture_output=True,
+            text=True,
+        )
+        assert lint.returncode != 0
+        for name in refused:
+            assert f"{name}: Invalid page name: fails the 'identifier'" in lint.stdout
 
 
 def test_init_populates_skills_and_supports_reset(git_repo: pathlib.Path) -> None:
