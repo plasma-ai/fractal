@@ -3098,7 +3098,7 @@ def test_cut_off_mid_reply_books_recorded_spend_partly_unpriced(
     loop_node.record.step_cost(step_id=killed_row['step_id'], cost=recorded)
     assert _step_rows(loop_node)[0].endswith('; partly unpriced')
     err = capsys.readouterr().err
-    assert "Warning: a reply's spend is missing from the launch's record" in err
+    assert "Warning: part of the launch's spend is missing from its record" in err
 
 
 def test_kill_during_a_tool_call_is_fully_priced(
@@ -3437,11 +3437,13 @@ def test_a_failed_settle_marks_sub_agent_spend_after_the_result(
     loop_node: Node,
     scripted_claude: Callable[..., ScriptedClaude],
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
 ) -> None:
     """A settle that raises marks a launch whose sub-agent ran past its result.
 
     The stream leaves a sub-agent's spend after the result to the settle,
     so a settle that fails leaves spend the stream saw out of the figure.
+    The pane warns.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
     background = {'input_tokens': 2_000, 'output_tokens': 700}
@@ -3463,6 +3465,8 @@ def test_a_failed_settle_marks_sub_agent_spend_after_the_result(
         'PLAN/completed/partly unpriced',
         'EXECUTE/completed/',
     ]
+    err = capsys.readouterr().err
+    assert "Warning: part of the launch's spend is missing from its record" in err
 
 
 @pytest.mark.parametrize(

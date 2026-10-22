@@ -266,14 +266,14 @@ past its result stays whole whatever the settle finds. On Claude Code 2.1.300,
 The step books what was recorded, with no estimate for the missing part:
 `_settle_cost` returns a `Settlement` (`cost`, `cut_off`), `Agent.settle_cost`
 returns the verdict, and the loop prints
-`Warning: a reply's spend is missing from the launch's record` to stderr (which
-reaches `headless.log`) and passes it to `step_end`, at the steered close too,
-which appends `; partly unpriced` to the row's metadata at any terminal when the
-row holds a figure; a row with no figure is not partly priced, so its end marks
-it `; unpriced` instead, at any terminal -- a completed launch whose record
-leaves spend out and holds none never reads as a silent `NULL`. `step_cost`'s
-strip of a stale `unpriced` marker leaves `partly unpriced` alone, since the
-missing part stays unpriced.
+`Warning: part of the launch's spend is missing from its record` to stderr
+(which reaches `headless.log`) and passes it to `step_end`, at the steered close
+too, which appends `; partly unpriced` to the row's metadata at any terminal
+when the row holds a figure; a row with no figure is not partly priced, so its
+end marks it `; unpriced` instead, at any terminal -- a completed launch whose
+record leaves spend out and holds none never reads as a silent `NULL`.
+`step_cost`'s strip of a stale `unpriced` marker leaves `partly unpriced` alone,
+since the missing part stays unpriced.
 
 The settle runs after every launch and parses every line of each transcript it
 opens, before the window check (a `StructuredOutput` call can precede the

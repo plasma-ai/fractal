@@ -3287,7 +3287,7 @@ class Loop:
                 self._step_partly_unpriced = after is None or trailing
             if self._step_partly_unpriced:
                 print(
-                    "Warning: a reply's spend is missing from the launch's"
+                    "Warning: part of the launch's spend is missing from its"
                     ' record; its step books the spend recorded (partly'
                     ' unpriced)',
                     file=sys.stderr,
