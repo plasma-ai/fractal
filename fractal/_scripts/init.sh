@@ -450,7 +450,8 @@ if ! git -C "$REPO_DIR" cat-file -e "$BASE_REF:$WIKI_DIR/_index.md" 2>/dev/null;
     echo "Error: base branch '$BASE_REF' has no project wiki at $WIKI_DIR/_index.md" >&2
     echo "Create one first:" >&2
     echo "  (cd \"$REPO_DIR\" && wiki init --path=\"$WIKI_DIR\"" \
-        "--settings='{\"naming\": {\"validate\": [\"ascii\", \"identifier\"]}}' &&" \
+        "--settings='{\"naming\": {\"validate\": [\"ascii\", \"identifier\"]," \
+        "\"allow\": \".\"}}' &&" \
         "git add \"$WIKI_DIR\" && git commit -m 'add project wiki')" >&2
     exit 1
 fi
@@ -748,9 +749,10 @@ fi
 
 if [[ ! -f "$MEMORY_DIR/_index.md" ]]; then
     # --quiet: drop wiki's own "Initialized wiki at ..." line so the
-    # created-memory message below is the single user-facing line
+    # created-memory message below is the single user-facing line; the
+    # identifier rule allows '.', so a non-markdown file keeps its extension
     wiki init --quiet --path="$MEMORY_DIR" \
-        --settings='{"naming": {"validate": ["ascii", "identifier"]}}'
+        --settings='{"naming": {"validate": ["ascii", "identifier"], "allow": "."}}'
     echo "Created memory wiki at $MEMORY_DIR"
 fi
 

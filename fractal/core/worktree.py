@@ -686,8 +686,11 @@ def ensure_project_wiki(
             f'Note: using project wiki name {name!r}'
             f' (from repository directory {repo_dir.name!r}).'
         )
-    # seed the strict naming policy so fractal project wikis use identifiers
-    settings = json.dumps({'naming': {'validate': ['ascii', 'identifier']}})
+    # seed the strict naming policy so fractal project wikis use identifiers;
+    # the identifier rule allows '.', so a non-markdown file keeps its extension
+    settings = json.dumps(
+        {'naming': {'validate': ['ascii', 'identifier'], 'allow': '.'}}
+    )
     # resolve the wiki console script (the plasma-wiki dependency installs
     # it into fractal's own environment); name the remedy on a miss
     try:
