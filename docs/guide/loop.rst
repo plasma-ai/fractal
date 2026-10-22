@@ -704,10 +704,12 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``--ignore-scope`` or ``--force``.
 2. **Refreshes and lints.** ``wiki update`` runs on the project wiki and the
    node's memory wiki, then ``scripts/lint.sh`` runs; either failing fails
-   the commit with the tool's output. Skipped with ``--force`` or ``--init``:
-   neither may block a backstop save or a baseline, the setup save a node
-   starts from, which carries only fractal's own setup — project content
-   takes an ordinary, linted commit.
+   the commit with the tool's output. The seeded ``lint.sh`` also runs
+   ``wiki lint`` on both wikis but only warns: its findings appear in the
+   commit output and do not fail the commit. Skipped with ``--force`` or
+   ``--init``: neither may block a backstop save or a baseline, the setup
+   save a node starts from, which carries only fractal's own setup — project
+   content takes an ordinary, linted commit.
 3. **Stages.** Scoped staging of the scope roots, node directory, and wiki
    (the whole worktree when unscoped), always excluding runtime artifacts
    (``**/.venv``, ``**/.db``, ``**/.db-*``, ``**/.status``, ``**/.paused``,
