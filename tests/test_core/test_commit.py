@@ -29,6 +29,7 @@ __all__ = [
     'test_user_node_commit_init_commits_baseline',
     'test_commit_pushes_unless_local',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_user_init_baseline_fails_when_its_seed_cannot_stage',
     'test_child_baseline_carries_only_its_seed',
     'test_child_baseline_refuses_a_file_moved_into_its_seed',
     'test_commit_event_records_sha_and_emits_once',
@@ -278,6 +279,43 @@ def test_user_init_baseline_survives_a_hostile_external_ignore(
     # runtime state still never rides the baseline
     assert '.status' not in tracked
     assert '.db' not in tracked
+
+
+def test_user_init_baseline_fails_when_its_seed_cannot_stage(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A seed the add cannot stage fails the baseline, never lands without it.
+
+    The seed's plain add tolerates only git's refusal of an ignored seed --
+    the hold the record pass overrides, as the hostile-ignore case shows.
+    Any other failure (here an unreadable record) raises with git's message,
+    before anything is staged, rather than commit a baseline missing its
+    seed.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    _git(repo, 'config', 'user.email', 'test@test.com')
+    _git(repo, 'config', 'user.name', 'Test')
+    Node(repo).init(agent='claude', user=True)
+    subprocess.run(
+        [f'{_FRACTAL_BIN}', 'track'],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    record = repo / '.fractal' / 'main' / 'memory' / 'notes.md'
+    record.parent.mkdir(parents=True)
+    record.write_text('root notes\n', encoding='utf-8')
+    record.chmod(0)
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    try:
+        with pytest.raises(RuntimeError, match=r'git add of \.fractal/main failed'):
+            Node(repo).commit('configure', init=True)
+    finally:
+        record.chmod(0o644)
+    # nothing committed and nothing left staged
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'diff', '--cached', '--name-only').stdout == ''
 
 
 def test_child_baseline_carries_only_its_seed(tmp_path: pathlib.Path) -> None:

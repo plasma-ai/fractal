@@ -586,6 +586,33 @@ def commit_user_init(node: Node, message: str) -> str:
 
     # stage the pathspec; closure so the hook-rewrite recovery can re-use it
     def _stage_paths() -> None:
+        # the seed answers to the work commits' estate law instead of -f: a
+        # plain add withholding what the law refuses, then the record pass's
+        # force-add of the records only a machine-local layer holds -- so
+        # fractal's own exclude block (tmp/, *.err, __pycache__/) keeps its
+        # hold on the runtime files beside the records
+        denied = _estate_denied(node, seed, estates)
+        if estates:
+            withheld = [f':(exclude,literal){node.worktree / path}' for path in denied]
+            # add from inside the seed, so every pathspec shares its prefix
+            # (git 2.54 and 2.55 can stage nothing for a nested directory
+            # pathspec beside an exclude outside it), and first, so a failure
+            # leaves the index untouched; only git's refusal of an ignored
+            # seed (exit 1, the hold the record pass overrides) is tolerated --
+            # any other failure fails the baseline rather than land it without
+            # the seed; LC_ALL pins the refusal's wording
+            cmd = ['git', '-C', f'{node.node_dir}', 'add', '--', '.']
+            cmd += [*_STAGE_EXCLUDES, *withheld]
+            env = {**os.environ, 'LC_ALL': 'C'}
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            refusal = 'The following paths are ignored by one of your .gitignore files'
+            ignored = result.returncode == 1 and refusal in result.stderr
+            if result.returncode != 0 and not ignored:
+                error = result.stderr.strip()
+                raise RuntimeError(
+                    f'git add of {seed_dir} failed (exit {result.returncode}):'
+                    f' {error!r}'
+                )
         # -f mirrors the work commits' record pass: the wiki's paths are
         # explicit and exclude-filtered, so an external ignore rule cannot
         # silently eat the wiki
@@ -593,21 +620,6 @@ def commit_user_init(node: Node, message: str) -> str:
         if forced:
             cmd = ['add', '-f', '--', *forced, *_STAGE_EXCLUDES]
             fractal.util.git.run(cmd, cwd=node.worktree)
-        if not estates:
-            return
-        # the seed answers to the work commits' estate law instead of -f: a
-        # plain add withholding what the law refuses, then the record pass's
-        # force-add of the records only a machine-local layer holds -- so
-        # fractal's own exclude block (tmp/, *.err, __pycache__/) keeps its
-        # hold on the runtime files beside the records; the plain add may
-        # fail (everything under it ignored) without failing the baseline
-        denied = _estate_denied(node, seed, estates)
-        withheld = [f':(exclude,literal){node.worktree / path}' for path in denied]
-        # add from inside the seed, so every pathspec shares its prefix: git
-        # 2.54 and 2.55 can stage nothing for a nested directory pathspec
-        # beside an exclude pathspec outside it
-        cmd = ['add', '--', '.', *_STAGE_EXCLUDES, *withheld]
-        fractal.util.git.run(cmd, cwd=node.node_dir, check=False)
         notices[:], _ = _stage_records(node, seed, estates, denied)
 
     _stage_paths()

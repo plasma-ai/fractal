@@ -161,11 +161,16 @@ baseline plain-adds the seed dir past the refused paths, then runs the record
 pass over that one estate, never another tree's seed sharing `.fractal/`. The
 plain add runs from inside the seed dir, so every pathspec shares its prefix:
 git 2.54 and 2.55 can stage nothing for a nested directory pathspec beside an
-exclude pathspec outside it. A force-add of the whole dir would honor only the
-stage excludes, so every runtime file fractal's exclude block holds -- `tmp/`,
-an agent's `.err` capture, `.session`, `setup.log`, `__pycache__/` -- would ride
-the baseline onto the top-level branch. The record pass's notices lead the
-baseline's confirmation line, as they lead a work commit's output.
+exclude pathspec outside it. It runs before the baseline's other adds and
+tolerates only git's refusal of an ignored seed (exit 1, the hold the record
+pass then overrides); any other failure, such as a held `index.lock` or an
+unreadable record, fails the baseline with git's message and nothing staged, so
+a baseline never lands without its seed. A force-add of the whole dir would
+honor only the stage excludes, so every runtime file fractal's exclude block
+holds -- `tmp/`, an agent's `.err` capture, `.session`, `setup.log`,
+`__pycache__/` -- would ride the baseline onto the top-level branch. The record
+pass's notices lead the baseline's confirmation line, as they lead a work
+commit's output.
 
 fractal owns its estate staging (`_stage_records`): after the plain adds, any
 estate file an ignore rule held out is re-evaluated against fractal-normal rules
