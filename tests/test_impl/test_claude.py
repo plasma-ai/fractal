@@ -76,6 +76,7 @@ __all__ = [
     'test_settle_marks_a_record_missing_part_of_a_reply',
     'test_settle_marks_an_entry_it_cannot_read_whole',
     'test_settle_marks_a_reply_it_cannot_price',
+    'test_settle_marks_a_reply_that_searched_the_web',
     'test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result',
     'test_settle_prices_a_recorded_launch_as_its_cost_record_does',
     'test_cost_baseline_is_the_total_a_resume_restores',
@@ -2029,6 +2030,58 @@ def test_settle_marks_a_reply_it_cannot_price(
     assert verdict is marked
     row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(booked + _USAGE_SECOND_COST + extra)
+
+
+@pytest.mark.parametrize(
+    argnames=('after', 'searches', 'fetches', 'marked'),
+    argvalues=[
+        # a killed launch's reply that searched the web twice
+        pytest.param(None, 2, 0, True, id='killed-searched'),
+        # past a result, a reply after it that searched
+        pytest.param(_AFTER, 2, 0, True, id='after-searched'),
+        # no search, no fee
+        pytest.param(None, 0, 0, False, id='no-search'),
+        # claude charges a web fetch only its tokens
+        pytest.param(None, 0, 3, False, id='fetched'),
+    ],
+)
+def test_settle_marks_a_reply_that_searched_the_web(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after: Optional[str],
+    searches: int,
+    fetches: int,
+    marked: bool,
+) -> None:
+    """A reply that searched books its tokens, marked for the fee left out.
+
+    Claude Code charges each web search a fee on top of the reply's
+    tokens, which the price table does not carry, so the step books the
+    tokens and is marked partly unpriced -- killed, or past a result. A
+    web fetch costs only its tokens.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    # real-shaped (claude 2.1.300): every reply's usage counts its server tools
+    tools = {'web_search_requests': searches, 'web_fetch_requests': fetches}
+    usage = {**_USAGE_SECOND, 'server_tool_use': tools}
+    content = _transcript_line('msg_a', _USAGE_FIRST)
+    content += _transcript_line('msg_b', usage, stamp=_LATE)
+    backend, step_id = _settling(node_with_db, tmp_path, monkeypatch, content)
+    # past a result, its figure covers the reply before it
+    booked = _USAGE_FIRST_COST
+    if after is not None:
+        booked = 0.01
+        node_with_db.record.step_cost(step_id=step_id, cost=booked)
+    verdict = backend.settle_cost(
+        step_id,
+        started=_OPENED,
+        ended=_CLOSED,
+        after=after,
+    )
+    assert verdict is marked
+    row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(booked + _USAGE_SECOND_COST)
 
 
 @pytest.mark.parametrize(

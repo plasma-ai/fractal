@@ -11,6 +11,7 @@ launches with stubbed agents -- lives in ``test_cli/test_run_modes.py``.
 from __future__ import annotations
 
 import contextlib
+import copy
 import dataclasses
 import io
 import itertools
@@ -58,6 +59,7 @@ from tests._helpers import (
     _past_timestamp,
     _stub_run_script,
 )
+from tests.test_impl.rollouts import spawning_thread
 
 from ._agents import SampleAgent
 from .conftest import _record_step_cost, _spawn_parent_child
@@ -78,6 +80,7 @@ __all__ = [
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
     'test_boot_gate_vets_the_recorded_group',
     'test_boot_waits_for_a_running_merge',
+    'test_a_failed_active_stamp_names_the_status_the_node_keeps',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
@@ -127,6 +130,7 @@ __all__ = [
     'test_every_kill_prices_the_launch_from_its_transcript',
     'test_resumed_launch_books_only_its_own_spend',
     'test_unsettled_result_figure_books_the_launch_record_instead',
+    'test_failed_codex_attempts_count_toward_the_cap',
     'test_agent_launch_failure_books_a_failed_step',
     'test_setup_tolerates_non_utf8_output',
     'test_unsupported_provider_frontmatter_refuses_the_step',
@@ -651,8 +655,8 @@ class ScriptedCodex(CodexAgent):
     """The real codex backend and parser over a scripted bash stand-in.
 
     Each launch runs the next script in place of ``codex``, in the
-    production spawn shape, without capturing a rollout window: the
-    scripted launches fail, and a failed launch never reads one.
+    production spawn shape, without capturing a rollout window, so its
+    failed launches stay unpriced.
     """
 
     def __init__(self: ScriptedCodex, node: Node, scripts: list[str]) -> None:
@@ -679,6 +683,63 @@ class ScriptedCodex(CodexAgent):
             errors='replace',
             **kwargs,
         )
+        self.spawned.append(process)
+        return process
+
+
+class RolloutCodex(CodexAgent):
+    """The real codex backend over a stand-in that writes its rollout.
+
+    Each launch spawns through the backend's own hook, so the rollout
+    window is captured before it as for codex; the stand-in appends its
+    next batch of rollout records to ``thread``'s dated rollout under the
+    node's codex home, prints its stdout frames, and exits 1.
+    """
+
+    def __init__(
+        self: RolloutCodex,
+        node: Node,
+        thread: str,
+        launches: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]],
+    ) -> None:
+        """Initialize ``RolloutCodex``."""
+        super().__init__(node, 'codex')
+        self.rollout = (
+            self.config_dir
+            / 'sessions/2026/09/15'
+            / f'rollout-2026-09-15T17-51-25-{thread}.jsonl'
+        )
+        self.launches = list(launches)
+        self.spawned: list[subprocess.Popen] = []
+
+    def __deepcopy__(self: RolloutCodex, memo: dict[int, Any]) -> RolloutCodex:
+        """Share the stand-in: event payloads copy their source, not processes."""
+        return self
+
+    def _spawn(
+        self: RolloutCodex,
+        invocation: Any,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Run the next launch in place of ``codex``, its window captured first."""
+        records, frames = self.launches.pop(0)
+        # stage the batch beside the sessions tree, outside the window's glob
+        staged = self.config_dir / f'launch-{len(self.spawned)}.jsonl'
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text(
+            ''.join(json.dumps(record) + '\n' for record in records),
+            encoding='utf-8',
+        )
+        script = '; '.join(
+            [
+                f'mkdir -p {shlex.quote(str(self.rollout.parent))}',
+                f'cat {shlex.quote(str(staged))} >> {shlex.quote(str(self.rollout))}',
+                *(_echo(frame) for frame in frames),
+                'exit 1',
+            ]
+        )
+        stand_in = dataclasses.replace(invocation, argv=('bash', '-c', script))
+        process = super()._spawn(stand_in, **kwargs)
         self.spawned.append(process)
         return process
 
@@ -1649,6 +1710,50 @@ def test_boot_waits_for_a_running_merge(
     assert set(launched_as) == {'active'}
     assert output.getvalue().count(notice) == 1
     assert readme.read_text(encoding='utf-8') == '# test\n'
+
+
+@pytest.mark.parametrize(
+    argnames=('boot', 'kept', 'live'),
+    argvalues=[
+        ('start', 'idle (starting)', '--live still reads it active'),
+        ('resume', 'paused', '--live reads it paused too'),
+    ],
+)
+def test_a_failed_active_stamp_names_the_status_the_node_keeps(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    boot: str,
+    kept: str,
+    live: str,
+) -> None:
+    """A boot whose active stamp fails says which status the node keeps.
+
+    The stamp is guarded so a transient failure never aborts the run, and
+    nothing re-stamps a missed one: a start keeps its ``idle``, which the
+    boot-window rule reads as ``active`` under ``--live``, while a resume
+    keeps the ``paused`` the pause left, which no reading relabels.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    if boot == 'resume':
+        node.status_set('active')
+        node.record.run_start()
+        node.status_set('paused')
+    status_set = node.status_set
+
+    def _refuse_active(status: str, *args: Any, **kwargs: Any) -> None:
+        if status == 'active':
+            raise OSError('status write refused')
+        status_set(status, *args, **kwargs)
+
+    monkeypatch.setattr(node, 'status_set', _refuse_active)
+    loop = MockLoop(node, resume=boot == 'resume')
+    loop.run()
+    out = capsys.readouterr().out
+    banner = next(line for line in out.splitlines() if 'Active stamp failed' in line)
+    assert f'the node reads {kept} for this run' in banner
+    assert live in banner
 
 
 def test_continue_restore_lands_config_all_or_nothing(
@@ -3878,6 +3983,90 @@ def test_unsettled_result_figure_books_the_launch_record_instead(
     assert [cost for cost, final in agent.flushed if final] == [_SAVED_TOTALS[0]]
     err = capsys.readouterr().err
     assert "Warning: the launch's result figure could not be settled" in err
+
+
+def test_failed_codex_attempts_count_toward_the_cap(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Each attempt codex refuses at capacity books its spend before the retry.
+
+    The refusal lands after two paid responses, so the attempt's stream
+    closes unpriced while its rollout's counter grew: the launch's settle
+    books that growth before the loop weighs the retry. The retry resumes
+    the thread and books only its own growth, and the two attempts together
+    spend the run's cap, so the backoff before a third ends the run instead
+    of buying it.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    model = next(
+        record['payload']['model']
+        for record in spawning_thread
+        if record['type'] == 'turn_context'
+    )
+    rates = {
+        'input_cost_per_token': 1e-5,
+        'cache_read_input_token_cost': 1e-6,
+        'output_cost_per_token': 5e-5,
+    }
+    monkeypatch.setattr(pricing, '_load', lambda: {model: rates})
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, agent='codex', model=model, max_cost=0.15, step_retries=2)
+    # each attempt runs the captured turn through its second response and the
+    # tool result codex sends on its third request, which codex refuses at
+    # capacity; the retry's counter carries on from the first attempt's
+    thread = spawning_thread[0]['payload']['id']
+    second = [
+        index
+        for index, record in enumerate(spawning_thread)
+        if record['type'] == 'token_usage_record'
+    ][1]
+    result = next(
+        index
+        for index in range(second, len(spawning_thread))
+        if spawning_thread[index]['payload'].get('type') == 'function_call_output'
+    )
+    paid = copy.deepcopy(spawning_thread[: result + 1])
+    spent = paid[second]['payload']['thread_token_usage']
+    retry = copy.deepcopy(paid[1:])
+    for record in retry:
+        if record['type'] == 'token_usage_record':
+            counter = record['payload']['thread_token_usage']
+            record['payload']['thread_token_usage'] = {
+                key: count + spent[key] for key, count in counter.items()
+            }
+    message = 'Selected model is at capacity. Please try a different model.'
+    refusal = {'type': 'event_msg', 'payload': {'type': 'error', 'message': message}}
+    frames = [
+        {'type': 'thread.started', 'thread_id': thread},
+        {'type': 'turn.started'},
+        {'type': 'error', 'message': message},
+    ]
+    launches = [
+        ([*paid, refusal], frames),
+        ([*retry, refusal], frames),
+        ([refusal], frames),
+    ]
+    agent = RolloutCodex(loop_node, thread, launches)
+    ScriptedLoop(loop_node, agent).run()
+    out = capsys.readouterr().out
+    # both attempts booked the growth of the counter they ran past
+    attempt = (
+        (spent['input_tokens'] - spent['cached_input_tokens'])
+        * rates['input_cost_per_token']
+        + spent['cached_input_tokens'] * rates['cache_read_input_token_cost']
+        + spent['output_tokens'] * rates['output_cost_per_token']
+    )
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == pytest.approx([attempt, attempt])
+    assert loop_node.cost.spent() == pytest.approx(2 * attempt)
+    # a refusal is whole, and the spent cap bought no third attempt
+    assert all('unpriced' not in row for row in _step_rows(loop_node))
+    assert len(agent.spawned) == 2
+    assert 'Subtree cost budget reached' in out
 
 
 def test_agent_launch_failure_books_a_failed_step(

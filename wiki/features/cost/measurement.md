@@ -59,10 +59,11 @@ or rewritten log, an interrupted or doubled turn, another thread's records, a
 sum the thread counter disputes, an unpriced model, a sub-agent log the window
 cannot bind to the turn (below), or a log with no per-response records at all
 (codex older than 0.153 writes none) -- records `NULL` cost and logs
-`codex usage unpriced: <reason>` at warning level on the agent's logger, while a
-step whose process exits non-zero records `NULL` silently: the exit is the
-loop's to attribute. An earlier interrupted turn need not be complete -- its
-captured counter is the resume baseline, and its own step stays unpriced.
+`codex usage unpriced: <reason>` at warning level on the agent's logger. A step
+whose process exits non-zero closes its stream unpriced and silent -- the exit
+is the loop's to attribute -- and is priced from its counters after exit
+(below). An earlier interrupted turn need not be complete: its captured counter
+is the resume baseline.
 
 A sub-agent thread the turn spawns or drives writes its own log beside the
 thread's, and that spend is the step's. The window maps every log new or grown
@@ -126,6 +127,46 @@ archives or writes at another depth is invisible to it, one whose session
 metadata carries a plain string `source` (`exec`, `cli`) and names a root other
 than the step's thread as its session is taken for a sibling root, and such a
 step prices its own rows alone.
+
+A codex step whose process exits non-zero -- a request refused because the
+served model is at capacity, a crash, a deadline or other kill -- is priced
+after exit by the codex settle hook (`CodexAgent._settle_cost`), through the
+`Agent.settle_cost` call the loop makes for every launch (below). The stream's
+finish keeps that launch's window, keyed by the thread the step row names (the
+stream's, or the resumed one when the stream died before naming it), and the
+settle reads it leniently (`UsageWindow.settle`). The rollouts bind to the
+launch exactly as above -- the same file identity and prefix checks, the same
+spawn and sibling-root rules, each refusal logged as
+`codex usage unpriced: <reason>` and leaving the row `NULL` -- but the turn need
+not complete, and an interrupted or refused one is no fault. The thread's spend
+is its last `token_usage_record` counter less the counter captured at spawn, and
+each spawned rollout's is the same past its captured length, each priced at the
+one served model its `turn_context` records name; a rollout that grew nothing
+needs no model and adds nothing. A child's rows must still name the child and
+the root and ride one of the parent window's turns. A token count
+(`token_count`'s `total_token_usage`) past the last usage record is a response
+with no record -- codex older than 0.153 writes none -- and refuses the settle
+rather than book that spend as free, as does a counter below its baseline. The
+settle runs after the process exits and before the loop decides the retry, so a
+failed attempt counts toward the run's spend, its caps and the step leash, and a
+run of repeated provider failures can end on its budget instead of retrying
+unseen. A clean exit keeps no window, and with `after` the settle adds nothing:
+codex spends nothing past its result.
+
+A failed codex step's record leaves part of a reply out when a rollout -- the
+thread's or a sub-agent's -- ends on a request in flight. A request is in flight
+from a turn's start (`task_started`), or from a `response_item` past the last
+counter (a tool's result codex sends next, or a reply it was streaming), until
+the next counter closes it, the turn completes (`task_complete`), or an `error`
+record refuses it. A refusal such as the at-capacity error is not billed, so a
+refused attempt reads whole; a kill mid-request books what the counters
+recorded, marked `partly unpriced` (below). A window with a request in flight
+and no counter growth prices nothing -- the row stays `NULL`, marked `unpriced`,
+never a `$0` that would misstate an unknown spend -- while one with no growth
+and no request in flight books a knowable `$0`. A response item is told by its
+kind's quoted name and never decoded, like every kind the window skips; a
+parallel tool call still running while a sibling's result is recorded reads as a
+request in flight, the conservative side.
 
 A Claude result frame's figure (`total_cost_usd`, or through openrouter its
 `modelUsage` table priced through the alias chain) is the session's running
@@ -242,6 +283,12 @@ reads it from each transcript it opens:
   named model, which `_usage_cost` reports the same way. A synthetic reply
   (Claude Code's `<synthetic>` stand-in for an API error) holds a usage of
   zeros, so it leaves nothing out; past a result, only a reply after it counts;
+- a reply that searched the web (a nonzero
+  `server_tool_use.web_search_requests`): Claude Code's own cost record charges
+  each search a fee beside the tokens ($0.01 on 2.1.300), which the pricing
+  table does not carry, so the step books the tokens alone. A web fetch
+  (`web_fetch_requests`) bills only its tokens, so it leaves nothing out; past a
+  result, only a reply after it counts;
 - a sub-agent transcript it cannot read, and, on a launch with no result figure,
   a missing or unreadable session transcript or a settle that raises (the loop
   marks the last itself);
@@ -306,8 +353,8 @@ the settle as `replies`, which closes the session transcript's window with it at
 that usage -- so the step books it and reads as whole, unless Claude wrote the
 reply and a turn after it (its continuation, a few milliseconds later), which
 then ends the window as written. Only a delta with no usage leaves the reply
-itself unpriced. A cut-off Codex step stays `NULL`: its usage window accepts
-exactly one completed turn and it has no settle path.
+itself unpriced. A cut-off Codex step is settled from its rollout counters
+instead (above).
 
 ## Rollups and the per-run subtree
 
