@@ -36,7 +36,8 @@ The iteration prompt hands both locations to the agent as the `WIKI_DIR` and
 `fractal init` creates the project wiki when none exists
 (`fractal/core/worktree.py`): the validated project name becomes the wiki name,
 and the wiki is seeded with the strict ascii/identifier naming policy so project
-pages mirror source-module identifiers. A pre-existing non-empty `wiki/`
+pages mirror source-module identifiers; the policy allows `.`, so a non-markdown
+file keeps its extension (`controls.json`). A pre-existing non-empty `wiki/`
 directory that is not a wiki (no `.wiki/` marker) is refused, never adopted —
 the operator must convert it explicitly with `wiki init`; an empty one is
 initialized in place. An existing wiki (one carrying `_index.md`) is adopted as
@@ -55,7 +56,12 @@ commit (`fractal/core/commit.py`) then commits the fresh wiki along with the
 forks from a committed wiki with merge handling in place (see
 [[features/wiki_system/merge_behavior]]).
 
-Memory starts empty; the node lays it out as topical pages as it learns.
+Memory starts empty, seeded by `node init` (`fractal/_scripts/init.sh`) with the
+same naming policy; the node lays it out as topical pages as it learns. A file
+the commit refuses as no node record (a binary, an archive, a log; see
+[[features/loop/commit_pipeline]]) still gets a row in memory's index, which
+then links a file the commit left out, so such files belong in the node's `tmp/`
+or in project space.
 
 ## Maintenance at commit
 

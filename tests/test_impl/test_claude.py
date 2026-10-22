@@ -75,6 +75,7 @@ __all__ = [
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
     'test_settle_marks_a_record_missing_part_of_a_reply',
     'test_settle_marks_an_entry_it_cannot_read_whole',
+    'test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result',
     'test_settle_prices_a_recorded_launch_as_its_cost_record_does',
     'test_cost_baseline_is_the_total_a_resume_restores',
 ]
@@ -1963,6 +1964,76 @@ def test_settle_marks_an_entry_it_cannot_read_whole(
     assert backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED) is True
     row = node_with_db.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + 50 * 3e-6)
+
+
+@pytest.mark.parametrize(
+    argnames=('after_result', 'record', 'marked'),
+    argvalues=[
+        # the settle finds no record of the sub-agent's spend
+        pytest.param('sub-agent', None, True, id='no-transcript'),
+        # the record holds the spend at a model the pricing cannot price
+        pytest.param('sub-agent', 'unpriced', True, id='unpriced'),
+        # the settle books the spend past the result
+        pytest.param('sub-agent', 'priced', False, id='priced'),
+        # nothing follows the result, whose figure is whole
+        pytest.param('nothing', None, False, id='nothing-after'),
+        # a later result's figure covers the sub-agent's spend before it
+        pytest.param('later result', None, False, id='later-result'),
+    ],
+)
+def test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after_result: str,
+    record: Optional[str],
+    marked: bool,
+) -> None:
+    """A sub-agent streaming past the result marks a settle that books none of it.
+
+    Claude Code can outlive its result while a background sub-agent runs.
+    The stream leaves that spend to the settle, which books it from the
+    sub-agent's transcript; when the settle cannot (no record, or one it
+    cannot price), the step's figure misses spend the stream saw. A result
+    nothing follows, or one a later result covers, is whole.
+    """
+    rates = {} if record == 'unpriced' else _PRICING
+    monkeypatch.setattr(pricing, '_load', lambda: rates)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-home'))
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude')
+    session = str(uuid.uuid4())
+    (step_id,) = _steps(node, 1)
+    # the capture's turn through its result, then a sub-agent's reply (the
+    # capture's own reply frame, re-parented), then the wake-up's own result
+    with _BACKGROUND_WAIT.open(encoding='utf-8') as file:
+        capture = [line.replace('@SESSION@', session) for line in file]
+    lines = capture[:18]
+    if after_result != 'nothing':
+        reply = json.loads(capture[13])
+        reply['message']['id'] = 'msg_late'
+        reply['parent_tool_use_id'] = 'toolu_bg'
+        lines.append(json.dumps(reply) + '\n')
+    if after_result == 'later result':
+        lines += capture[18:]
+    result = backend.stream(lines, step_id=step_id)
+    # the sub-agent's transcript holds its reply, completed past the result
+    if record is not None:
+        transcript = pathlib.Path(backend.transcript(session)['path'])
+        subagents = transcript.with_suffix('') / 'subagents'
+        subagents.mkdir(parents=True)
+        main = _transcript_line('msg_main', _USAGE_FIRST)
+        transcript.write_text(main, encoding='utf-8')
+        late = _transcript_line('msg_late', _USAGE_SECOND, stamp=_LATE)
+        (subagents / 'agent-a.jsonl').write_text(late, encoding='utf-8')
+    verdict = backend.settle_cost(
+        step_id,
+        started=_OPENED,
+        ended=_CLOSED,
+        after=_AFTER,
+        trailing=result.trailing,
+    )
+    assert verdict is marked
 
 
 @pytest.mark.parametrize(

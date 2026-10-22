@@ -19,7 +19,8 @@ orients its level and lists its children, and topics without children are
 standalone leaf `.md` pages. Fractal's project wikis name pages in ascii
 snake_case — the strict ascii/identifier naming policy seeded at `wiki init`
 rejects hyphens and spaces, so page names can mirror the source modules they
-document.
+document. The policy allows `.`: the rule judges a non-markdown file by its
+whole name, so the allowance lets its extension pass (`controls.json`).
 
 ## Frontmatter
 

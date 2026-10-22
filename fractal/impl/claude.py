@@ -141,6 +141,10 @@ class ClaudeParser(StreamParser):
                 )
         message_type = message.get('type')
         top_level = message.get('parent_tool_use_id') is None
+        # a sub-agent running past a result spends past its figure, which
+        # only the settle books (see the assistant frames below)
+        if self.final and not top_level:
+            self.trailing = True
         # assistant text deltas and tool-use headers
         if message_type == 'stream_event':
             event = message.get('event') or {}
@@ -304,6 +308,8 @@ class ClaudeParser(StreamParser):
             if cost is not None:
                 self.cost = cost
                 self.final = True
+                # the figure covers every sub-agent frame before it
+                self.trailing = False
             # a --max-budget-usd hit is a clean budget stop, not an agent
             # error, even though claude exits non-zero on it
             subtype = message.get('subtype')
