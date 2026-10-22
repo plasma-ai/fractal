@@ -162,6 +162,16 @@ and marks the step partly unpriced (below). A window that prices nothing leaves
 the cost `NULL`, marked `unpriced`. A killed launch never reaches a result
 figure, so the baseline never touches it: its settle prices its own window.
 
+A chat turn ([[features/chat/_index|chat]]) books nothing, but its reply's
+closing line shows the same figure. A fork restores the source session's latest
+record just as a resume does, so `Node.chat` and the cockpit's `ChatTurn` read
+`Agent.cost_baseline` of the invocation's session before spawning whenever its
+`mode` is `resume` or `fork` (the public `invocation` verb stamps it), and hand
+it to the parser. A refused figure closes the turn on `$?`. A baseline read that
+raises refuses the figure without stopping the reply: `Node.chat` prints the
+loop's `Warning: reading the session cost baseline failed (...)` line, and the
+cockpit's turn, which never raises, adds an error line.
+
 A Claude launch that ends without its result frame -- killed by a deadline, a
 stall or thinking cap, a pause, or a dead stream -- carries only the stream's
 running estimate, which prices each reply from its first frame (or nothing, when
@@ -230,6 +240,10 @@ reads it from each transcript it opens:
 - a sub-agent transcript it cannot read, and, on a launch with no result figure,
   a missing or unreadable session transcript or a settle that raises (the loop
   marks the last itself);
+- on a launch whose result frame named its figure, a sub-agent the stream saw
+  running after the result (below) when the settle books no spend past it: its
+  transcript missing or unreadable, its usage unpriced, or the settle raising
+  (the loop marks the last itself);
 - a result figure the baseline could not settle (above), which the loop marks
   itself: the window stands in for a figure that can hold spend no transcript
   records.
@@ -244,26 +258,32 @@ after which the agent retries. Entries of types other than `user` and
 result frame's figure already covers the spend before it, so only a partial
 reply, an unanswered last turn or a malformed entry stamped after that instant
 counts; a completed launch with a partial line or an interrupted sub-agent
-before its result reads as whole, and a missing session transcript leaves out no
-spend the settle knows of.
+before its result reads as whole, and a missing session transcript leaves out
+only the spend the stream saw after the result (below).
 
 Past a result frame the transcript is the one source for further spend: the
 parser stops pricing sub-agent frames once its figure is final (only a new
 top-level reply reopens it), since Claude Code also streams a background
 sub-agent's replies with `parent_tool_use_id` set, and the settle adds them from
-the transcript.
+the transcript. Any sub-agent frame while the figure is final sets the parser's
+`trailing` flag, which the next result frame clears, since its figure covers
+every frame before it. `Agent.stream` carries the flag on
+`StreamResult.trailing`, and the loop passes it to `settle_cost`, which marks
+the step when the settle books nothing past the result; a launch nothing follows
+past its result stays whole whatever the settle finds. On Claude Code 2.1.300,
+`-p` holds its result until background agents finish, so no frame follows it.
 
 The step books what was recorded, with no estimate for the missing part:
 `_settle_cost` returns a `Settlement` (`cost`, `cut_off`), `Agent.settle_cost`
 returns the verdict, and the loop prints
-`Warning: a reply's spend is missing from the launch's record` to stderr (which
-reaches `headless.log`) and passes it to `step_end`, at the steered close too,
-which appends `; partly unpriced` to the row's metadata at any terminal when the
-row holds a figure; a row with no figure is not partly priced, so its end marks
-it `; unpriced` instead, at any terminal -- a completed launch whose record
-leaves spend out and holds none never reads as a silent `NULL`. `step_cost`'s
-strip of a stale `unpriced` marker leaves `partly unpriced` alone, since the
-missing part stays unpriced.
+`Warning: part of the launch's spend is missing from its record` to stderr
+(which reaches `headless.log`) and passes it to `step_end`, at the steered close
+too, which appends `; partly unpriced` to the row's metadata at any terminal
+when the row holds a figure; a row with no figure is not partly priced, so its
+end marks it `; unpriced` instead, at any terminal -- a completed launch whose
+record leaves spend out and holds none never reads as a silent `NULL`.
+`step_cost`'s strip of a stale `unpriced` marker leaves `partly unpriced` alone,
+since the missing part stays unpriced.
 
 The settle runs after every launch and parses every line of each transcript it
 opens, before the window check (a `StructuredOutput` call can precede the
@@ -335,7 +355,7 @@ Zero and unknowable are never conflated:
   (`N unpriced steps (NULL cost) excluded`) while stdout stays parseable.
 - A priced step marked `partly unpriced` (above) sums as if whole, so the same
   commands disclose those too
-  (`N partly unpriced steps (a reply's spend missing from the record) counted at recorded spend`,
+  (`N partly unpriced steps (some spend missing from the record) counted at recorded spend`,
   counted by `Cost.partly_unpriced`). Nothing adds a margin for the spend no
   record holds ([[features/cost/budgets|budgets]]).
 

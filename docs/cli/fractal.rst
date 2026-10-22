@@ -247,6 +247,24 @@ when the tree is tracked — using an explicit pathspec, so any other staged
 work is never swept in, and it does not push. Its subject is
 ``<branch>: init (<message>)``.
 
+On a **child node** every commit, ``--init`` included, appends its full
+report to ``tmp/commit.log`` in the node directory before printing it, so
+the report survives a caller whose output is lost — a shell redirect whose
+session ended while the commit went on to land. The report is what the
+command prints: the warnings, the held-out counts, git's commit output, the
+push notice, and, when the commit fails (a failed retry included), a failing
+hook's output in its error. A passing hook's output goes to git's stderr,
+which the report does not keep. Each entry opens with a banner stamped with
+the UTC time: ``=== Commit at <time> (<sha>) ===`` names the commit HEAD
+moved to, and ``(no commit)`` marks a run that committed nothing. A failed
+run's entry holds its ``Error:`` text in place of the report, and its
+banner reads ``(failed)``, or the sha when the commit landed before the
+failure (a failed push). ``--check`` and a user node's baseline log
+nothing. The log is git-ignored scratch, so it is never committed, survives
+``node start --continue --clean``, and appends without a size bound. A
+failed write prints one ``Warning:`` line on stderr and never fails the
+commit.
+
 ``MESSAGE``
    Short description appended to the commit message. Required unless
    ``--check``.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import os
 import pathlib
 import signal
@@ -27,6 +28,7 @@ __all__ = [
     '_stub_run_script',
     '_alive',
     '_kill_tagged',
+    '_save_cost_state',
 ]
 
 
@@ -201,3 +203,39 @@ def _kill_tagged(tag: str) -> None:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def _save_cost_state(path: pathlib.Path, session: str, total: float) -> None:
+    """Append the ``cost-state`` record claude saves to a transcript at exit.
+
+    Real-shaped (claude 2.1.300): the session's running total, and the
+    per-model usage behind it. A resume, or a fork, of the session counts
+    its result figure on from that total.
+    """
+    state = {
+        'type': 'cost-state',
+        'sessionId': session,
+        'totalCostUSD': total,
+        'totalAPIDuration': 5780,
+        'totalAPIDurationWithoutRetries': 5779,
+        'totalToolDuration': 227,
+        'totalLinesAdded': 0,
+        'totalLinesRemoved': 0,
+        'totalDuration': 5972,
+        'startTime': 1792304015631,
+        'modelUsage': {
+            'claude-fable-5': {
+                'inputTokens': 154,
+                'outputTokens': 5933,
+                'thinkingTokens': 5437,
+                'cacheReadInputTokens': 359431,
+                'cacheCreationInputTokens': 23408,
+                'webSearchRequests': 0,
+                'costUSD': total,
+            },
+        },
+        'hasUnknownModelCost': False,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps(state) + '\n')

@@ -180,6 +180,16 @@ may include breaking changes, each listed under a Breaking heading.
   on a no-op commit too. The estate count covers every estate file left
   unstaged: refused on either staging path, or a record the force-add could not
   stage.
+- `fractal commit` appends each report to `tmp/commit.log` in the node's
+  directory before printing it, so the report the command prints survives a
+  caller whose output is lost, such as a shell redirect whose session ended
+  while the commit went on to land: the warnings, held-out counts, git's commit
+  output, the push notice, and, when the commit fails, a failing hook's output
+  in its error. Each entry opens with `=== Commit at <UTC time> (<sha>) ===`,
+  naming the commit it landed, or `(no commit)`; a failed commit's entry holds
+  its `Error:` text and reads `(failed)`. `--check` and a user node's baseline
+  log nothing. The log is git-ignored scratch: it is never committed and
+  survives `node start --continue --clean`.
 - The packaged node charter and memory skill tell a node to name its own files
   through `$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR`, with scratch in
   `$NODE_DIR/tmp/` — a path at the worktree root is the project, not the node,
@@ -242,6 +252,9 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- The loop guide's commit pipeline says the seeded `lint.sh` only warns on
+  `wiki lint` findings: they appear in the commit output and do not fail the
+  commit. It read as if any wiki lint finding failed the commit.
 - `fractal node init --help` describes `--values` as the path to a TOML file of
   input values. It described literal TOML values, so TOML text passed in place
   of a path failed with a file name error.
@@ -318,6 +331,13 @@ may include breaking changes, each listed under a Breaking heading.
   ends at the output cap books the usage the stream recorded for it, so a
   thinking-cap kill reads as whole unless the stream reported no usage. A killed
   Codex step still records no cost.
+- A Claude step whose stream shows a sub-agent still running after the result
+  frame is marked `; partly unpriced` when none of that later spend can be
+  priced: its transcript is missing or unreadable, its model is unpriced, or the
+  settle fails. The step booked the result's figure as whole, though the stream
+  had seen spend past it. A step whose stream shows nothing after its result
+  stays whole whatever the settle finds. Claude Code 2.1.300 holds its result
+  until background agents finish, so it streams no such frames.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed
@@ -333,6 +353,15 @@ may include breaking changes, each listed under a Breaking heading.
   A step whose record leaves spend out and holds no figure, such as a waiting
   SYNC whose failed launch left no transcript, is now marked `; unpriced` even
   when it completed.
+- `fractal node chat` and the cockpit's chat pane show a reply on a resumed or
+  forked Claude session at the turn's own cost instead of the session's running
+  total. A fork counts its result figure on from the source session's saved
+  total just as a resume does, so the turn reads that total before it spawns and
+  shows the figure less it, as the loop books a resumed step, or `$?` when the
+  total cannot be read. The partly unpriced disclosure of
+  `fractal node cost spent` and `breakdown` reads
+  `(some spend missing from the record)`, since it also counts steps whose
+  result figure was refused.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the
@@ -397,6 +426,14 @@ may include breaking changes, each listed under a Breaking heading.
   skip it, which is safe; committing or moving the file clears the refusal. A
   wiki declared at the worktree root refuses the merge by name, since every
   refresh would walk the whole worktree and leave the target dirty.
+- The wikis fractal creates, the project wiki `fractal init` scaffolds and each
+  node's memory wiki, accept dotted file names such as `controls.json`,
+  `notes.txt`, and `fit.py`: their seeded ascii/identifier naming policy allows
+  `.`. The identifier rule judged a non-markdown file by its whole name,
+  extension included, so `wiki update` skipped the file and `wiki lint` refused
+  it. A name with a hyphen or a space is still refused. An existing wiki keeps
+  its settings: to accept dotted names there, add `"allow": "."` to the `naming`
+  block of its `.wiki/settings.json`, and commit the change for a project wiki.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The
@@ -433,6 +470,14 @@ may include breaking changes, each listed under a Breaking heading.
   `include`, `exclude`) beside the table are ignored, so one node's record can
   seed another, and a `[values]` table beside any other top-level key refuses,
   naming the keys.
+- `fractal node diff` never judges the trust stanza for this repository that
+  Codex appends to a node's `.codex/config.toml` (a `[projects."<path>"]` header
+  keyed to the repository's main worktree, or to the node's own worktree, and
+  `trust_level = "trusted"`), so a node that has run Codex diffs clean instead
+  of reporting drift. Any other change to the file still reports, diffed without
+  the stanza. A stanza trusting any other path is drift, since trust enables
+  project-local settings, as is a projects table carrying more than the trusted
+  level.
 - The billing breaker no longer counts a step refused before its launch — a cost
   cap over a model the price table cannot price, or a per-step agent or provider
   that cannot run — as an instant zero-cost failure: such a refusal bought no
@@ -491,6 +536,10 @@ may include breaking changes, each listed under a Breaking heading.
   its scope from outside it, naming the old path, as the merge's footprint check
   does. The scope check read git's rename-detecting diff, which names only a
   rename's new path, so the deletion outside the scope committed unchecked.
+- `fractal destroy --help` and `fractal reset --help` say the command deletes
+  the tree's local node branches, unmerged work included, while the root branch
+  and remote branches remain. Only the confirmation prompt said so, and
+  `--force` skips it.
 - A node's agents and its `setup.sh` run without a `VIRTUAL_ENV`, whether a node
   start, the tmux server, or the launching shell supplied it, so `uv run` in a
   node worktree uses the worktree's project environment without warning on every

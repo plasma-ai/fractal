@@ -29,15 +29,16 @@ owns:
 
 - **Invocation building.** A composed invocation is pure serializable data: the
   base command's argv words, the working directory (the node's worktree), an
-  environment overlay, and an optional caller-minted session id. Backends
-  contribute only their reserved provider keys to the environment; the public
-  verb composes the full subprocess environment, and a reserved key valued as
-  unset scrubs routing variables inherited from an ancestor's provider route.
-  The verb always unsets a few ambient variables too: the effort and
-  model-forcing knobs, so a pin reaches the agent only through its flag, and
-  `VIRTUAL_ENV`, which names the launching project's venv rather than the node
-  worktree's. Agent commands split on whitespace only — shell quoting is refused
-  at accept time.
+  environment overlay, an optional caller-minted session id, and the mode the
+  launch reaches that session in (fresh, resume, or fork), which tells a
+  consumer whether it continues the session's spend. Backends contribute only
+  their reserved provider keys to the environment; the public verb composes the
+  full subprocess environment, and a reserved key valued as unset scrubs routing
+  variables inherited from an ancestor's provider route. The verb always unsets
+  a few ambient variables too: the effort and model-forcing knobs, so a pin
+  reaches the agent only through its flag, and `VIRTUAL_ENV`, which names the
+  launching project's venv rather than the node worktree's. Agent commands split
+  on whitespace only — shell quoting is refused at accept time.
 
 - **Spawning and stream parsing.** Agents are subprocesses driven line-by-line.
   Each backend ships a parser that turns its own wire format into normalized

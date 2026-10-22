@@ -19,6 +19,9 @@ Run `wiki --help` and `wiki <command> --help` for the CLI.
   through `$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR/tmp/`, never a bare
   `memory/` or `plans/` path: file tools resolve relative paths against the
   worktree root, which is the project, not your node.
+- **Keep binaries and logs out of memory.** A file the commit refuses (a binary,
+  an archive, a log) still gets a row in memory's index, which then links a file
+  the commit left out; put such files in `$NODE_DIR/tmp/` or in project space.
 - **Write knowledge, not history.** Never reference iteration numbers,
   timestamps, or chronological markers -- a reader shouldn't be able to tell how
   many iterations have run. Before COMMIT, scan memory and any page you promote

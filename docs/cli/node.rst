@@ -831,7 +831,15 @@ each file is compared against the node's live copy: ``NODE.md``, ``steps/``,
 ``scripts/``, ``skills/``, and — for each ``agents/<agent>/`` file — the
 live ``.<agent>/`` copy, all in the node's data directory. A live symlink
 and a file the template does not carry are never judged; a template file the
-node lacks is drift. Literal braces are valid output and are compared like any
+node lacks is drift. Codex trusts the project it runs in by appending a
+``[projects."<path>"]`` stanza with ``trust_level = "trusted"`` to
+``.codex/config.toml``, keyed to the repository's main worktree. The trust
+stanza for this repository at the end of that file, keyed to the main worktree
+or to the node's own worktree (compared as resolved paths), is never judged, so
+any other change there diffs without it. A stanza trusting any other path is
+drift, since trust enables project-local settings, as is a projects table
+carrying more than the trusted level. Literal braces are valid output and are
+compared like any
 other text. Source defaults are not merged again; deleting a required recorded
 input causes a rendering refusal. The recorded commit resolves as long as it
 is reachable, so a template folder
@@ -1203,7 +1211,7 @@ one run, iteration, or step. Prints ``untracked`` when the scope ran only
 cost-untracked steps; when ended steps carry no recorded cost, a stderr
 disclosure notes how many unpriced steps were excluded, and another notes
 how many steps count only their recorded spend because the record leaves
-part of a reply out.
+part of their spend out (a reply cut off, or a result figure refused).
 
 ``cost breakdown``
 ~~~~~~~~~~~~~~~~~~

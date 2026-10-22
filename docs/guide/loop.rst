@@ -587,8 +587,9 @@ that recorded no cost counts as zero in every sum, though its ``NULL`` means
 "unknown", never "$0"; a step that ended abnormally (any status other than
 ``completed``) with a session on its row but no figure flushed is marked
 ``unpriced`` in its metadata, and a figure that flushes later strips the
-marker. A ``claude`` step whose record leaves part of a reply out books the
-spend recorded and is marked ``partly unpriced`` instead (see
+marker. A ``claude`` step whose record leaves part of its spend out (a
+reply cut off, or a result figure refused) books the spend recorded and is
+marked ``partly unpriced`` instead (see
 :doc:`agents`); no
 cap adds a margin for the spend no record holds. These config keys (all
 USD) bound spend:
@@ -712,10 +713,12 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``--ignore-scope`` or ``--force``.
 2. **Refreshes and lints.** ``wiki update`` runs on the project wiki and the
    node's memory wiki, then ``scripts/lint.sh`` runs; either failing fails
-   the commit with the tool's output. Skipped with ``--force`` or ``--init``:
-   neither may block a backstop save or a baseline, the setup save a node
-   starts from, which carries only fractal's own setup — project content
-   takes an ordinary, linted commit.
+   the commit with the tool's output. The seeded ``lint.sh`` also runs
+   ``wiki lint`` on both wikis but only warns: its findings appear in the
+   commit output and do not fail the commit. Skipped with ``--force`` or
+   ``--init``: neither may block a backstop save or a baseline, the setup
+   save a node starts from, which carries only fractal's own setup — project
+   content takes an ordinary, linted commit.
 3. **Stages.** Scoped staging of the scope roots, node directory, and wiki
    (the whole worktree when unscoped), always excluding runtime artifacts
    (``**/.venv``, ``**/.db``, ``**/.db-*``, ``**/.status``, ``**/.paused``,
@@ -896,8 +899,8 @@ When a step fails, the steps after it are still booked as real rows —
 opened and immediately closed ``stopped`` with reason ``failed on <step>`` —
 so the activity log answers which steps never ran. An abnormally ended step
 that has a session but no recorded cost gets ``; unpriced`` appended to its
-metadata, and a step whose record leaves part of a reply out gets
-``; partly unpriced``.
+metadata, and a step whose record leaves part of its spend out (a reply
+cut off, or a result figure refused) gets ``; partly unpriced``.
 
 How a run ends
 ~~~~~~~~~~~~~~
@@ -993,9 +996,12 @@ step attempt, its duration, cost, and metadata reason — with ``--limit``,
 TUI (:doc:`/tui`) presents the same data interactively across the whole tree.
 
 Diagnostics persist in the node directory: ``setup.log`` holds the
-last setup output, ``<agent>.err`` the last launch's live stderr capture, and
+last setup output, ``<agent>.err`` the last launch's live stderr capture,
 ``tmp/err/<run>-<iter>-<step>.err`` a durable per-failure stderr snapshot for
-every failed or timed-out launch (retries add a ``-N`` serial).
+every failed or timed-out launch (retries add a ``-N`` serial), and
+``tmp/commit.log`` the report or error of every ``fractal commit`` run on the
+node, each under a banner naming its time and sha (see :doc:`/cli/fractal`);
+the loop's backstop saves describe themselves in their commit bodies instead.
 
 Steering a running loop
 -----------------------
