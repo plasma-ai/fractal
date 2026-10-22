@@ -6518,7 +6518,11 @@ class Node:
         """Commit the current iteration's work.
 
         Delegates to the ``core.commit`` pipeline (scope check, lint, stage,
-        commit, and push unless ``local`` is set).
+        commit, and push unless ``local`` is set). A child node's commit,
+        ``init`` included, appends its report -- or, on failure, its error --
+        to ``tmp/commit.log`` in the node directory before returning, stamped
+        with the UTC time and the sha HEAD moved to; ``check`` and a user
+        node's baseline log nothing.
 
         Args:
             message: Short description appended to the commit message.
@@ -6576,14 +6580,54 @@ class Node:
         # so an agent/operator commit resolves the iteration from the open
         # iteration row (else 0) and the commit event pins to the
         # active run/iter/step context
-        return commit.commit(
-            node=self,
-            message=message,
-            init=init,
-            check=check,
-            ignore_scope=ignore_scope,
-            force=force,
-        )
+        if check:
+            return commit.commit(node=self, message=message, check=True)
+        # log each report to the node's scratch before the caller prints it --
+        # a caller whose output dies (a shell redirect held by an ended agent
+        # session) loses the warnings and held-out counts while the commit
+        # lands; --check commits nothing, and a user node's baseline returns
+        # above unlogged (a tracked seed's force-add would stage tmp/ with it)
+        cmd = ['rev-parse', 'HEAD']
+        head = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
+
+        def _log_report(report: str, *, failed: bool) -> None:
+            # stamp the sha HEAD moved to -- a failed push follows a landed
+            # commit -- else the outcome
+            sha = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
+            if sha != head:
+                stamp = sha
+            elif failed:
+                stamp = 'failed'
+            else:
+                stamp = 'no commit'
+            banner = f'=== Commit at {fractal.util.time.utc_now()} ({stamp}) ==='
+            log = self.node_dir / 'tmp' / 'commit.log'
+            # a lost entry warns and never fails the commit it describes
+            try:
+                log.parent.mkdir(parents=True, exist_ok=True)
+                with log.open('a', encoding='utf-8', errors='replace') as stream:
+                    stream.write(f'{banner}\n{report}\n')
+            except OSError as error:
+                self.log(
+                    message='Warning: writing the commit report to tmp/commit.log'
+                    f' failed ({error})',
+                    level=logging.WARNING,
+                )
+
+        try:
+            output = commit.commit(
+                node=self,
+                message=message,
+                init=init,
+                check=check,
+                ignore_scope=ignore_scope,
+                force=force,
+            )
+        except Exception as error:
+            _log_report(f'Error: {error}', failed=True)
+            raise
+        _log_report(output, failed=False)
+        return output
 
     def _default_agent(self: Node) -> Optional[str]:
         """Return the node's default agent (the base of its ``agent`` command)."""
