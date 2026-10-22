@@ -242,6 +242,9 @@ may include breaking changes, each listed under a Breaking heading.
 
 ### Fixed
 
+- The loop guide's commit pipeline says the seeded `lint.sh` only warns on
+  `wiki lint` findings: they appear in the commit output and do not fail the
+  commit. It read as if any wiki lint finding failed the commit.
 - `fractal node init --help` describes `--values` as the path to a TOML file of
   input values. It described literal TOML values, so TOML text passed in place
   of a path failed with a file name error.
