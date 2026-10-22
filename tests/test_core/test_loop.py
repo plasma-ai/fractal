@@ -10,6 +10,7 @@ launches with stubbed agents -- lives in ``test_cli/test_run_modes.py``.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import json
 import logging
@@ -36,7 +37,7 @@ from fractal.constants import (
     STEP_PGID_FILE,
 )
 from fractal.core import loop as loop_module, pricing, worktree
-from fractal.core.agent import Agent, StreamEvent, StreamResult
+from fractal.core.agent import Agent, Invocation, StreamEvent, StreamResult
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
@@ -59,6 +60,7 @@ __all__ = [
     'test_provider_frontmatter_rebinds_the_boot_agent',
     'test_agent_env_publishes_node_branch',
     'test_agent_env_inherits_headless_launches',
+    'test_worktree_processes_inherit_no_virtual_env',
     'test_midrun_limit_edits_reach_the_next_step_env',
     'test_step_env_and_prompt_share_one_config_read',
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
@@ -1103,6 +1105,79 @@ def test_agent_env_inherits_headless_launches(
     loop = MockLoop(loop_node)
     expected = 'true' if headless else 'false'
     assert loop._agent_env('work')['FRACTAL_HEADLESS'] == expected
+
+
+def test_worktree_processes_inherit_no_virtual_env(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Setup and every step's agent run without the loop's ``VIRTUAL_ENV``.
+
+    An inherited ``VIRTUAL_ENV`` names the launching project's venv, never
+    the node worktree's, so each ``uv run`` there would warn that it does
+    not match the project environment; the venv's bin stays first on
+    ``PATH``, so the installation's CLIs still resolve.
+    """
+    monkeypatch.setenv('_NODE', '')
+    venv = tmp_path / 'repo' / '.venv'
+    monkeypatch.setenv('VIRTUAL_ENV', f'{venv}')
+    monkeypatch.setenv('PATH', f'{venv / "bin"}{os.pathsep}{os.environ["PATH"]}')
+    # each worktree process appends the env it runs under to its own record
+    setup_record = tmp_path / 'setup.jsonl'
+    agent_record = tmp_path / 'agent.jsonl'
+    dump = (
+        'import json, os, sys; '
+        'open(sys.argv[1], "a").write(json.dumps(dict(os.environ)) + "\\n")'
+    )
+    scripts = loop_node.node_dir / 'scripts'
+    scripts.mkdir(exist_ok=True)
+    (scripts / 'setup.sh').write_text(
+        f'#!/bin/bash\n{shlex.join([sys.executable, "-c", dump, f"{setup_record}"])}\n',
+        encoding='utf-8',
+    )
+
+    class EnvAgent(SampleAgent):
+        """A backend whose launch records its env and exits clean."""
+
+        def _spawn(
+            self: EnvAgent, invocation: Invocation, **kwargs: Any
+        ) -> subprocess.Popen:
+            """Run the env dump through the real spawn."""
+            argv = (sys.executable, '-c', dump, f'{agent_record}')
+            return super()._spawn(
+                dataclasses.replace(invocation, argv=argv),
+                **kwargs,
+            )
+
+        def stream(self: EnvAgent, stdout: Any, **kwargs: Any) -> Any:
+            """Drain to EOF and report an empty, costless stream."""
+            for _ in stdout:
+                pass
+            kwargs['process'].wait()
+            return StreamResult(session=None, model=None, cost=None)
+
+    class EnvLoop(MockLoop):
+        """Mock loop that runs the real setup.sh and launch."""
+
+        _run_setup = Loop._run_setup
+
+        def _launch(
+            self: EnvLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Run the base launch with the env-recording agent."""
+            kwargs['agent'] = EnvAgent(self.node)
+            return Loop._launch(self, step, prompt, **kwargs)
+
+    assert EnvLoop(loop_node).run() == 0
+    # every recorded process saw no venv and the venv's bin leading PATH
+    for record in (setup_record, agent_record):
+        lines = record.read_text(encoding='utf-8').splitlines()
+        seen = {
+            (env.get('VIRTUAL_ENV'), env['PATH'].split(os.pathsep)[0])
+            for env in map(json.loads, lines)
+        }
+        assert seen == {(None, f'{venv / "bin"}')}
 
 
 @pytest.mark.parametrize(

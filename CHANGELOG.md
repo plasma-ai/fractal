@@ -491,6 +491,11 @@ may include breaking changes, each listed under a Breaking heading.
   its scope from outside it, naming the old path, as the merge's footprint check
   does. The scope check read git's rename-detecting diff, which names only a
   rename's new path, so the deletion outside the scope committed unchecked.
+- A node's agents and its `setup.sh` run without a `VIRTUAL_ENV`, whether a node
+  start, the tmux server, or the launching shell supplied it, so `uv run` in a
+  node worktree uses the worktree's project environment without warning on every
+  call that `VIRTUAL_ENV` does not match it. `fractal node chat` launches its
+  agent the same way, and the repo venv's bin stays first on `PATH`.
 
 ## [1.3.0] - 2026-09-17
 

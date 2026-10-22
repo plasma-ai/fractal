@@ -272,6 +272,14 @@ wall-clock deadlines (``RUN_END_EPOCH``, ``ITER_END_EPOCH``), and the step's
 read these directly — ``fractal plan init``, for example, defaults its
 ``--iter-ref`` from ``ITER_REF``.
 
+No launch carries a ``VIRTUAL_ENV``. One inherited from the shell or the tmux
+server names the launching project's venv, not the node worktree's, so ``uv``
+in the worktree would warn about it on every call. The loop drops it before
+``scripts/setup.sh`` runs, and every agent launch, ``fractal node chat``
+included, runs without it. ``PATH`` keeps the venv's bin (a node start puts
+the repo's ``.venv/bin`` first when it exists), so ``fractal`` and its helper
+tools still resolve from the installation.
+
 Step frontmatter
 ----------------
 
