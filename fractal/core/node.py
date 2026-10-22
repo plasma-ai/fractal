@@ -6684,6 +6684,20 @@ class Node:
             resume=resume,
             model=model,
         )
+        # a resumed or forked session's result figure can count on from the
+        # session's earlier spend: read what it carries before the turn adds
+        # to it, so the reply shows the turn's own cost, as the loop books it
+        # (an unknown baseline refuses the figure rather than stop the reply)
+        baseline: Optional[float] = 0.0
+        if command.mode != 'fresh':
+            try:
+                baseline = backend.cost_baseline(command.session)
+            except Exception as error:
+                print(
+                    f'Warning: reading the session cost baseline failed ({error})',
+                    file=sys.stderr,
+                )
+                baseline = None
         # spawn the agent and stream with no cost/session writes (no step_id),
         # capturing the resulting session id from the stream
         proc = backend.spawn(command)
@@ -6695,7 +6709,12 @@ class Node:
         # spawns a single process (no start_new_session), so kill the PID
         # directly, not its group
         try:
-            result = backend.stream(proc.stdout, process=proc, render=render)
+            result = backend.stream(
+                proc.stdout,
+                process=proc,
+                render=render,
+                baseline=baseline,
+            )
         except BaseException:
             if proc.poll() is None:
                 try:

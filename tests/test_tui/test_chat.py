@@ -11,6 +11,8 @@ included.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import pathlib
 import subprocess
 import sys
@@ -34,6 +36,7 @@ from fractal.tui.chat import (
     resolve_transport,
 )
 from fractal.tui.data import TuiData
+from tests._helpers import _save_cost_state
 
 from ._doubles import MockTurn
 
@@ -42,6 +45,7 @@ __all__ = [
     'test_resolve_transport_consults_the_deployment_hook',
     'test_resolve_transport_survives_a_broken_deployment_hook',
     'test_chat_turn_streams_a_real_subprocess',
+    'test_chat_turn_closes_a_continued_session_on_its_own_cost',
     'test_chat_turn_closes_error_results_with_detail',
     'test_chat_turn_summarizes_only_the_final_opencode_step',
     'test_chat_turn_codex_result_closes_the_turn_once',
@@ -327,6 +331,51 @@ def test_chat_turn_streams_a_real_subprocess(tmp_path: pathlib.Path) -> None:
     assert events[0].text == 's-123'
     assert events[1].text == 'hi'
     assert events[2].text == 'done · 1 turns · 0.5s · $0.04'
+
+
+@pytest.mark.parametrize(
+    argnames='fork',
+    argvalues=[
+        # the cockpit's own chat thread continues in place
+        pytest.param(False, id='resume'),
+        # a fork restores the source session's saved total too
+        pytest.param(True, id='fork'),
+    ],
+)
+def test_chat_turn_closes_a_continued_session_on_its_own_cost(
+    pair_tree: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fork: bool,
+) -> None:
+    """A turn continuing a Claude session closes on the turn's own spend.
+
+    Claude Code saves a session's running total to its transcript as each
+    launch exits, and a resume or a fork counts the result figure on from
+    it, so the turn closes on the figure less that total -- never on the
+    session's running total.
+    """
+    saved, running = 0.5483, 0.6520
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(pair_tree / 'claude-home'))
+    node = Node(pair_tree / '.worktrees' / 'main.alpha')
+    agent = node.agent()
+    transcript = pathlib.Path(agent.transcript('past-1')['path'])
+    _save_cost_state(transcript, 'past-1', saved)
+    # the cockpit's own builder, with a stand-in for the agent binary
+    command = node.chat_command('what changed?', session='past-1', resume=not fork)
+    result = {
+        'type': 'result',
+        'subtype': 'success',
+        'num_turns': 1,
+        'duration_ms': 500,
+        'total_cost_usd': running,
+    }
+    code = f'print({json.dumps(result)!r})\n'
+    command = dataclasses.replace(command, argv=(sys.executable, '-c', code))
+    events = list(ChatTurn(command, agent).events())
+    assert events[-1] == ChatEvent(
+        kind='meta',
+        text=f'done · 1 turns · 0.5s · ${running - saved:.2f}',
+    )
 
 
 def test_chat_turn_closes_error_results_with_detail(tmp_path: pathlib.Path) -> None:

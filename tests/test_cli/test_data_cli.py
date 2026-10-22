@@ -426,7 +426,7 @@ def test_node_cost_discloses_partly_unpriced_steps(repo: dict) -> None:
     # a late flush leaves the cut reply unpriced
     record.step_cost(step_id=step_id, cost=2 * STEP_COST)
     note = (
-        "1 partly unpriced step (a reply's spend missing from the record)"
+        '1 partly unpriced step (some spend missing from the record)'
         ' counted at recorded spend'
     )
     spent = _run(partly, 'node', 'cost', 'spent', '--run', str(run_id))

@@ -58,10 +58,15 @@ A chat turn runs the node's effective agent with its configured model
 (overridable per turn with `--model`) and the node's configured reasoning
 effort, so a chat answer runs at the same depth as the loop's own steps. It
 books nothing: no cost rows accrue to the node (see
-[[features/cost/_index|cost]]) and the node's recorded sessions are unchanged. A
-node with no agent configured refuses with a pointer to `fractal init --agent`,
-and an agent process that exits non-zero surfaces as an error rather than a
-silent empty reply.
+[[features/cost/_index|cost]]) and the node's recorded sessions are unchanged.
+The reply's closing line shows the turn's own cost, at both doors: a resumed or
+forked Claude session's result figure counts on from the total Claude Code saved
+for the source session, so before spawning the turn reads that baseline through
+the same agent verb the loop uses and its parser takes it off, refusing a figure
+it cannot settle (`$?`; see [[features/cost/measurement]]). A node with no agent
+configured refuses with a pointer to `fractal init --agent`, and an agent
+process that exits non-zero surfaces as an error rather than a silent empty
+reply.
 
 ## The cockpit door
 

@@ -162,6 +162,16 @@ and marks the step partly unpriced (below). A window that prices nothing leaves
 the cost `NULL`, marked `unpriced`. A killed launch never reaches a result
 figure, so the baseline never touches it: its settle prices its own window.
 
+A chat turn ([[features/chat/_index|chat]]) books nothing, but its reply's
+closing line shows the same figure. A fork restores the source session's latest
+record just as a resume does, so `Node.chat` and the cockpit's `ChatTurn` read
+`Agent.cost_baseline` of the invocation's session before spawning whenever its
+`mode` is `resume` or `fork` (the public `invocation` verb stamps it), and hand
+it to the parser. A refused figure closes the turn on `$?`. A baseline read that
+raises refuses the figure without stopping the reply: `Node.chat` prints the
+loop's `Warning: reading the session cost baseline failed (...)` line, and the
+cockpit's turn, which never raises, adds an error line.
+
 A Claude launch that ends without its result frame -- killed by a deadline, a
 stall or thinking cap, a pause, or a dead stream -- carries only the stream's
 running estimate, which prices each reply from its first frame (or nothing, when
@@ -335,7 +345,7 @@ Zero and unknowable are never conflated:
   (`N unpriced steps (NULL cost) excluded`) while stdout stays parseable.
 - A priced step marked `partly unpriced` (above) sums as if whole, so the same
   commands disclose those too
-  (`N partly unpriced steps (a reply's spend missing from the record) counted at recorded spend`,
+  (`N partly unpriced steps (some spend missing from the record) counted at recorded spend`,
   counted by `Cost.partly_unpriced`). Nothing adds a margin for the spend no
   record holds ([[features/cost/budgets|budgets]]).
 

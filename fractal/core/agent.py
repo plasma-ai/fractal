@@ -222,8 +222,12 @@ class Invocation:
     inherited from an ancestor's route. ``session`` carries
     the caller-minted id for providers that do not mint their own; the
     launcher must pre-stamp it on the step row before spawning, so a
-    boot-window abort still leaves a resumable session. Pure serializable
-    data: a host can ship it to any executor.
+    boot-window abort still leaves a resumable session. ``mode`` says how
+    the launch reaches ``session``: ``'fresh'`` starts it, while
+    ``'resume'`` and ``'fork'`` continue its history, and with it any
+    spend the provider counts its result figure on from
+    (``Agent.cost_baseline``). Pure serializable data: a host can ship it
+    to any executor.
     """
 
     # base command name (DB/session-map key)
@@ -234,6 +238,8 @@ class Invocation:
     # values of None mean 'pop this key from the composed spawn env'
     env: Optional[Mapping[str, Optional[str]]] = None
     session: Optional[str] = None
+    # 'fresh' | 'resume' | 'fork'
+    mode: str = 'fresh'
 
 
 @dataclasses.dataclass(frozen=True)
@@ -608,9 +614,10 @@ class Agent:
         )
         # stamp the id on the returned invocation centrally -- the launcher
         # pre-stamps invocation.session on the step row, so a backend that
-        # dropped it would silently break boot-window resumability
+        # dropped it would silently break boot-window resumability -- and
+        # its mode (a launch with no session is fresh)
         if session is not None:
-            result = dataclasses.replace(result, session=session)
+            result = dataclasses.replace(result, session=session, mode=mode)
         # compose the spawn environment: base os.environ, then the caller
         # overlay, then _invocation's provider-specific keys -- provider keys
         # win on collision (codex's CODEX_HOME must survive). _invocation

@@ -520,8 +520,9 @@ class Loop:
         # must see a substitution the stream recovered from; empty for an
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
-        # this launch's record leaves part of a reply out, so its booked
-        # figure misses that part
+        # this launch's record leaves part of its spend out (a reply cut
+        # off, or a result figure refused), so its booked figure misses that
+        # part
         self._step_partly_unpriced = False
         self._step_limit_seconds = 0
         self._step_ceiling_seconds = 0
