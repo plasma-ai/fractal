@@ -596,9 +596,12 @@ def commit_user_init(node: Node, message: str) -> str:
         # hold on the runtime files beside the records; the plain add may
         # fail (everything under it ignored) without failing the baseline
         denied = _estate_denied(node, seed, estates)
-        withheld = [f':(exclude,literal){path}' for path in denied]
-        cmd = ['add', '--', f':(literal){seed_dir}', *_STAGE_EXCLUDES, *withheld]
-        fractal.util.git.run(cmd, cwd=node.worktree, check=False)
+        withheld = [f':(exclude,literal){node.worktree / path}' for path in denied]
+        # add from inside the seed, so every pathspec shares its prefix: git
+        # 2.54 and 2.55 can stage nothing for a nested directory pathspec
+        # beside an exclude pathspec outside it
+        cmd = ['add', '--', '.', *_STAGE_EXCLUDES, *withheld]
+        fractal.util.git.run(cmd, cwd=node.node_dir, check=False)
         notices[:], _ = _stage_records(node, seed, estates, denied)
 
     _stage_paths()

@@ -108,7 +108,8 @@ def test_user_node_commit_init_commits_baseline(
     baselines the wiki init created there, and the settings file itself.
     Runtime files in the seed never ride the baseline, tracked or not: the
     seed answers to the work commits' estate law, so fractal's own exclude
-    block holds even past the force-add.
+    block holds even past the force-add, and a file the law refuses is
+    withheld and named.
     """
     if wiki != 'wiki':
         settings = git_repo / '.fractal' / '.settings.json'
@@ -143,6 +144,10 @@ def test_user_node_commit_init_commits_baseline(
         path = git_repo / '.fractal' / 'main' / runtime
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('runtime\n', encoding='utf-8')
+    # a file no ignore rule holds but the estate law refuses (no record)
+    (git_repo / '.fractal' / 'main' / 'parked.pem').write_text(
+        'key\n', encoding='utf-8'
+    )
     # the wiki tool's self-ignored derived cache sits inside the staged wiki
     cache = git_repo / wiki / '.wiki' / 'cache'
     cache.mkdir(parents=True, exist_ok=True)
@@ -152,7 +157,7 @@ def test_user_node_commit_init_commits_baseline(
     # lean on a block written at init -- the runtime artifacts beside the
     # seed must stay out of the commit on their own
     (git_repo / '.git' / 'info' / 'exclude').unlink()
-    node.commit('configure', init=True)
+    output = node.commit('configure', init=True)
     # a tracked tree makes a real commit (the seed is new), and so does a
     # configured folder (init created its wiki); untracked, the default wiki
     # is already committed by the fixture, so the baseline is legitimately a
@@ -171,6 +176,9 @@ def test_user_node_commit_init_commits_baseline(
     assert 'tmp/' not in tracked
     assert 'claude.err' not in tracked
     assert '__pycache__' not in tracked
+    assert 'parked.pem' not in tracked
+    # the law's refusal is named, as on a work commit
+    assert ('parked.pem' in output) == track
     # the wiki's derived cache stays self-ignored past the force-add
     assert '.wiki/cache' not in tracked
 
