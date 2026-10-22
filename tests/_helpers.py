@@ -8,6 +8,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import time
 
 import pytest
 
@@ -27,6 +28,8 @@ __all__ = [
     '_stub_run_script',
     '_alive',
     '_kill_tagged',
+    '_LOCK_HOLDER',
+    '_await_ready',
 ]
 
 
@@ -201,3 +204,28 @@ def _kill_tagged(tag: str) -> None:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+# a standalone holder of the real merge lock file: acquire an exclusive
+# fcntl.flock on argv[1], signal readiness via argv[2], then block -- the same
+# lock and mode Node.merge and a booting loop contend
+_LOCK_HOLDER = (
+    'import fcntl, sys, time; '
+    "f = open(sys.argv[1], 'a'); "
+    'fcntl.flock(f, fcntl.LOCK_EX); '
+    "open(sys.argv[2], 'w').close(); "
+    'time.sleep(120)'
+)
+
+
+def _await_ready(
+    marker: pathlib.Path,
+    *,
+    proc: subprocess.Popen,
+    deadline: float,
+) -> None:
+    """Block (bounded) until ``marker`` appears, failing if ``proc`` dies first."""
+    while not marker.exists():
+        assert proc.poll() is None, 'holder exited before acquiring the lock'
+        assert time.monotonic() < deadline, 'holder never signalled ready'
+        time.sleep(0.02)

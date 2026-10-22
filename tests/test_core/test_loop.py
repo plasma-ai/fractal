@@ -21,6 +21,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Collection, Iterator
 from typing import Any, Optional
@@ -30,10 +31,12 @@ import pytest
 import fractal.util
 import fractal.util.process
 from fractal.constants import (
+    MERGE_LOCK_FILE,
     PAUSE_ABORT_FILE,
     PGID_FILE,
     SOCKET_FILE,
     STEP_PGID_FILE,
+    WORKTREES_FOLDER,
 )
 from fractal.core import loop as loop_module, pricing, worktree
 from fractal.core.agent import Agent, StreamEvent, StreamResult
@@ -44,7 +47,14 @@ from fractal.exceptions import AgentStreamError, _Abort
 from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
 from fractal.impl.codex import CodexAgent
-from tests._helpers import _age_run, _git, _past_timestamp, _stub_run_script
+from tests._helpers import (
+    _LOCK_HOLDER,
+    _age_run,
+    _await_ready,
+    _git,
+    _past_timestamp,
+    _stub_run_script,
+)
 
 from ._agents import SampleAgent
 from .conftest import _record_step_cost, _spawn_parent_child
@@ -63,6 +73,7 @@ __all__ = [
     'test_step_env_and_prompt_share_one_config_read',
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
     'test_boot_gate_vets_the_recorded_group',
+    'test_boot_waits_for_a_running_merge',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
     'test_stream_fault_attributes_to_the_stream_side',
@@ -1456,6 +1467,99 @@ def test_boot_gate_vets_the_recorded_group(
             except ProcessLookupError:
                 pass
             leader.wait()
+
+
+@pytest.mark.parametrize(
+    argnames='boot',
+    argvalues=['start', 'continue', 'resume'],
+)
+def test_boot_waits_for_a_running_merge(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    capsys: pytest.CaptureFixture,
+    boot: str,
+) -> None:
+    """A booting loop goes live only once a running merge lets go.
+
+    A merge refuses only an active node, and its advance can rewrite any
+    other node's worktree -- carrying a paused node's frozen state, resetting
+    an idle or settled one -- so every boot takes the repo's merge lock around
+    its continue clean-up and its active stamp. While another process holds
+    that lock the boot says once that it waits, and the node keeps its
+    status and its worktree and launches no step; once the lock is released
+    the boot stamps active and the steps run.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    # a fresh start boots idle, a continue boots re-armed idle over the
+    # dirt its clean-up discards, and a resume boots paused over the run
+    # the pause left open
+    readme = node.worktree / 'README.md'
+    if boot == 'continue':
+        readme.write_text('left by the last run\n', encoding='utf-8')
+    if boot == 'resume':
+        node.status_set('active')
+        node.record.run_start()
+        node.status_set('paused')
+    status = node.status()
+    content = readme.read_text(encoding='utf-8')
+    launched_as: list[str] = []
+
+    class _Recording(MockLoop):
+        """Note the node's status at each launch."""
+
+        def _launch(
+            self: _Recording, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            launched_as.append(self.node.status())
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = _Recording(node, continue_=boot == 'continue', resume=boot == 'resume')
+    codes: list[int] = []
+
+    def _boot() -> None:
+        codes.append(loop.run())
+
+    booter = threading.Thread(target=_boot)
+    lock_file = node.repo_dir / WORKTREES_FOLDER / MERGE_LOCK_FILE
+    lock_file.parent.mkdir(exist_ok=True)
+    ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
+    holder = subprocess.Popen(
+        [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
+    )
+    notice = 'Waiting for a running merge to finish...'
+    try:
+        _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
+        booter.start()
+        # the boot says once that it waits, then blocks behind the held lock
+        booter.join(timeout=3)
+        assert booter.is_alive()
+        assert capsys.readouterr().out.count(notice) == 1
+        # nothing went live, launched, or touched the worktree meanwhile
+        assert node.status() == status
+        assert loop.launched == []
+        assert readme.read_text(encoding='utf-8') == content
+        # the holder dies, the kernel releases the lock, and the boot runs
+        holder.kill()
+        holder.wait(timeout=5)
+        booter.join(timeout=60)
+        assert not booter.is_alive()
+    finally:
+        # the holder is a single leaf process, so a pid kill reaps it fully
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
+        if booter.is_alive():
+            booter.join(timeout=60)
+
+    # the steps ran on an active node with no second wait, and a continue's
+    # clean-up discarded the last run's dirt
+    assert codes == [0]
+    assert loop.launched
+    assert set(launched_as) == {'active'}
+    assert notice not in capsys.readouterr().out
+    assert readme.read_text(encoding='utf-8') == '# test\n'
 
 
 def test_continue_restore_lands_config_all_or_nothing(
