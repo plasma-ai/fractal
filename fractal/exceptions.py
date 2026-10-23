@@ -8,6 +8,7 @@ __all__ = [
     'AbstractMethodError',
     'AgentStreamError',
     'DirtyWorktreeError',
+    'IndexLockedError',
 ]
 
 
@@ -57,6 +58,15 @@ class DirtyWorktreeError(RuntimeError):
     Distinct from every other commit failure: a dirty tree is the check's
     own nonzero outcome (the CLI's reserved exit 1), so only this type
     converts there while the rest surface as ``Error:`` exit 2.
+    """
+
+
+class IndexLockedError(RuntimeError):
+    """Raised when another process's ``index.lock`` outlasts a git write's retry.
+
+    Distinct from a hook's rejection: the write never ran, so the commit
+    pipeline's hook recovery has nothing to re-stage, and the error carries
+    git's own message naming the lock.
     """
 
 

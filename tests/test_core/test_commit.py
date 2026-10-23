@@ -33,6 +33,7 @@ __all__ = [
     'test_sub_project_user_baseline_commits_its_wiki',
     'test_child_baseline_carries_only_its_seed',
     'test_child_baseline_refuses_a_file_moved_into_its_seed',
+    'test_child_baseline_reads_project_changes_by_content',
     'test_child_baseline_commits_its_memory_wiki_attributes',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
@@ -95,6 +96,10 @@ _LOGS_INDEX = '.fractal/main.task/memory/logs/_index.md'
 
 # an index stamp far older than any a test run writes
 _AGED_STAMP = '2020-01-01T00:00:00Z'
+
+# an mtime no checkout records, so a tracked file set to it has stale stat
+# data in the index while its bytes stay as committed
+_AGED_NS = 1_000_000_000 * 10**9
 
 # the commit warning's header over the root paths shadowing node folder entries
 _SHADOW_WARNING = (
@@ -428,6 +433,56 @@ def test_child_baseline_refuses_a_file_moved_into_its_seed(
     listing = str(refused.value).splitlines()[1:]
     assert listing == ['README.md']
     assert _head(project_dir) == head
+
+
+@pytest.mark.parametrize(
+    argnames='state',
+    argvalues=['touched', 'edited', 'staged-reverted'],
+    ids=['touch-only', 'real-change', 'staged-reverted'],
+)
+def test_child_baseline_reads_project_changes_by_content(
+    tmp_path: pathlib.Path,
+    state: str,
+) -> None:
+    """The baseline check counts a project file changed by content, never by stat.
+
+    The changed paths come from one git status listing, which compares the
+    index to HEAD and the working tree to the index by content, as
+    ``git diff HEAD`` and ``git diff --cached HEAD`` do, without the
+    working-tree diff's index refresh under ``index.lock``. A project file
+    only touched (stale stat data, same bytes) reads unchanged and the seed
+    baseline lands; an edit refuses by name, and so does an edit staged and
+    then reverted on disk, which the index still carries.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    head = _head(project_dir)
+    readme = project_dir / 'README.md'
+    if state == 'touched':
+        os.utime(readme, ns=(_AGED_NS, _AGED_NS))
+    elif state == 'edited':
+        readme.write_text('# edited\n', encoding='utf-8')
+    else:
+        committed = readme.read_text(encoding='utf-8')
+        readme.write_text('# staged\n', encoding='utf-8')
+        _git(project_dir, 'add', 'README.md')
+        readme.write_text(committed, encoding='utf-8')
+
+    if state == 'touched':
+        node.commit('configure', init=True)
+        subject = _git(project_dir, 'log', '-1', '--format=%s').stdout.strip()
+        assert subject == 'main.task: init (configure)'
+        assert 'README.md' not in _git(project_dir, 'show', '--name-only').stdout
+    else:
+        with pytest.raises(RuntimeError, match='commits only the node seed') as refused:
+            node.commit('configure', init=True)
+        assert str(refused.value).splitlines()[1:] == ['README.md']
+        assert _head(project_dir) == head
 
 
 @pytest.mark.parametrize(

@@ -1363,6 +1363,7 @@ class Loop:
         # triggering or riding the commit, and the add takes its listed paths
         # -- an exclude-riding add silently stages nothing over an untracked tree
         cmd = [
+            '--no-optional-locks',
             'status',
             '--porcelain',
             '-z',
@@ -1386,7 +1387,7 @@ class Loop:
         # stage only paths the add can express: an entry gone from both the
         # index and the worktree (a staged rename's origin, a staged
         # deletion) is already fully staged, and naming it is fatal
-        cmd = ['ls-files', '-z', '--', f'{node_dir}']
+        cmd = ['--no-optional-locks', 'ls-files', '-z', '--', f'{node_dir}']
         tracked = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
         index = set(os.fsdecode(tracked).split('\0'))
         paths = [

@@ -469,7 +469,7 @@ fi
 # tracked changes (untracked .fractal/ metadata is ignored); deeper nodes may
 # branch from a parent mid-iteration
 if [[ "$PARENT_BRANCH" != *.* ]] \
-    && [[ -n "$(git -C "$PARENT_WORKTREE_DIR" status --porcelain -uno)" ]]; then
+    && [[ -n "$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks status --porcelain -uno)" ]]; then
     echo "Error: branch '$PARENT_BRANCH' has uncommitted changes in $PARENT_WORKTREE_DIR" >&2
     echo "Commit them before initializing a top-level node" >&2
     exit 1
