@@ -115,7 +115,7 @@ directory; pass ``--path <dir>`` to target another worktree.
   anything is written, so ``set`` cannot store a value the validator rejects.
   ``node init``'s additional flag checks — the agent registry, provider
   support, the base worktree, a reserve requiring ``max_cost`` — do not run
-  here; ``node start`` re-validates the stored file at launch.
+  here; ``node start`` and ``resume`` re-validate the stored file at launch.
 
 ``fractal node update``
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -154,9 +154,11 @@ consequences:
   snapshot, the drift is healed *from config to registry* with a per-key
   warning at the next boundary — config always wins.
 - A *bad* hand edit (a bare-number duration, a broken cost ordering) is not
-  caught at edit time: ``node start`` re-validates the stored file before
-  launching, and the loop's mid-run re-readers warn and keep the previous
-  values rather than crash.
+  caught at edit time: ``node start`` and ``resume`` re-validate the stored
+  file of every node they launch before they change anything, the loop's
+  boot aborts on record over an edit that lands after that check, and the
+  loop's mid-run re-readers warn and keep the previous values rather than
+  crash.
 
 The duration format
 -------------------

@@ -135,17 +135,25 @@ the mode with a cleared reserve), and the validator refuses any other value.
 ## Validation
 
 One merged validator guards every write path -- init flags, the config setters,
-and the re-check at `fractal node start` (which covers direct file edits). It
-rejects what the loop cannot run: non-numeric or non-finite costs, non-positive
-ceilings, a per-iteration or per-step cap without `max_cost`, a reserve at or
-above 99% of `max_cost`, a broken `step <= iter <= run` cost ordering,
-non-integer or degenerate integer caps, non-boolean mode flags, bare-number or
-sub-second durations, `interval` and `sleep` both set, `iter_timeout` exceeding
-`interval`, absolute or `..` list-key entries (a scope root that never matches
-the commit pipeline's relative prefix check, or a `clone_dirs` entry reaching
-outside the worktree it warms), non-canonical list-key spellings (`./src`,
-`src/` -- the setters store canonical form, so only a hand-edit lands one), and
-a `.` cache dir, which would clone the whole checkout.
+and the launch re-check (`Node._check_launch_config`: the validator plus the
+agent resolve) that `fractal node start` runs and resume runs for every node it
+would relaunch, which covers direct file edits. It rejects what the loop cannot
+run: non-numeric or non-finite costs, non-positive ceilings, a per-iteration or
+per-step cap without `max_cost`, a reserve at or above 99% of `max_cost`, a
+broken `step <= iter <= run` cost ordering, non-integer or degenerate integer
+caps, non-boolean mode flags, bare-number or sub-second durations, `interval`
+and `sleep` both set, `iter_timeout` exceeding `interval`, absolute or `..`
+list-key entries (a scope root that never matches the commit pipeline's relative
+prefix check, or a `clone_dirs` entry reaching outside the worktree it warms),
+non-canonical list-key spellings (`./src`, `src/` -- the setters store canonical
+form, so only a hand-edit lands one), and a `.` cache dir, which would clone the
+whole checkout.
+
+The loop's boot reads the same values in `Loop._read_run_parameters`, a stage of
+the boot's `_abort_preflight` guard rather than the constructor, so an edit
+landing between the launch check and the boot ends in a recorded abort (`exited`
+with the reason, or a resume left paused with its credit span re-opened) instead
+of a crash with nothing recorded.
 
 ## Reading and writing after init
 

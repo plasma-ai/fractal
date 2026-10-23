@@ -491,9 +491,10 @@ run — same budgets and iteration count, the interrupted step re-entered
 (resuming the recorded agent session when one exists) — and run and iteration
 deadlines are credited for the paused span. A node still parking gets its
 pending pause withdrawn instead. Resuming refuses when the node is not paused,
-when an ancestor is still paused, or when the effort ladder committed on the
-tree's root branch is invalid for a node it would relaunch; the ladder refusal
-lands before any node is touched. ``resume`` returns once the loops are
+when an ancestor is still paused, or when a node it would relaunch has a
+stored config the launch re-validation rejects or an invalid effort ladder
+committed on the tree's root branch; those refusals name the node and land
+before any node is touched. ``resume`` returns once the loops are
 relaunched; a relaunched loop waits for a merge in progress before it goes
 ``active``, as every launch does (see ``start``).
 

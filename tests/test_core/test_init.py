@@ -2987,8 +2987,7 @@ def test_init_rejects_incoherent_pacing(
     The interval/sleep mutex and the iter-timeout-within-interval cap are
     launch invariants the loop depends on, so the launch validator rejects
     a violating combination at the init boundary with a clear message --
-    not at loop construction, where the failure would strand the node
-    ``idle`` inside the tmux pane with no run row.
+    not at the loop's boot, after a launch that already reported success.
     """
     node = Node(git_repo)
     node.init(agent='claude', user=True)

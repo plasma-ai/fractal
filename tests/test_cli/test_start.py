@@ -324,11 +324,11 @@ def test_start_revalidates_hand_edited_config(
 
     The documented steering path is to edit ``config.json`` directly, which
     bypasses the init/update setters' checks. A bad duration (no unit suffix)
-    would otherwise abort the loop after ``start`` already
-    printed success, wedging the node idle; a broken cost ordering would launch
+    would otherwise abort the loop's boot after ``start`` already
+    printed success; a broken cost ordering would launch
     a degenerate budget; a per-iter cap whose ceiling was edited away would
     spend unbounded once the iteration's budget drains; an agent the registry
-    does not know would kill the loop at boot the same invisible way.
+    does not know would abort the boot the same way.
     ``start`` must reject each before launching -- exit non-zero with a clear
     message and no "Started" output.
     """
