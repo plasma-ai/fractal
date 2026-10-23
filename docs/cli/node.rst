@@ -393,10 +393,11 @@ A fresh start requires status exactly ``idle``. Starting refuses on: the user
 node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a
 paused ancestor or tree-wide pause latch; a foreign tmux session already
 holding the node's session name; a node whose recorded process group is
-still alive (identity-verified, so a recycled group id never blocks); and a
-stored config the launch re-validation rejects. Continuing from ``killed``
-surfaces the recorded kill attribution as a notice. An uncapped start is
-allowed but warns loudly.
+still alive (identity-verified, so a recycled group id never blocks); a
+stored config the launch re-validation rejects; and an invalid effort ladder
+committed on the tree's root branch (see :doc:`/configuration`). Continuing
+from ``killed`` surfaces the recorded kill attribution as a notice. An
+uncapped start is allowed but warns loudly.
 
 A merge can rewrite the worktree of any node that is not ``active``, so every
 loop launch — a start, a continue, or a resume — waits for a merge in progress
@@ -482,8 +483,10 @@ paused).
 run — same budgets and iteration count, the interrupted step re-entered
 (resuming the recorded agent session when one exists) — and run and iteration
 deadlines are credited for the paused span. A node still parking gets its
-pending pause withdrawn instead. Resuming refuses when the node is not paused
-or when an ancestor is still paused. ``resume`` returns once the loops are
+pending pause withdrawn instead. Resuming refuses when the node is not paused,
+when an ancestor is still paused, or when the effort ladder committed on the
+tree's root branch is invalid for a node it would relaunch; the ladder refusal
+lands before any node is touched. ``resume`` returns once the loops are
 relaunched; a relaunched loop waits for a merge in progress before it goes
 ``active``, as every launch does (see ``start``).
 

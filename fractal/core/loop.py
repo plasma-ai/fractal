@@ -445,19 +445,11 @@ class Loop:
         self._node_model = config.get('model') or ''
         self._node_effort = config.get('effort') or ''
         # the effort ladders a thinking-capped step's steer lowers through,
-        # as committed on the tree's root branch and held for the run (no
-        # node can change its own, and an edit lands at the next start or
-        # resume); an agent the settings do not name keeps its own ladder
-        self._effort_ladders = worktree.committed_effort_ladders(
-            node.repo_dir,
-            ref=config.get('root'),
-            project=node.project_path,
-        )
-        _check_effort_ladders(
-            self._effort_ladders,
-            ref=config.get('root'),
-            root=node.db.path.parent,
-        )
+        # as committed on the tree's root branch, read at boot and held for
+        # the run (no node can change its own, and an edit lands at the next
+        # start or resume); an agent the settings do not name keeps its own
+        # ladder
+        self._effort_ladders: dict[str, tuple[tuple[str, ...], str]] = {}
         meta = config.get('meta') or ''
         self._meta_mode = bool(meta)
         # the boot-pinned mode flags, the one source the step env and the
@@ -667,6 +659,7 @@ class Loop:
                 self._clean_worktree()
         self._labels()
         try:
+            self._read_effort_ladders()
             self._preflight()
             self._adopt()
         except _Abort:
@@ -812,6 +805,21 @@ class Loop:
             raise
         finally:
             self._on_exit()
+
+    def _read_effort_ladders(self: Loop) -> None:
+        """Load the run's effort ladders, aborting the boot on a bad one.
+
+        ``start`` and ``resume`` refuse a bad ladder up front, but a
+        commit can land on the root branch between their check and this
+        boot, so the fault aborts through :meth:`_abort_preflight` and
+        lands on record.
+        """
+        try:
+            self._effort_ladders = _effort_ladders(self.node)
+        except ValueError as error:
+            reason = f'{error}'
+            print(f'Error: {reason}', file=sys.stderr)
+            self._abort_preflight(reason)
 
     def _preflight(self: Loop) -> None:
         """Fail fast (step files, binary, pricing, provider probe via seam hooks).
@@ -5367,6 +5375,35 @@ def _models_match(pinned: str, served: str) -> bool:
         widths = tuple(len(segment) for segment in tail)
         return all(segment.isdigit() for segment in tail) and widths in _SNAPSHOT_WIDTHS
     return False
+
+
+def _effort_ladders(node: Node) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Read and check the effort ladders a node's loop runs on.
+
+    The one read the loop's boot and the verbs that launch it (``start``,
+    ``resume``) share: the ladders committed on the tree's root branch in
+    the node's own project, checked against the tree's registered agents.
+
+    Args:
+        node: The node whose loop the ladders steer.
+
+    Returns:
+        Each named agent's ``(levels, floor)``, levels lowest first.
+
+    Raises:
+        ValueError: If the committed settings file is invalid, or a ladder
+            names no registered agent or lists its agent's own levels out
+            of the agent's order.
+
+    """
+    ref = node.config.get('root')
+    ladders = worktree.committed_effort_ladders(
+        node.repo_dir,
+        ref=ref,
+        project=node.project_path,
+    )
+    _check_effort_ladders(ladders, ref=ref, root=node.db.path.parent)
+    return ladders
 
 
 def _check_effort_ladders(
