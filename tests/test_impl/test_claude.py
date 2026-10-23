@@ -54,6 +54,7 @@ __all__ = [
     'test_stream_detached_keeps_session_unpersisted_claude',
     'test_stream_records_full_per_invocation_cost',
     'test_stream_truncated_records_accumulated_cost',
+    'test_stream_books_a_synthetic_reply_as_a_known_zero',
     'test_stream_reopens_a_settled_cost_at_a_reply_after_its_result',
     'test_stream_books_a_resumed_launchs_figures_less_its_baseline',
     'test_stream_survives_missing_pricing_cache',
@@ -1053,6 +1054,58 @@ def test_stream_truncated_records_accumulated_cost(
     ]
     row = node.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
+
+
+@pytest.mark.parametrize(
+    argnames='parent',
+    argvalues=[
+        # the agent's own reply
+        pytest.param(None, id='top-level'),
+        # a sub-agent's reply
+        pytest.param('toolu_a', id='sub-agent'),
+    ],
+)
+def test_stream_books_a_synthetic_reply_as_a_known_zero(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    parent: Optional[str],
+) -> None:
+    """A stream whose only reply is synthetic books $0, never an unknown cost.
+
+    Claude Code stands a synthetic reply in for an API error, naming the
+    model ``<synthetic>`` and a usage of zeros. Nothing was billed, so the
+    reply prices at the stream's own model, and a launch killed after it
+    books a known $0.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude')
+    (step_id,) = _steps(node, 1)
+    # real-shaped (claude 2.1.300): a synthetic reply's usage is all zero
+    usage = {
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'cache_creation_input_tokens': 0,
+        'cache_read_input_tokens': 0,
+        'cache_creation': {
+            'ephemeral_1h_input_tokens': 0,
+            'ephemeral_5m_input_tokens': 0,
+        },
+    }
+    frames = [
+        {'type': 'system', 'subtype': 'init', 'session_id': 'sess_err'},
+        {
+            'type': 'assistant',
+            'message': {'id': 'msg_err', 'model': '<synthetic>', 'usage': usage},
+            'parent_tool_use_id': parent,
+            'session_id': 'sess_err',
+        },
+        # no result frame: the agent was killed here
+    ]
+    result = backend.stream(_lines(frames), step_id=step_id, model='claude-fable-5')
+    assert result.cost == 0.0
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == 0.0
 
 
 @pytest.mark.parametrize(

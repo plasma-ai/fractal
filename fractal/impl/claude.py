@@ -292,11 +292,12 @@ class ClaudeParser(StreamParser):
                 if message_id is not None:
                     self._priced_ids.add(message_id)
                 # a sub-agent's frame runs its own model, so each frame prices
-                # at the model it names (the top-level one when it names none);
-                # a synthetic reply's names no priced model, so as in the
-                # settle its zeroed usage prices nothing
+                # at the model it names; one naming none prices at the
+                # top-level model, and so does a synthetic reply's (claude's
+                # stand-in for an API error), whose zeroed usage books a known $0
                 model = inner.get('model')
-                model = model if isinstance(model, str) else None
+                real = isinstance(model, str) and model != '<synthetic>'
+                model = model if real else None
                 cost = self._message_cost(usage, model=model)
                 if cost is not None:
                     self.cost = (self.cost or 0.0) + cost
