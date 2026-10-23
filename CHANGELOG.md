@@ -483,6 +483,12 @@ may include breaking changes, each listed under a Breaking heading.
   agent was not aborted. `fractal node _reap` reports that case with its own
   exit 3, so a helper that cannot run at all (a broken install's failed import
   exits 1) still ends the step through the pause's own TERM of its group.
+- Run and iteration deadlines credit a pause from the moment the loop parks to
+  the resume, in the loop and in `fractal node time remaining` alike. The credit
+  ran from the pause request, so the time a step worked on past the request (an
+  agent pausing its own node finishes its step before the loop parks) was
+  refunded to the deadlines as paused time, and a pause that a resume withdrew
+  before the loop parked credited the time the node kept working.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives the template variables (the paths, the branch, and the spawn

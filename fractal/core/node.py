@@ -4059,8 +4059,8 @@ class Node:
                 )
         # a node still parking (active with a pending pause signal) has a live
         # loop that cannot be relaunched -- withdraw its pause instead, so the
-        # loop never parks; the resume event closes the span for the credit
-        # walk, and a loop that already read the signal parks anyway (honest:
+        # loop never parks; the request opened no credit span (only a park
+        # does), and a loop that already read the signal parks anyway (honest:
         # it lands paused for the next resume to relaunch)
         resumed_count = 0
         withdrawn = [
