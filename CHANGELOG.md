@@ -658,6 +658,17 @@ may include breaking changes, each listed under a Breaking heading.
   force-added, and the baseline's output names it. The baseline force-added the
   whole seed directory, so every ignored file in it rode the commit onto the
   top-level branch.
+- `fractal node start` (with or without `--continue`), `fractal node resume`,
+  and `fractal resume` refuse an invalid effort ladder committed on the tree's
+  root branch before they change anything, naming the setting and its fault; a
+  resume checks every node it would relaunch. Such a ladder (a bad shape, an
+  unregistered agent, or the agent's own levels out of order) killed the loop's
+  boot after the command reported success, with nothing recorded: a fresh start
+  stayed `idle`, a continue stayed `idle` and refused its own retry, and a
+  resume stayed `paused` with the parked time charged against the run's
+  deadlines. A ladder committed after the command's check aborts the boot on
+  record: a start or continue ends `exited` with the reason on its run, and a
+  resume stays paused for the next resume.
 
 ## [1.3.0] - 2026-09-17
 

@@ -418,7 +418,9 @@ pauses withdrawn)``, or ``No paused nodes to resume.``.
 ``--path``
    Repository path. Default: ``.``.
 
-Refuses when the tree has no user node.
+Refuses when the tree has no user node, and, before it lifts the latch or
+touches any node, when the effort ladder committed on the root branch is
+invalid for a parked node (see :doc:`/configuration`).
 
 .. code-block:: console
 

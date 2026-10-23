@@ -126,22 +126,36 @@ object of agent ladders, each with exactly `levels` (unique non-empty strings)
 and `floor` (one of them). The loop reads the copy committed on the tree's root
 branch at boot (`worktree.committed_effort_ladders`, beside
 `committed_wiki_setting`) and holds it for the run, so a node cannot change its
-own ladder and a committed change lands at the next start or resume; an invalid
-ladder fails the boot, and since every reader parses the whole file,
-`fractal init`, the `--init` baseline, spawn, and the merge footprint check's
-reads of the root branch's copy (`Node.check_wiki` for a node in another
-sub-project, or with its parent checked out nowhere) refuse it too. The parser
-cannot know the levels a provider accepts, so an override naming a level the CLI
-rejects fails the steered launch.
+own ladder and a committed change lands at the next start or resume. Since every
+reader parses the whole file, `fractal init`, the `--init` baseline, spawn, and
+the merge footprint check's reads of the root branch's copy (`Node.check_wiki`
+for a node in another sub-project, or with its parent checked out nowhere)
+refuse an invalid ladder too. The parser cannot know the levels a provider
+accepts, so an override naming a level the CLI rejects fails the steered launch.
 
-Two checks need the agent registry, so they run at the loop's boot
-(`loop._check_effort_ladders`) rather than in the parser: the boot agent's
-resolve has loaded the tree's deployment hook file by then, so custom agents are
-registered. Each ladder must name a registered agent (a misspelled `Claude`
-would otherwise keep the default ladder), and a ladder built only from levels
-its agent declares in `effort_levels` must list them in that order, lowest first
-(a highest-first list would make the steer raise the effort). A ladder carrying
-a level of its own is taken as written.
+Two checks need the agent registry, so they run outside the parser
+(`loop._check_effort_ladders`), resolving each name with the tree's data dir so
+the deployment hook file's custom agents count. Each ladder must name a
+registered agent (a misspelled `Claude` would otherwise keep the default
+ladder), and a ladder built only from levels its agent declares in
+`effort_levels` must list them in that order, lowest first (a highest-first list
+would make the steer raise the effort). A ladder carrying a level of its own is
+taken as written.
+
+One read runs the parse and both checks for a node: `loop._effort_ladders`, the
+committed copy in the node's own project. Its three callers share its messages,
+which name the setting, the file, the root branch, and the fault:
+
+- `Node.start` (fresh and `--continue`) calls it before it changes anything, so
+  a bad ladder refuses at the command instead of after "Started".
+- `Node.resume` calls it for every node it would relaunch (each reads its own
+  project's copy) before the tree latch lifts, any pause is withdrawn, or any
+  resume event closes a pause credit span.
+- `Loop._read_effort_ladders`, the first boot stage inside the
+  `_abort_preflight` guard (ahead of `_preflight`'s probes), covers a commit
+  landing between the command's check and the boot: a start or continue lands
+  `exited` with the reason on a closed run row, and a resume stays paused with
+  its run open and its credit span re-opened.
 
 ## Preflight
 

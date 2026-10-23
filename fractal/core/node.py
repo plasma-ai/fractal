@@ -2690,6 +2690,7 @@ class Node:
 
         """
         from .agent import command_base, resolve
+        from .loop import _effort_ladders
 
         # reject user nodes
         if self.is_user:
@@ -2725,6 +2726,9 @@ class Node:
             raise RuntimeError(
                 f'Cannot start under a paused node ({latched}). Resume it first.'
             )
+        # refuse a bad committed effort ladder before anything changes -- the
+        # loop's boot reads it again and would abort after "Started" printed
+        _effort_ladders(self)
         # launch-time notices (the retune echo, the kill countermand) ride
         # the returned confirmation -- core never prints; the CLI echoes it
         notices: list[str] = []
@@ -4011,6 +4015,8 @@ class Node:
             Confirmation message.
 
         """
+        from .loop import _effort_ladders
+
         # a draining seat re-arms nothing (export plus the run's durable
         # drain signal) -- relaunching a parked subtree from inside a
         # wind-down is the one expanding verb the other guards miss
@@ -4018,6 +4024,14 @@ class Node:
             raise RuntimeError(
                 'Cannot resume a node from a draining run (--drain forbids re-arms).'
             )
+        # refuse a bad committed effort ladder before anything changes -- each
+        # relaunched loop reads its own project's ladder at boot and would
+        # abort back to paused after the resume closed its pause credit span
+        relaunched = [node for _, node in self._live_descendants(status='paused')]
+        if not self.is_user and self.status() == 'paused':
+            relaunched.append(self)
+        for node in relaunched:
+            _effort_ladders(node)
         # a tree-wide resume releases the latch first -- new starts and
         # spawns are legal again the moment the release begins, even when
         # nothing is left parked to relaunch
