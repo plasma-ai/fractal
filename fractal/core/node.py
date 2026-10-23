@@ -1485,13 +1485,15 @@ class Node:
                 ref=root,
                 project=child_project,
             )
-            if (committed or WIKI_FOLDER) != (wiki or WIKI_FOLDER):
+            named = committed or WIKI_FOLDER
+            fixed = wiki or WIKI_FOLDER
+            if named != fixed:
                 raise ValueError(
                     f'The project wiki setting committed on {root!r} names'
-                    f' {committed or WIKI_FOLDER!r}, but the tree recorded'
-                    f' {wiki or WIKI_FOLDER!r}; commit the recorded'
-                    f' setting on {root!r}, or run `fractal reset {root}` and'
-                    ' re-run `fractal init` to adopt the committed one.'
+                    f' {named!r}, but the tree recorded {fixed!r}; commit the'
+                    f' recorded setting on {root!r}, or run `fractal reset'
+                    f' {root}` and re-run `fractal init` to adopt the committed'
+                    ' one.'
                 )
         # compose the child branch and probe its pre-existing ref now: the template
         # read below forks from the branch's own tip on a --reset, and the failure
@@ -2215,7 +2217,9 @@ class Node:
             # has no node worktrees -- a live node would keep the old folder;
             # an absent setting and one naming the default are the same folder
             recorded = self.config.get('wiki')
-            adopted = (wiki_folder or WIKI_FOLDER) != (recorded or WIKI_FOLDER)
+            named = wiki_folder or WIKI_FOLDER
+            fixed = recorded or WIKI_FOLDER
+            adopted = named != fixed
             if adopted:
                 nodes = [
                     checkout
@@ -2224,11 +2228,10 @@ class Node:
                 ]
                 if nodes:
                     raise ValueError(
-                        f'The project wiki setting names'
-                        f' {wiki_folder or WIKI_FOLDER!r}, but the tree on'
-                        f' {branch!r} recorded {recorded or WIKI_FOLDER!r} and'
-                        f' still has nodes; run `fractal reset {branch}` and'
-                        ' re-run init to adopt it.'
+                        f'The project wiki setting names {named!r}, but the'
+                        f' tree on {branch!r} recorded {fixed!r} and still has'
+                        f' nodes; run `fractal reset {branch}` and re-run init'
+                        ' to adopt it.'
                     )
                 config = self.config.load()
                 if wiki_folder is None:
@@ -2887,11 +2890,11 @@ class Node:
         # the launch checks read the retuned config, so a refusal rolls the
         # retune back as the re-arm gate's does
         try:
-            # a non-positive ceiling launches straight into a degenerate $0 finish, so
-            # reject it; a missing ceiling means uncapped -- allowed but warned loudly
-            # since spend is then bounded only by --max-iters/--timeout (a token-priced
-            # agent with no model set can only run this way -- a cost cap requires a
-            # model)
+            # a non-positive ceiling launches straight into a degenerate $0
+            # finish, so reject it; a missing ceiling means uncapped -- allowed
+            # but warned loudly since spend is then bounded only by
+            # --max-iters/--timeout (a token-priced agent with no model set can
+            # only run this way -- a cost cap requires a model)
             max_cost = self.config.get('max_cost')
             if max_cost is not None and max_cost <= 0:
                 raise RuntimeError(
@@ -4239,10 +4242,10 @@ class Node:
     def merge(
         self: Node,
         *,
-        continue_merge: bool = False,
-        ignore_scope: bool = False,
         validation_script: Optional[str] = None,
         message: Optional[str] = None,
+        continue_merge: bool = False,
+        ignore_scope: bool = False,
     ) -> tuple[str, str]:
         """Squash-merge the node's branch into its merge target.
 
@@ -4474,7 +4477,8 @@ class Node:
         # the tree's user node resolves by the repo's record, not the
         # checkout: a root checked out in a linked worktree carries no
         # self-ignored seed there, so its folder would read as the default
-        if self.branch.rsplit('.', 1)[0] == root:
+        parent_branch, *_ = self.branch.rsplit('.', 1)
+        if parent_branch == root:
             parent = Node.resolve_user(self.repo_dir, name=root)
         else:
             parent = self.parent
@@ -6895,8 +6899,8 @@ class Node:
             result = backend.stream(
                 proc.stdout,
                 process=proc,
-                render=render,
                 baseline=baseline,
+                render=render,
             )
         except BaseException:
             if proc.poll() is None:

@@ -1182,8 +1182,8 @@ def test_stream_books_a_resumed_launchs_figures_less_its_baseline(
         _lines(frames),
         step_id=step_id,
         model='claude-fable-5',
-        render=events.append,
         baseline=baseline,
+        render=events.append,
     )
     results = [event for event in events if event.kind == 'result']
     if settled:

@@ -14,7 +14,7 @@ from typing import Optional
 
 __all__ = []
 
-#: Seconds between the TERM pass and the KILL of every group still alive.
+#: seconds between the TERM pass and the KILL of every group still alive
 GRACE_SECONDS = 5.0
 
 # signal rounds per pass: each re-walks the tree for groups the last round
@@ -22,8 +22,8 @@ GRACE_SECONDS = 5.0
 # the wait after the rounds still signals any later group, so a few suffice
 _ROUNDS = 5
 
-#: Seconds the KILL pass waits before naming survivors: a KILL cannot be
-#: caught, so this covers only its delivery and the process table catching up.
+#: seconds the KILL pass waits before naming survivors: a KILL cannot be
+#: caught, so this covers only its delivery and the process table catching up
 SETTLE_SECONDS = 1.0
 
 # seconds between process-table snapshots while waiting on a group: each

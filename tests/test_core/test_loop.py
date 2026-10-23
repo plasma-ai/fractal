@@ -858,7 +858,7 @@ def scripted_claude(
     #   subprocess no fake clock can drive, so a case that checks the clock
     #   holds needs its first waiting frame within 1s of the spawn; bash
     #   prints it in milliseconds, wide margin for CPU contention under -n auto
-    monkeypatch.setattr(loop_module, 'NO_PROGRESS_SECONDS', 1)
+    monkeypatch.setattr(loop_module, '_NO_PROGRESS_SECONDS', 1)
     _configure(loop_node, step_timeout='10s', step_retries=3)
     loop_node.radio.init()
     agents: list[ScriptedClaude] = []
@@ -3174,7 +3174,7 @@ def test_steered_launch_reports_the_deadline_it_runs_under(
     is the deadline it runs under, never a fresh ceiling.
     """
     # a no-progress clock long enough to give the stuck launch a span
-    monkeypatch.setattr(loop_module, 'NO_PROGRESS_SECONDS', 3)
+    monkeypatch.setattr(loop_module, '_NO_PROGRESS_SECONDS', 3)
     silent = _claude_script(_INIT, _TOOL_START, _TOOL_RESULT, 'exec sleep 30')
     resumed = _claude_script(_INIT, _RESULT)
     agent = scripted_claude([silent, resumed, _claude_script(_INIT, _RESULT)])

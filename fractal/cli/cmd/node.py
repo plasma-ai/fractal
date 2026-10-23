@@ -690,10 +690,10 @@ def node_merge(app: typer.Typer) -> typer.Typer:
                 )
                 typer.confirm(prompt, abort=True)
         output, notices = node.merge(
-            continue_merge=continue_,
-            ignore_scope=ignore_scope,
             validation_script=validate,
             message=message,
+            continue_merge=continue_,
+            ignore_scope=ignore_scope,
         )
         if output:
             typer.echo(output)

@@ -49,7 +49,7 @@ _UNRESOLVED_REF = 'Template ref does not resolve to a commit: {ref!r}.'
 # config.toml in its CODEX_HOME (the node's .codex/): a blank line, a
 # [projects.<path>] header quoting the path as a TOML basic or literal
 # string, and trust_level = "trusted", keyed to the repository's main
-# worktree. Diff never judges the trust stanza for this repository at the
+# worktree; diff never judges the trust stanza for this repository at the
 # end of the file (the node's own worktree is accepted too); one trusting
 # any other path is drift, since trust enables project-local settings
 _CODEX_CONFIG = '.codex/config.toml'
@@ -370,47 +370,6 @@ def read_sources(bundle: pathlib.Path) -> dict[str, bytes]:
     return result
 
 
-def _disk_hint(worktree: pathlib.Path, relpath: str) -> str:
-    """Describe what the disk holds at a path a commit does not track.
-
-    An untracked copy under the exact name is the uncommitted-copy hint.
-    A name that reaches an entry on disk only through a symlink or another
-    letter case (a case-insensitive filesystem) says so instead:
-    committing that entry would not track the name.
-
-    Args:
-        worktree: Worktree root the path is relative to.
-        relpath: Worktree-relative POSIX path.
-
-    Returns:
-        The hint with its leading space, or ``''`` when the disk holds
-        nothing at the path.
-
-    """
-    posix = pathlib.PurePosixPath(relpath)
-    target = worktree / posix
-    if not target.exists():
-        return ''
-    inexact = (
-        ' (a copy on disk matches the name only through a symlink or a'
-        ' letter-case difference)'
-    )
-    # the exact name resolves to itself, with no symlink on the way
-    root = worktree.resolve()
-    resolved = target.resolve()
-    if not resolved.is_relative_to(root):
-        return inexact
-    if resolved.relative_to(root).as_posix() != posix.as_posix():
-        return inexact
-    # and spells each component as its parent directory lists it
-    parent = worktree
-    for part in posix.parts:
-        if part not in {entry.name for entry in parent.iterdir()}:
-            return inexact
-        parent = parent / part
-    return ' (an uncommitted copy exists on disk)'
-
-
 def read_shared(
     sources: dict[str, bytes],
     *,
@@ -501,7 +460,8 @@ def read_shared(
                 ' forks from, or pass @<ref> to read the template at another'
                 ' commit.'
             )
-        mode, kind, blob_id = listing.partition('\t')[0].split()
+        info, *_ = listing.partition('\t')
+        mode, kind, blob_id = info.split()
         if mode == '120000':
             raise ValueError(
                 f'{where} {name!r}, a symlink at {commit}; a link is never'
@@ -1227,48 +1187,6 @@ def read_provenance(node_dir: pathlib.Path) -> dict[str, Any]:
     return data
 
 
-def _cut_trust(
-    live: bytes,
-    *,
-    worktree: pathlib.Path,
-    repo_dir: pathlib.Path,
-) -> bytes:
-    """Cut the trust stanza for this repository from a live codex config.
-
-    Reads only the run of stanzas ending the file. Each key unquotes
-    through a TOML parse and is cut when it resolves to the main repo
-    root or the node's worktree, so a symlinked or trailing-slash
-    spelling still matches; a stanza for any other path, a relative one
-    included, stays in the bytes and is judged.
-
-    Args:
-        live: The live ``.codex/config.toml`` bytes.
-        worktree: The node's worktree.
-        repo_dir: Main repo root.
-
-    Returns:
-        The live bytes without the trust stanzas for this repository.
-
-    """
-    run = _CODEX_TRUST.search(live)
-    if run is None:
-        return live
-    roots = {worktree.resolve(), repo_dir.resolve()}
-    kept: list[bytes] = []
-    for stanza in _CODEX_STANZA.finditer(live, run.start()):
-        # a key that fails to parse or resolve names no root, and neither
-        # does a relative key, which would resolve against the shell's cwd
-        try:
-            projects = tomllib.loads(stanza.group().decode('utf-8'))['projects']
-            path = pathlib.Path(next(iter(projects)))
-            trusted = path.is_absolute() and path.resolve() in roots
-        except ValueError:
-            trusted = False
-        if not trusted:
-            kept.append(stanza.group())
-    return live[: run.start()] + b''.join(kept)
-
-
 def diff(
     *,
     node_dir: pathlib.Path,
@@ -1386,3 +1304,89 @@ def diff(
             report = ''.join(lines)
             reports.append(report.rstrip('\n'))
     return reports, warnings
+
+
+# ------ helper functions
+
+
+def _disk_hint(worktree: pathlib.Path, relpath: str) -> str:
+    """Describe what the disk holds at a path a commit does not track.
+
+    An untracked copy under the exact name is the uncommitted-copy hint.
+    A name that reaches an entry on disk only through a symlink or another
+    letter case (a case-insensitive filesystem) says so instead:
+    committing that entry would not track the name.
+
+    Args:
+        worktree: Worktree root the path is relative to.
+        relpath: Worktree-relative POSIX path.
+
+    Returns:
+        The hint with its leading space, or ``''`` when the disk holds
+        nothing at the path.
+
+    """
+    posix = pathlib.PurePosixPath(relpath)
+    target = worktree / posix
+    if not target.exists():
+        return ''
+    inexact = (
+        ' (a copy on disk matches the name only through a symlink or a'
+        ' letter-case difference)'
+    )
+    # the exact name resolves to itself, with no symlink on the way
+    root = worktree.resolve()
+    resolved = target.resolve()
+    if not resolved.is_relative_to(root):
+        return inexact
+    if resolved.relative_to(root).as_posix() != posix.as_posix():
+        return inexact
+    # and spells each component as its parent directory lists it
+    parent = worktree
+    for part in posix.parts:
+        if part not in {entry.name for entry in parent.iterdir()}:
+            return inexact
+        parent = parent / part
+    return ' (an uncommitted copy exists on disk)'
+
+
+def _cut_trust(
+    live: bytes,
+    *,
+    worktree: pathlib.Path,
+    repo_dir: pathlib.Path,
+) -> bytes:
+    """Cut the trust stanza for this repository from a live codex config.
+
+    Reads only the run of stanzas ending the file. Each key unquotes
+    through a TOML parse and is cut when it resolves to the main repo
+    root or the node's worktree, so a symlinked or trailing-slash
+    spelling still matches; a stanza for any other path, a relative one
+    included, stays in the bytes and is judged.
+
+    Args:
+        live: The live ``.codex/config.toml`` bytes.
+        worktree: The node's worktree.
+        repo_dir: Main repo root.
+
+    Returns:
+        The live bytes without the trust stanzas for this repository.
+
+    """
+    run = _CODEX_TRUST.search(live)
+    if run is None:
+        return live
+    roots = {worktree.resolve(), repo_dir.resolve()}
+    kept: list[bytes] = []
+    for stanza in _CODEX_STANZA.finditer(live, run.start()):
+        # a key that fails to parse or resolve names no root, and neither
+        # does a relative key, which would resolve against the shell's cwd
+        try:
+            projects = tomllib.loads(stanza.group().decode('utf-8'))['projects']
+            path = pathlib.Path(next(iter(projects)))
+            trusted = path.is_absolute() and path.resolve() in roots
+        except ValueError:
+            trusted = False
+        if not trusted:
+            kept.append(stanza.group())
+    return live[: run.start()] + b''.join(kept)

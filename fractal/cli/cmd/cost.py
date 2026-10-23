@@ -70,9 +70,10 @@ def cost_remaining(app: typer.Typer) -> typer.Typer:
         # a deleted target reports the cap-less 'no budget' -- its history
         # persists, but remaining never answers through the caller
         node, deleted, _ = resolve_ledger_target(path, node)
+        branch = deleted or node.branch
         require_scope_owner(
             node=node,
-            branch=deleted or node.branch,
+            branch=branch,
             run_id=run_id,
             iter_id=iter_id,
             step_id=step_id,
@@ -140,9 +141,10 @@ def cost_spent(app: typer.Typer) -> typer.Typer:
         # recorded run standing in for the current one -- core gives run_id
         # precedence over the caller's own scope
         node, deleted, latest = resolve_ledger_target(path, node)
+        branch = deleted or node.branch
         require_scope_owner(
             node=node,
-            branch=deleted or node.branch,
+            branch=branch,
             run_id=run_id,
             iter_id=iter_id,
             step_id=step_id,
@@ -232,7 +234,8 @@ def cost_breakdown(app: typer.Typer) -> typer.Typer:
         # its latest recorded run standing in for the current one -- core
         # gives run_id precedence over the caller's own scope
         node, deleted, latest = resolve_ledger_target(path, node)
-        require_scope_owner(node, deleted or node.branch, run_id=run_id)
+        branch = deleted or node.branch
+        require_scope_owner(node=node, branch=branch, run_id=run_id)
         if deleted is not None and run_id is None:
             run_id = latest
         # the display-complete spend table (leads with the target, sums to
