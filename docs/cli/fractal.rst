@@ -382,7 +382,10 @@ resume).`` when nothing is running — the latch still lands.
 
 ``--reason``
    Optional reason, recorded on the pause events and appended to the
-   confirmation. Default: none.
+   confirmation. The loop reserves ``parked``, and any reason starting with
+   ``via pause latch`` or ``resume preflight failed:``, for the pause events
+   it records as it parks, so such a reason is refused before anything is
+   written. Default: none.
 
 ``--path``
    Repository path. Default: ``.``.

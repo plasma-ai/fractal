@@ -481,7 +481,10 @@ tmux session — that is its normal state, not a crash. While a node (or the
 whole tree, via ``fractal pause``) is paused, spawning and starting refuse
 anywhere beneath it; the only legal verbs on a paused node are ``resume``,
 ``kill``, ``chat``, and ``merge`` (committed work only; the node stays
-paused).
+paused). The loop reserves ``parked``, and any reason starting with
+``via pause latch`` or ``resume preflight failed:``, for the pause events it
+records as it parks, so ``pause`` refuses such a ``--reason`` before anything
+is written.
 
 ``resume`` relaunches the parked subtree leaf-first. Each loop adopts its open
 run — same budgets and iteration count, the interrupted step re-entered
@@ -1179,7 +1182,8 @@ The loop reads step files only once per iteration, so an edit made
 mid-iteration shows here from the step's next launch, when the loop enforces
 it; the node's own seat reads the same ceiling from ``$STEP_TIMEOUT_SECONDS``.
 A steered step counts down from its stuck launch, as the loop's
-deadline does. Paused spans are credited back to run and iteration deadlines.
+deadline does. Paused spans are credited back to run and iteration deadlines,
+each from the moment the loop parks (not the pause request) to the resume.
 Two non-numeric answers are distinct: ``no limit`` means no timeout is
 configured for the queried scope; ``not running`` means a limit exists but no
 run, iteration, or step is currently active. An idle node has no current step,

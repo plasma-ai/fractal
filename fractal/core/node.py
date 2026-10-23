@@ -29,9 +29,12 @@ from fractal.constants import (
     FRACTAL_FOLDER,
     HEADLESS_FILE,
     HEADLESS_LOG,
+    LATCH_PARK_REASON_PREFIX,
     LOCK_FILE,
+    PARK_REASON,
     PAUSED_FILE,
     PGID_FILE,
+    PREFLIGHT_PARK_REASON_PREFIX,
     PROJECT_FOLDER,
     SOCKET_FILE,
     STATUS_FILE,
@@ -3884,7 +3887,29 @@ class Node:
         Returns:
             Confirmation message.
 
+        Raises:
+            ValueError: If ``reason`` uses the text the loop reserves for its
+                own park rows.
+
         """
+        # refuse the loop's park text before anything is written -- the
+        # deadline credit tells a park from a request by its reason; a prefix
+        # counts without its trailing space, since a fanned-out reason gains
+        # a ' (via pause of ...)' suffix
+        if reason:
+            prefixes = (LATCH_PARK_REASON_PREFIX, PREFLIGHT_PARK_REASON_PREFIX)
+            reserved = [
+                prefix.rstrip()
+                for prefix in prefixes
+                if reason.startswith(prefix.rstrip())
+            ]
+            if reason == PARK_REASON:
+                reserved.append(PARK_REASON)
+            if reserved:
+                raise ValueError(
+                    f'--reason must not use the reserved text {reserved[0]!r}'
+                    ' (the loop records its own parks with it).'
+                )
         # a tree-wide pause latches the root before fanning out, so a start
         # or spawn racing the sweep (even at depth 1, where no pausable
         # ancestor exists) refuses instead of slipping in unfrozen
@@ -4059,8 +4084,8 @@ class Node:
                 )
         # a node still parking (active with a pending pause signal) has a live
         # loop that cannot be relaunched -- withdraw its pause instead, so the
-        # loop never parks; the resume event closes the span for the credit
-        # walk, and a loop that already read the signal parks anyway (honest:
+        # loop never parks; the request opened no credit span (only a park
+        # does), and a loop that already read the signal parks anyway (honest:
         # it lands paused for the next resume to relaunch)
         resumed_count = 0
         withdrawn = [

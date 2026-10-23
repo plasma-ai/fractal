@@ -291,7 +291,14 @@ class ClaudeParser(StreamParser):
             if usage and (message_id is None or message_id not in self._priced_ids):
                 if message_id is not None:
                     self._priced_ids.add(message_id)
-                cost = self._message_cost(usage)
+                # a sub-agent's frame runs its own model, so each frame prices
+                # at the model it names; one naming none prices at the
+                # top-level model, and so does a synthetic reply's (claude's
+                # stand-in for an API error), whose zeroed usage books a known $0
+                model = inner.get('model')
+                real = isinstance(model, str) and model != '<synthetic>'
+                model = model if real else None
+                cost = self._message_cost(usage, model=model)
                 if cost is not None:
                     self.cost = (self.cost or 0.0) + cost
                     events.append(StreamEvent(kind='cost', cost=self.cost))
@@ -422,9 +429,18 @@ class ClaudeParser(StreamParser):
             }
         return [StreamEvent(kind='thinking_cap', session=self.session, reply=reply)]
 
-    def _message_cost(self: ClaudeParser, usage: dict[str, Any]) -> Optional[float]:
-        """Hook for an assistant frame's running cost estimate."""
-        return _compute_cost(usage, self.model)
+    def _message_cost(
+        self: ClaudeParser,
+        usage: dict[str, Any],
+        *,
+        model: Optional[str] = None,
+    ) -> Optional[float]:
+        """Hook for an assistant frame's running cost estimate.
+
+        ``model`` is the model the frame names (a sub-agent's frame names
+        its own); ``None`` prices at the stream's top-level model.
+        """
+        return _compute_cost(usage, model or self.model)
 
     def _result_cost(self: ClaudeParser, message: dict[str, Any]) -> Optional[float]:
         """Hook for the result frame's cost fact.
@@ -452,9 +468,11 @@ class _RoutedClaudeParser(ClaudeParser):
     def _message_cost(
         self: _RoutedClaudeParser,
         usage: dict[str, Any],
+        *,
+        model: Optional[str] = None,
     ) -> Optional[float]:
         """Skip the gateway's zeroed assistant usage -- nothing to accrue."""
-        return _compute_cost(usage, self.model) or None
+        return _compute_cost(usage, model or self.model) or None
 
     def _result_cost(
         self: _RoutedClaudeParser,

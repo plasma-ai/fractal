@@ -9015,15 +9015,25 @@ def test_resume_preflight_abort_recredits_the_reparked_wait(
     ``pause`` event) so ``_pause_credit`` keeps crediting the re-parked wait.
     """
     node = node_with_db
+    node.config.set('timeout', '10m')
     node.status_set('active')
     run_id = node.record.run_start()
+    _age_run(node, run_id, 300.0)
     node.status_set('paused')
-    # the original pause opens a credit span; the failed resume's completed
-    # event (stamped by Node._resume before the loop boots) closes it
-    pause_id = node.record.event_start('pause')
-    node.record.event_end(event_id=pause_id, status='completed')
-    resume_id = node.record.event_start('resume')
-    node.record.event_end(event_id=resume_id, status='completed')
+    # the loop's park opens a credit span (200s ago); the failed resume's
+    # completed event (stamped by Node._resume before the loop boots) closes
+    # it (150s ago)
+    for event, metadata, seconds_ago in (
+        ('pause', 'parked', 200.0),
+        ('resume', '', 150.0),
+    ):
+        event_id = node.record.event_start(event, metadata=metadata)
+        node.record.event_end(event_id=event_id, status='completed')
+        node.db.update(
+            data={'created_at': _past_timestamp(seconds_ago)},
+            table='events',
+            where={'event_id': event_id},
+        )
     loop = MockLoop(node, resume=True)
     with pytest.raises(_Abort):
         loop._abort_preflight('OPENROUTER_API_KEY is not set')
@@ -9033,6 +9043,15 @@ def test_resume_preflight_abort_recredits_the_reparked_wait(
     events.sort(key=lambda e: e['event_id'])
     credit_seq = [e['event'] for e in events if e['event'] in ('pause', 'resume')]
     assert credit_seq == ['pause', 'resume', 'pause']
+    # the re-parked wait is credited: 600 - (300 elapsed - (50 + 100) parked)
+    node.db.update(
+        data={'created_at': _past_timestamp(100.0)},
+        table='events',
+        where={'event_id': events[-1]['event_id']},
+    )
+    remaining = node.time.remaining(scope='run', run_id=run_id)
+    assert remaining is not None
+    assert 440.0 < remaining <= 451.0
     # and the node is still paused with its run adoptable (unchanged)
     assert node.status() == 'paused'
     assert node.db.read('runs', where={'run_id': run_id})[0]['ended_at'] is None
@@ -9081,9 +9100,12 @@ def test_resume_anchors_run_deadline_on_credited_remaining(
     node.status_set('active')
     run_id = node.record.run_start()
     _age_run(node, run_id, 300.0)
-    # a closed 180s pause span (240s ago -> 60s ago) credits 180s back
-    for event, seconds_ago in (('pause', 240.0), ('resume', 60.0)):
-        event_id = node.record.event_start(event, run_id=run_id)
+    # a closed 180s park span (240s ago -> 60s ago) credits 180s back
+    for event, metadata, seconds_ago in (
+        ('pause', 'parked', 240.0),
+        ('resume', '', 60.0),
+    ):
+        event_id = node.record.event_start(event, metadata=metadata, run_id=run_id)
         node.record.event_end(event_id=event_id, status='completed')
         node.db.update(
             data={'created_at': _past_timestamp(seconds_ago)},

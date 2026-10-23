@@ -19,8 +19,11 @@ from typing import Any, Optional, Union
 
 import fractal.util
 from fractal.constants import (
+    LATCH_PARK_REASON_PREFIX,
+    PARK_REASON,
     PAUSE_ABORT_FILE,
     PGID_FILE,
+    PREFLIGHT_PARK_REASON_PREFIX,
     SOCKET_FILE,
     STEER_REASON_PREFIX,
     STEP_PGID_FILE,
@@ -1013,7 +1016,7 @@ class Loop:
                     if stood_down not in ('retired', 'killed'):
                         event_id = self.node.record.event_start(
                             'pause',
-                            metadata=f'resume preflight failed: {reason}',
+                            metadata=f'{PREFLIGHT_PARK_REASON_PREFIX}{reason}',
                         )
                         self.node.record.event_end(
                             event_id=event_id, status='completed'
@@ -1073,7 +1076,7 @@ class Loop:
             return False
         print(f'=== Parked at boot: {latched} is paused ===')
         try:
-            node.record.signal_set('pause', f'via pause latch ({latched})')
+            node.record.signal_set('pause', f'{LATCH_PARK_REASON_PREFIX}({latched})')
         except Exception:
             pass
         # open the pause span -- without the instant, the parked time would
@@ -1081,7 +1084,7 @@ class Loop:
         try:
             event_id = node.record.event_start(
                 'pause',
-                metadata=f'via pause latch ({latched})',
+                metadata=f'{LATCH_PARK_REASON_PREFIX}({latched})',
                 run_id=self._run_id,
             )
             if event_id is not None:
@@ -1209,7 +1212,7 @@ class Loop:
         except Exception:
             pass
         # close the pause span for the deadline credit even when no resume CLI
-        # ran (a bare --resume launch) -- a resume event with no open pause
+        # ran (a bare --resume launch) -- a resume event with no open park
         # is inert to the credit walk, so the CLI-then-boot double write is safe
         try:
             event_id = node.record.event_start('resume', run_id=self._run_id)
@@ -4746,15 +4749,15 @@ class Loop:
         # mid-step state resume continues from); _on_exit reads the paused
         # stamp and leaves it alone
         if self._paused:
-            # (re)open the pause span at the park instant -- a duplicate
-            # pause event collapses in the credit walk, and a park after a
-            # withdrawn pause (whose resume event closed the span) would
-            # otherwise burn its parked wall-clock against
-            # the adopted deadlines
+            # open the pause span at the park instant -- the credit walk
+            # opens spans only at the loop's park rows, never at the pause
+            # request (the step may have worked on past it), so without
+            # this row the parked wall-clock would burn against the
+            # adopted deadlines
             try:
                 event_id = node.record.event_start(
                     'pause',
-                    metadata='parked',
+                    metadata=PARK_REASON,
                     run_id=self._run_id,
                 )
                 if event_id is not None:
