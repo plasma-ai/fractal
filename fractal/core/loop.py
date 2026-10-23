@@ -752,12 +752,15 @@ class Loop:
         ``start`` and ``resume`` refuse a bad config or ladder up front,
         but an edit can land between their check and this boot, so the
         fault aborts through :meth:`_abort_preflight` and lands on record.
+        A malformed ``OFFLINE_MODE``, which the price refresh reads, aborts
+        the same way before the refresh can raise past the run row.
         """
         # a RuntimeError is the tree's agent hook file failing to load, which
         # the agent registry raises naming the file
         try:
             self._read_run_parameters()
             self._effort_ladders = _effort_ladders(self.node)
+            pricing.offline()
         except (ValueError, RuntimeError) as error:
             reason = f'{error}'
             print(f'Error: {reason}', file=sys.stderr)

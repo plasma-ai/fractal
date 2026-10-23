@@ -683,10 +683,15 @@ the LiteLLM price table (``~/.fractal/pricing.json``), refreshed at run start
 and daily during long runs. If the fetch fails and no cache exists, the run
 aborts at preflight; a stale cache warns and is used. A native ``claude``
 step prices from the same table only a launch that ends without its own
-cost figure (killed, capped, paused, or with the figure refused), so a run
-with one refreshes a cache older than a day at run start, and a failed
-fetch only warns: every launch that reports its figure still books it, and
-with no cache at all such a launch books unpriced. A cost cap combined
+cost figure (killed, capped, paused, or with the figure refused), and a
+``grok`` step only a stream that reports no cost, so a run with either
+refreshes a cache older than a day at run start, and a failed fetch only
+warns: every launch that reports its figure still books it, and with no
+cache at all such a launch books unpriced. With ``OFFLINE_MODE=true`` in the
+loop's environment (the switch the ``wiki`` tool honors too), every refresh
+skips the fetch and behaves as a failed one: the cached table serves with
+the warning, and a token-priced run with no cache aborts at preflight; any
+value other than ``true`` or ``false`` aborts the boot. A cost cap combined
 with an agent whose spend cannot be priced aborts the run at preflight, before
 the run row commits and before any paid probe: every token-priced step's
 effective model (its own ``model:`` or the node's) is judged against the

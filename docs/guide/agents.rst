@@ -213,7 +213,8 @@ global home (``~/.grok``, or ``$GROK_HOME`` when set in the launching
 environment); an ``XAI_API_KEY`` in the environment is picked up as well.
 ``grok`` reports its spend on the stream's final frame — trusted as-is,
 since subscription/pool models have no pricing-table entry — with token
-pricing only as a fallback. ``grok`` reports no tool activity on its
+pricing only as a fallback, so a run with a ``grok`` step refreshes a price
+table older than a day at run start. ``grok`` reports no tool activity on its
 stream and suppresses reasoning output, so a quiet pane during a ``grok``
 step is normal.
 
