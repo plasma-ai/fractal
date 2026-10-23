@@ -174,7 +174,7 @@ stream recorded it, so the killed launch's settle books it
 ([[features/cost/measurement|measurement]]).
 
 **No progress**: a watchdog thread in the launch times the agent's own idle span
-against the module constant `NO_PROGRESS_SECONDS` (1800). The provider parser
+against the module constant `_NO_PROGRESS_SECONDS` (1800). The provider parser
 owns when the agent holds control and reports it as neutral `acting` and
 `waiting` stream events; the loop's clock only follows them (running from the
 launch and each `acting`, paused at `waiting`, pushed back by a `waiting` that

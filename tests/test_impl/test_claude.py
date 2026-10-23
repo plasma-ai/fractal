@@ -10,7 +10,6 @@ the config-home transcript layout. Stream-level cases drive the base
 from __future__ import annotations
 
 import datetime as dt
-import itertools
 import json
 import logging
 import os
@@ -27,6 +26,9 @@ from fractal.core.event import Event
 from fractal.core.node import Node
 from fractal.impl import claude
 from fractal.impl.claude import ClaudeAgent, ClaudeParser, _RoutedClaudeParser
+from tests.test_core.streams import claude_background_wait
+
+from .transcripts import sub_agent_launch
 
 __all__ = [
     'test_capability_flags_report_provider_facts_claude',
@@ -122,25 +124,6 @@ _CLOSED = '2026-01-01T00:00:02.000Z'
 _AFTER = '2026-01-01T00:00:01.500Z'
 _LATE = '2026-01-01T00:00:01.800Z'
 
-# a live claude 2.1.300 capture (trimmed, session as @SESSION@): a turn's
-# result on line 18, then claude's wake-up on a background task's notice and
-# a new reply (from line 23) closed by its own result on line 33
-_BACKGROUND_WAIT = (
-    pathlib.Path(__file__).parents[1]
-    / 'test_core'
-    / 'streams'
-    / 'claude_background_wait.jsonl'
-)
-
-# a live claude 2.1.300 launch with three sub-agents, laid out as claude keeps
-# it: the session's transcript, its cost-state record last, beside a folder of
-# the sub-agents' (trimmed to the assistant lines, a run of a reply's lines with
-# the same usage cut to its last, content blanked, tool ids renumbered, session
-# as @SESSION@)
-_SUB_AGENT_LAUNCH = (
-    pathlib.Path(__file__).parent / 'transcripts' / 'sub_agent_launch.jsonl'
-)
-
 # the rates claude prices that launch's cost record at, for its main model and
 # for the side model its web tools call (whose calls hold no cache)
 _RECORDED_RATES = {
@@ -156,6 +139,10 @@ _RECORDED_RATES = {
         'output_cost_per_token': 5e-7,
     },
 }
+
+# the output tokens that launch's two sub-agent replies spent past the last
+# line claude wrote for each of them mid-stream
+_MID_STREAM_OUTPUT_TOKENS = 895
 
 # claude's give-up after its last continuation: a synthetic error reply, then
 # an is_error result whose subtype still reads success
@@ -1132,9 +1119,7 @@ def test_stream_reopens_a_settled_cost_at_a_reply_after_its_result(
     must still read as unsettled for the loop to price it.
     """
     backend = ClaudeAgent(node_with_db, 'claude')
-    with _BACKGROUND_WAIT.open(encoding='utf-8') as file:
-        lines = list(itertools.islice(file, count))
-    assert backend.stream(lines).final is final
+    assert backend.stream(claude_background_wait[:count]).final is final
 
 
 @pytest.mark.parametrize(
@@ -1182,8 +1167,8 @@ def test_stream_books_a_resumed_launchs_figures_less_its_baseline(
         _lines(frames),
         step_id=step_id,
         model='claude-fable-5',
-        render=events.append,
         baseline=baseline,
+        render=events.append,
     )
     results = [event for event in events if event.kind == 'result']
     if settled:
@@ -2473,8 +2458,7 @@ def test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result(
     (step_id,) = _steps(node, 1)
     # the capture's turn through its result, then a sub-agent's reply (the
     # capture's own reply frame, re-parented), then the wake-up's own result
-    with _BACKGROUND_WAIT.open(encoding='utf-8') as file:
-        capture = [line.replace('@SESSION@', session) for line in file]
+    capture = [line.replace('@SESSION@', session) for line in claude_background_wait]
     lines = capture[:18]
     if after_result != 'nothing':
         reply = json.loads(capture[13])
@@ -2508,26 +2492,10 @@ def test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result(
     argvalues=[
         # the main model's prompt side: input, cache reads and cache writes
         pytest.param('claude-opus-5-5', 'prompt', id='main-model-prompt'),
-        # its output side
-        pytest.param(
-            'claude-opus-5-5',
-            'output',
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason='sub-agent replies whose final usage never reaches disk',
-            ),
-            id='main-model-output',
-        ),
-        # the side model's spend, whole
-        pytest.param(
-            'claude-haiku-5-5',
-            'all',
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason='side-model calls with no assistant lines',
-            ),
-            id='side-model',
-        ),
+        # its output side, short of two replies' tokens past their last line
+        pytest.param('claude-opus-5-5', 'output', id='main-model-output'),
+        # the side model's spend, with no line to price it from
+        pytest.param('claude-haiku-5-5', 'all', id='side-model'),
     ],
 )
 def test_settle_prices_a_recorded_launch_as_its_cost_record_does(
@@ -2543,10 +2511,11 @@ def test_settle_prices_a_recorded_launch_as_its_cost_record_does(
     as a ``cost-state`` record at exit; its start and duration are the
     launch's window. Priced at the record's own rates, one part of the
     spend at a time, the settle of that window from the session's and its
-    sub-agents' transcripts matches the record, short of two gaps: two
-    sub-agent replies whose last line claude wrote mid-stream (a handful
-    of output tokens on a full reply), and the side-model calls claude's
-    web tools make, which write no assistant line.
+    sub-agents' transcripts matches the record, short of the spend no
+    transcript holds: the output of two sub-agent replies past the last
+    line claude wrote for them mid-stream (a handful of output tokens on a
+    full reply), and the side-model calls claude's web tools make, which
+    write no assistant line, so none of the side model's spend prices.
     """
     # price only the part of the spend under test
     rates = _RECORDED_RATES[model]
@@ -2564,8 +2533,8 @@ def test_settle_prices_a_recorded_launch_as_its_cost_record_does(
     node.record.step_session('claude', step_id=step_id, model=None, session=session)
     # lay the launch's transcripts out under the session's
     transcript = pathlib.Path(backend.transcript(session)['path'])
-    folder = _SUB_AGENT_LAUNCH.with_suffix('')
-    sources = {transcript: _SUB_AGENT_LAUNCH}
+    folder = sub_agent_launch.with_suffix('')
+    sources = {transcript: sub_agent_launch}
     for path in folder.rglob('agent-*.jsonl'):
         sources[transcript.with_suffix('') / path.relative_to(folder)] = path
     for target, source in sources.items():
@@ -2573,18 +2542,19 @@ def test_settle_prices_a_recorded_launch_as_its_cost_record_does(
         content = source.read_text(encoding='utf-8').replace('@SESSION@', session)
         target.write_text(content, encoding='utf-8')
     # settle the window the launch's record spans
-    lines = _SUB_AGENT_LAUNCH.read_text(encoding='utf-8').splitlines()
+    lines = sub_agent_launch.read_text(encoding='utf-8').splitlines()
     record = json.loads(lines[-1])
     opened = dt.datetime.fromtimestamp(record['startTime'] / 1000, dt.UTC)
     closed = opened + dt.timedelta(milliseconds=record['totalDuration'])
     backend.settle_cost(step_id, started=opened.isoformat(), ended=closed.isoformat())
-    # the record's figure for the part, its output side at the output rate
+    # the record's figure for the part, its output side at the output rate,
+    # short of the spend no transcript holds
     usage = record['modelUsage'][model]
     output = usage['outputTokens'] * output_rate
     expected = {
         'prompt': usage['costUSD'] - output,
-        'output': output,
-        'all': usage['costUSD'],
+        'output': output - _MID_STREAM_OUTPUT_TOKENS * output_rate,
+        'all': None,
     }[part]
     row = node.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(expected)

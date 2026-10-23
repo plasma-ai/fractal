@@ -221,7 +221,7 @@ class Time:
                 return float(seconds) if seconds > 0 else None
         # read the ceiling the launch recorded on the row ('-1' when none);
         # the column is absent where a write-denied reader cannot lift it
-        row = self.db.read('steps', where={'step_id': step_id}, limit=1)[0]
+        row, *_ = self.db.read('steps', where={'step_id': step_id}, limit=1)
         recorded = row.get('timeout')
         if recorded is not None:
             return float(recorded) if recorded > 0 else None
@@ -281,20 +281,15 @@ class Time:
         # preflight), told from the pause verb's request by its reason; a
         # failed resume never relaunched the loop (the node is still
         # parked), so only a completed one closes a span
-        spans = [
-            row
-            for row in rows
-            if (
-                row['event'] == 'pause'
-                and (
-                    row['metadata'] == PARK_REASON
-                    or row['metadata'].startswith(
-                        (LATCH_PARK_REASON_PREFIX, PREFLIGHT_PARK_REASON_PREFIX)
-                    )
-                )
-            )
-            or (row['event'] == 'resume' and row['status'] == 'completed')
-        ]
+        prefixes = (LATCH_PARK_REASON_PREFIX, PREFLIGHT_PARK_REASON_PREFIX)
+        spans: list[dict] = []
+        for row in rows:
+            reason = row['metadata']
+            parked = reason == PARK_REASON or reason.startswith(prefixes)
+            park = row['event'] == 'pause' and parked
+            closed = row['event'] == 'resume' and row['status'] == 'completed'
+            if park or closed:
+                spans.append(row)
         spans.sort(key=lambda row: row['created_at'])
         # walk the interleaved instants; duplicate parks collapse onto the
         # first, duplicate resumes are inert, and the fixed-width UTC format
@@ -318,6 +313,9 @@ class Time:
         return credit
 
 
+# ------ helper functions
+
+
 def _step_occurrence(row: dict, rows: Iterable[dict]) -> int:
     """Return which same-named step file a step row ran, 0-based.
 
@@ -334,13 +332,13 @@ def _step_occurrence(row: dict, rows: Iterable[dict]) -> int:
         The occurrence, for ``Step.find``.
 
     """
-    numbers = {
-        other['step']
-        for other in rows
-        if other['iter_id'] == row['iter_id']
-        and other['step_name'] == row['step_name']
-        and other['step'] < row['step']
-    }
+    numbers: set[int] = set()
+    for other in rows:
+        same_iter = other['iter_id'] == row['iter_id']
+        same_name = other['step_name'] == row['step_name']
+        earlier = other['step'] < row['step']
+        if same_iter and same_name and earlier:
+            numbers.add(other['step'])
     return len(numbers)
 
 
@@ -363,14 +361,14 @@ def _steer_charge(row: dict, rows: Iterable[dict]) -> float:
         The stuck launch's seconds, ``0.0`` when the row is no steer.
 
     """
-    prior = [
-        other
-        for other in rows
-        if other['iter_id'] == row['iter_id']
-        and other['step'] == row['step']
-        and other['step_name'] == row['step_name']
-        and other['step_id'] < row['step_id']
-    ]
+    prior: list[dict] = []
+    for other in rows:
+        same_iter = other['iter_id'] == row['iter_id']
+        same_step = other['step'] == row['step']
+        same_name = other['step_name'] == row['step_name']
+        earlier = other['step_id'] < row['step_id']
+        if same_iter and same_step and same_name and earlier:
+            prior.append(other)
     if not prior:
         return 0.0
     stuck = max(prior, key=lambda other: other['step_id'])

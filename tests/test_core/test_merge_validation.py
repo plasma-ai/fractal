@@ -193,7 +193,7 @@ def test_merge_validation_refusal_preserves_hand_resolution(
         'checks/missing.sh' if failure == 'missing' else 'checks/check merge.sh'
     )
     with pytest.raises(RuntimeError, match=r'[Vv]alidat'):
-        node.merge(continue_merge=True, validation_script=validation_script)
+        node.merge(validation_script=validation_script, continue_merge=True)
 
     assert _git(git_repo, 'rev-parse', 'HEAD').stdout == target_head
     assert _git(node.worktree, 'rev-parse', 'HEAD').stdout == child_head
@@ -214,7 +214,7 @@ def test_merge_validation_refusal_preserves_hand_resolution(
         (git_repo / 'feature.txt').write_text('candidate work\n', encoding='utf-8')
         _git(git_repo, 'add', 'feature.txt')
     permission.touch()
-    node.merge(continue_merge=True, validation_script='checks/check merge.sh')
+    node.merge(validation_script='checks/check merge.sh', continue_merge=True)
     assert _git(git_repo, 'show', 'HEAD:README.md').stdout == 'resolved line\n'
     assert _git(git_repo, 'status', '--porcelain').stdout == ''
     head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()

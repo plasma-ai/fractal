@@ -175,7 +175,7 @@ or rebase, or the `index.lock` a killed git command leaves — and log one warni
 per leftover, naming it, so nobody merges the node over a half-done operation.
 The check runs in `Node` through `fractal.util.git.in_progress`, whichever way
 the script went. The loop runs the same probe at every launch, so a resumed or
-continued step's prompt opens by naming each leftover too (see
+continued step's prompt names each leftover too (see
 [[features/loop/prompt_assembly]]).
 
 Four rails bound the reap. It never signals pid 0 or 1, the caller's own group,

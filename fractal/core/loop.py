@@ -72,11 +72,11 @@ _KILL_GRACE_SECONDS = 10.0
 # the KILL's settle, and slack for the process-table walks between signals
 _REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS + 5.0
 
-#: Seconds of the agent's own idle time -- counted while it holds
-#: control (from its launch, a tool result, visible text, a think's
-#: end, or a wake-up), paused while a tool runs, a think is open, or
-#: its turn has ended -- after which the loop ends the launch as stuck.
-NO_PROGRESS_SECONDS = 1_800
+# seconds of the agent's own idle time after which the loop ends the launch
+# as stuck -- counted while it holds control (from its launch, a tool result,
+# visible text, a think's end, or a wake-up), paused while a tool runs, a
+# think is open, or its turn has ended
+_NO_PROGRESS_SECONDS = 1_800
 
 # the stuck reason of a launch ended at a thinking cap, whose steer runs one
 # effort level lower (the no-action watchdog's steer keeps the effort)
@@ -123,6 +123,11 @@ _BILLING_INSTANT_SECONDS = 10
 # its provider being unavailable doubles the retry wait from the step-retry
 # backoff to the billing breaker's cap -- an outage outlasts a fixed backoff
 _UNAVAILABLE_BACKOFF_CAP_SECONDS = _BILLING_BACKOFF_CAP_SECONDS
+
+# age past which the loop refetches the LiteLLM pricing cache -- model prices
+# change rarely, so a daily refresh keeps a long run's table current without
+# a fetch per iteration
+_PRICING_MAX_AGE = '24h'
 
 # the dash-segment widths a dated model snapshot stamps: one YYYYMMDD run,
 # or a dashed YYYY-MM-DD (a dotted date normalizes to the same three) -- the
@@ -314,7 +319,7 @@ class StepResult:
     here). A budget-cap stop is a clean ``completed`` with
     ``budget_stopped`` set, never a failure. ``stuck`` is a launch the
     loop ended at a thinking cap or after no action for
-    ``NO_PROGRESS_SECONDS``, its ``reason`` naming which; ``stalled`` is a
+    ``_NO_PROGRESS_SECONDS``, its ``reason`` naming which; ``stalled`` is a
     steered launch that got stuck again. ``unavailable`` marks a failure
     the agent's backend names as its provider being unavailable (an
     overloaded or erroring API), which paces the retry exponentially.
@@ -393,8 +398,8 @@ class Loop:
         # the effort ladders a thinking-capped step's steer lowers through,
         # as committed on the tree's root branch, read at boot and held for
         # the run (no node can change its own, and an edit lands at the next
-        # start or resume); an agent the settings do not name keeps its own
-        # ladder
+        # start or resume); an agent the settings do not name
+        # keeps its own ladder
         self._effort_ladders: dict[str, tuple[tuple[str, ...], str]] = {}
         meta = config.get('meta') or ''
         self._meta_mode = bool(meta)
@@ -403,8 +408,8 @@ class Loop:
         self._boot_modes = _boot_modes(node, detached=self._detached, meta=meta)
         # the static variables a step's prompt and env share, re-read per step
         # under the prompt build's guard (the render parameter shadows the
-        # module here, hence the dotted path)
-        self._step_vars = fractal.core.render.variables(node)
+        # module here, hence the alias)
+        self._step_vars = _render_variables(node)
         # run/iteration lifecycle state
         self._iter = 0
         self._iter_timestamp = ''
@@ -459,8 +464,8 @@ class Loop:
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
         # this launch's record leaves part of its spend out (a reply cut
-        # off, or a result figure refused), so its booked figure misses that
-        # part
+        # off, or a result figure refused), so its booked figure
+        # misses that part
         self._step_partly_unpriced = False
         self._step_limit_seconds = 0
         self._step_ceiling_seconds = 0
@@ -664,8 +669,8 @@ class Loop:
         # contended under wide fan-out) never aborts the run -- nothing
         # re-stamps a missed one, so .status keeps the boot's own status for
         # the whole run: a start's 'idle', read 'idle (starting)' while --live
-        # still reads it active, or a resume's 'paused', which no reading
-        # relabels
+        # still reads it active, or a resume's 'paused', which
+        # no reading relabels
         stood_down = ''
         try:
             with worktree.merge_lock(node.repo_dir, waiting=_waiting):
@@ -899,10 +904,10 @@ class Loop:
                     file=sys.stderr,
                 )
         # a cost-reporting agent prices only what its own figure misses, so a
-        # day-old table serves and a failed fetch only warns -- every launch
-        # that reports its figure still books it
+        # table within the refresh age serves and a failed fetch only warns --
+        # every launch that reports its figure still books it
         elif wants_pricing:
-            status = pricing.update(max_age='24h')
+            status = pricing.update(max_age=_PRICING_MAX_AGE)
             if status == 'missing':
                 print(
                     'Warning: could not fetch pricing and no cached pricing.json'
@@ -1346,18 +1351,18 @@ class Loop:
     def _clean_worktree(self: Loop) -> None:
         """Restore the worktree for a continue launch.
 
-        Continue-mode cleanup: commit operator seed edits --no-verify,
-        clean, re-arm budgets, preserve config.json. A worktree holding a
-        git operation in progress is left as found.
+        Commit the operator's edits under the node folder (--no-verify),
+        then discard every other uncommitted change, staged or not,
+        keeping config.json. A worktree holding a git operation in
+        progress is left as found.
         """
         node = self.node
         worktree = node.worktree
         node_dir = node.node_dir
         # a git operation left in progress is the agent's to finish or abort
-        # (its first prompt names it): the commit below would silently finish
-        # a staged merge or crash boot on a conflicted one, and the restore
-        # would discard the operation's state; a probe that cannot answer
-        # names nothing
+        # (its first prompt names it): the reset and restore below would
+        # discard the operation's state; a probe that cannot
+        # answer names nothing
         if operations := fractal.util.git.in_progress(worktree, check=False):
             named = ', '.join(
                 f'{operation} ({marker.name})' for operation, marker in operations
@@ -1367,6 +1372,12 @@ class Loop:
                 f' the worktree has {named}, which the first step prompt names'
             )
             return
+        # unstage everything first (unguarded: a failed reset would let a
+        # staged project change ride the commit below): the commit then
+        # carries only what its add stages, and the checkout/clean below
+        # discard a staged project change like an unstaged one; the worktree
+        # is untouched, so no edit is lost
+        fractal.util.git.run(['reset', '-q'], cwd=worktree)
         # commit operator steering edits before the checkout/clean below
         # reverts them (--no-verify, unguarded: failing loud beats destroying
         # them); the excludes-scoped -uall probe keeps runtime artifacts from
@@ -1385,28 +1396,9 @@ class Loop:
             *commit._STAGE_EXCLUDES,
         ]
         raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
-        # "XY <path>" entries; a rename or copy in either column (an
-        # operator's git mv, a worktree-detected move) trails its origin
-        # path as a bare extra token
-        entries = []
-        tokens = iter(os.fsdecode(raw).split('\0'))
-        for token in tokens:
-            if not token:
-                continue
-            entries.append(token[3:])
-            if 'R' in token[:2] or 'C' in token[:2]:
-                entries.append(next(tokens))
-        # stage only paths the add can express: an entry gone from both the
-        # index and the worktree (a staged rename's origin, a staged
-        # deletion) is already fully staged, and naming it is fatal
-        cmd = ['--no-optional-locks', 'ls-files', '-z', '--', f'{node_dir}']
-        tracked = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
-        index = set(os.fsdecode(tracked).split('\0'))
-        paths = [
-            path
-            for path in entries
-            if path in index or (worktree / path).exists(follow_symlinks=False)
-        ]
+        # "XY <path>" entries; with nothing staged, each is a worktree change
+        # the add can name (a deletion, or each side of a move, included)
+        paths = [token[3:] for token in os.fsdecode(raw).split('\0') if token]
         if paths:
             print(
                 f'Continuing: committing operator edits under .fractal/{node.branch}...'
@@ -1670,7 +1662,7 @@ class Loop:
 
             # refresh stale pricing for long-running token-reporting nodes
             if self._needs_pricing:
-                status = pricing.update(max_age='24h')
+                status = pricing.update(max_age=_PRICING_MAX_AGE)
                 if status == 'missing':
                     raise RuntimeError(
                         'Could not fetch pricing and no cached pricing.json exists.'
@@ -2859,10 +2851,12 @@ class Loop:
         meta target included, so a mid-run config edit cannot flip a run's
         mode composition. A steer renders ``STALL.md`` alone: its resumed
         session already holds the step. A git operation left unfinished in
-        the worktree opens either prompt with ``GIT_PENDING.md``.
+        the worktree joins as the ``GIT_PENDING`` mode, beneath the charter
+        like every mode, and opens a steer's prompt, which has no charter.
         """
         # refresh the cost budget so each step's context reflects spend so far
         self._build_cost_budget()
+        operations = self._git_pending_operations()
         overrides = {
             'STEP_LABEL': self._step_label,
             'ITER_LABEL': self._iter_label,
@@ -2878,31 +2872,35 @@ class Loop:
             'META_MODE': self._boot_modes['META_MODE'],
             'META_TARGET': self._boot_modes['META_TARGET'],
             'DRAIN_MODE': 'true' if self._drain else 'false',
+            # git-pending mode is per-launch (each launch can leave a git operation)
+            'GIT_PENDING_MODE': 'true' if operations else 'false',
+            'GIT_OPERATIONS': operations,
         }
         variables = {**self._step_vars, **overrides}
-        notice = self._git_pending_notice(variables)
         if self._steer_session is not None:
             text = self._stall_file.read_text(encoding='utf-8')
-            return f'{notice}{render.render(text, variables)}'
+            if operations:
+                notice = self._git_pending_file.read_text(encoding='utf-8')
+                text = f'{notice}\n{text}'
+            return render.render(text, variables)
         prompt = self.node.build_prompt(f'{step.path}', overrides=variables)
         # a resumed iteration replays a frozen plan -- the harness re-reads
         # the inbox at every attached seat, so directives that arrived after
         # the plan froze are in context before any replayed decision executes
         if self._resume_mode and (digest := self._inbox_digest()):
             prompt = f'{prompt}\n{digest}'
-        return f'{notice}{prompt}'
+        return prompt
 
-    def _git_pending_notice(self: Loop, variables: dict[str, str]) -> str:
-        """Render the leftover-git-operation notice a prompt opens with, or ``''``.
+    def _git_pending_operations(self: Loop) -> str:
+        """List the git operations left unfinished in the worktree, or ``''``.
 
         Probed at every launch: a killed, paused, or stuck step can stop
         inside a merge, squash, cherry-pick, revert, or rebase, or with
         ``index.lock`` held, and the next launch would otherwise run git on
-        top of it. A probe that cannot answer names nothing.
+        top of it. One bullet per operation, the ``GIT_OPERATIONS`` that
+        ``GIT_PENDING.md`` renders. A probe that cannot answer names nothing.
         """
         operations = fractal.util.git.in_progress(self.node.worktree, check=False)
-        if not operations:
-            return ''
         lines = []
         for operation, marker in operations:
             line = f'- {operation} ({marker.name})'
@@ -2920,9 +2918,7 @@ class Loop:
             if hint := _GIT_PENDING_HINTS.get(marker.name):
                 line = f'{line}: {hint}'
             lines.append(line)
-        text = self._git_pending_file.read_text(encoding='utf-8')
-        notice = render.render(text, {**variables, 'GIT_OPERATIONS': '\n'.join(lines)})
-        return f'{notice}\n'
+        return '\n'.join(lines)
 
     def _inbox_digest(self: Loop) -> str:
         """Render the unread inbox for a resumed seat's prompt, or ``''``.
@@ -3103,7 +3099,7 @@ class Loop:
         A work step's reply that hits the output cap while still thinking
         ends the invocation on the stream-error path, before the agent
         continues past it; for an agent that reports progress, a watchdog
-        ends it like the deadline after ``NO_PROGRESS_SECONDS`` of the
+        ends it like the deadline after ``_NO_PROGRESS_SECONDS`` of the
         agent's own idle time. A steer resumes the stuck session.
         """
         node = self.node
@@ -3309,7 +3305,7 @@ class Loop:
         watchdog_done = threading.Event()
 
         def _watchdog() -> None:
-            limit = NO_PROGRESS_SECONDS
+            limit = _NO_PROGRESS_SECONDS
             while not watchdog_done.wait(min(1.0, limit / 10)):
                 since = idle_since
                 if since is not None and time.monotonic() - since >= limit:
@@ -3331,9 +3327,9 @@ class Loop:
                 process=process,
                 step_id=self._step_id,
                 model=record_model,
+                baseline=baseline,
                 detached=self._step_detached,
                 render=_render,
-                baseline=baseline,
             )
         except Exception as error:
             stream_error = error
@@ -3493,7 +3489,7 @@ class Loop:
             return StepResult(
                 status='stuck',
                 exit_code=1,
-                reason=f'no action for {_span(NO_PROGRESS_SECONDS)}',
+                reason=f'no action for {_span(_NO_PROGRESS_SECONDS)}',
                 session=stuck_session,
                 cost=cost_out,
             )
@@ -4803,8 +4799,8 @@ class Loop:
             # open the pause span at the park instant -- the credit walk
             # opens spans only at the loop's park rows, never at the pause
             # request (the step may have worked on past it), so without
-            # this row the parked wall-clock would burn against the
-            # adopted deadlines
+            # this row the parked wall-clock would burn against
+            # the adopted deadlines
             try:
                 event_id = node.record.event_start(
                     'pause',
@@ -5369,6 +5365,10 @@ class LoopStepFailureEvent(FailureEvent):
 
 
 # ------ helper functions
+
+
+# render.variables under a name Loop.__init__'s render parameter cannot shadow
+_render_variables = render.variables
 
 
 def _as_data(value: object, /, *, limit: int) -> str:

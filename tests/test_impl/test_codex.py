@@ -100,6 +100,7 @@ __all__ = [
     'test_seed_skips_uncarriable_instructions_codex',
     'test_transcript_globs_the_dated_rollouts',
     'test_preflight_probes_model_acceptance',
+    'test_preflight_names_what_a_passed_probe_spent',
     'test_preflight_timeout_reaps_a_term_ignoring_probe',
     'test_preflight_timeout_never_kills_a_group_term_ended',
     'test_preflight_timeout_reaps_the_probes_tool_groups',
@@ -2366,12 +2367,13 @@ def test_preflight_timeout_kills_the_probe_group_when_the_reap_breaks(
     node_with_db: Node,
     router: _Router,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A broken process-tree reap still ends a timed-out probe's group.
 
     The timeout falls back to KILLing the probe's group alone and names
-    the failure, and the hung probe still reads as timed out.
+    the failure as a warning on the agent's logger, and the hung probe
+    still reads as timed out.
     """
 
     def broken(*args: Any, **kwargs: Any) -> NoReturn:
@@ -2385,7 +2387,10 @@ def test_preflight_timeout_kills_the_probe_group_when_the_reap_breaks(
         backend.preflight('gpt-5-codex')
     ((_, probe),) = probes
     assert probe.returncode == -signal.SIGKILL, probe.pid
-    assert 'process-tree reap failed (ps is gone)' in capsys.readouterr().err
+    warnings = [
+        record.message for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert any('process-tree reap failed (ps is gone)' in line for line in warnings)
 
 
 # ------ helpers

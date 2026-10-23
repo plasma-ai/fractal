@@ -440,7 +440,8 @@ class ClaudeParser(StreamParser):
         ``model`` is the model the frame names (a sub-agent's frame names
         its own); ``None`` prices at the stream's top-level model.
         """
-        return _compute_cost(usage, model or self.model)
+        model = model or self.model
+        return _compute_cost(usage, model)
 
     def _result_cost(self: ClaudeParser, message: dict[str, Any]) -> Optional[float]:
         """Hook for the result frame's cost fact.
@@ -472,7 +473,8 @@ class _RoutedClaudeParser(ClaudeParser):
         model: Optional[str] = None,
     ) -> Optional[float]:
         """Skip the gateway's zeroed assistant usage -- nothing to accrue."""
-        return _compute_cost(usage, model or self.model) or None
+        model = model or self.model
+        return _compute_cost(usage, model) or None
 
     def _result_cost(
         self: _RoutedClaudeParser,
@@ -768,12 +770,14 @@ class ClaudeAgent(Agent):
         # file's record leaves part of a reply out
         latest: dict[str, _Reply] = {}
         for index, content in enumerate(contents):
+            # the stream's recorded replies are the session transcript's own
+            recorded = replies if index == 0 else ()
             window, ends_cut = _transcript_window(
                 content,
                 started=started,
                 ended=ended,
                 after=after,
-                recorded=replies if index == 0 else (),
+                recorded=recorded,
             )
             for message_id, reply in window.items():
                 if message_id not in latest or latest[message_id][2] <= reply[2]:

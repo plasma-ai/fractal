@@ -413,8 +413,8 @@ one still linked to the agent dies with it. ``kill`` and a step deadline reap
 the same way. Anything still alive after the forced kill is named in the
 command's output. A git operation the abort left unfinished in the worktree —
 a merge, a rebase, an ``index.lock`` — is named too, so it is finished or
-aborted before the node is merged; the resumed step's prompt opens by naming
-it as well. An agent that pauses its own node aborts nothing: its step
+aborted before the node is merged; the resumed step's prompt names it as
+well. An agent that pauses its own node aborts nothing: its step
 finishes with every tool it started, and the loop parks at its next
 checkpoint. Only if the first read of the process table fails does the
 abort fall back to TERMing every recorded group except the caller's own, so a

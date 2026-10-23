@@ -129,9 +129,9 @@ MAX_RESERVE_FRACTION = 0.99
 # stored; the two sites MUST round identically, so both quote this constant
 RESERVE_PRECISION = 4
 
-#: where a stored reserve's figure came from -- ``default`` is the fraction
-#: init materializes, which a cap change retunes; ``explicit`` is a figure set
-#: by flag, template preset, or ``config set``, which no cap change moves
+#: where a stored reserve's figure came from -- 'default' is the fraction
+#: init materializes, which a cap change retunes; 'explicit' is a figure set
+#: by flag, template preset, or `config set`, which no cap change moves
 RESERVE_MODES = ('default', 'explicit')
 
 # signed 64-bit ceiling for SQLite INTEGER columns; an integer cap at or above
@@ -243,9 +243,10 @@ def validate_wiki(value: Any, source: str) -> str:
         )
     reserved = (FRACTAL_FOLDER, WORKTREES_FOLDER, '.git')
     if any(part.casefold() in reserved for part in rel.parts):
+        names = ', '.join(reserved)
         raise ValueError(
             f'{source} must stay outside fractal machinery, not {value!r}'
-            f' (no {", ".join(reserved)} component).'
+            f' (no {names} component).'
         )
     if value == 'null':
         raise ValueError(
