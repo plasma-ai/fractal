@@ -38,6 +38,7 @@ from fractal.constants import (
     STATUSES,
     STEP_PGID_FILE,
     UNAVAILABLE_REASON_PREFIX,
+    UNLAUNCHED_REASON_PREFIX,
     WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
@@ -5407,7 +5408,9 @@ class Node:
         -- the step row's own exit code is the binary failure marker, so
         the reason is where the code survives). A failure the loop judged
         a provider outage (its reason leads ``provider unavailable: ``)
-        breaks the streak too, as it never arms the loop's breaker.
+        breaks the streak too, as it never arms the loop's breaker, and so
+        does a step the loop refused before its launch (its reason leads
+        ``not launched: ``), which bought no inference to count.
         Active nodes only: a settled node's trailing failures are history.
         """
         if self.status() != 'active':
@@ -5432,6 +5435,10 @@ class Node:
             # either, however instant and unpriced -- its verdict leads the
             # reason, so a launch-authored tail can never forge it
             if row['metadata'].startswith(UNAVAILABLE_REASON_PREFIX):
+                return False
+            # nor is a step the loop refused before its launch, which bought
+            # no inference -- its refusal leads the reason the same way
+            if row['metadata'].startswith(UNLAUNCHED_REASON_PREFIX):
                 return False
             if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
                 return False

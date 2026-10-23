@@ -557,11 +557,13 @@ may include breaking changes, each listed under a Breaking heading.
   the stanza. A stanza trusting any other path is drift, since trust enables
   project-local settings, as is a projects table carrying more than the trusted
   level.
-- The billing breaker no longer counts a step refused before its launch — a cost
+- The billing breaker does not count a step refused before its launch — a cost
   cap over a model the price table cannot price, or a per-step agent or provider
   that cannot run — as an instant zero-cost failure: such a refusal bought no
-  inference and proves nothing about credits, so three of them no longer park
-  the node as `PAUSED: billing`.
+  inference and proves nothing about credits, so three of them never park the
+  node as `PAUSED: billing`. The refused step's row reason leads with
+  `not launched:`, so `fractal node list` never shows such a run as
+  `PAUSED: billing` either.
 - A step whose agent names an error on its stream and then exits non-zero
   reports the real exit status: the step banner and the row's reason read
   `agent error (exit N)` with the stream detail and the stderr tail behind it,
@@ -578,9 +580,7 @@ may include breaking changes, each listed under a Breaking heading.
   before the paid `codex` probe, naming the step and the gap
   (`a cost cap requires a model for <agent> in <step>`, or
   `cost cap set but model '<name>' (<step>) has no pricing entry`); the same gap
-  met at launch stays a step failure with the same words. Three such launch
-  refusals in a row read as the `PAUSED: billing` backoff, which the preflight
-  check forestalls.
+  met at launch stays a step failure with the same words.
 - A drain run's lineage guard recognizes its seat's commands: it looks for the
   recorded agent invocation among the caller's ancestors, so a command the agent
   CLI starts in a process group or a session of its own (Claude Code starts each
