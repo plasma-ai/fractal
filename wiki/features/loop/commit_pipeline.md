@@ -46,30 +46,29 @@ prefix, and the estates prefix) resolved by `scope_boundaries` and judged by
 dir, a repo-root node with no roots is unbounded. The worktree-root
 `.gitattributes` sits outside every root and is admitted only while the whole
 change is init's own edit -- HEAD's content followed by the index lines the wiki
-tool appends there (`# Wiki index merge driver`, `**/_index.md merge=wiki`), by
-those lines and page lines (`# Wiki page merge driver`, `**/*.md merge=wiki`),
-or by the page lines alone over a base already mapping the index (one
+tool appends there (`# Wiki index merge driver`, `**/_index.md merge=wiki`; one
 definition, `_ATTRIBUTES_INIT_LINES`). The tool writes its page mapping
-(`*.md merge=wiki`) into each wiki root's own `.gitattributes`, not this one;
-root page lines pass because they assign only the wiki's merge driver. Lines
-compare in either line ending, and any other added or removed line makes the
-file an ordinary out-of-scope path. The same record backs `merge.sh`'s footprint
-check through the private `fractal node _scope` command -- the staged paths
-outside `.fractal/`, with `--attributes-ok` passed under the same whole-change
-rule applied to the target's staged copy -- so a squash is judged by exactly the
-law the commit enforces (see
-[[user_flow/finishing/_index|user_flow/finishing]]). Before it judges, `_scope`
-runs `Node.check_wiki`, which recomputes the node's wiki folder by the spawn
-rule and refuses a `config.json` hand-edited to another folder, which would
-otherwise move the exemption (or, for a node held to its project's committed
-setting, a setting changed on the root branch since the spawn). `--ignore-scope`
-commits out-of-scope changes but still lints; `--force` bypasses scope, lint,
-and git hooks alike. Before staging, the pipeline refreshes both wiki indexes
-(the project wiki and the node's memory) with the `wiki` CLI and fails the
-commit if a refresh fails -- a broken wiki must never land -- then runs the
-node's `lint.sh` and surfaces its notices instead of dropping them. Helper CLIs
-are resolved from the invoking installation, not ambient PATH, so a foreign
-install cannot answer the hook's reads.
+(`*.md merge=wiki`) into each wiki root's own `.gitattributes`, never this one,
+and root page lines in either spelling are refused: appended last, they would
+take over the merge of every Markdown file in the repository, overriding any
+merge rule the repository sets for it. Lines compare in either line ending, and
+any other added or removed line makes the file an ordinary out-of-scope path.
+The same record backs `merge.sh`'s footprint check through the private
+`fractal node _scope` command -- the staged paths outside `.fractal/`, with
+`--attributes-ok` passed under the same whole-change rule applied to the
+target's staged copy -- so a squash is judged by exactly the law the commit
+enforces (see [[user_flow/finishing/_index|user_flow/finishing]]). Before it
+judges, `_scope` runs `Node.check_wiki`, which recomputes the node's wiki folder
+by the spawn rule and refuses a `config.json` hand-edited to another folder,
+which would otherwise move the exemption (or, for a node held to its project's
+committed setting, a setting changed on the root branch since the spawn).
+`--ignore-scope` commits out-of-scope changes but still lints; `--force`
+bypasses scope, lint, and git hooks alike. Before staging, the pipeline
+refreshes both wiki indexes (the project wiki and the node's memory) with the
+`wiki` CLI and fails the commit if a refresh fails -- a broken wiki must never
+land -- then runs the node's `lint.sh` and surfaces its notices instead of
+dropping them. Helper CLIs are resolved from the invoking installation, not
+ambient PATH, so a foreign install cannot answer the hook's reads.
 
 A node's `--init` baseline (`fractal commit "configure <name>" --init`, the
 child's configured seed before its start) skips the refresh and the lint, so it
@@ -221,11 +220,17 @@ index, so the parent's row links a folder the commit has, and no commit deletes
 an index the node may have written.
 
 Each rebuilt index whose bytes differ from what is staged is written back to the
-git index and the working tree, which keeps the tree clean for the loop's
-`--check`; page writes are discarded with the temp folder. The rebuild starts
-from the staged bytes, so the node's own edits to an index's description and to
-the text below its separator survive. An index whose rebuild differs from HEAD's
-copy only in the frontmatter's `updated:` line commits HEAD's bytes, old stamp
+git index and then the working tree, which keeps the tree clean for the loop's
+`--check`. The staging comes first and lands whole: every blob is hashed into
+the object store (through the path's filters, as `git add` would), then one
+`git update-index --index-info` repoints the entries. A failure there leaves the
+index and the tree as they were; a failed tree write restages what the tree
+holds for each index it did not reach. Either way the tree matches what the
+commit lands, so a failed write-back never leaves dirt for a backstop to save.
+Page writes are discarded with the temp folder. The rebuild starts from the
+staged bytes, so the node's own edits to an index's description and to the text
+below its separator survive. An index whose rebuild differs from HEAD's copy
+only in the frontmatter's `updated:` line commits HEAD's bytes, old stamp
 included -- otherwise a refused file sitting in memory would move the stamp at
 every commit. In the working tree a refused file's row disappears at each
 commit; the next refresh adds it back locally, and the next commit drops it

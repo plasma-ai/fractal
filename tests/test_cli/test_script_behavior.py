@@ -148,12 +148,11 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   the node's scope roots (its project wiki excepted, every ``.fractal/`` path
   left out of the listing, and the worktree-root ``.gitattributes`` admitted
   only as init's own edit -- HEAD's content, leading blank line or trailing
-  whitespace included, plus the part of the wiki tool's merge-driver block
-  it appends (the whole block, its page lines, or its index lines alone),
-  so a foreign line beside them, or the block with a line changed, is out
-  of scope even on a target with no ``.gitattributes`` at all), naming the
-  paths and both remedies, in both arms -- a fresh merge restores the
-  target, a ``--continue`` leaves the staged squash -- unless
+  whitespace included, plus the index lines the wiki tool appends, so a
+  page line, a foreign line beside them, or the index lines with one
+  changed is out of scope even on a target with no ``.gitattributes`` at
+  all), naming the paths and both remedies, in both arms -- a fresh merge
+  restores the target, a ``--continue`` leaves the staged squash -- unless
   ``--ignore-scope`` is passed; a repo-root node with no scope is
   unrestricted, a sub-project node with none is bounded to its project dir
   (its own wiki in, the repo-root wiki out), and one with roots to
@@ -380,9 +379,14 @@ __all__ = [
 ]
 
 # the merge-driver lines a worktree-root .gitattributes passes with as init's
-# edit: the index lines the wiki tool writes there, and the page lines
+# edit: the index lines the wiki tool writes there
 _WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
+# a repo-wide page merge-driver block, which would take over the merge of
+# every Markdown file
 _WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
+# the page merge-driver block the wiki tool writes to each wiki root's own
+# .gitattributes
+_WIKI_ROOT_PAGE_LINES = '# Wiki page merge driver\n*.md merge=wiki\n'
 
 
 # ------ init.sh: worktree paths with spaces
@@ -5376,20 +5380,13 @@ def test_merge_admits_init_attributes_over_a_targets_own_lines(
 @pytest.mark.parametrize(
     argnames=('attributes', 'edit', 'lands'),
     argvalues=[
-        pytest.param(None, _WIKI_INDEX_LINES + _WIKI_PAGE_LINES, True, id='block'),
+        pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
         pytest.param(
             '* text=auto\n',
-            '\n' + _WIKI_INDEX_LINES + _WIKI_PAGE_LINES,
+            '\n' + _WIKI_INDEX_LINES,
             True,
-            id='block-after-own-lines',
+            id='index-lines-after-own-lines',
         ),
-        pytest.param(
-            '* text=auto\n\n' + _WIKI_INDEX_LINES,
-            _WIKI_PAGE_LINES,
-            True,
-            id='page-lines',
-        ),
-        pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
         pytest.param(
             '*.png binary\r\n',
             '\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
@@ -5404,13 +5401,31 @@ def test_merge_admits_init_attributes_over_a_targets_own_lines(
         ),
         pytest.param(
             None,
-            _WIKI_INDEX_LINES + _WIKI_PAGE_LINES + '*.bin binary\n',
+            _WIKI_INDEX_LINES + '\n' + _WIKI_PAGE_LINES,
+            False,
+            id='repo-wide-page-lines',
+        ),
+        pytest.param(
+            '* text=auto\n\n' + _WIKI_INDEX_LINES,
+            '\n' + _WIKI_PAGE_LINES,
+            False,
+            id='page-lines-alone',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '\n' + _WIKI_ROOT_PAGE_LINES,
+            False,
+            id='wiki-root-page-lines',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '*.bin binary\n',
             False,
             id='foreign-line',
         ),
         pytest.param(
             None,
-            _WIKI_INDEX_LINES + _WIKI_PAGE_LINES.replace('=wiki', '=union'),
+            _WIKI_INDEX_LINES.replace('=wiki', '=union'),
             False,
             id='changed-line',
         ),
@@ -5426,13 +5441,14 @@ def test_merge_admits_only_the_wiki_attributes_edit(
 
     The wiki tool appends its index lines to the file, in the file's own
     line ending: CRLF when the file already holds a CRLF line. That is
-    init's own edit, and so are the page lines, after the index lines or
-    alone over a file already mapping the index. A scoped node's first
-    squash carries the edit to the target, and the footprint check admits
-    it, so the landing succeeds with the target's file as its original plus
-    the edit, byte for byte. A foreign line beside the block, or the block
-    with a line changed, is out of scope like any other path, and the merge
-    is refused naming the file.
+    init's own edit. A scoped node's first squash carries the edit to the
+    target, and the footprint check admits it, so the landing succeeds with
+    the target's file as its original plus the edit, byte for byte. The
+    tool maps pages in each wiki root's own file, never this one, where a
+    page line in either spelling would take over the merge of every
+    Markdown file in the repository. So page lines, beside the index lines
+    or alone, a foreign line, or the index lines with one changed are out
+    of scope like any other path, and the merge is refused naming the file.
     """
     repo = _init_tree(tmp_path / 'attrsrepo')
     if attributes is not None:
