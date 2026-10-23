@@ -277,21 +277,17 @@ def commit(
         # raw git call bypassing util.git.run -- the helper feeds no stdin,
         # and check-ignore's batch form reads its paths from --stdin; -z on
         # both sides so a non-ASCII path round-trips unquoted
-        result = subprocess.run(
-            [
-                'git',
-                '-C',
-                f'{worktree}',
-                '--no-optional-locks',
-                'check-ignore',
-                '-v',
-                '--stdin',
-                '-z',
-            ],
-            input=ignored,
-            capture_output=True,
-            text=True,
-        )
+        cmd = [
+            'git',
+            '-C',
+            f'{worktree}',
+            '--no-optional-locks',
+            'check-ignore',
+            '-v',
+            '--stdin',
+            '-z',
+        ]
+        result = subprocess.run(cmd, input=ignored, capture_output=True, text=True)
         managed: set[str] = set()
         # fractal's own info/exclude holds are the managed block's lines
         # only -- the file is a user surface too (its normal purpose), so a
@@ -558,12 +554,14 @@ def commit_user_init(node: Node, message: str) -> str:
     # (an absent setting names the default)
     setting = worktree.read_wiki_setting(node.worktree / project)
     recorded = node.config.get('wiki')
-    if (setting or WIKI_FOLDER) != (recorded or WIKI_FOLDER):
+    named = setting or WIKI_FOLDER
+    fixed = recorded or WIKI_FOLDER
+    if named != fixed:
         raise ValueError(
-            f'{seed}/{SETTINGS_FILE} names {setting or WIKI_FOLDER!r} as the'
-            f' project wiki, but the tree on {node.branch!r} recorded'
-            f' {recorded or WIKI_FOLDER!r}; re-run `fractal init` to adopt it'
-            f' (after `fractal reset {node.branch}` if the tree has nodes).'
+            f'{seed}/{SETTINGS_FILE} names {named!r} as the project wiki, but'
+            f' the tree on {node.branch!r} recorded {fixed!r}; re-run'
+            f' `fractal init` to adopt it (after `fractal reset {node.branch}`'
+            ' if the tree has nodes).'
         )
     # stage fractal's node data only when tracked (it is self-ignored on the
     # top-level branch by default); the shared project wiki always rides along
@@ -912,7 +910,7 @@ def _root_shadows(node: Node) -> list[str]:
     node_folder = node.node_dir.relative_to(worktree).as_posix()
     result = []
     for path in added:
-        name = path.split('/', 1)[0]
+        name, *_ = path.split('/', 1)
         if name in entries and name not in existing:
             result.append(f'{path} (shadows {node_folder}/{name})')
     return result
@@ -979,8 +977,8 @@ def _scope_check(node: Node, bounds: Scope) -> None:
 #: root would take over the merge of every Markdown file in the repository;
 #: merge.sh's footprint check mirrors them for the target's staged copy
 _ATTRIBUTES_INIT_LINES = ('# Wiki index merge driver', '**/_index.md merge=wiki')
-#: the page merge-driver block the wiki tool writes to each wiki root's own
-#: .gitattributes
+#: the page merge-driver block the wiki tool writes to each
+#: wiki root's own .gitattributes
 _WIKI_ROOT_ATTRIBUTES_LINES = ('# Wiki page merge driver', '*.md merge=wiki')
 
 
@@ -1474,12 +1472,7 @@ def _rebuild_memory_index(node: Node, unstaged: list[str]) -> list[str]:
     if wiki_cli is None:
         return []
     try:
-        changed = _restage_memory_indexes(
-            node,
-            prefix,
-            wiki_cli=wiki_cli,
-            env=env,
-        )
+        changed = _restage_memory_indexes(node, prefix, wiki_cli=wiki_cli, env=env)
     except Exception as error:
         reason = ' '.join(f'{error}'.split())
         return [
@@ -1542,14 +1535,12 @@ def _restage_memory_indexes(
     # pinned out -- with Wiki._gitignore_fence's exemption, which turns the
     # check off when the root and its index both read as ignored; the wiki
     # walks no dot path, so its settings always ride along
-    walked = [
-        path
-        for path in staged
-        if not any(
-            part.startswith('.')
-            for part in pathlib.PurePosixPath(path).relative_to(prefix).parts
-        )
-    ]
+    walked: list[str] = []
+    for path in staged:
+        parts = pathlib.PurePosixPath(path).relative_to(prefix).parts
+        if any(part.startswith('.') for part in parts):
+            continue
+        walked.append(path)
     # probe each path as ./<path>: git reads a --stdin path opening with ':'
     # (under a ':'-named project folder) as pathspec magic, not as the path
     root_index = f'{prefix}/_index.md'
@@ -1573,7 +1564,10 @@ def _restage_memory_indexes(
     result = subprocess.run(cmd, input=payload, capture_output=True)
     # exit 1 is a clean probe that matched nothing
     if result.returncode not in (0, 1):
-        raise RuntimeError(f'git check-ignore failed (exit {result.returncode})')
+        error = os.fsdecode(result.stderr).strip()
+        raise RuntimeError(
+            f'git check-ignore failed (exit {result.returncode}): {error!r}'
+        )
     # git echoes each path as it was given, so drop the ./ again
     fenced = {
         os.fsdecode(path).removeprefix('./')
@@ -1600,7 +1594,10 @@ def _restage_memory_indexes(
         ]
         result = subprocess.run(cmd, input=payload, capture_output=True)
         if result.returncode != 0:
-            raise RuntimeError(f'git checkout-index failed (exit {result.returncode})')
+            error = os.fsdecode(result.stderr).strip()
+            raise RuntimeError(
+                f'git checkout-index failed (exit {result.returncode}): {error!r}'
+            )
         indexes = [path for path in kept if path.endswith('/_index.md')]
         before = {path: (pathlib.Path(tmp) / path).read_bytes() for path in indexes}
         root = pathlib.Path(tmp) / prefix
@@ -1650,7 +1647,8 @@ def _restage_memory_indexes(
     modes: dict[str, str] = {}
     for entry in filter(None, os.fsdecode(raw).split('\0')):
         info, path = entry.split('\t', 1)
-        modes[path] = info.split(' ', 1)[0]
+        mode, *_ = info.split(' ', 1)
+        modes[path] = mode
     payload = b''
     for path, data in changed.items():
         cmd = [
@@ -1664,7 +1662,10 @@ def _restage_memory_indexes(
         ]
         result = subprocess.run(cmd, input=data, capture_output=True)
         if result.returncode != 0:
-            raise RuntimeError(f'git hash-object failed (exit {result.returncode})')
+            error = os.fsdecode(result.stderr).strip()
+            raise RuntimeError(
+                f'git hash-object failed (exit {result.returncode}): {error!r}'
+            )
         blob = result.stdout.decode().strip()
         mode = modes.get(path, '100644')
         payload += os.fsencode(f'{mode} {blob}\t{path}') + b'\0'
@@ -1676,7 +1677,10 @@ def _restage_memory_indexes(
         time.sleep(fractal.util.git.INDEX_LOCK_WAIT)
         result = subprocess.run(cmd, input=payload, capture_output=True)
     if result.returncode != 0:
-        raise RuntimeError(f'git update-index failed (exit {result.returncode})')
+        error = os.fsdecode(result.stderr).strip()
+        raise RuntimeError(
+            f'git update-index failed (exit {result.returncode}): {error!r}'
+        )
     # then write the tree; a failed write restages what the tree holds for
     # each index it did not reach, so the tree and the git index agree
     paths = list(changed)
@@ -1691,7 +1695,7 @@ def _restage_memory_indexes(
     return True
 
 
-#: an index frontmatter's ``updated:`` stamp line
+#: an index frontmatter's 'updated:' stamp line
 _STAMP_LINE = re.compile(rb'^updated:.*$', re.MULTILINE)
 
 

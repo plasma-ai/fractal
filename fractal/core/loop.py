@@ -72,11 +72,11 @@ _KILL_GRACE_SECONDS = 10.0
 # the KILL's settle, and slack for the process-table walks between signals
 _REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS + 5.0
 
-#: Seconds of the agent's own idle time -- counted while it holds
-#: control (from its launch, a tool result, visible text, a think's
-#: end, or a wake-up), paused while a tool runs, a think is open, or
-#: its turn has ended -- after which the loop ends the launch as stuck.
-NO_PROGRESS_SECONDS = 1_800
+# seconds of the agent's own idle time after which the loop ends the launch
+# as stuck -- counted while it holds control (from its launch, a tool result,
+# visible text, a think's end, or a wake-up), paused while a tool runs, a
+# think is open, or its turn has ended
+_NO_PROGRESS_SECONDS = 1_800
 
 # the stuck reason of a launch ended at a thinking cap, whose steer runs one
 # effort level lower (the no-action watchdog's steer keeps the effort)
@@ -123,6 +123,11 @@ _BILLING_INSTANT_SECONDS = 10
 # its provider being unavailable doubles the retry wait from the step-retry
 # backoff to the billing breaker's cap -- an outage outlasts a fixed backoff
 _UNAVAILABLE_BACKOFF_CAP_SECONDS = _BILLING_BACKOFF_CAP_SECONDS
+
+# age past which the loop refetches the LiteLLM pricing cache -- model prices
+# change rarely, so a daily refresh keeps a long run's table current without
+# a fetch per iteration
+_PRICING_MAX_AGE = '24h'
 
 # the dash-segment widths a dated model snapshot stamps: one YYYYMMDD run,
 # or a dashed YYYY-MM-DD (a dotted date normalizes to the same three) -- the
@@ -314,7 +319,7 @@ class StepResult:
     here). A budget-cap stop is a clean ``completed`` with
     ``budget_stopped`` set, never a failure. ``stuck`` is a launch the
     loop ended at a thinking cap or after no action for
-    ``NO_PROGRESS_SECONDS``, its ``reason`` naming which; ``stalled`` is a
+    ``_NO_PROGRESS_SECONDS``, its ``reason`` naming which; ``stalled`` is a
     steered launch that got stuck again. ``unavailable`` marks a failure
     the agent's backend names as its provider being unavailable (an
     overloaded or erroring API), which paces the retry exponentially.
@@ -393,8 +398,8 @@ class Loop:
         # the effort ladders a thinking-capped step's steer lowers through,
         # as committed on the tree's root branch, read at boot and held for
         # the run (no node can change its own, and an edit lands at the next
-        # start or resume); an agent the settings do not name keeps its own
-        # ladder
+        # start or resume); an agent the settings do not name
+        # keeps its own ladder
         self._effort_ladders: dict[str, tuple[tuple[str, ...], str]] = {}
         meta = config.get('meta') or ''
         self._meta_mode = bool(meta)
@@ -403,8 +408,8 @@ class Loop:
         self._boot_modes = _boot_modes(node, detached=self._detached, meta=meta)
         # the static variables a step's prompt and env share, re-read per step
         # under the prompt build's guard (the render parameter shadows the
-        # module here, hence the dotted path)
-        self._step_vars = fractal.core.render.variables(node)
+        # module here, hence the alias)
+        self._step_vars = _render_variables(node)
         # run/iteration lifecycle state
         self._iter = 0
         self._iter_timestamp = ''
@@ -459,8 +464,8 @@ class Loop:
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
         # this launch's record leaves part of its spend out (a reply cut
-        # off, or a result figure refused), so its booked figure misses that
-        # part
+        # off, or a result figure refused), so its booked figure
+        # misses that part
         self._step_partly_unpriced = False
         self._step_limit_seconds = 0
         self._step_ceiling_seconds = 0
@@ -664,8 +669,8 @@ class Loop:
         # contended under wide fan-out) never aborts the run -- nothing
         # re-stamps a missed one, so .status keeps the boot's own status for
         # the whole run: a start's 'idle', read 'idle (starting)' while --live
-        # still reads it active, or a resume's 'paused', which no reading
-        # relabels
+        # still reads it active, or a resume's 'paused', which
+        # no reading relabels
         stood_down = ''
         try:
             with worktree.merge_lock(node.repo_dir, waiting=_waiting):
@@ -899,10 +904,10 @@ class Loop:
                     file=sys.stderr,
                 )
         # a cost-reporting agent prices only what its own figure misses, so a
-        # day-old table serves and a failed fetch only warns -- every launch
-        # that reports its figure still books it
+        # table within the refresh age serves and a failed fetch only warns --
+        # every launch that reports its figure still books it
         elif wants_pricing:
-            status = pricing.update(max_age='24h')
+            status = pricing.update(max_age=_PRICING_MAX_AGE)
             if status == 'missing':
                 print(
                     'Warning: could not fetch pricing and no cached pricing.json'
@@ -1356,8 +1361,8 @@ class Loop:
         node_dir = node.node_dir
         # a git operation left in progress is the agent's to finish or abort
         # (its first prompt names it): the reset and restore below would
-        # discard the operation's state; a probe that cannot answer names
-        # nothing
+        # discard the operation's state; a probe that cannot
+        # answer names nothing
         if operations := fractal.util.git.in_progress(worktree, check=False):
             named = ', '.join(
                 f'{operation} ({marker.name})' for operation, marker in operations
@@ -1657,7 +1662,7 @@ class Loop:
 
             # refresh stale pricing for long-running token-reporting nodes
             if self._needs_pricing:
-                status = pricing.update(max_age='24h')
+                status = pricing.update(max_age=_PRICING_MAX_AGE)
                 if status == 'missing':
                     raise RuntimeError(
                         'Could not fetch pricing and no cached pricing.json exists.'
@@ -3094,7 +3099,7 @@ class Loop:
         A work step's reply that hits the output cap while still thinking
         ends the invocation on the stream-error path, before the agent
         continues past it; for an agent that reports progress, a watchdog
-        ends it like the deadline after ``NO_PROGRESS_SECONDS`` of the
+        ends it like the deadline after ``_NO_PROGRESS_SECONDS`` of the
         agent's own idle time. A steer resumes the stuck session.
         """
         node = self.node
@@ -3300,7 +3305,7 @@ class Loop:
         watchdog_done = threading.Event()
 
         def _watchdog() -> None:
-            limit = NO_PROGRESS_SECONDS
+            limit = _NO_PROGRESS_SECONDS
             while not watchdog_done.wait(min(1.0, limit / 10)):
                 since = idle_since
                 if since is not None and time.monotonic() - since >= limit:
@@ -3322,9 +3327,9 @@ class Loop:
                 process=process,
                 step_id=self._step_id,
                 model=record_model,
+                baseline=baseline,
                 detached=self._step_detached,
                 render=_render,
-                baseline=baseline,
             )
         except Exception as error:
             stream_error = error
@@ -3484,7 +3489,7 @@ class Loop:
             return StepResult(
                 status='stuck',
                 exit_code=1,
-                reason=f'no action for {_span(NO_PROGRESS_SECONDS)}',
+                reason=f'no action for {_span(_NO_PROGRESS_SECONDS)}',
                 session=stuck_session,
                 cost=cost_out,
             )
@@ -4794,8 +4799,8 @@ class Loop:
             # open the pause span at the park instant -- the credit walk
             # opens spans only at the loop's park rows, never at the pause
             # request (the step may have worked on past it), so without
-            # this row the parked wall-clock would burn against the
-            # adopted deadlines
+            # this row the parked wall-clock would burn against
+            # the adopted deadlines
             try:
                 event_id = node.record.event_start(
                     'pause',
@@ -5360,6 +5365,10 @@ class LoopStepFailureEvent(FailureEvent):
 
 
 # ------ helper functions
+
+
+# render.variables under a name Loop.__init__'s render parameter cannot shadow
+_render_variables = render.variables
 
 
 def _as_data(value: object, /, *, limit: int) -> str:

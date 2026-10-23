@@ -12,7 +12,6 @@ import pathlib
 import re
 import shutil
 import subprocess
-import sys
 import time
 import tomllib
 import typing
@@ -277,8 +276,8 @@ class CodexAgent(Agent):
         """
         super().__init__(node, command, provider)
         # the rollout window of each launch that exited non-zero, keyed by its
-        # thread -- the post-exit settle takes it, since its stream priced
-        # nothing
+        # thread -- the post-exit settle takes it, since its
+        # stream priced nothing
         self._unsettled: dict[str, UsageWindow] = {}
 
     def _spawn(
@@ -586,7 +585,7 @@ class CodexAgent(Agent):
                 spare=self.node.loop_records,
             )
             for line in lines:
-                print(line, file=sys.stderr)
+                self.log(line, logging.WARNING)
             process.communicate()
             raise RuntimeError(
                 'codex preflight timed out\n'

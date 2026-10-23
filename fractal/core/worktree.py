@@ -1000,9 +1000,9 @@ def _parse_effort_ladder(
                 f' not {ladder!r}.'
             )
         levels, floor = ladder['levels'], ladder['floor']
-        if not isinstance(levels, list) or not all(
-            isinstance(level, str) and level for level in levels
-        ):
+        is_list = isinstance(levels, list)
+        named = is_list and all(isinstance(level, str) and level for level in levels)
+        if not named:
             raise ValueError(
                 f'{name} "levels" must be a list of non-empty strings, not {levels!r}.'
             )

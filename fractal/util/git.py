@@ -13,10 +13,10 @@ from fractal.exceptions import IndexLockedError
 
 __all__ = []
 
-#: Git's markers of an operation left unfinished in a worktree, each mapped to
+#: git's markers of an operation left unfinished in a worktree, each mapped to
 #: what it names: a merge, cherry-pick, or revert stopped on a conflict (or a
 #: squash staged but never committed), a rebase stopped part-way, and the index
-#: lock a running git command holds and a killed one leaves behind.
+#: lock a running git command holds and a killed one leaves behind
 OPERATION_MARKERS = {
     'MERGE_HEAD': 'a merge in progress',
     'SQUASH_MSG': 'a squash merge in progress',
@@ -27,10 +27,10 @@ OPERATION_MARKERS = {
     'index.lock': 'a running git process or a stale index.lock',
 }
 
-#: Seconds a git write that meets another process's ``index.lock`` waits
+#: seconds a git write that meets another process's index.lock waits
 #: before its one retry -- a reader's refresh or a quick git command holds
 #: the lock for well under that, while one still held after it belongs to a
-#: long-running command (an editor's ``git commit``) or a killed one
+#: long-running command (an editor's `git commit`) or a killed one
 INDEX_LOCK_WAIT = 2.0
 
 

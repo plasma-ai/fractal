@@ -26,10 +26,10 @@ if typing.TYPE_CHECKING:
     from .node import Node
 
 __all__ = [
+    'lower_effort',
     'resolve',
     'register',
     'supported',
-    'lower_effort',
     'Invocation',
     'StreamEvent',
     'StreamResult',
@@ -436,8 +436,8 @@ class Agent:
     # at run start
     needs_pricing: bool = False
     # cost-reporting, but prices a launch its own figure misses (a kill, a
-    # refused figure) via the LiteLLM cache; the run start refreshes a
-    # day-old cache, and a failed fetch only warns
+    # refused figure) via the LiteLLM cache; the run start refreshes a cache
+    # past the loop's refresh age, and a failed fetch only warns
     wants_pricing: bool = False
     # 'call' (per-invocation figures) or 'thread' (cumulative totals settled
     # against prior sibling steps)
@@ -802,9 +802,9 @@ class Agent:
         process: Optional[subprocess.Popen] = None,
         step_id: Optional[int] = None,
         model: Optional[str] = None,
+        baseline: Optional[float] = 0.0,
         detached: bool = False,
         render: Optional[Callable[[StreamEvent], None]] = None,
-        baseline: Optional[float] = 0.0,
     ) -> StreamResult:
         """Drive a parser over the agent's stdout lines.
 
@@ -827,13 +827,13 @@ class Agent:
                 nothing (a live chat writes nothing).
             model: Configured-model fallback for the parser (the
                 stream-reported model overwrites it).
+            baseline: The resumed session's spend before the launch
+                (``cost_baseline``), taken off a result figure that counts
+                on from it; ``None`` (unreadable) refuses the figure.
             detached: Suppress the ``.session`` map persistence (the
                 step-row stamp always lands).
             render: Presentation callback receiving every parsed event
                 (CLI ANSI, TUI bubbles, loop pane).
-            baseline: The resumed session's spend before the launch
-                (``cost_baseline``), taken off a result figure that counts
-                on from it; ``None`` (unreadable) refuses the figure.
 
         Returns:
             The stream outcome, read off the drained parser state.
