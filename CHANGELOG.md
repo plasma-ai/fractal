@@ -415,6 +415,11 @@ may include breaking changes, each listed under a Breaking heading.
   each of its frames that followed another reply's, so a step killed while
   sub-agents ran could book several times its spend, above the figure its
   transcripts hold, and unmarked.
+- A Claude step's streamed cost estimate prices a sub-agent's reply at the model
+  the sub-agent runs, and a frame naming no model at the step's own. It priced
+  every frame at the step's model, so a step killed while a cheaper sub-agent
+  ran, such as Haiku under Opus, could book above the figure its transcripts
+  hold, and unmarked.
 - The loop's `Warning:` line for a step whose record leaves spend out ends on
   the marker its row gets: `(unpriced)` when the row holds no figure, as when a
   killed launch left no transcript and streamed no usage, and
