@@ -548,31 +548,39 @@ may include breaking changes, each listed under a Breaking heading.
   variables, only the mode flags (`$DETACHED_MODE`, `$META_MODE`,
   `$META_TARGET`) stay pinned to their boot values, as does `$FRACTAL_HEADLESS`,
   and the prompt now takes `$META_TARGET` from the same pinned set.
-- `node merge` regenerates the indexes the merge driver merged in every wiki
-  root, not only the project wiki: in each folder declaring a tracked
-  `.wiki/settings.json`, an `_index.md` whose staged bytes match neither side's
-  (a criss-cross merge base hides none) gets a `wiki update` scoped to its
-  folder, the whole root for a root's own index, before validation, and rides
-  the squash commit. A merged index the driver cannot finish — one not in its
-  wiki class's form, one whose `.wiki/wiki.py` hook fails, a conflict resolved
-  by hand, or a page committed without its row — lands current, while an index
-  outside those folders keeps its bytes. Every folder is matched literally, so a
-  glob character in a folder name never refuses or stages a sibling's files; an
-  index in a folder its wiki excludes is skipped instead of failing the merge,
-  and so, with a warning, is an index whose folder encloses another declared
-  wiki, which the wiki refuses to sweep. The refresh reads the disk, so the
-  merge refuses an untracked file under the project wiki or in a refreshed
-  folder, naming it, instead of indexing it into the squash commit, where its
-  row would dangle in every clean checkout. Strays are judged by the wiki's
-  ignore and dot rules: a file only a personal `core.excludesFile` hides refuses
-  too, and one under a dot-prefixed folder, which the wiki never indexes,
-  neither refuses the merge nor rides the squash commit. A symlink, or a file
-  the wiki's `exclude.patterns` matches, still refuses though the wiki would
-  skip it, which is safe; committing or moving the file clears the refusal. A
-  refresh that fails after creating an index removes it along with the rest of
-  the squash, so the retry lands. A wiki declared at the worktree root refuses
-  the merge by name, since every refresh would walk the whole worktree and leave
-  the target dirty.
+- `node merge` refreshes every wiki root its squash touches, not only the
+  project wiki: each folder declaring a tracked `.wiki/settings.json` that holds
+  a file the squash adds, modifies, or deletes (a move counts at both ends, and
+  so does an edit to the root's `.wiki/settings.json` or `.wiki/wiki.py`) gets a
+  `wiki update` over the whole root before validation, and the refresh rides the
+  squash commit, so a `--validate` script running `wiki update --check` on each
+  root passes. A page whose `updated:` stamp still reads as the target's — an
+  edit committed without a restamp, or one both sides made, where the page
+  driver keeps the later stamp, the target's — lands restamped. An index the
+  driver cannot finish — one not in its wiki class's form, one whose
+  `.wiki/wiki.py` hook fails, a conflict resolved by hand, a file committed
+  without its row or deleted with its row left in place, or a folder added or
+  removed without the row above it — lands current. A parent whose root already
+  needed `wiki update` gets that fix in the squash too. Every root is matched
+  literally, so a glob character in a root's name never refuses or stages a
+  sibling's files; an index in a folder its wiki excludes lands as merged, and
+  so, with a warning, does a root the wiki refuses to sweep because its walk
+  reaches another declared wiki, while a root whose settings exclude that wiki's
+  folder refreshes like any other; an untracked file under the inner wiki
+  belongs to it and refuses nothing at the outer root. The refresh reads the
+  disk, so the merge refuses an untracked file under the project wiki or in a
+  refreshed root, naming it, instead of indexing it into the squash commit,
+  where its row would dangle in every clean checkout. Strays are judged by the
+  wiki's ignore and dot rules: a file only a personal `core.excludesFile` hides
+  refuses too, and one under a dot-prefixed folder, which the wiki never
+  indexes, neither refuses the merge nor rides the squash commit. A symlink, or
+  a file the wiki's `exclude.patterns` matches, still refuses though the wiki
+  would skip it, which is safe, while in a root other than the project wiki a
+  file inside a folder its wiki excludes refuses nothing; committing or moving
+  the file clears the refusal. A refresh that fails after creating an index
+  removes it along with the rest of the squash, so the retry lands. A wiki
+  declared at the worktree root refuses the merge by name, since every refresh
+  would walk the whole worktree and leave the target dirty.
 - The wikis fractal creates, the project wiki `fractal init` scaffolds and each
   node's memory wiki, accept dotted file names such as `controls.json`,
   `notes.txt`, and `fit.py`: their seeded ascii/identifier naming policy allows

@@ -5,7 +5,7 @@ desc: |
   files, which regions auto-resolve versus conflict, and the parent's
   reconciliation duties after integrating children.
 created: 2026-07-21T04:51:58Z
-updated: 2026-07-21T04:51:58Z
+updated: 2026-10-23T15:45:29Z
 ---
 
 # features/wiki_system/merge_behavior
@@ -63,21 +63,36 @@ ours'. A conflicted merge, or one left as merged, settles at the next
 merged filesystem and prunes stale rows.
 
 Whatever the driver leaves, `fractal node merge` runs `wiki update` on the
-squash before committing: the project wiki and the memory wiki whole, and in
-every other wiki root — a folder declaring a tracked `.wiki/settings.json`, such
-as a corpus beside the project wiki — each index the driver merged, whose staged
-bytes match neither side's, through an update scoped to its folder (the whole
-root for the root's own index), so indexes outside those folders keep their
-bytes. The bytes, not the merge base, mark a merged index, so a criss-cross
-history, where git names one of two bases, hides none. An index belongs to the
-deepest declared root above it, every folder is matched literally, and an index
-in a folder its wiki excludes is skipped, as the wiki's own walk skips it. An
-index whose folder encloses another declared wiki is skipped too, with a warning
-naming both: the wiki refuses to sweep across a nested root, so that index lands
-as the driver merged it.
+squash before committing, so the squash passes a whole-root
+`wiki update --check` (the check a corpus gate or a `--validate` script runs) in
+every wiki it touches. The project wiki and the memory wiki refresh whole on
+every merge, and so does every other wiki root — a folder declaring a tracked
+`.wiki/settings.json`, such as a corpus beside the project wiki — that holds a
+file the squash adds, modifies, or deletes. A move counts at both ends, and a
+change to the root's `.wiki/settings.json` or `.wiki/wiki.py` hook counts for
+that root, while any other path under a dot-prefixed folder, which the wiki
+never indexes, refreshes nothing. The refresh restamps each changed page whose
+`updated:` still reads as the target's — an edit committed without a restamp, or
+one both sides made, where the page driver keeps the later stamp, the target's —
+and leaves every index in the root listing what landed: a row for each added
+file, Markdown or not, and none for a deleted one, and in the index above a
+folder, a row for each new folder and none for a removed one. The squash is
+compared with the target's HEAD, not with a merge base, so a criss-cross
+history, where git names one of two bases, hides nothing. Refreshing the whole
+root also carries any fix the target's root already needed: a parent whose root
+would fail `wiki update --check` before the merge gets the fix in the squash. A
+file belongs to the deepest declared root above it, every root is matched
+literally, and an index in a folder its wiki excludes lands as merged, as the
+wiki's own walk skips it. A root the wiki refuses to sweep, because its walk
+reaches another declared wiki, is skipped too, with a warning naming both, and
+its files land as the squash left them: the wiki refuses before it writes
+anything. A root whose settings exclude the inner wiki's folder walks past it
+and refreshes like any other. An untracked file under the inner wiki belongs to
+that wiki, the deepest root above it, so the outer root's guard neither refuses
+nor stages it.
 
 The update reads the disk, so the merge refuses an untracked file under the
-project wiki or in a folder it refreshes, naming it: indexed into the squash
+project wiki or in another root it refreshes, naming it: indexed into the squash
 commit, it would dangle in every clean checkout. Untracked files are judged by
 two of the wiki's rules — the repository's ignore rules alone, so a file only a
 personal `core.excludesFile` hides still refuses, since the wiki would index it,
@@ -85,7 +100,9 @@ and the dot rule, so a file under a dot-prefixed folder, which the walk never
 lists, neither refuses the merge nor rides the squash commit. The guard does not
 mirror the walk's other exclusions: a symlink, or a file the wiki's
 `exclude.patterns` matches, still refuses though the refresh would skip it,
-which is safe, and committing or moving the file clears the refusal. The refresh
+which is safe, and committing or moving the file clears the refusal. In a root
+other than the project wiki, a file inside a folder its wiki excludes refuses
+nothing, since a check scoped to that folder reports the exclusion. The refresh
 stages only tracked files it updated, indexes it created, and a root's `.wiki/`
 state. The memory wiki is the target's, and the target's next commit lands what
 it holds. A refresh step that fails restores the target like a conflict; the

@@ -186,14 +186,18 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   prefills a later bare ``git commit`` in the target with the stale squash
   message; a marker path git cannot answer is skipped rather than resolved,
   as an empty word, to the target's worktree root.
-- **``merge.sh`` wiki-root refresh** regenerates, beyond the project and
-  memory wikis, each index the merge driver merged in every other declared
-  wiki root -- staged bytes matching neither side's, over a criss-cross merge
-  base too -- scoped to its folder: a root's own index refreshes that root
-  whole, and an index belongs to the deepest root above it. A wiki declared
-  at the worktree root refuses the merge, since every refresh would walk the
-  whole worktree; an untracked file in a refreshed folder refuses the merge
-  by name, while one in a sibling a glob would match does not; an index in a
+- **``merge.sh`` wiki-root refresh** refreshes, beyond the project and
+  memory wikis, every other declared wiki root holding a path the squash
+  adds, changes, or deletes, whole, so a validator's whole-root
+  ``wiki update --check`` passes: a page edited without a restamp, or by both
+  sides, lands restamped, every index lists what landed (a merged index in
+  order over a criss-cross merge base too, a moved page under its new
+  folder, a new or deleted folder in the index above it), a settings change
+  re-indexes its root, and a fix the target's root already needed rides the
+  squash; a path belongs to the deepest root above it. A wiki declared at
+  the worktree root refuses the merge, since every refresh would walk the
+  whole worktree; an untracked file in a refreshed root refuses the merge by
+  name, while one in a sibling a glob would match does not; an index in a
   folder its wiki excludes is skipped; and a failed refresh restores the
   target with the child unadvanced, as does a failed declaration read,
   listing, or staging step around it, and a direct call that names no
@@ -205,9 +209,12 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   personal ignore hides refuses the merge, since the wiki would index it, and
   one under a dot-prefixed folder neither refuses it nor rides the squash; a
   symlink, or a file the wiki's ``exclude.patterns`` matches, still refuses,
-  which is safe, and committing or moving the file clears it. A merged index
-  whose folder encloses another declared wiki, which the wiki refuses to sweep,
-  lands as the driver merged it, with a warning.
+  which is safe, and committing or moving the file clears it. A root the
+  wiki refuses to sweep, because its walk reaches another declared wiki,
+  lands as the driver merged it, with a warning, while one whose settings
+  exclude the inner wiki's folder refreshes like any other; an untracked file
+  under the inner wiki belongs to it, so the outer root neither refuses nor
+  stages it.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
   a conflicted merge with the merge's own tail -- ``.fractal/`` restore and
   seed strip, footprint check, commit, merge-base advance -- and refuses when
@@ -1356,12 +1363,13 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
     The ``_index.md`` merge driver unions both siblings' rows, but it cannot
     add a row for a page a sibling committed without refreshing its index, so
     the merged index would fail a whole-root ``wiki update --check``. The
-    squash regenerates every index the driver merged in each declared wiki
-    root, not only the project wiki, so the merged index carries every page's
-    row in order; an index the merges never touched keeps its bytes, stale as
-    it is. The refresh reads the disk, so an untracked draft in a folder it
-    regenerates would be indexed into the commit: the merge refuses it by name
-    and restores the target.
+    squash refreshes each declared wiki root it touches, whole, not only the
+    project wiki, so the merged index carries every page's row in order, and
+    a parent whose root already needed ``wiki update`` gets the fix in the
+    squash: the stale index of a folder no merge touched lands refreshed. The
+    refresh reads the disk, so an untracked draft in a root it refreshes
+    would be indexed into the commit: the merge refuses it by name and
+    restores the target.
     """
     repo = _init_tree(tmp_path / 'corpusrepo')
     # a declared corpus root beside the project wiki: a folder both siblings
@@ -1422,8 +1430,8 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
     _git(worktrees['two'], 'commit', '-m', 'mid card')
     first = _script('merge.sh', repo, f'{worktrees["one"]}')
     assert first.returncode == 0, (first.stdout, first.stderr)
-    # an untracked draft in the folder the second merge regenerates refuses
-    # it by name, restoring the target with the draft untouched
+    # an untracked draft in the root the second merge refreshes refuses it
+    # by name, restoring the target with the draft untouched
     draft = corpus / 'cards' / 'draft.md'
     draft.write_text('a bare draft\n', encoding='utf-8')
     head = _git(repo, 'rev-parse', 'HEAD').stdout
@@ -1446,8 +1454,11 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
         < index.index('[[cards/mid')
         < index.index('[[cards/zeta')
     ), index
-    # ...the index no merge touched kept its stale bytes...
-    assert _git(repo, 'show', 'main:library/other/_index.md').stdout == stale
+    # ...the stale index no merge touched landed refreshed, its rows in
+    # order...
+    other_index = _git(repo, 'show', 'main:library/other/_index.md').stdout
+    assert other_index != stale, other_index
+    assert other_index.index('[[other/first') < other_index.index('[[other/second')
     # ...and the refresh left the target clean
     assert _git(repo, 'status', '--porcelain').stdout == ''
 
@@ -1457,9 +1468,9 @@ def test_merge_orders_sibling_rows_in_every_wiki_root(
     argvalues=[
         (('library',), 'library', '.', None),
         (('library', 'library/inner'), 'library/inner', 'cards', None),
-        (('library',), 'library', '[x]', 'library/x/sub/_index.md'),
+        (('[x]',), '[x]', '.', 'x/sub/_index.md'),
     ],
-    ids=['root-index', 'deepest-root', 'glob-named-folder'],
+    ids=['root-index', 'deepest-root', 'glob-named-root'],
 )
 def test_merge_orders_merged_rows_wherever_the_index_sits(
     tmp_path: pathlib.Path,
@@ -1470,11 +1481,11 @@ def test_merge_orders_merged_rows_wherever_the_index_sits(
 ) -> None:
     """A merged index lands in order wherever it sits in a corpus wiki.
 
-    A root's own index refreshes that whole root; an index in a nested
-    declared wiki is refreshed as part of the deepest root above it, so its
-    rows link relative to that root; and a folder whose name holds a glob
-    character is matched literally, so an untracked index in a sibling the
-    glob would match stays untracked and never refuses the merge.
+    A root the squash touches refreshes whole, its own index included; an
+    index in a nested declared wiki is refreshed as part of the deepest root
+    above it, so its rows link relative to that root; and a root whose name
+    holds a glob character is matched literally, so an untracked index in a
+    sibling the glob would match stays untracked and never refuses the merge.
     """
     repo = _init_tree(tmp_path / 'layoutrepo')
     for declared in roots:
@@ -1589,6 +1600,185 @@ def test_merge_regenerates_an_index_merged_over_a_criss_cross_base(
     assert _git(repo, 'status', '--porcelain').stdout == ''
 
 
+@pytest.mark.parametrize(
+    argnames=('root', 'change', 'landed'),
+    argvalues=[
+        # both sides edit the page apart, and the page driver keeps the
+        # target's later stamp, which is HEAD's
+        ('library', 'both-edit', None),
+        # the node edits the page and commits it without restamping it
+        ('library', 'edit', None),
+        # the node edits the page's desc, which its folder's row repeats
+        ('library', 'page-desc', ('cards/_index.md', 'An edited page.', True)),
+        # the node deletes the page, leaving its row in the folder's index
+        ('library', 'delete', ('cards/_index.md', '[[cards/page', False)),
+        # the node moves the page to another folder, refreshing neither index
+        ('library', 'move', ('notes/_index.md', '[[notes/page', True)),
+        # the node adds a data file, which its folder's index has no row for
+        ('library', 'add-file', ('cards/_index.md', 'cards/data.json', True)),
+        # the node deletes a folder's index alone, its page still there
+        ('library', 'delete-index', ('notes/_index.md', '[[notes/memo', True)),
+        # the node deletes a folder whole, leaving its row in the root's index
+        ('library', 'delete-folder', ('_index.md', '[[notes/', False)),
+        # the node adds a folder, at the root and one level down, which the
+        # index above it has no row for
+        ('library', 'add-folder', ('_index.md', '[[fresh/', True)),
+        ('library', 'add-subfolder', ('cards/_index.md', '[[cards/deep/', True)),
+        # the node edits a folder's desc, which the root's row repeats
+        ('library', 'folder-desc', ('_index.md', 'An edited folder.', True)),
+        # the node's settings exclude a folder the root's index lists
+        ('library', 'settings', ('_index.md', '[[notes/', False)),
+        # the node's unstamped edit in the project wiki, refreshed whole
+        ('wiki', 'edit', None),
+    ],
+    ids=[
+        'both-sides-edit',
+        'node-edit',
+        'node-page-desc',
+        'node-delete',
+        'node-move',
+        'node-data-file',
+        'node-index-delete',
+        'node-folder-delete',
+        'node-folder-add',
+        'node-subfolder-add',
+        'node-folder-desc',
+        'node-settings',
+        'project-wiki-edit',
+    ],
+)
+def test_merge_refreshes_every_wiki_root_its_squash_changes(
+    tmp_path: pathlib.Path,
+    root: str,
+    change: str,
+    landed: Optional[tuple[str, str, bool]],
+) -> None:
+    """A squash passes a whole-root ``wiki update --check`` in every wiki root.
+
+    The check flags a changed page whose ``updated:`` still reads as HEAD's --
+    an edit the node committed without restamping, or one both sides made,
+    where the page driver keeps the later stamp, the target's -- and an index
+    whose rows disagree with the disk: a file or folder added or deleted, a
+    page or folder whose desc changed, or a folder the settings exclude. The
+    merge refreshes, whole, each declared root holding a path its squash
+    adds, changes, or deletes, so a validator running the check on every
+    root passes: a changed page lands restamped past HEAD's stamp, and each
+    index lists what landed, a row in the index above a changed folder
+    included. The project wiki, refreshed whole, lands the same way.
+    """
+    repo = _init_tree(tmp_path / 'restamprepo')
+    # a corpus beside the project wiki, both in one layout and each mapping
+    # its pages to the merge driver as wiki init writes it; every page is
+    # stamped long before the merge, so the squash's own writes fall outside
+    # the wiki's stamp grace and only a refresh moves a stamp
+    old = '2026-01-01T00:00:00Z'
+    earlier = '2026-01-02T00:00:00Z'
+    later = '2026-01-03T00:00:00Z'
+    body = 'first line\n' + 'filler line\n' * 6 + 'last line\n'
+    for declared in ('wiki', 'library'):
+        corpus = repo / declared
+        _declare_wiki(corpus, 'cards', 'notes')
+        (corpus / '.gitattributes').write_text(
+            '# Wiki page merge driver\n*.md merge=wiki\n', encoding='utf-8'
+        )
+        for name in ('cards/page', 'notes/memo'):
+            (corpus / f'{name}.md').write_text(
+                f'---\nname: {name}\ndesc: A {name} page.\ncreated: {old}\n'
+                f'updated: {old}\n---\n\n# {name}\n\n***\n\n{body}',
+                encoding='utf-8',
+            )
+        _wiki_update(corpus)
+    # the validator runs the check a corpus gate runs, on every root
+    (repo / 'check.sh').write_text(
+        'wiki update --check --path=wiki && wiki update --check --path=library\n',
+        encoding='utf-8',
+    )
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'add the corpus')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    page = f'{root}/cards/page.md'
+    # every change is committed as made, with no refresh behind it
+    if change == 'both-edit':
+        target_page = repo / page
+        target_page.write_text(
+            target_page.read_text(encoding='utf-8')
+            .replace('first line', 'first line, edited on the target')
+            .replace(f'updated: {old}', f'updated: {later}'),
+            encoding='utf-8',
+        )
+        _git(repo, 'add', '--', page)
+        _git(repo, 'commit', '-m', 'the target edits the page')
+    node_page = worktree / page
+    if change in ('both-edit', 'edit'):
+        stamp = earlier if change == 'both-edit' else old
+        node_page.write_text(
+            node_page.read_text(encoding='utf-8')
+            .replace('last line', 'last line, edited by the node')
+            .replace(f'updated: {old}', f'updated: {stamp}'),
+            encoding='utf-8',
+        )
+    elif change == 'page-desc':
+        node_page.write_text(
+            node_page.read_text(encoding='utf-8').replace(
+                'desc: A cards/page page.', 'desc: An edited page.'
+            ),
+            encoding='utf-8',
+        )
+    elif change == 'delete':
+        _git(worktree, 'rm', '--quiet', page)
+    elif change == 'move':
+        _git(worktree, 'mv', page, f'{root}/notes/page.md')
+    elif change == 'add-file':
+        (worktree / root / 'cards' / 'data.json').write_text('{}\n', encoding='utf-8')
+    elif change == 'delete-index':
+        _git(worktree, 'rm', '--quiet', f'{root}/notes/_index.md')
+    elif change == 'delete-folder':
+        _git(worktree, 'rm', '-r', '--quiet', f'{root}/notes')
+    elif change == 'add-folder':
+        (worktree / root / 'fresh').mkdir()
+        _write_page(worktree / root / 'fresh' / 'page.md')
+    elif change == 'add-subfolder':
+        (worktree / root / 'cards' / 'deep').mkdir()
+        _write_page(worktree / root / 'cards' / 'deep' / 'page.md')
+    elif change == 'folder-desc':
+        index = worktree / root / 'cards' / '_index.md'
+        index.write_text(
+            index.read_text(encoding='utf-8').replace(
+                'desc: The cards folder.', 'desc: An edited folder.'
+            ),
+            encoding='utf-8',
+        )
+    else:
+        (worktree / root / '.wiki' / 'settings.json').write_text(
+            f'{json.dumps({"exclude": {"patterns": ["notes"]}})}\n', encoding='utf-8'
+        )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', f'the node makes a {change} change')
+
+    result = _script('merge.sh', repo, f'{worktree}', '--validate=check.sh')
+
+    # the check passed on the squash, which landed with the target clean
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    if landed is None:
+        # the page carries every edit, restamped past both sides' stamps
+        text = _git(repo, 'show', f'main:{page}').stdout
+        assert 'last line, edited by the node' in text, text
+        if change == 'both-edit':
+            assert 'first line, edited on the target' in text, text
+        stamps = [line for line in text.split('\n') if line.startswith('updated: ')]
+        assert len(stamps) == 1, text
+        assert stamps[0] > f'updated: {later}', text
+    else:
+        # the index lists exactly what landed
+        index, row, listed = landed
+        text = _git(repo, 'show', f'main:{root}/{index}').stdout
+        assert (row in text) == listed, text
+
+
 def test_merge_refuses_a_wiki_declared_at_the_worktree_root(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1650,9 +1840,10 @@ def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
     """An index in a folder its wiki excludes lands as the merge left it.
 
     The wiki's own walk skips a dot folder and a folder its
-    ``exclude.patterns`` names, and a refresh scoped to either is refused,
-    so the merge skips such an index rather than failing: both sides' edits
-    land, and an untracked file there refuses nothing and stays untracked.
+    ``exclude.patterns`` names, so the root's refresh leaves such an index
+    as merged: both sides' edits land, and an untracked file there, which a
+    check scoped to its folder refuses as excluded, refuses nothing and stays
+    untracked.
     """
     repo = _init_tree(tmp_path / 'excludedrepo')
     corpus = repo / 'library'
@@ -1770,10 +1961,12 @@ def test_merge_lands_a_merged_index_whose_folder_encloses_another_wiki(
 ) -> None:
     """An index whose folder encloses another declared wiki lands as merged.
 
-    The wiki refuses to refresh a folder that encloses a nested declared
-    root, so the merge skips that refresh with a warning naming both, and
-    the index lands as the merge driver left it -- both siblings' edits to
-    its authored body included -- with the target clean.
+    The wiki refuses to refresh a root whose walk reaches a nested declared
+    root, before it writes anything, so the merge skips that refresh with a
+    warning naming both, and the index lands as the merge driver left it --
+    both siblings' edits to its authored body included. An untracked draft
+    in the inner wiki belongs to that wiki, the deepest root above it, so it
+    refuses nothing and stays untracked.
     """
     repo = _init_tree(tmp_path / 'nestedrepo')
     library = repo / 'library'
@@ -1800,17 +1993,87 @@ def test_merge_lands_a_merged_index_whose_folder_encloses_another_wiki(
         _git(worktrees[name], 'commit', '-m', f'{name} edits the library index')
     first = _script('merge.sh', repo, f'{worktrees["one"]}')
     assert first.returncode == 0, (first.stdout, first.stderr)
+    draft = library / 'inner' / 'draft.md'
+    draft.write_text('a bare draft\n', encoding='utf-8')
 
     second = _script('merge.sh', repo, f'{worktrees["two"]}')
 
     # the refresh was skipped by name, and both edits landed as merged
     assert second.returncode == 0, (second.stdout, second.stderr)
-    assert 'library/_index.md lands as merged' in second.stderr, second.stderr
+    assert 'library lands as merged' in second.stderr, second.stderr
     assert 'declared wiki library/inner' in second.stderr, second.stderr
     merged = _git(repo, 'show', 'main:library/_index.md').stdout
     assert 'first line, edited by one' in merged, merged
     assert 'last line, edited by two' in merged, merged
-    assert _git(repo, 'status', '--porcelain').stdout == ''
+    # the inner wiki's draft refused nothing and stayed untracked
+    status = _git(repo, 'status', '--porcelain').stdout
+    assert status == '?? library/inner/draft.md\n', status
+
+
+def test_merge_refreshes_a_root_whose_settings_exclude_its_inner_wiki(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A root whose settings exclude an inner declared wiki refreshes like any other.
+
+    The wiki refuses to sweep a root only when its walk reaches another
+    declared wiki, and a root whose ``exclude.patterns`` names the inner
+    wiki's folder walks past it: the merge refreshes and stages that root as
+    usual, so a page the node edited without a restamp lands restamped and a
+    validator's whole-root check passes, while an untracked index the inner
+    wiki holds is no file of the refresh's and stays out of the squash.
+    """
+    repo = _init_tree(tmp_path / 'excludedinnerrepo')
+    library = repo / 'library'
+    _declare_wiki(library, 'cards')
+    (library / '.wiki' / 'settings.json').write_text(
+        f'{json.dumps({"exclude": {"patterns": ["inner"]}})}\n', encoding='utf-8'
+    )
+    _declare_wiki(library / 'inner')
+    # a page stamped long before the merge, so the squash's own write falls
+    # outside the wiki's stamp grace and only a refresh moves its stamp
+    old = '2026-01-01T00:00:00Z'
+    (library / 'cards' / 'page.md').write_text(
+        f'---\nname: cards/page\ndesc: A cards page.\ncreated: {old}\n'
+        f'updated: {old}\n---\n\n# cards/page\n\n***\n\nfirst line\n',
+        encoding='utf-8',
+    )
+    _wiki_update(library)
+    (repo / 'check.sh').write_text(
+        'wiki update --check --path=library\n', encoding='utf-8'
+    )
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'declare the corpus beside its inner wiki')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    # the node edits the page and commits it without restamping it
+    node_page = worktree / 'library' / 'cards' / 'page.md'
+    node_page.write_text(
+        node_page.read_text(encoding='utf-8').replace(
+            'first line', 'first line, edited by the node'
+        ),
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'the node edits the page')
+    # an untracked index in the inner wiki, on the target
+    drafts = library / 'inner' / 'drafts'
+    drafts.mkdir()
+    (drafts / '_index.md').write_text(
+        '---\nname: drafts\n---\n# drafts\n\n***\n', encoding='utf-8'
+    )
+
+    result = _script('merge.sh', repo, f'{worktree}', '--validate=check.sh')
+
+    # the root refreshed with no warning, and the page landed restamped
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'lands as merged' not in result.stderr, result.stderr
+    landed = _git(repo, 'show', 'main:library/cards/page.md').stdout
+    assert 'first line, edited by the node' in landed, landed
+    assert f'updated: {old}' not in landed, landed
+    # the inner wiki's untracked index stayed out of the squash
+    status = _git(repo, 'status', '--porcelain').stdout
+    assert status == '?? library/inner/drafts/\n', status
 
 
 def test_merge_restores_the_target_when_a_corpus_refresh_fails(
@@ -1831,7 +2094,7 @@ def test_merge_restores_the_target_when_a_corpus_refresh_fails(
     assert first.returncode == 0, (first.stdout, first.stderr)
     head = _git(repo, 'rev-parse', 'HEAD').stdout
     child = _git(repo, 'rev-parse', 'main.two').stdout
-    # a wiki that refuses every refresh scoped to a folder
+    # a wiki that refuses every refresh of the corpus root
     env = _cli_env()
     real = shutil.which('wiki', path=env['PATH'])
     bindir = tmp_path / 'bin'
@@ -1840,7 +2103,7 @@ def test_merge_restores_the_target_when_a_corpus_refresh_fails(
     shim.write_text(
         '#!/usr/bin/env bash\n'
         'if [[ "$1" == update ]]; then\n'
-        '    for arg in "${@:2}"; do [[ "$arg" == --* ]] || exit 1; done\n'
+        '    for arg in "${@:2}"; do [[ "$arg" == --path=*/library ]] && exit 1; done\n'
         'fi\n'
         f'exec {real} "$@"\n',
         encoding='utf-8',
@@ -1884,20 +2147,20 @@ def test_merge_restores_the_target_when_a_corpus_refresh_fails(
         # the declared roots and the indexes the squash touched
         (
             '" $* " == *" :(glob)**/.wiki/settings.json "*',
-            'listing the wiki indexes of',
+            'listing the wiki files of',
             "main.two's squash failed",
         ),
-        # the untracked files in the corpus folder the merge refreshes
+        # the untracked files in the corpus root the merge refreshes
         (
-            '" $* " == *" --others "* && " $* " == *" :(literal)library/cards "*',
+            '" $* " == *" --others "* && " $* " == *" :(literal)library "*',
             'listing the untracked files under',
-            'stepfailrepo/library/cards failed',
+            'stepfailrepo/library failed',
         ),
-        # the refreshed corpus folder's tracked updates
+        # the refreshed corpus root's tracked updates
         (
-            '" $* " == *" add -u -- :(literal)library/cards "*',
+            '" $* " == *" add -u -- :(literal)library "*',
             'staging the refreshed wiki indexes under',
-            'stepfailrepo/library/cards after merging main.two failed',
+            'stepfailrepo/library after merging main.two failed',
         ),
     ],
     ids=[
@@ -1906,7 +2169,7 @@ def test_merge_restores_the_target_when_a_corpus_refresh_fails(
         'created-index-add',
         'roots-listing',
         'corpus-strays',
-        'folder-staging',
+        'root-staging',
     ],
 )
 def test_merge_restores_the_target_when_a_wiki_refresh_step_fails(
