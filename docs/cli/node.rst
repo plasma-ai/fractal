@@ -481,7 +481,10 @@ tmux session — that is its normal state, not a crash. While a node (or the
 whole tree, via ``fractal pause``) is paused, spawning and starting refuse
 anywhere beneath it; the only legal verbs on a paused node are ``resume``,
 ``kill``, ``chat``, and ``merge`` (committed work only; the node stays
-paused).
+paused). The loop reserves ``parked``, and any reason starting with
+``via pause latch`` or ``resume preflight failed:``, for the pause events it
+records as it parks, so ``pause`` refuses such a ``--reason`` before anything
+is written.
 
 ``resume`` relaunches the parked subtree leaf-first. Each loop adopts its open
 run — same budgets and iteration count, the interrupted step re-entered

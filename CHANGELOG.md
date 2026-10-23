@@ -494,6 +494,9 @@ may include breaking changes, each listed under a Breaking heading.
   agent pausing its own node finishes its step before the loop parks) was
   refunded to the deadlines as paused time, and a pause that a resume withdrew
   before the loop parked credited the time the node kept working.
+- `fractal pause` and `fractal node pause` refuse a `--reason` of `parked`, or
+  one starting with `via pause latch` or `resume preflight failed:`, the text
+  the loop records its own parks with, so the request can never count as a park.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives the template variables (the paths, the branch, and the spawn

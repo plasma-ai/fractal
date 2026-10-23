@@ -12,6 +12,8 @@ the parts of the signal surface the existing suite leaves uncovered.
   leave the node ``active`` for the loop to act on;
 - the tree-wide brake -- ``fractal pause`` latches the root against new work,
   and ``fractal resume`` withdraws the pending pause and lifts the latch;
+- the reserved pause reasons -- both pause verbs refuse the loop's own park
+  text before writing anything;
 - ``kill``'s node/row status agreement -- the node and every active run/iteration/
   step row all land on ``killed`` together, pinned both as pure bookkeeping and
   against a real loop launch reaped mid-step through ``kill.sh``;
@@ -49,6 +51,11 @@ from typing import Optional
 import pytest
 
 from fractal.cli.utils import resolve_node, resolve_user_node
+from fractal.constants import (
+    LATCH_PARK_REASON_PREFIX,
+    PARK_REASON,
+    PREFLIGHT_PARK_REASON_PREFIX,
+)
 from fractal.core.node import Node
 from tests._helpers import _git
 
@@ -59,6 +66,7 @@ __all__ = [
     'test_active_node_accepts_graceful_signals',
     'test_user_node_resolves_from_a_non_init_checkout',
     'test_tree_pause_latches_and_resume_releases',
+    'test_pause_refuses_a_reserved_reason',
     'test_finish_cancel_withdraws_the_pending_signal',
     'test_list_surfaces_pending_signal_and_filters_on_base',
     'test_kill_marks_node_and_active_rows_killed',
@@ -356,6 +364,69 @@ def test_tree_pause_latches_and_resume_releases(
     idle = _run(root, 'resume')
     assert idle.returncode == 0
     assert 'No paused nodes to resume.' in idle.stdout
+
+
+# the park text the loop reserves for its own pause rows: the exact checkpoint
+# reason and each prefix, matched without its trailing space
+_LATCH = LATCH_PARK_REASON_PREFIX.rstrip()
+_PREFLIGHT = PREFLIGHT_PARK_REASON_PREFIX.rstrip()
+
+
+@pytest.mark.parametrize(
+    argnames=('reason', 'reserved'),
+    argvalues=[
+        (PARK_REASON, PARK_REASON),
+        (f'{LATCH_PARK_REASON_PREFIX}(main)', _LATCH),
+        (_LATCH, _LATCH),
+        (f'{PREFLIGHT_PARK_REASON_PREFIX}key unset', _PREFLIGHT),
+        (_PREFLIGHT, _PREFLIGHT),
+    ],
+    ids=['park', 'latch', 'latch-bare', 'preflight', 'preflight-bare'],
+)
+@pytest.mark.parametrize(
+    argnames='verb',
+    argvalues=[('pause',), ('node', 'pause')],
+    ids=['tree', 'node'],
+)
+def test_pause_refuses_a_reserved_reason(
+    tmp_path_factory: pytest.TempPathFactory,
+    live_loop: Callable[[pathlib.Path], None],
+    verb: tuple[str, ...],
+    reason: str,
+    reserved: str,
+) -> None:
+    """A pause whose reason the loop reserves for its parks is refused unwritten.
+
+    The deadline credit opens its spans at the loop's own park rows, told
+    from a pause request by their reason, so a request carrying that text
+    would credit the time its node kept working. Both pause verbs refuse it
+    before anything lands -- no pause row, no signal, no tree latch -- and a
+    bare prefix counts, since a fanned-out reason gains a suffix. An ordinary
+    reason then pauses, even one that only opens with the park word. A
+    private repo: the tree verb sweeps every node.
+    """
+    root = _private_repo(tmp_path_factory, 'reserved')
+    wt, _ = _arm(root, 'reserved')
+    live_loop(wt)
+    cwd = root if verb == ('pause',) else wt
+    pauses = "SELECT COUNT(*) FROM events WHERE event='pause'"
+    signals = "SELECT COUNT(*) FROM signals WHERE signal='pause'"
+    # the reserved reason is refused, naming the reserved text
+    refused = _run(cwd, *verb, '--reason', reason)
+    assert refused.returncode == 2
+    assert f'--reason must not use the reserved text {reserved!r}' in refused.stderr
+    assert refused.stdout.strip() == ''
+    # ...and nothing was written: no pause row, no signal, no latch
+    assert _cell(wt, pauses) == '0'
+    assert _cell(wt, signals) == '0'
+    assert _run(wt, 'node', 'status').stdout.strip() == 'active'
+    assert Node(wt).pause_latched() is None
+    # an ordinary reason still pauses
+    paused = _run(cwd, *verb, '--reason', f'{PARK_REASON} for review')
+    assert paused.returncode == 0, paused.stderr
+    assert 'Pause signal sent to 1 node' in paused.stdout
+    assert _cell(wt, pauses) == '1'
+    assert _run(wt, 'node', 'status').stdout.strip() == 'active (pausing)'
 
 
 def test_finish_cancel_withdraws_the_pending_signal(
@@ -914,6 +985,29 @@ def _last_event(wt: pathlib.Path, event: str) -> dict:
     )
     out = _run(wt, 'db', '_query', sql, '--csv').stdout
     return next(csv.DictReader(io.StringIO(out)))
+
+
+def _private_repo(tmp_path_factory: pytest.TempPathFactory, label: str) -> pathlib.Path:
+    """Return a fresh repo with a user node, for a test that sweeps the tree.
+
+    The dirname carries a run-unique suffix: tmux session names embed it
+    machine-wide, so sibling suite runs never collide.
+    """
+    root = tmp_path_factory.mktemp(f'fractal_{label}_{uuid.uuid4().hex[:8]}')
+    _git(root, 'init', '-b', 'main')
+    _git(root, 'config', 'user.email', f'{label}@test.local')
+    _git(root, 'config', 'user.name', label)
+    (root / 'README.md').write_text(f'# {label}\n', encoding='utf-8')
+    wiki = root / 'wiki'
+    wiki.mkdir()
+    (wiki / '_index.md').write_text(
+        '---\nname: wiki\n---\n# wiki\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(root, 'add', '-A')
+    _git(root, 'commit', '-m', 'init')
+    assert _run(root, 'init').returncode == 0
+    return root
 
 
 def _session_name(wt: pathlib.Path) -> str:

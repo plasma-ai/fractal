@@ -98,7 +98,10 @@ of every other signal — so a parent parked before its children can never
 drain-complete over them; it aborts the in-flight agent, and the loop exits with
 status `paused`, leaving the run and any open iteration rows open. A user-node
 pause first latches the whole tree (a `.paused` marker beside the central
-database), so even spawns and starts racing the sweep refuse.
+database), so even spawns and starts racing the sweep refuse. A reason the loop
+reserves for its own park rows (`parked`, or one starting with `via pause latch`
+or `resume preflight failed:`) is refused before anything is written, so a
+request is never read as a park (see [[features/cost/time_budgets]]).
 
 `resume` is the mirror: it fans out leaf-first (deepest first) so children
 already read `active` before their parent's drain-waits look at them. The
