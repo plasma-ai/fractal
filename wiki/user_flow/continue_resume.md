@@ -45,12 +45,16 @@ must be resumed instead, and a retired one unretired). What "fresh run" means:
 
 - **Runs are isolated.** Each launch arms the cost cap anew and starts new
   run/iteration accounting; the node's history keeps every prior run.
-- **The worktree is restored.** The launch restores the worktree to its
-  committed state; if uncommitted project files exist (a kill usually leaves
-  some), the continue refuses until you pass `--clean` to acknowledge discarding
-  them. A worktree holding a git operation in progress (a merge, squash merge,
-  cherry-pick, revert, rebase, or `index.lock`) is left as found instead, and
-  the first step's prompt names the operation for the agent to finish or abort.
+- **The worktree is restored.** The launch commits the operator's edits under
+  the node folder, in a commit that carries nothing else, and restores the rest
+  of the worktree to its committed state, discarding staged and unstaged changes
+  alike (it unstages everything first, so a staged project file can neither ride
+  that commit nor survive the restore); if uncommitted project files exist (a
+  kill usually leaves some), the continue refuses until you pass `--clean` to
+  acknowledge discarding them. A worktree holding a git operation in progress (a
+  merge, squash merge, cherry-pick, revert, rebase, or `index.lock`) is left as
+  found instead, and the first step's prompt names the operation for the agent
+  to finish or abort.
 - **A budget-ended run never re-arms silently.** If the last run ended by
   exhausting its cost cap, a bare `--continue` refuses, naming the spent and
   armed figures; pass an explicit `--max-cost` to arm the next run deliberately.

@@ -370,6 +370,10 @@ may include breaking changes, each listed under a Breaking heading.
   so on its output before each wait. A merge refuses only an `active` node, so a
   boot that landed mid-merge could have its worktree reset or carried by the
   merge while its agent started.
+- `node start --continue` discards a project change the operator left staged, as
+  it does an unstaged one, and its operator-edit commit carries only the node
+  folder's edits. A staged project change survived the clean, and rode the
+  operator-edit commit whenever the node folder held edits too.
 - `node merge` checks its target again once it holds the merge lock, and refuses
   a target that went `active` or `paused` while the merge waited. A target
   re-armed with `start --continue` during the wait could go live, and the squash

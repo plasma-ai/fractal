@@ -863,9 +863,10 @@ machine-local layer fences (step 3 above).
 
 Pause is the one path that never commits: the dirty worktree *is* the frozen
 mid-step state that resume continues from. ``fractal node start --continue``
-is the path that discards it (it restores the worktree with a clean), after
-first committing any operator edits made under the node directory and
-preserving ``config.json`` edits. A worktree holding a git operation in
+is the path that discards it: it first commits any operator edits made under
+the node directory, in a commit that carries nothing else, then restores the
+worktree with a clean that discards every other uncommitted change, staged or
+not, preserving ``config.json`` edits. A worktree holding a git operation in
 progress (a merge, squash merge, cherry-pick, revert, rebase, or
 ``index.lock``) is the exception: the continue leaves it as found, skipping
 both the operator-edit commit and the clean, says so on its output, and the

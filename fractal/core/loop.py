@@ -1346,18 +1346,18 @@ class Loop:
     def _clean_worktree(self: Loop) -> None:
         """Restore the worktree for a continue launch.
 
-        Continue-mode cleanup: commit operator seed edits --no-verify,
-        clean, re-arm budgets, preserve config.json. A worktree holding a
-        git operation in progress is left as found.
+        Commit the operator's edits under the node folder (--no-verify),
+        then discard every other uncommitted change, staged or not,
+        keeping config.json. A worktree holding a git operation in
+        progress is left as found.
         """
         node = self.node
         worktree = node.worktree
         node_dir = node.node_dir
         # a git operation left in progress is the agent's to finish or abort
-        # (its first prompt names it): the commit below would silently finish
-        # a staged merge or crash boot on a conflicted one, and the restore
-        # would discard the operation's state; a probe that cannot answer
-        # names nothing
+        # (its first prompt names it): the reset and restore below would
+        # discard the operation's state; a probe that cannot answer names
+        # nothing
         if operations := fractal.util.git.in_progress(worktree, check=False):
             named = ', '.join(
                 f'{operation} ({marker.name})' for operation, marker in operations
@@ -1367,6 +1367,12 @@ class Loop:
                 f' the worktree has {named}, which the first step prompt names'
             )
             return
+        # unstage everything first (unguarded: a failed reset would let a
+        # staged project change ride the commit below): the commit then
+        # carries only what its add stages, and the checkout/clean below
+        # discard a staged project change like an unstaged one; the worktree
+        # is untouched, so no edit is lost
+        fractal.util.git.run(['reset', '-q'], cwd=worktree)
         # commit operator steering edits before the checkout/clean below
         # reverts them (--no-verify, unguarded: failing loud beats destroying
         # them); the excludes-scoped -uall probe keeps runtime artifacts from
@@ -1385,28 +1391,9 @@ class Loop:
             *commit._STAGE_EXCLUDES,
         ]
         raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
-        # "XY <path>" entries; a rename or copy in either column (an
-        # operator's git mv, a worktree-detected move) trails its origin
-        # path as a bare extra token
-        entries = []
-        tokens = iter(os.fsdecode(raw).split('\0'))
-        for token in tokens:
-            if not token:
-                continue
-            entries.append(token[3:])
-            if 'R' in token[:2] or 'C' in token[:2]:
-                entries.append(next(tokens))
-        # stage only paths the add can express: an entry gone from both the
-        # index and the worktree (a staged rename's origin, a staged
-        # deletion) is already fully staged, and naming it is fatal
-        cmd = ['--no-optional-locks', 'ls-files', '-z', '--', f'{node_dir}']
-        tracked = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
-        index = set(os.fsdecode(tracked).split('\0'))
-        paths = [
-            path
-            for path in entries
-            if path in index or (worktree / path).exists(follow_symlinks=False)
-        ]
+        # "XY <path>" entries; with nothing staged, each is a worktree change
+        # the add can name (a deletion, or each side of a move, included)
+        paths = [token[3:] for token in os.fsdecode(raw).split('\0') if token]
         if paths:
             print(
                 f'Continuing: committing operator edits under .fractal/{node.branch}...'
