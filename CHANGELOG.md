@@ -7,6 +7,8 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-23
+
 ### Breaking
 
 - A child node's `fractal commit --init` baseline carries only the node's own
@@ -1672,4 +1674,5 @@ pinning it in lockstep.
 [1.1.0]: https://github.com/plasma-ai/fractal/compare/v1.0.0...v1.1.0
 [1.2.0]: https://github.com/plasma-ai/fractal/compare/v1.1.0...v1.2.0
 [1.3.0]: https://github.com/plasma-ai/fractal/compare/v1.2.0...v1.3.0
-[unreleased]: https://github.com/plasma-ai/fractal/compare/v1.3.0...HEAD
+[1.4.0]: https://github.com/plasma-ai/fractal/compare/v1.3.0...v1.4.0
+[unreleased]: https://github.com/plasma-ai/fractal/compare/v1.4.0...HEAD
