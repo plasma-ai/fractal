@@ -497,7 +497,11 @@ count, with the interrupted step re-entered — resuming the recorded agent
 session when one exists, re-orienting fresh otherwise (session continuity is
 best-effort, not guaranteed). The pause and resume events are instants, and
 the paused span between them is credited back to the run and
-iteration deadlines, so parking a node does not burn its timeouts.
+iteration deadlines, so parking a node does not burn its timeouts. A
+resumed run that ends before re-entering the parked iteration — its run
+deadline ran out, or ``max_iters`` was lowered below that iteration, while
+it was parked — closes the iteration as the run ends: ``failed`` with
+``timed out`` for the deadline, ``stopped`` for the cap.
 
 If the resume races a loop that is still parking, the relaunch refuses with
 "the loop is still running or parking" and tells you to retry once it exits —

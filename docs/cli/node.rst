@@ -372,7 +372,8 @@ launch time.
    ``max_cost: old -> new``, re-deriving a default reserve as ``node update``
    does. **Required** when the last run ended on its cost budget — runs are
    isolated and each launch arms the cap anew, so a budget-ended run refuses
-   a bare ``--continue``.
+   a bare ``--continue``. A continue that refuses or fails to launch keeps
+   the old cap.
 
 ``--headless`` / ``--tmux``
    Select the runtime backend: ``--headless`` runs the loop in a detached

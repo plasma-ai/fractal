@@ -42,8 +42,10 @@ re-checks the width and descendant caps, since it returns one unsettled node to
 the tree exactly as a spawn adds one. A run that ended on its cost budget never
 re-arms silently: a bare `--continue` refuses, naming the spent and armed
 figures, until an explicit `--max-cost` rides it (applied through the parent's
-retune — see [[features/cost/budgets|budgets]]). A tree-wide pause latch makes
-any start refuse until resume.
+retune — see [[features/cost/budgets|budgets]]). A continue refused after the
+retune (at the re-arm gate, or over its re-checked config or agent) or whose
+launch fails restores the old cap. A tree-wide pause latch makes any start
+refuse until resume.
 
 ## finish and stop
 
@@ -102,10 +104,14 @@ already read `active` before their parent's drain-waits look at them. The
 relaunched loop *adopts* the open run — same budgets, same iteration count —
 re-enters the interrupted step (resuming the recorded agent session when one
 exists, else re-orienting fresh), and credits the paused span back to run and
-iteration deadlines. Resuming a node that is still parking withdraws the pending
-pause instead; if the loop already read the signal it parks anyway, and the next
-resume relaunches it. Resume refuses on a node that is not paused or pausing,
-and refuses under a paused ancestor until that ancestor is resumed first.
+iteration deadlines. If the run deadline ran out, or `max_iters` was lowered
+below the parked iteration, while the node was parked, the resumed run ends at
+its loop top and closes the adopted iteration: `failed` with `timed out` for the
+deadline, `stopped` for the cap. Resuming a node that is still parking withdraws
+the pending pause instead; if the loop already read the signal it parks anyway,
+and the next resume relaunches it. Resume refuses on a node that is not paused
+or pausing, and refuses under a paused ancestor until that ancestor is resumed
+first.
 
 ## retire and unretire
 

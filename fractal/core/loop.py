@@ -1864,6 +1864,28 @@ class Loop:
                         if self._check_stop():
                             break
 
+        # a resume whose loop top ends the run before re-entering the adopted
+        # iteration (its run deadline spent, or max_iters lowered, while
+        # parked) closes it as its own pass would; a park leaves it open, and
+        # the count steps back onto its number so the exit reason names it
+        if self._adopt_iter_id is not None and not self._paused:
+            self._iter += 1
+            if self._timed_out:
+                iter_status, iter_exit_code, iter_reason = 'failed', 1, 'timed out'
+            else:
+                iter_status, iter_exit_code, iter_reason = 'stopped', 0, None
+            self._last_iter_failed = self._timed_out
+            try:
+                node.record.iter_end(
+                    iter_id=self._adopt_iter_id,
+                    status=iter_status,
+                    exit_code=iter_exit_code,
+                    metadata=iter_reason,
+                )
+            except Exception:
+                pass
+            self._adopt_iter_id = None
+
     def _discover_steps(self: Loop) -> Optional[list[Step]]:
         """Re-discover the NN- step files (lexicographic order).
 
@@ -2062,8 +2084,9 @@ class Loop:
 
             # the SYNC was a launch of its own, so re-read the breaker it may
             # have just armed: the work step must never be the hot call the
-            # gate above exists to refuse
-            if not self._billing_gate(steps, step_num):
+            # gate above exists to refuse -- with no SYNC, the breaker is the
+            # one the hold above already waited out
+            if synced and not self._billing_gate(steps, step_num):
                 if self._paused:
                     return True
                 break
