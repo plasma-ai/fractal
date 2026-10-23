@@ -382,7 +382,10 @@ resume).`` when nothing is running — the latch still lands.
 
 ``--reason``
    Optional reason, recorded on the pause events and appended to the
-   confirmation. Default: none.
+   confirmation. The loop reserves ``parked``, and any reason starting with
+   ``via pause latch`` or ``resume preflight failed:``, for the pause events
+   it records as it parks, so such a reason is refused before anything is
+   written. Default: none.
 
 ``--path``
    Repository path. Default: ``.``.
@@ -418,7 +421,11 @@ pauses withdrawn)``, or ``No paused nodes to resume.``.
 ``--path``
    Repository path. Default: ``.``.
 
-Refuses when the tree has no user node.
+Refuses when the tree has no user node, and, before it lifts the latch or
+touches any node, when a parked node's stored config fails the launch
+re-validation ``node start`` runs, or the effort ladder committed on the
+root branch is invalid for it, naming that node (see
+:doc:`/configuration`).
 
 .. code-block:: console
 

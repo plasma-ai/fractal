@@ -54,6 +54,7 @@ __all__ = [
     'test_stream_detached_keeps_session_unpersisted_claude',
     'test_stream_records_full_per_invocation_cost',
     'test_stream_truncated_records_accumulated_cost',
+    'test_stream_books_a_synthetic_reply_as_a_known_zero',
     'test_stream_reopens_a_settled_cost_at_a_reply_after_its_result',
     'test_stream_books_a_resumed_launchs_figures_less_its_baseline',
     'test_stream_survives_missing_pricing_cache',
@@ -73,6 +74,7 @@ __all__ = [
     'test_settle_cost_adds_each_readable_sub_agent_transcript',
     'test_settle_reads_workflow_sub_agent_transcripts',
     'test_parallel_sub_agents_price_each_reply_once',
+    'test_sub_agent_frames_price_at_their_own_model',
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
     'test_settle_marks_a_record_missing_part_of_a_reply',
     'test_settle_marks_an_entry_it_cannot_read_whole',
@@ -1055,6 +1057,58 @@ def test_stream_truncated_records_accumulated_cost(
 
 
 @pytest.mark.parametrize(
+    argnames='parent',
+    argvalues=[
+        # the agent's own reply
+        pytest.param(None, id='top-level'),
+        # a sub-agent's reply
+        pytest.param('toolu_a', id='sub-agent'),
+    ],
+)
+def test_stream_books_a_synthetic_reply_as_a_known_zero(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    parent: Optional[str],
+) -> None:
+    """A stream whose only reply is synthetic books $0, never an unknown cost.
+
+    Claude Code stands a synthetic reply in for an API error, naming the
+    model ``<synthetic>`` and a usage of zeros. Nothing was billed, so the
+    reply prices at the stream's own model, and a launch killed after it
+    books a known $0.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    node = node_with_db
+    backend = ClaudeAgent(node, 'claude')
+    (step_id,) = _steps(node, 1)
+    # real-shaped (claude 2.1.300): a synthetic reply's usage is all zero
+    usage = {
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'cache_creation_input_tokens': 0,
+        'cache_read_input_tokens': 0,
+        'cache_creation': {
+            'ephemeral_1h_input_tokens': 0,
+            'ephemeral_5m_input_tokens': 0,
+        },
+    }
+    frames = [
+        {'type': 'system', 'subtype': 'init', 'session_id': 'sess_err'},
+        {
+            'type': 'assistant',
+            'message': {'id': 'msg_err', 'model': '<synthetic>', 'usage': usage},
+            'parent_tool_use_id': parent,
+            'session_id': 'sess_err',
+        },
+        # no result frame: the agent was killed here
+    ]
+    result = backend.stream(_lines(frames), step_id=step_id, model='claude-fable-5')
+    assert result.cost == 0.0
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == 0.0
+
+
+@pytest.mark.parametrize(
     argnames=('count', 'final'),
     argvalues=[
         # the turn's result settles the launch's cost
@@ -1154,10 +1208,10 @@ def test_stream_survives_missing_pricing_cache(
 ) -> None:
     """No pricing cache degrades to unpriced accrual, never a crash.
 
-    ``needs_pricing`` gates the run-start cache bootstrap to token-priced
-    agents, so a claude-only host may carry no ``~/.fractal/pricing.json``
-    at all -- best-effort accrual must skip pricing (no flush), never break
-    the stream mid-step.
+    A claude-only run refreshes the cache best-effort, so a host whose
+    fetch fails may carry no ``~/.fractal/pricing.json`` at all --
+    best-effort accrual must skip pricing (no flush), never break the
+    stream mid-step.
     """
     monkeypatch.setattr(pricing, '_PRICING_CACHE', str(tmp_path / 'absent.json'))
     pricing._load.cache_clear()
@@ -1864,6 +1918,81 @@ def test_parallel_sub_agents_price_each_reply_once(
     assert backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED) is False
     row = node.db.read('steps', where={'step_id': step_id})[0]
     settled = _USAGE_FIRST_COST + _USAGE_SECOND_COST + 2 * 100 * 1.5e-5
+    assert row['cost'] == pytest.approx(settled)
+
+
+@pytest.mark.parametrize(
+    argnames=('named', 'streamed', 'settled'),
+    argvalues=[
+        # a cheaper sub-agent model than the parent's, at its own rates
+        pytest.param(
+            'claude-haiku-5-5',
+            100 * 1e-6 + 1000 * 1.25e-6 + 10_000 * 1e-7 + 200 * 5e-6,
+            100 * 1e-6 + 1000 * 1.25e-6 + 10_000 * 1e-7 + 300 * 5e-6,
+            id='own-model',
+        ),
+        # a frame naming no model, at the parent's
+        pytest.param(
+            None,
+            _USAGE_FIRST_COST,
+            _USAGE_FIRST_COST + 100 * 1.5e-5,
+            id='no-model',
+        ),
+    ],
+)
+def test_sub_agent_frames_price_at_their_own_model(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    named: Optional[str],
+    streamed: float,
+    settled: float,
+) -> None:
+    """A killed launch's sub-agent books at its own model's rates.
+
+    A sub-agent runs its own model, so the stream prices each of its
+    frames at the model the frame names, and a frame naming none at the
+    parent's. With no result figure, the settle books the sub-agent's
+    transcript over that estimate, never a figure priced at the parent's
+    rates above it.
+    """
+    rates = {
+        **_PRICING,
+        'claude-haiku-5-5': {
+            'input_cost_per_token': 1e-6,
+            'output_cost_per_token': 5e-6,
+            'cache_read_input_token_cost': 1e-7,
+            'cache_creation_input_token_cost': 1.25e-6,
+        },
+    }
+    monkeypatch.setattr(pricing, '_load', lambda: rates)
+    node = node_with_db
+    backend, step_id = _settling(node, tmp_path, monkeypatch, '')
+    session = node.db.read('steps', where={'step_id': step_id})[0]['session']
+    # the sub-agent's first frame, its parent streaming on another model, and
+    # no result
+    reply: dict[str, Any] = {'id': 'msg_side', 'usage': _USAGE_FIRST}
+    if named is not None:
+        reply['model'] = named
+    frame = {
+        'type': 'assistant',
+        'message': reply,
+        'parent_tool_use_id': 'toolu_a',
+        'session_id': session,
+    }
+    backend.stream(_lines([frame]), step_id=step_id, model='claude-fable-5')
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(streamed)
+    # the sub-agent's transcript holds the reply at its final usage, a
+    # hundred output tokens on, under the model that served it
+    transcript = pathlib.Path(backend.transcript(session)['path'])
+    subagents = transcript.with_suffix('') / 'subagents'
+    subagents.mkdir(parents=True)
+    final = {**_USAGE_FIRST, 'output_tokens': 300}
+    line = _transcript_line('msg_side', final, model=named or 'claude-fable-5')
+    (subagents / 'agent-a.jsonl').write_text(line, encoding='utf-8')
+    assert backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED) is False
+    row = node.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(settled)
 
 

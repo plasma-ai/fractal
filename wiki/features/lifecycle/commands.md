@@ -45,7 +45,10 @@ figures, until an explicit `--max-cost` rides it (applied through the parent's
 retune — see [[features/cost/budgets|budgets]]). A continue refused after the
 retune (at the re-arm gate, or over its re-checked config or agent) or whose
 launch fails restores the old cap. A tree-wide pause latch makes any start
-refuse until resume.
+refuse until resume. A start or continue also refuses, before it changes
+anything, an effort ladder committed on the root branch that the loop's boot
+would refuse (see
+[[features/agents/models_and_effort#The effort ladder|models_and_effort]]).
 
 ## finish and stop
 
@@ -97,7 +100,10 @@ of every other signal — so a parent parked before its children can never
 drain-complete over them; it aborts the in-flight agent, and the loop exits with
 status `paused`, leaving the run and any open iteration rows open. A user-node
 pause first latches the whole tree (a `.paused` marker beside the central
-database), so even spawns and starts racing the sweep refuse.
+database), so even spawns and starts racing the sweep refuse. A reason the loop
+reserves for its own park rows (`parked`, or one starting with `via pause latch`
+or `resume preflight failed:`) is refused before anything is written, so a
+request is never read as a park (see [[features/cost/time_budgets]]).
 
 `resume` is the mirror: it fans out leaf-first (deepest first) so children
 already read `active` before their parent's drain-waits look at them. The
@@ -111,7 +117,9 @@ deadline, `stopped` for the cap. Resuming a node that is still parking withdraws
 the pending pause instead; if the loop already read the signal it parks anyway,
 and the next resume relaunches it. Resume refuses on a node that is not paused
 or pausing, and refuses under a paused ancestor until that ancestor is resumed
-first.
+first. It also refuses when any node it would relaunch has a stored config
+`start` would refuse or an invalid effort ladder committed on the root branch,
+naming that node; the check runs before the latch lifts or any node is touched.
 
 ## retire and unretire
 

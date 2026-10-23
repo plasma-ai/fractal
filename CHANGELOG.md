@@ -363,6 +363,14 @@ may include breaking changes, each listed under a Breaking heading.
 - A killed Claude step's settle also reads the transcripts of a workflow's
   sub-agents, kept a folder deeper under `subagents/workflows/`, and skips
   sub-agent transcripts last written before the launch started.
+- A run with a native Claude step refreshes the price table
+  (`~/.fractal/pricing.json`) at run start when it is missing or more than a day
+  old. A Claude launch that ends without its result figure (killed, capped,
+  paused, or with the figure refused) is priced from its transcript at the
+  table's rates, but only a codex or openrouter-routed step refreshed the table,
+  so on a host with no cache, or a stale one missing a new model, such a launch
+  booked no cost and armed caps counted it as $0. A failed fetch only warns, and
+  the run goes on.
 - A Claude step's spend after its result frame is booked: Claude Code outlives
   its result while background sub-agents run, and the replies they complete
   after the result were never counted. Once the process ends — exit 0, a
@@ -424,6 +432,11 @@ may include breaking changes, each listed under a Breaking heading.
   each of its frames that followed another reply's, so a step killed while
   sub-agents ran could book several times its spend, above the figure its
   transcripts hold, and unmarked.
+- A Claude step's streamed cost estimate prices a sub-agent's reply at the model
+  the sub-agent runs, and a frame naming no model at the step's own. It priced
+  every frame at the step's model, so a step killed while a cheaper sub-agent
+  ran, such as Haiku under Opus, could book above the figure its transcripts
+  hold, and unmarked.
 - The loop's `Warning:` line for a step whose record leaves spend out ends on
   the marker its row gets: `(unpriced)` when the row holds no figure, as when a
   killed launch left no transcript and streamed no usage, and
@@ -484,6 +497,15 @@ may include breaking changes, each listed under a Breaking heading.
   agent was not aborted. `fractal node _reap` reports that case with its own
   exit 3, so a helper that cannot run at all (a broken install's failed import
   exits 1) still ends the step through the pause's own TERM of its group.
+- Run and iteration deadlines credit a pause from the moment the loop parks to
+  the resume, in the loop and in `fractal node time remaining` alike. The credit
+  ran from the pause request, so the time a step worked on past the request (an
+  agent pausing its own node finishes its step before the loop parks) was
+  refunded to the deadlines as paused time, and a pause that a resume withdrew
+  before the loop parked credited the time the node kept working.
+- `fractal pause` and `fractal node pause` refuse a `--reason` of `parked`, or
+  one starting with `via pause latch` or `resume preflight failed:`, the text
+  the loop records its own parks with, so the request can never count as a park.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives the template variables (the paths, the branch, and the spawn
@@ -653,6 +675,15 @@ may include breaking changes, each listed under a Breaking heading.
   its scope from outside it, naming the old path, as the merge's footprint check
   does. The scope check read git's rename-detecting diff, which names only a
   rename's new path, so the deletion outside the scope committed unchecked.
+- On git 2.54 and 2.55, `fractal commit` stages the new files of a node in a
+  sub-project: a scoped child's seed at `--init`, a new file in its scope at a
+  work commit, and the project wiki a user node's baseline creates there. Those
+  git versions misread fractal's runtime-file excludes once the paths a commit
+  stages share a directory of five or more characters (`backend`, `apps/web`,
+  but not `app`), so the commits took edits to tracked files and no new file,
+  without a warning. The new work reached history only through the loop's
+  backstop save, which skips the lint and the scope check, and a user baseline
+  that left the wiki untracked made the next `node init` in that project refuse.
 - `fractal destroy --help` and `fractal reset --help` say the command deletes
   the tree's local node branches, unmerged work included, while the root branch
   and remote branches remain. Only the confirmation prompt said so, and
@@ -670,6 +701,27 @@ may include breaking changes, each listed under a Breaking heading.
   force-added, and the baseline's output names it. The baseline force-added the
   whole seed directory, so every ignored file in it rode the commit onto the
   top-level branch.
+- `fractal node start` (with or without `--continue`), `fractal node resume`,
+  and `fractal resume` refuse an invalid effort ladder committed on the tree's
+  root branch before they change anything, naming the setting and its fault; a
+  resume checks every node it would relaunch. Such a ladder (a bad shape, an
+  unregistered agent, or the agent's own levels out of order) killed the loop's
+  boot after the command reported success, with nothing recorded: a fresh start
+  stayed `idle`, a continue stayed `idle` and refused its own retry, and a
+  resume stayed `paused` with the parked time charged against the run's
+  deadlines. A ladder committed after the command's check aborts the boot on
+  record: a start or continue ends `exited` with the reason on its run, and a
+  resume stays paused for the next resume.
+- `fractal node resume` and `fractal resume` re-validate the `config.json` of
+  every node they would relaunch before they change anything, with the checks
+  and messages `fractal node start` uses, and name the node that fails. A config
+  edited while a node was paused (a malformed duration, a cost cap the launch
+  rules refuse, an unknown or missing agent) killed the resumed loop's boot with
+  nothing recorded, after the resume had closed the node's pause credit span, so
+  the parked time counted against the run's deadlines. A config broken after a
+  start's or resume's check aborts the loop's boot on record: a start or
+  continue ends `exited` with the reason on its run, and a resume stays paused
+  with its paused time still credited.
 - A `node start --continue --max-cost` refused over the node's stored config or
   agent (a hand-edited duration without a unit, a mistyped agent) keeps the old
   cap. The new cap stayed in the node's config and registry row although nothing

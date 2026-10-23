@@ -13,6 +13,7 @@ from collections.abc import Iterator
 import pytest
 
 import fractal
+from fractal.core import pricing
 from tests._helpers import _digests, _tree_drift
 
 # the suite drives the installed fractal console script as a subprocess (and
@@ -212,3 +213,26 @@ def _offline_wiki() -> Iterator[None]:
     monkeypatch.setenv('OFFLINE_MODE', 'true')
     yield
     monkeypatch.undo()
+
+
+@pytest.fixture(scope='session', autouse=True)
+def _offline_pricing(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Point the in-process price table at a fresh, empty session cache.
+
+    A loop boot whose steps price from the LiteLLM table refreshes
+    ``~/.fractal/pricing.json`` when it is missing or a day old, so an
+    in-process preflight would otherwise fetch over the network and write
+    the operator's real cache. A fresh empty table prices nothing, as a
+    missing one does, and the boot's max-age refresh reads it as current;
+    tests that price or fetch point the cache at their own path.
+    (``test_cli`` subprocesses get the same table in their hermetic
+    ``HOME``.)
+    """
+    cache = tmp_path_factory.mktemp('pricing') / 'pricing.json'
+    cache.write_text('{}', encoding='utf-8')
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(pricing, '_PRICING_CACHE', f'{cache}')
+    pricing._load.cache_clear()
+    yield
+    monkeypatch.undo()
+    pricing._load.cache_clear()

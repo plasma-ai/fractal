@@ -19,8 +19,11 @@ from typing import Any, Optional, Union
 
 import fractal.util
 from fractal.constants import (
+    LATCH_PARK_REASON_PREFIX,
+    PARK_REASON,
     PAUSE_ABORT_FILE,
     PGID_FILE,
+    PREFLIGHT_PARK_REASON_PREFIX,
     SOCKET_FILE,
     STEER_REASON_PREFIX,
     STEP_PGID_FILE,
@@ -364,11 +367,6 @@ class Loop:
             render: Presentation callback for parsed agent stream events
                 (the pane rendering); ``None`` renders nothing.
 
-        Raises:
-            ValueError: If no agent is configured or the agent command
-                names no registered backend, or a run parameter is
-                invalid (a malformed duration, conflicting schedules).
-
         """
         # bind the node and the pane renderer
         self.node = node
@@ -376,64 +374,9 @@ class Loop:
         self._continue = continue_
         self._resume = resume
         self._drain = drain
-        # the agent comes from the argument or the node config (--agent at init)
+        # the agent argument, resolved with the run parameters at boot
+        self._agent_argument = agent_command
         config = node.config
-        self._agent_command = agent_command or config.get('agent')
-        if not self._agent_command:
-            raise ValueError('No agent configured; set --agent at node init.')
-        # resolve the backend now so an unsupported agent fails before any row
-        # is opened (the registry's error names the supported commands)
-        self._agent: Agent = node.agent(self._agent_command)
-        # read the budget caps (re-read at each iteration top for retunes)
-        self._read_cost_caps()
-        # label the per-step cost cap honestly: enforced for agents with a
-        # budget flag (claude, passed as --max-budget-usd), warn-only for
-        # agents without one (codex)
-        self._step_cost_verb = 'max' if self._agent.enforces_budget else 'warn'
-        # read the iteration cap and the wall-clock/schedule parameters
-        self._max_iters = int(config.get('max_iters') or -1)
-        self._timeout = config.get('timeout') or ''
-        self._iter_timeout = config.get('iter_timeout') or ''
-        self._step_timeout = config.get('step_timeout') or ''
-        self._interval = config.get('interval') or ''
-        self._sleep = config.get('sleep') or ''
-        self._wait = config.get('wait') or ''
-        self._run_timeout_seconds = _parse_duration(self._timeout, 'timeout')
-        self._iter_timeout_seconds = _parse_duration(self._iter_timeout, 'iter_timeout')
-        self._step_timeout_seconds = _parse_duration(self._step_timeout, 'step_timeout')
-        self._interval_seconds = _parse_duration(self._interval, 'interval')
-        self._sleep_seconds = _parse_duration(self._sleep, 'sleep')
-        self._wait_seconds = _parse_duration(self._wait, 'wait')
-        if self._wait_seconds <= 0:
-            self._wait_seconds = 60
-        # failed-step retries: extra attempts a failed launch gets (0
-        # disables) and the backoff before each retry; clamp a hand-edited
-        # negative to 0 -- an empty attempt loop would crash the iteration
-        step_retries = config.get('step_retries')
-        self._step_retries = 1 if step_retries is None else max(0, int(step_retries))
-        self._step_retry_backoff = config.get('step_retry_backoff') or '10s'
-        self._step_retry_backoff_seconds = _parse_duration(
-            value=self._step_retry_backoff,
-            label='step_retry_backoff',
-        )
-        # --interval and --sleep are mutually exclusive (checked after
-        # durations are parsed, so the *_SECONDS values are real)
-        if self._interval_seconds > 0 and self._sleep_seconds > 0:
-            raise ValueError('--interval and --sleep are mutually exclusive.')
-        # interval defaults the per-iteration deadline to the slot (an
-        # iteration cannot run past its cadence) -- but only when none was
-        # set: an explicit tighter iter_timeout is honored, never loosened to
-        # the full interval; a looser one is rejected at the config boundary
-        # (Config.validate); this raise backstops direct loop construction
-        if self._interval_seconds > 0:
-            if self._iter_timeout_seconds > self._interval_seconds:
-                raise ValueError(
-                    f'--iter-timeout ({self._iter_timeout}) exceeds'
-                    f' --interval ({self._interval}).'
-                )
-            if self._iter_timeout_seconds <= 0:
-                self._iter_timeout = self._interval
-                self._iter_timeout_seconds = self._interval_seconds
         # SYNC_MODE gates the SYNC step run before each step; unlike the
         # prompt-injection modes (DETACHED_MODE/CONTINUE_MODE/RESUME_MODE/
         # RESERVE_MODE/DRAIN_MODE/META_MODE) SYNC.md is run as its own step, not
@@ -446,19 +389,11 @@ class Loop:
         self._node_model = config.get('model') or ''
         self._node_effort = config.get('effort') or ''
         # the effort ladders a thinking-capped step's steer lowers through,
-        # as committed on the tree's root branch and held for the run (no
-        # node can change its own, and an edit lands at the next start or
-        # resume); an agent the settings do not name keeps its own ladder
-        self._effort_ladders = worktree.committed_effort_ladders(
-            node.repo_dir,
-            ref=config.get('root'),
-            project=node.project_path,
-        )
-        _check_effort_ladders(
-            self._effort_ladders,
-            ref=config.get('root'),
-            root=node.db.path.parent,
-        )
+        # as committed on the tree's root branch, read at boot and held for
+        # the run (no node can change its own, and an edit lands at the next
+        # start or resume); an agent the settings do not name keeps its own
+        # ladder
+        self._effort_ladders: dict[str, tuple[tuple[str, ...], str]] = {}
         meta = config.get('meta') or ''
         self._meta_mode = bool(meta)
         # the boot-pinned mode flags, the one source the step env and the
@@ -527,7 +462,6 @@ class Loop:
         self._step_partly_unpriced = False
         self._step_limit_seconds = 0
         self._step_ceiling_seconds = 0
-        self._step_timeout_effective = self._step_timeout_seconds
         self._step_budget_value: Optional[float] = None
         # a steered launch: the stuck session it resumes, the seconds its
         # attempt already ran (the step ceiling spans both), and whether a
@@ -543,9 +477,6 @@ class Loop:
         self._git_pending_file = self._modes_dir / 'GIT_PENDING.md'
         # whether any step will need the pricing cache (resolved in preflight)
         self._needs_pricing = False
-        # armed caps with a non-enforcing agent and no timeout have no
-        # in-step brake -- disclose the unbounded-overshoot exposure once
-        self._warn_soft_cap()
 
     @functools.cached_property
     def logger(self: Loop) -> logging.Logger:
@@ -666,8 +597,9 @@ class Loop:
         if self._continue:
             with worktree.merge_lock(node.repo_dir, waiting=_waiting):
                 self._clean_worktree()
-        self._labels()
         try:
+            self._read_boot_config()
+            self._labels()
             self._preflight()
             self._adopt()
         except _Abort:
@@ -814,6 +746,100 @@ class Loop:
         finally:
             self._on_exit()
 
+    def _read_boot_config(self: Loop) -> None:
+        """Load the run parameters and effort ladders, aborting on a bad one.
+
+        ``start`` and ``resume`` refuse a bad config or ladder up front,
+        but an edit can land between their check and this boot, so the
+        fault aborts through :meth:`_abort_preflight` and lands on record.
+        """
+        try:
+            self._read_run_parameters()
+            self._effort_ladders = _effort_ladders(self.node)
+        except ValueError as error:
+            reason = f'{error}'
+            print(f'Error: {reason}', file=sys.stderr)
+            self._abort_preflight(reason)
+
+    def _read_run_parameters(self: Loop) -> None:
+        """Load the agent and the run parameters from the node's config.
+
+        Read at boot, never at construction, so a bad value aborts
+        through the boot's preflight guard and lands on record.
+
+        Raises:
+            ValueError: If no agent is configured or the agent command
+                names no registered backend, or a run parameter is
+                invalid (a malformed duration, conflicting schedules, a
+                cap the launch invariants refuse).
+
+        """
+        node = self.node
+        # the agent comes from the argument or the node config (--agent at init)
+        config = node.config
+        self._agent_command = self._agent_argument or config.get('agent')
+        if not self._agent_command:
+            raise ValueError('No agent configured; set --agent at node init.')
+        # resolve the backend now so an unsupported agent fails before any row
+        # is opened (the registry's error names the supported commands)
+        self._agent: Agent = node.agent(self._agent_command)
+        # read the budget caps (re-read at each iteration top for retunes)
+        self._read_cost_caps()
+        # label the per-step cost cap honestly: enforced for agents with a
+        # budget flag (claude, passed as --max-budget-usd), warn-only for
+        # agents without one (codex)
+        self._step_cost_verb = 'max' if self._agent.enforces_budget else 'warn'
+        # read the iteration cap and the wall-clock/schedule parameters
+        self._max_iters = int(config.get('max_iters') or -1)
+        self._timeout = config.get('timeout') or ''
+        self._iter_timeout = config.get('iter_timeout') or ''
+        self._step_timeout = config.get('step_timeout') or ''
+        self._interval = config.get('interval') or ''
+        self._sleep = config.get('sleep') or ''
+        self._wait = config.get('wait') or ''
+        self._run_timeout_seconds = _parse_duration(self._timeout, 'timeout')
+        self._iter_timeout_seconds = _parse_duration(self._iter_timeout, 'iter_timeout')
+        self._step_timeout_seconds = _parse_duration(self._step_timeout, 'step_timeout')
+        self._interval_seconds = _parse_duration(self._interval, 'interval')
+        self._sleep_seconds = _parse_duration(self._sleep, 'sleep')
+        self._wait_seconds = _parse_duration(self._wait, 'wait')
+        if self._wait_seconds <= 0:
+            self._wait_seconds = 60
+        # a launch's effective step ceiling starts at the node value (each
+        # launch re-derives it from its own step file)
+        self._step_timeout_effective = self._step_timeout_seconds
+        # failed-step retries: extra attempts a failed launch gets (0
+        # disables) and the backoff before each retry; clamp a hand-edited
+        # negative to 0 -- an empty attempt loop would crash the iteration
+        step_retries = config.get('step_retries')
+        self._step_retries = 1 if step_retries is None else max(0, int(step_retries))
+        self._step_retry_backoff = config.get('step_retry_backoff') or '10s'
+        self._step_retry_backoff_seconds = _parse_duration(
+            value=self._step_retry_backoff,
+            label='step_retry_backoff',
+        )
+        # --interval and --sleep are mutually exclusive (checked after
+        # durations are parsed, so the *_SECONDS values are real)
+        if self._interval_seconds > 0 and self._sleep_seconds > 0:
+            raise ValueError('--interval and --sleep are mutually exclusive.')
+        # interval defaults the per-iteration deadline to the slot (an
+        # iteration cannot run past its cadence) -- but only when none was
+        # set: an explicit tighter iter_timeout is honored, never loosened to
+        # the full interval; a looser one is rejected at the config boundary
+        # (Config.validate); this raise backstops a direct loop boot
+        if self._interval_seconds > 0:
+            if self._iter_timeout_seconds > self._interval_seconds:
+                raise ValueError(
+                    f'--iter-timeout ({self._iter_timeout}) exceeds'
+                    f' --interval ({self._interval}).'
+                )
+            if self._iter_timeout_seconds <= 0:
+                self._iter_timeout = self._interval
+                self._iter_timeout_seconds = self._interval_seconds
+        # armed caps with a non-enforcing agent and no timeout have no
+        # in-step brake -- disclose the unbounded-overshoot exposure once
+        self._warn_soft_cap()
+
     def _preflight(self: Loop) -> None:
         """Fail fast (step files, binary, pricing, provider probe via seam hooks).
 
@@ -825,8 +851,10 @@ class Loop:
         # priced from the LiteLLM table -- a token-priced agent prices at the
         # served model its own session record names, configured model or
         # not, and a routed backend chain-prices its result usage; an agent
-        # that reports its own cost natively gives pricing nothing to do
+        # that reports its own cost natively needs none, though one that
+        # prices what its figure misses from the table wants it current
         self._needs_pricing = False
+        wants_pricing = False
         priced: list[tuple[pathlib.Path, Agent, str]] = []
         for path in sorted((node.node_dir / 'steps').glob('*.md')):
             # step files are hand-edited: a bad byte must abort through the
@@ -848,6 +876,8 @@ class Loop:
                 if backend.needs_pricing or backend.provider is not None:
                     self._needs_pricing = True
                     priced.append((path, backend, step.model or self._node_model))
+            elif backend.wants_pricing:
+                wants_pricing = True
         # refresh model pricing before the run; a fetch failure with no cache
         # is fatal -- the cost/cap pipeline cannot price token usage without it
         if self._needs_pricing:
@@ -856,6 +886,23 @@ class Loop:
                 reason = 'Could not fetch pricing and no cached pricing.json exists.'
                 print(f'Error: {reason}', file=sys.stderr)
                 self._abort_preflight(reason)
+            if status == 'stale':
+                print(
+                    'Warning: could not refresh pricing; using cached pricing.json.',
+                    file=sys.stderr,
+                )
+        # a cost-reporting agent prices only what its own figure misses, so a
+        # day-old table serves and a failed fetch only warns -- every launch
+        # that reports its figure still books it
+        elif wants_pricing:
+            status = pricing.update(max_age='24h')
+            if status == 'missing':
+                print(
+                    'Warning: could not fetch pricing and no cached pricing.json'
+                    ' exists; a launch that ends without its own cost figure'
+                    ' books unpriced.',
+                    file=sys.stderr,
+                )
             if status == 'stale':
                 print(
                     'Warning: could not refresh pricing; using cached pricing.json.',
@@ -984,7 +1031,7 @@ class Loop:
                     if stood_down not in ('retired', 'killed'):
                         event_id = self.node.record.event_start(
                             'pause',
-                            metadata=f'resume preflight failed: {reason}',
+                            metadata=f'{PREFLIGHT_PARK_REASON_PREFIX}{reason}',
                         )
                         self.node.record.event_end(
                             event_id=event_id, status='completed'
@@ -1044,7 +1091,7 @@ class Loop:
             return False
         print(f'=== Parked at boot: {latched} is paused ===')
         try:
-            node.record.signal_set('pause', f'via pause latch ({latched})')
+            node.record.signal_set('pause', f'{LATCH_PARK_REASON_PREFIX}({latched})')
         except Exception:
             pass
         # open the pause span -- without the instant, the parked time would
@@ -1052,7 +1099,7 @@ class Loop:
         try:
             event_id = node.record.event_start(
                 'pause',
-                metadata=f'via pause latch ({latched})',
+                metadata=f'{LATCH_PARK_REASON_PREFIX}({latched})',
                 run_id=self._run_id,
             )
             if event_id is not None:
@@ -1180,7 +1227,7 @@ class Loop:
         except Exception:
             pass
         # close the pause span for the deadline credit even when no resume CLI
-        # ran (a bare --resume launch) -- a resume event with no open pause
+        # ran (a bare --resume launch) -- a resume event with no open park
         # is inert to the credit walk, so the CLI-then-boot double write is safe
         try:
             event_id = node.record.event_start('resume', run_id=self._run_id)
@@ -4740,15 +4787,15 @@ class Loop:
         # mid-step state resume continues from); _on_exit reads the paused
         # stamp and leaves it alone
         if self._paused:
-            # (re)open the pause span at the park instant -- a duplicate
-            # pause event collapses in the credit walk, and a park after a
-            # withdrawn pause (whose resume event closed the span) would
-            # otherwise burn its parked wall-clock against
-            # the adopted deadlines
+            # open the pause span at the park instant -- the credit walk
+            # opens spans only at the loop's park rows, never at the pause
+            # request (the step may have worked on past it), so without
+            # this row the parked wall-clock would burn against the
+            # adopted deadlines
             try:
                 event_id = node.record.event_start(
                     'pause',
-                    metadata='parked',
+                    metadata=PARK_REASON,
                     run_id=self._run_id,
                 )
                 if event_id is not None:
@@ -5412,6 +5459,35 @@ def _models_match(pinned: str, served: str) -> bool:
         widths = tuple(len(segment) for segment in tail)
         return all(segment.isdigit() for segment in tail) and widths in _SNAPSHOT_WIDTHS
     return False
+
+
+def _effort_ladders(node: Node) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Read and check the effort ladders a node's loop runs on.
+
+    The one read the loop's boot and the verbs that launch it (``start``,
+    ``resume``) share: the ladders committed on the tree's root branch in
+    the node's own project, checked against the tree's registered agents.
+
+    Args:
+        node: The node whose loop the ladders steer.
+
+    Returns:
+        Each named agent's ``(levels, floor)``, levels lowest first.
+
+    Raises:
+        ValueError: If the committed settings file is invalid, or a ladder
+            names no registered agent or lists its agent's own levels out
+            of the agent's order.
+
+    """
+    ref = node.config.get('root')
+    ladders = worktree.committed_effort_ladders(
+        node.repo_dir,
+        ref=ref,
+        project=node.project_path,
+    )
+    _check_effort_ladders(ladders, ref=ref, root=node.db.path.parent)
+    return ladders
 
 
 def _check_effort_ladders(
