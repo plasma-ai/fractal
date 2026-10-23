@@ -142,8 +142,10 @@ class GrokAgent(Agent):
     # NOTE: cost-reporting: grok stamps total_cost_usd on the wire, and its pool
     #   model (grok-build) has no LiteLLM price entry, so token pricing would
     #   wedge the cost-cap pre-flight -- trust the wire (token pricing stays a
-    #   best-effort parser fallback when the wire reports no cost)
+    #   best-effort parser fallback when the wire reports no cost, so the run
+    #   start refreshes a day-old table)
     needs_pricing = False
+    wants_pricing = True
     cost_scope = 'call'
     enforces_budget = False
     providers = ()

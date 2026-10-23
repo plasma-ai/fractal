@@ -181,6 +181,11 @@ may include breaking changes, each listed under a Breaking heading.
   prints the exact delta to apply. An older fractal refuses a template that uses
   the feature, reporting the include as not found, or renders nothing in its
   place under `ignore missing`.
+- `OFFLINE_MODE=true` in the loop's environment, the switch the `wiki` tool
+  honors, keeps the price refreshes off the network: the cached price table
+  serves with the could-not-refresh warning, and a codex or openrouter-routed
+  run with no cached table aborts at preflight. Any value other than `true` or
+  `false` aborts the boot.
 
 ### Changed
 
@@ -398,6 +403,10 @@ may include breaking changes, each listed under a Breaking heading.
   so on a host with no cache, or a stale one missing a new model, such a launch
   booked no cost and armed caps counted it as $0. A failed fetch only warns, and
   the run goes on.
+- A run with a Grok step refreshes a missing or day-old price table at run start
+  too. A Grok stream that reports no cost is priced from its usage at the
+  table's rates, so on a host with no cache, or a stale one missing a new model,
+  such a step booked no cost. A failed fetch only warns, and the run goes on.
 - A Claude step's spend after its result frame is booked: Claude Code outlives
   its result while background sub-agents run, and the replies they complete
   after the result were never counted. Once the process ends — exit 0, a

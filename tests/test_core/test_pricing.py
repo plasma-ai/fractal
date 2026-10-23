@@ -28,7 +28,8 @@ __all__ = [
     'test_update_caps_the_fetch_with_a_socket_timeout',
     'test_update_degrades_when_the_fetch_fails',
     'test_update_degrades_when_the_cache_dir_is_unwritable',
-    'test_update_rejects_a_malformed_max_age',
+    'test_update_skips_the_fetch_offline',
+    'test_update_rejects_a_malformed_max_age_or_offline_mode',
     'test_rates_returns_priced_entries_only',
     'test_load_degrades_to_empty_on_missing_or_corrupt_cache',
 ]
@@ -44,9 +45,14 @@ def cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> Iterator[pathlib.Path]:
-    """Yield a temp pricing-cache path, resetting the process cache around it."""
+    """Yield a temp pricing-cache path, resetting the process cache around it.
+
+    The session runs offline; these tests drive the online refresh, each
+    stubbing the fetch.
+    """
     path = tmp_path / 'pricing.json'
     monkeypatch.setattr(pricing, '_PRICING_CACHE', str(path))
+    monkeypatch.setenv('OFFLINE_MODE', 'false')
     pricing._load.cache_clear()
     yield path
     pricing._load.cache_clear()
@@ -196,16 +202,62 @@ def test_update_degrades_when_the_cache_dir_is_unwritable(
         cache.parent.chmod(0o700)
 
 
-@pytest.mark.parametrize('cached', [True, False], ids=['cache', 'no_cache'])
-def test_update_rejects_a_malformed_max_age(
+@pytest.mark.parametrize(
+    argnames=('cached', 'expected'),
+    argvalues=[
+        pytest.param(True, 'stale', id='stale'),
+        pytest.param(False, 'missing', id='missing'),
+    ],
+)
+def test_update_skips_the_fetch_offline(
     cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
     cached: bool,
+    expected: str,
 ) -> None:
-    """A ``max_age`` without a unit suffix raises regardless of cache state."""
+    """``OFFLINE_MODE=true`` skips the fetch and degrades as a failed one would.
+
+    An offline host keeps whatever table it has: ``stale`` with a cache,
+    ``missing`` without, while a cache newer than ``max_age`` still reads
+    ``fresh``.
+    """
     if cached:
         cache.write_text(json.dumps(_RATES), encoding='utf-8')
-    with pytest.raises(ValueError, match='Invalid duration'):
-        pricing.update(max_age='24')
+    monkeypatch.setenv('OFFLINE_MODE', 'true')
+    monkeypatch.setattr(urllib.request, 'urlretrieve', _unexpected_fetch)
+    assert pricing.update() == expected
+    assert pricing.update(max_age='24h') == ('fresh' if cached else 'missing')
+    # the cache is as it was, and nothing was staged beside it
+    assert cache.exists() == cached
+    assert list(cache.parent.glob(f'.{cache.name}-*')) == []
+
+
+@pytest.mark.parametrize('cached', [True, False], ids=['cache', 'no_cache'])
+@pytest.mark.parametrize(
+    argnames=('max_age', 'offline', 'match'),
+    argvalues=[
+        pytest.param('24', 'false', 'Invalid duration', id='max_age'),
+        pytest.param('24h', 'yes', 'OFFLINE_MODE must be', id='offline_mode'),
+    ],
+)
+def test_update_rejects_a_malformed_max_age_or_offline_mode(
+    cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cached: bool,
+    max_age: str,
+    offline: str,
+    match: str,
+) -> None:
+    """A malformed ``max_age`` or ``OFFLINE_MODE`` raises regardless of cache state.
+
+    A ``max_age`` needs a unit suffix, and ``OFFLINE_MODE`` reads only
+    ``true`` or ``false``.
+    """
+    if cached:
+        cache.write_text(json.dumps(_RATES), encoding='utf-8')
+    monkeypatch.setenv('OFFLINE_MODE', offline)
+    with pytest.raises(ValueError, match=match):
+        pricing.update(max_age=max_age)
 
 
 def test_rates_returns_priced_entries_only(cache: pathlib.Path) -> None:
@@ -235,5 +287,5 @@ def test_load_degrades_to_empty_on_missing_or_corrupt_cache(
 
 
 def _unexpected_fetch(url: str, filename: pathlib.Path) -> None:
-    """Fail the test when the fresh path fetches anyway."""
+    """Fail the test when a path that skips the fetch fetches anyway."""
     raise AssertionError('unexpected pricing fetch')

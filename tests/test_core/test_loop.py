@@ -52,6 +52,7 @@ from fractal.exceptions import AgentStreamError, _Abort
 from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
 from fractal.impl.codex import CodexAgent
+from fractal.impl.grok import GrokAgent
 from fractal.impl.opencode import OpencodeAgent
 from tests._helpers import (
     _LOCK_HOLDER,
@@ -149,8 +150,10 @@ __all__ = [
     'test_preflight_abort_honors_a_kill_that_reaped_the_probe',
     'test_boot_reaps_an_orphaned_probe_group',
     'test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model',
-    'test_boot_refreshes_a_day_old_price_table_for_a_claude_step',
+    'test_boot_refreshes_a_day_old_price_table_for_claude_and_grok_steps',
     'test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds',
+    'test_token_priced_boot_serves_the_cached_table_offline',
+    'test_a_malformed_offline_mode_aborts_the_boot',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -885,9 +888,14 @@ def price_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> Iterator[pathlib.Path]:
-    """Yield a temp pricing-cache path, resetting the process cache around it."""
+    """Yield a temp pricing-cache path, resetting the process cache around it.
+
+    The session runs offline; a test on this cache drives the online
+    refresh, stubbing the fetch.
+    """
     path = tmp_path / 'pricing.json'
     monkeypatch.setattr(pricing, '_PRICING_CACHE', str(path))
+    monkeypatch.setenv('OFFLINE_MODE', 'false')
     pricing._load.cache_clear()
     yield path
     pricing._load.cache_clear()
@@ -4797,11 +4805,13 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
 
 
 @pytest.mark.parametrize(
-    argnames=('agents', 'claude'),
+    argnames=('agents', 'wants'),
     argvalues=[
-        pytest.param(('claude', None), True, id='node_agent'),
-        pytest.param(('opencode', 'claude'), True, id='step_agent'),
-        pytest.param(('opencode', None), False, id='no_claude'),
+        pytest.param(('claude', None), True, id='claude_node_agent'),
+        pytest.param(('opencode', 'claude'), True, id='claude_step_agent'),
+        pytest.param(('grok', None), True, id='grok_node_agent'),
+        pytest.param(('opencode', 'grok'), True, id='grok_step_agent'),
+        pytest.param(('opencode', None), False, id='neither'),
     ],
 )
 @pytest.mark.parametrize(
@@ -4812,25 +4822,26 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
         pytest.param(60, False, id='fresh'),
     ],
 )
-def test_boot_refreshes_a_day_old_price_table_for_a_claude_step(
+def test_boot_refreshes_a_day_old_price_table_for_claude_and_grok_steps(
     loop_node: Node,
     price_cache: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
     agents: tuple[str, Optional[str]],
-    claude: bool,
+    wants: bool,
     age: Optional[int],
     stale: bool,
 ) -> None:
-    """A run with a native claude step refreshes a missing or day-old price table.
+    """A run with a native claude or a grok step refreshes a missing or day-old table.
 
     A claude launch that ends without its own result figure (killed,
     capped, paused, or with the figure refused) is priced from its
-    transcript at the table's rates, so the boot fetches the table once
-    when none is cached or the cache is over a day old, whether the
-    claude step runs on the node's agent or a step file's ``agent:``. A
-    fresher cache serves as-is, and a run whose agents all report their
-    own cost and price nothing never fetches.
+    transcript at the table's rates, and a grok stream that reports no
+    cost is priced from its usage, so the boot fetches the table once
+    when none is cached or the cache is over a day old, whether the step
+    runs on the node's agent or a step file's ``agent:``. A fresher cache
+    serves as-is, and a run whose agents all report their own cost and
+    price nothing never fetches.
     """
     node_agent, step_agent = agents
     _configure(loop_node, agent=node_agent)
@@ -4852,11 +4863,11 @@ def test_boot_refreshes_a_day_old_price_table_for_a_claude_step(
     monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
     loop = Loop(loop_node)
     loop._read_run_parameters()
-    # `sh` stands in for the node agent's binary; neither backend probes
-    backend = ClaudeAgent if node_agent == 'claude' else OpencodeAgent
-    monkeypatch.setattr(loop, '_agent', backend(loop_node, 'sh'))
+    # `sh` stands in for the node agent's binary; no backend probes
+    backends = {'claude': ClaudeAgent, 'grok': GrokAgent, 'opencode': OpencodeAgent}
+    monkeypatch.setattr(loop, '_agent', backends[node_agent](loop_node, 'sh'))
     loop._preflight()
-    if claude and stale:
+    if wants and stale:
         # one fetch, and the settle's rates read the fetched table
         assert fetched == [pricing._PRICING_URL]
         assert pricing.rates('claude-fable-5') == _CLAUDE_PRICING['claude-fable-5']
@@ -4926,6 +4937,49 @@ def test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds(
     assert attempts == [pricing._PRICING_URL]
     assert capsys.readouterr().err.count(warning) == 1
     assert len(loop.launched) == 4
+
+
+def test_token_priced_boot_serves_the_cached_table_offline(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A codex boot under the suite's ``OFFLINE_MODE`` never fetches the table.
+
+    Online, a token-priced boot refreshes the price table on every start;
+    offline, as the whole suite runs, it skips the fetch, warns once that
+    it serves the cached table, and goes on. The session's fetch refusal
+    fails the test by name if the boot reaches the network.
+    """
+    _configure(loop_node, agent='codex')
+    loop = Loop(loop_node)
+    loop._read_run_parameters()
+    # `sh` stands in for the codex binary; with no model there is no probe
+    monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+    loop._preflight()
+    warning = 'Warning: could not refresh pricing; using cached pricing.json.'
+    assert capsys.readouterr().err.count(warning) == 1
+
+
+def test_a_malformed_offline_mode_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``OFFLINE_MODE`` neither ``true`` nor ``false`` aborts the boot on record.
+
+    The price refresh reads the switch, so the boot checks it with the run
+    parameters: the node reads ``exited`` and a closed run row names the
+    fault, rather than the refresh raising before the run row exists.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setenv('OFFLINE_MODE', 'yes')
+    loop = MockLoop(loop_node)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    assert 'OFFLINE_MODE must be "true" or "false"' in run['metadata']
 
 
 def test_preflight_logs_what_a_passed_probe_spent(

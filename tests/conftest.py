@@ -8,7 +8,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -198,16 +200,19 @@ def _venv_bin_on_path() -> Iterator[None]:
 
 
 @pytest.fixture(scope='session', autouse=True)
-def _offline_wiki() -> Iterator[None]:
-    """Skip the Obsidian plugin download when seeding node memory wikis.
+def _offline_mode() -> Iterator[None]:
+    """Run the whole session offline through the product's own switch.
 
     Every ``Node.init`` seeds a memory wiki via ``wiki init``, which otherwise
-    fetches the Front Matter Title plugin from GitHub on each call -- across the
+    fetches the Front Matter Title plugin from GitHub on each call, and every
+    token-priced loop boot refreshes the LiteLLM price table -- across the
     integration suite that is dozens of live downloads (slow and network-flaky).
     Setting ``OFFLINE_MODE`` for the whole session makes ``wiki`` install the
-    bundled settings without the network fetch; both in-process ``Node.init``
-    (via ``_run_script``'s inherited env) and ``test_cli`` subprocesses (via
-    ``_cli_env``) pick it up from ``os.environ``.
+    bundled settings and the price refresh serve its cached table, both without
+    the network fetch; in-process callers, ``_run_script``'s inherited env, and
+    ``test_cli`` subprocesses (via ``_cli_env``) all pick it up from
+    ``os.environ``. A test of the online refresh sets it ``false`` and stubs
+    the fetch.
     """
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv('OFFLINE_MODE', 'true')
@@ -219,19 +224,27 @@ def _offline_wiki() -> Iterator[None]:
 def _offline_pricing(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     """Point the in-process price table at a fresh, empty session cache.
 
-    A loop boot whose steps price from the LiteLLM table refreshes
-    ``~/.fractal/pricing.json`` when it is missing or a day old, so an
-    in-process preflight would otherwise fetch over the network and write
-    the operator's real cache. A fresh empty table prices nothing, as a
-    missing one does, and the boot's max-age refresh reads it as current;
+    Offline, a loop boot whose steps price from the LiteLLM table still
+    reads ``~/.fractal/pricing.json``, so an in-process preflight would
+    otherwise price against the operator's real cache. A fresh empty table
+    prices nothing, as a missing one does, serves a token-priced boot (with
+    no table that boot aborts), and reads as current to a max-age refresh;
     tests that price or fetch point the cache at their own path.
     (``test_cli`` subprocesses get the same table in their hermetic
-    ``HOME``.)
+    ``HOME``.) The fetch itself fails the running test by name for the
+    whole session, so a test that goes online without stubbing it never
+    reaches the network.
     """
     cache = tmp_path_factory.mktemp('pricing') / 'pricing.json'
     cache.write_text('{}', encoding='utf-8')
+
+    def refuse(url: str, *args: Any, **kwargs: Any) -> None:
+        test = os.environ.get('PYTEST_CURRENT_TEST', 'a test')
+        pytest.fail(f'{test} fetched {url} over the network; stub the fetch')
+
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(pricing, '_PRICING_CACHE', f'{cache}')
+    monkeypatch.setattr(urllib.request, 'urlretrieve', refuse)
     pricing._load.cache_clear()
     yield
     monkeypatch.undo()

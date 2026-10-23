@@ -139,6 +139,7 @@ __all__ = [
     'test_codex_preflight_probe_aborts_on_model_rejection',
     'test_codex_preflight_failure_is_loud_and_recoverable',
     'test_codex_preflight_runs_without_timeout_binary',
+    'test_codex_boot_stays_offline_under_the_suite',
     'test_stop_during_approval_wait_records_iteration_stopped',
     'test_run_exits_with_status_exited_on_timeout',
     'test_timeout_killed_step_records_partial_cost',
@@ -3012,14 +3013,21 @@ def test_codex_preflight_runs_without_timeout_binary(repo: dict) -> None:
         agent='codex',
     )
     worktree = node['worktree']
-    # a real priced model: codex accepts it (not the reject sentinel) and the
-    # per-step cost-cap pricing check passes, so the iteration runs to completion
+    # a priced model: codex accepts it (not the reject sentinel) and the
+    # per-step cost-cap pricing check passes against a test-scoped HOME
+    # cache, so the iteration runs to completion
     assert _run(worktree, 'config', '_set', 'model=gpt-4o-mini').returncode == 0
+    home = repo['root'] / 'home_codexnotimeout'
+    (home / '.fractal').mkdir(parents=True, exist_ok=True)
+    (home / '.fractal' / 'pricing.json').write_text(
+        json.dumps({'gpt-4o-mini': _STUB_PRICING[_STUB_MODEL]}),
+        encoding='utf-8',
+    )
     capture = repo['root'] / 'capture_codexnotimeout'
     if capture.exists():
         shutil.rmtree(capture)
     capture.mkdir()
-    env = _cli_env(CAPTURE_DIR=f'{capture}', STUB_COST='0')
+    env = _cli_env(CAPTURE_DIR=f'{capture}', STUB_COST='0', HOME=f'{home}')
     env['PATH'] = _path_without_timeout(repo['bindir'], repo['root'])
     result = _run_reaped(
         _loop_cmd(worktree),
@@ -3033,6 +3041,29 @@ def test_codex_preflight_runs_without_timeout_binary(repo: dict) -> None:
     assert 'codex preflight failed' not in result.stderr, result.stderr
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert any(c['agent'] == 'codex' for c in calls.values()), (calls, result.stderr)
+
+
+def test_codex_boot_stays_offline_under_the_suite(repo: dict) -> None:
+    """A codex loop under the suite's ``OFFLINE_MODE`` never fetches the price table.
+
+    Online, a token-priced boot refreshes the LiteLLM table on every start.
+    The session's ``OFFLINE_MODE=true`` reaches the loop subprocess through
+    its env, so the boot skips the fetch, warns that it serves the cached
+    table, and runs its steps on it: no fetch swaps a table in over the
+    hermetic home's seeded one.
+    """
+    node = _make_node(repo, 'codexoffline', detached=False, sync=False, agent='codex')
+    table = pathlib.Path(_cli_env()['HOME']) / '.fractal' / 'pricing.json'
+    seeded = table.stat()
+    calls, result = _run_loop(repo, node, capture_name='codexoffline')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert calls[1]['agent'] == 'codex', (calls, result.stderr)
+    warning = 'Warning: could not refresh pricing; using cached pricing.json.'
+    assert warning in result.stderr, result.stderr
+    # the seeded table is the same file, unwritten
+    after = table.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (seeded.st_ino, seeded.st_mtime_ns)
 
 
 def test_stop_during_approval_wait_records_iteration_stopped(repo: dict) -> None:
@@ -3310,16 +3341,18 @@ def test_step_timeout_reaps_the_agents_tool_groups(repo: dict) -> None:
     capture = repo['root'] / 'capture_reap_deadline'
     try:
         _, result = _run_loop(repo, node, capture_name='reap_deadline')
+        # under full-suite load the step's ceiling can lapse before the stub
+        # starts both tools; the hang marker, touched once both recorded,
+        # tells that starvation (nothing to reap -- skip) from a tool
+        # outliving the reap, and orders the pid reads after both writes (a
+        # tool reaped mid-record leaves its pid file empty)
+        if not (capture / 'init_hung').exists():
+            pytest.skip('load starvation: the stub never started both tools')
         tools = _tool_pids(capture)
         alive = _alive_pids(tools)
     finally:
         _kill_tools(capture)
 
-    # under full-suite load the step's ceiling can lapse before the stub
-    # starts both tools; the hang marker, touched once both recorded, tells
-    # that starvation (nothing to reap -- skip) from a tool outliving the reap
-    if not (capture / 'init_hung').exists():
-        pytest.skip('load starvation: the stub never started both tools')
     assert 'timed out' in result.stdout, result.stdout
     assert len(tools) == 2, (tools, result.stdout)
     assert alive == [], (alive, tools)

@@ -39,12 +39,22 @@ a warning over the cached table ([[features/cost/budgets|budgets]]). A
 successful fetch also invalidates the in-process memo so the run re-reads the
 fresh table. Cost-reporting agents read the cache only for what their own figure
 misses: Claude prices its streaming estimate and the settle of a launch with no
-result figure (killed, capped, paused, or with the figure refused) from it. A
-run with a native Claude step (an agent declaring `wants_pricing`) therefore
-refreshes the table once at run start under the same 24-hour max age; there
-`missing` and `stale` only warn, since every launch that reports its figure
-still books it. For these agents a missing or corrupt cache degrades to no
-pricing -- streams record unpriced, never crash mid-step.
+result figure (killed, capped, paused, or with the figure refused) from it, and
+Grok prices a stream that reports no cost from its usage. A run with a native
+Claude or a Grok step (an agent declaring `wants_pricing`) therefore refreshes
+the table once at run start under the same 24-hour max age; there `missing` and
+`stale` only warn, since every launch that reports its figure still books it.
+For these agents a missing or corrupt cache degrades to no pricing -- streams
+record unpriced, never crash mid-step.
+
+An offline host sets `OFFLINE_MODE=true`, the switch the wiki tool honors too.
+Every refresh then skips the fetch and reports as a failed one -- `stale` over a
+cache, `missing` without -- after the max-age check, so a fresh cache still
+reads `fresh`. The switch is read strictly: any value other than `true` or
+`false` raises, and the loop's boot checks it with its run parameters so a
+malformed value aborts on record instead of escaping the refresh ahead of the
+run row. The test suite runs under it: every subprocess inherits it, and the
+session replaces the fetch with a refusal that fails the running test by name.
 
 Claude's cache writes bill by their lifetime. A usage record's `cache_creation`
 split names the one-hour writes (`ephemeral_1h_input_tokens`), which price at
