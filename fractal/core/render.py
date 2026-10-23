@@ -254,10 +254,11 @@ def variables(node: Node, overrides: Optional[dict[str, str]] = None) -> dict[st
 
     The static variables (paths, git, config, modes) are the single
     derivation the loop and every other renderer share. Run-scoped
-    variables (step/iteration/budget and the continue/resume/reserve/drain
-    modes) are not derived here -- a caller supplies them via
-    ``overrides`` (the loop with live state, a chat with ``N/A (chat)``);
-    any placeholder left unsupplied stays verbatim.
+    variables (step/iteration/budget and the
+    continue/resume/reserve/drain/git-pending modes) are not derived
+    here -- a caller supplies them via ``overrides`` (the loop with live
+    state, a chat with ``N/A (chat)``); any placeholder left unsupplied
+    stays verbatim.
 
     Args:
         node: The node whose variables to derive.
@@ -328,8 +329,8 @@ def prompt(
     both selects the active modes and renders the text. A mode doc
     ``<NAME>.md`` activates when ``<NAME>_MODE`` is ``true`` in that map:
     static modes (``DETACHED``/``META``) derive from config, run-scoped
-    modes (``CONTINUE``/``RESUME``/``RESERVE``/``DRAIN``) ride in as
-    overrides.
+    modes (``CONTINUE``/``RESUME``/``RESERVE``/``DRAIN``/``GIT_PENDING``)
+    ride in as overrides.
     ``SYNC.md`` never joins -- sync runs as its own step.
 
     Args:

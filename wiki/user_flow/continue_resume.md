@@ -97,9 +97,8 @@ session when one exists, re-orienting fresh otherwise), and the run and
 iteration deadlines credited for the paused span, so a pause never costs
 wall-clock budget. A node caught still parking gets its pause withdrawn instead
 — the live loop simply never parks. If the abort left a git operation unfinished
-in the worktree, the re-entered step's prompt opens by naming it, so the agent
-finishes or aborts it before any other git work (see
-[[features/loop/prompt_assembly]]).
+in the worktree, the re-entered step's prompt names it, so the agent finishes or
+aborts it before any other git work (see [[features/loop/prompt_assembly]]).
 
 ## Tree-wide pause and resume
 

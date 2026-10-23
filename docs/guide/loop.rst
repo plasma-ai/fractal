@@ -155,8 +155,9 @@ Every step launch assembles one prompt from three parts, joined in order:
    (a wind-down: the harness refuses ``fractal node init``, ``start``,
    ``update``, and ``resume`` from that run's seats, and the drain is
    recorded on the run so a pause and resume keep it), ``DETACHED.md`` in
-   detached mode, and ``META.md`` for a meta node. Mode documents always
-   come from the installed package, never a per-node copy.
+   detached mode, ``META.md`` for a meta node, and ``GIT_PENDING.md`` while
+   the worktree holds an unfinished git operation (see below). Mode documents
+   always come from the installed package, never a per-node copy.
 
 The joined text is rendered in one pass with ``$VAR`` / ``${VAR}``
 substitution matching GNU ``envsubst``: unknown placeholders and ``$$`` pass
@@ -169,15 +170,17 @@ same variables, since its resumed session already holds the step.
 Every launch — a retry, a resumed step, a steer, and SYNC included — first
 checks the node's worktree for a git operation left unfinished: a merge, a
 squash merge, a cherry-pick, a revert, a rebase, or a held ``index.lock``.
-When it finds one, the prompt opens with the package's
-``modes/GIT_PENDING.md``, which names each operation and says to finish or
-abort it before starting any other git work. A squash merge points at
-``fractal node merge <child> --continue`` to finish and ``git reset
---merge`` to abort. git holds ``index.lock`` only while a command runs, so
-the notice names the lock by its resolved path (a linked worktree keeps it in
-its own git directory, not the main checkout's ``.git/``) and its age,
-without judging whether it is stale, and says to remove it only once no git
-process runs in the worktree. A clean worktree adds nothing to the prompt.
+When it finds one, the prompt carries the package's
+``modes/GIT_PENDING.md`` as a mode, beneath the charter (a steer's prompt,
+which has no charter, opens with it ahead of ``STALL.md``). It names each
+operation and says to finish or abort it before starting any other git work.
+A squash merge points at ``fractal node merge <child> --continue`` to finish
+and ``git reset --merge`` to abort. git holds ``index.lock`` only while a
+command runs, so the notice names the lock by its resolved path (a linked
+worktree keeps it in its own git directory, not the main checkout's
+``.git/``) and its age, without judging whether it is stale, and says to
+remove it only once no git process runs in the worktree. A clean worktree
+adds nothing to the prompt.
 
 On the iteration a resume re-enters, the prompt also ends with an
 unread-inbox digest, appended after rendering (so it is never substituted):

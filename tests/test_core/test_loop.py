@@ -225,7 +225,7 @@ __all__ = [
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
     'test_digest_renders_mail_as_inert_data',
-    'test_a_leftover_git_operation_opens_every_launch_prompt',
+    'test_a_leftover_git_operation_joins_every_launch_prompt_beneath_the_charter',
     'test_continue_leaves_a_pending_merge_for_the_agent',
     'test_a_clean_worktree_launch_prompt_carries_no_notice',
     'test_drain_survives_a_pause_and_resume',
@@ -8234,23 +8234,25 @@ class PromptRecordingLoop(MockLoop):
     ],
     ids=['merge', 'squash', 'index-lock'],
 )
-def test_a_leftover_git_operation_opens_every_launch_prompt(
+def test_a_leftover_git_operation_joins_every_launch_prompt_beneath_the_charter(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
     marker: str,
     named: str,
 ) -> None:
-    """A git operation left in the worktree opens every launch's prompt.
+    """A git operation left in the worktree is named in every launch's prompt.
 
     A killed or paused step can leave a merge or squash unfinished, and the
     next agent otherwise starts git work on top of it blind. Every launch --
-    a retry and a resumed one included -- opens with the notice naming the
-    operation and its way out, ahead of the charter and any mode; a steer
-    opens with it ahead of its stall notice.
+    a retry and a resumed one included -- carries the notice naming the
+    operation and its way out beneath the charter, which still opens the
+    prompt; a steer has no charter, so the notice opens it ahead of its stall
+    notice.
     """
     monkeypatch.setenv('_NODE', '')
     node = loop_node
     _configure(node, step_retry_backoff='1s')
+    charter = (node.node_dir / 'NODE.md').read_text(encoding='utf-8')
     relpath = _git(node.worktree, 'rev-parse', '--git-path', marker).stdout
     path = node.worktree / relpath.strip()
     path.write_text('0' * 40 + '\n', encoding='utf-8')
@@ -8264,20 +8266,21 @@ def test_a_leftover_git_operation_opens_every_launch_prompt(
     # the failed launch, its retry, and the next step
     assert len(loop.prompts) == 3
     for prompt in loop.prompts:
-        assert prompt.startswith('## Git Operation Pending')
-        assert named in prompt[: prompt.index('# Charter')]
-    # a resumed launch opens with the notice ahead of its resume mode
+        assert prompt.startswith(charter)
+        assert named in prompt[prompt.index('## Git Pending Mode') :]
+    # a resumed launch carries the notice beside its resume mode
     loop._resume_mode = True
     prompt = loop._build_step_prompt(loop._discover_steps()[0])
-    assert prompt.startswith('## Git Operation Pending')
-    assert prompt.index('# Charter') < prompt.index('## Resume Mode')
-    # a steer's prompt is the stall notice alone, still opened by the notice
+    assert prompt.startswith(charter)
+    assert named in prompt[prompt.index('## Git Pending Mode') :]
+    assert '## Resume Mode' in prompt
+    # a steer's prompt is the stall notice alone, opened by the notice
     loop._resume_mode = False
     loop._steer_session = 'SID'
     prompt = loop._build_step_prompt(loop._discover_steps()[0])
-    assert prompt.startswith('## Git Operation Pending')
+    assert prompt.startswith('## Git Pending Mode')
     assert named in prompt[: prompt.index('## Stall Mode')]
-    assert '# Charter' not in prompt
+    assert charter not in prompt
 
 
 @pytest.mark.parametrize('conflicted', [False, True], ids=['staged', 'conflicted'])
@@ -8325,7 +8328,7 @@ def test_continue_leaves_a_pending_merge_for_the_agent(
     merge_head = _git(repo, 'rev-parse', '--git-path', 'MERGE_HEAD').stdout
     assert (repo / merge_head.strip()).is_file()
     assert 'skipped the operator-edit commit and the clean' in capsys.readouterr().out
-    assert loop.prompts[0].startswith('## Git Operation Pending')
+    assert '## Git Pending Mode' in loop.prompts[0]
     assert 'a merge in progress (MERGE_HEAD)' in loop.prompts[0]
 
 
