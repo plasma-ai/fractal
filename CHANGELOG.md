@@ -615,6 +615,15 @@ may include breaking changes, each listed under a Breaking heading.
   its scope from outside it, naming the old path, as the merge's footprint check
   does. The scope check read git's rename-detecting diff, which names only a
   rename's new path, so the deletion outside the scope committed unchecked.
+- On git 2.54 and 2.55, `fractal commit` stages the new files of a node in a
+  sub-project: a scoped child's seed at `--init`, a new file in its scope at a
+  work commit, and the project wiki a user node's baseline creates there. Those
+  git versions misread fractal's runtime-file excludes once the paths a commit
+  stages share a directory of five or more characters (`backend`, `apps/web`,
+  but not `app`), so the commits took edits to tracked files and no new file,
+  without a warning. The new work reached history only through the loop's
+  backstop save, which skips the lint and the scope check, and a user baseline
+  that left the wiki untracked made the next `node init` in that project refuse.
 - `fractal destroy --help` and `fractal reset --help` say the command deletes
   the tree's local node branches, unmerged work included, while the root branch
   and remote branches remain. Only the confirmation prompt said so, and

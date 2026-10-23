@@ -30,6 +30,7 @@ __all__ = [
     'test_commit_pushes_unless_local',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_user_init_baseline_fails_when_its_seed_cannot_stage',
+    'test_sub_project_user_baseline_commits_its_wiki',
     'test_child_baseline_carries_only_its_seed',
     'test_child_baseline_refuses_a_file_moved_into_its_seed',
     'test_child_baseline_commits_its_memory_wiki_attributes',
@@ -66,6 +67,7 @@ __all__ = [
     'test_dot_scope_root_bounds_the_whole_project',
     'test_scoped_commit_refuses_a_file_moved_into_scope',
     'test_sub_project_commit_boundary',
+    'test_scoped_sub_project_node_commits_its_new_files',
     'test_wiki_setting_moves_the_scope_exemption',
     'test_commit_refuses_an_invalid_stored_wiki',
     'test_scoped_commit_handles_non_ascii_and_whitespace_paths',
@@ -321,6 +323,36 @@ def test_user_init_baseline_fails_when_its_seed_cannot_stage(
     # nothing committed and nothing left staged
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     assert _git(repo, 'diff', '--cached', '--name-only').stdout == ''
+
+
+@pytest.mark.parametrize('project', ['backend', 'apps/web'])
+def test_sub_project_user_baseline_commits_its_wiki(
+    tmp_path: pathlib.Path,
+    project: str,
+) -> None:
+    """A sub-project's user baseline commits the wiki init scaffolds there.
+
+    With the root ``.gitattributes`` already mapping the wiki indexes, every
+    path the baseline adds sits in the project's directory, beside the stage
+    excludes; git before 2.56 strips that shared directory from each exclude
+    as well, so an add run from the worktree root stages no new file once
+    the directory is no shorter than an exclude. The new wiki must land
+    regardless: it is the base-branch precondition every spawn in the
+    project checks.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # the root attributes already map the wiki indexes, so init's edit
+    # leaves the file as committed and the baseline's add skips it
+    (repo / '.gitattributes').write_text(_WIKI_INDEX_LINES, encoding='utf-8')
+    _git(repo, 'add', '.gitattributes')
+    _git(repo, 'commit', '-m', 'map the wiki indexes')
+    Node(repo).init(path=project, agent='claude', user=True)
+    output = Node(repo).commit('configure', init=True)
+    assert output.endswith('Committed user node baseline on main.')
+    tracked = _git(repo, 'ls-files', project).stdout
+    assert f'{project}/wiki/_index.md' in tracked
+    # the committed wiki admits a child into the project
+    Node(repo).init(name='task', agent='claude', local=True)
 
 
 def test_child_baseline_carries_only_its_seed(tmp_path: pathlib.Path) -> None:
@@ -2139,6 +2171,58 @@ def test_sub_project_commit_boundary(
     result = _git(worktree, 'ls-files', *inside)
     tracked = result.stdout.split()
     assert tracked == inside
+
+
+@pytest.mark.parametrize('project', ['backend', 'apps/web'])
+def test_scoped_sub_project_node_commits_its_new_files(
+    tmp_path: pathlib.Path,
+    project: str,
+) -> None:
+    """A scoped node in a sub-project commits every new file it stages.
+
+    The baseline's estate add and a work commit's scope sweep stage paths
+    sharing the project's directory, beside the stage excludes; git before
+    2.56 strips that shared directory from each exclude as well, so an add
+    run from the worktree root stages no new file once the directory is no
+    shorter than an exclude. The baseline must land every seed file, and a
+    work commit the new file in its scope, however long the project's path
+    is.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # a committed sub-project wiki -- the base-ref precondition for the init
+    index = repo / project / 'wiki' / '_index.md'
+    index.parent.mkdir(parents=True)
+    index.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+    _git(repo, 'add', project)
+    _git(repo, 'commit', '-m', 'add the project wiki')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        path=project,
+        scope=['src'],
+    )
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    worktree = node.worktree
+    # the baseline commits every seed file, so the tree reads clean
+    node.commit('configure', init=True)
+    node.commit(check=True)
+    # stub the lint gate (not under test) so staging alone decides
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+    # a new file in scope rides the work commit
+    module = worktree / project / 'src' / 'module.py'
+    module.parent.mkdir()
+    module.write_text('VALUE = 1\n', encoding='utf-8')
+    node.commit('add a module')
+    result = _git(worktree, 'ls-files', f'{project}/src')
+    assert result.stdout.split() == [f'{project}/src/module.py']
+    node.commit(check=True)
 
 
 @pytest.mark.parametrize(

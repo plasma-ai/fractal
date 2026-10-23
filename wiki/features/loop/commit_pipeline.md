@@ -91,41 +91,52 @@ lock (`config.json.lock`), crash-stranded atomic-write temp files,
 engine-materialized system skills (`skills/.system/`), and the wiki tool's
 self-ignored derived cache (`.wiki/cache/`) and per-machine Obsidian vault
 config (`.obsidian/`) never ride a work commit -- the baseline's force-add
-included. A cache a baseline once force-tracked is dropped from the index by the
-next work commit; the on-disk copy stays, and the cache's own ignore holds from
-there. Two advisory guards warn without blocking: workspace files silently eaten
-by host ignore rules are counted and named (fractal's own runtime ignores -- the
-managed `info/exclude` block by its line span, so a user line sharing the file
-still alarms -- and self-managing ignored directories stay silent). The warning
-lists the first ten paths, each with the rule that ate it as `check-ignore -v`
-reports it (source file, line, and pattern; the shared `info/exclude` reads
-repo-relative and any other absolute source as `core.excludesFile`, since a
-force commit folds the warning into its body), then counts the rest, and labels
-them repository or host rules, not node-record refusals -- the estate law's
-refusal warnings print beside it and the two must not read as one count, so an
-estate file the commit left unstaged (refused on either staging path, or a
-record the force-add could not stage) is theirs to name and never lists here,
-nor does the collapsed directory entry holding one. A second guard lists any
-staged file at or over 10MB by name -- an oversized file is usually an accident,
-but large commits are also legitimate. A third names each staged addition whose
-top-level name matches an entry of the node's own folder (`plans/x.md` beside
-`.fractal/<node>/plans`) with the entry it shadows. The path may be a node file
-written at the worktree root by mistake or real project work, so the warning
-states both outcomes: move node files under the node's folder, ignore it for
-project files (an agent told only "mistake" would move project files into its
-folder, where a merge never carries them). Staged additions are listed with
-`--no-renames`, so a node file moved to the root counts as the addition it is. A
-top-level name the project already had at the node's base -- the fork sha
-`Files` anchors `base` on -- is the project's own and stays silent; so is a
-merge or squash merge in progress, whose additions are not the node's writes,
-and `--init` skips the guard. Any failure inside the check (a locked record read
-among them) skips the warning, never the commit. Those paths are staged, so they
-never count in `Held out`; a force commit folds this warning into its body with
-the others. Whenever an estate file was left unstaged or the ignore warning
-fired, the command's last line repeats both counts (`Held out: ...`, non-zero
-parts only): a hook's or gate's long output prints between the warnings and the
-end, and a no-op commit is exactly when a node would otherwise read the tree as
-clean.
+included. Every sweep runs from the directory git strips as its paths' common
+prefix, the deepest one holding each path's parent (`_sweep`), so git prefixes
+each exclude with it. git before 2.56 strips that prefix from each exclude as
+well as from the path it tests, so an exclude that does not begin with it can
+match the wrong files: one no longer than the prefix (`**/.db` beside
+`backend/src` and `backend/wiki`) matches every untracked file. Run from the
+worktree root, the sweep would then stage tracked edits but no new file: a
+scoped node in a sub-project would commit no new file in its scope or its
+estate, and a user baseline would leave a new sub-project wiki untracked. Every
+path sits strictly below the directory, so a `**/<name>` exclude, which needs a
+slash before the name, still matches an entry directly inside a path, as it does
+from the worktree root. A cache a baseline once force-tracked is dropped from
+the index by the next work commit; the on-disk copy stays, and the cache's own
+ignore holds from there. Two advisory guards warn without blocking: workspace
+files silently eaten by host ignore rules are counted and named (fractal's own
+runtime ignores -- the managed `info/exclude` block by its line span, so a user
+line sharing the file still alarms -- and self-managing ignored directories stay
+silent). The warning lists the first ten paths, each with the rule that ate it
+as `check-ignore -v` reports it (source file, line, and pattern; the shared
+`info/exclude` reads repo-relative and any other absolute source as
+`core.excludesFile`, since a force commit folds the warning into its body), then
+counts the rest, and labels them repository or host rules, not node-record
+refusals -- the estate law's refusal warnings print beside it and the two must
+not read as one count, so an estate file the commit left unstaged (refused on
+either staging path, or a record the force-add could not stage) is theirs to
+name and never lists here, nor does the collapsed directory entry holding one. A
+second guard lists any staged file at or over 10MB by name -- an oversized file
+is usually an accident, but large commits are also legitimate. A third names
+each staged addition whose top-level name matches an entry of the node's own
+folder (`plans/x.md` beside `.fractal/<node>/plans`) with the entry it shadows.
+The path may be a node file written at the worktree root by mistake or real
+project work, so the warning states both outcomes: move node files under the
+node's folder, ignore it for project files (an agent told only "mistake" would
+move project files into its folder, where a merge never carries them). Staged
+additions are listed with `--no-renames`, so a node file moved to the root
+counts as the addition it is. A top-level name the project already had at the
+node's base -- the fork sha `Files` anchors `base` on -- is the project's own
+and stays silent; so is a merge or squash merge in progress, whose additions are
+not the node's writes, and `--init` skips the guard. Any failure inside the
+check (a locked record read among them) skips the warning, never the commit.
+Those paths are staged, so they never count in `Held out`; a force commit folds
+this warning into its body with the others. Whenever an estate file was left
+unstaged or the ignore warning fired, the command's last line repeats both
+counts (`Held out: ...`, non-zero parts only): a hook's or gate's long output
+prints between the warnings and the end, and a no-op commit is exactly when a
+node would otherwise read the tree as clean.
 
 ## The estate content law
 
@@ -166,18 +177,16 @@ outside the sweep.
 A user node's tracked seed answers to the same law on the same two paths: the
 baseline plain-adds the seed dir past the refused paths, then runs the record
 pass over that one estate, never another tree's seed sharing `.fractal/`. The
-plain add runs from inside the seed dir, so every pathspec shares its prefix:
-git 2.54 and 2.55 can stage nothing for a nested directory pathspec beside an
-exclude pathspec outside it. It runs before the baseline's other adds and
-tolerates only git's refusal of an ignored seed (exit 1, the hold the record
-pass then overrides); any other failure, such as a held `index.lock` or an
-unreadable record, fails the baseline with git's message and nothing staged, so
-a baseline never lands without its seed. A force-add of the whole dir would
-honor only the stage excludes, so every runtime file fractal's exclude block
-holds -- `tmp/`, an agent's `.err` capture, `.session`, `setup.log`,
-`__pycache__/` -- would ride the baseline onto the top-level branch. The record
-pass's notices lead the baseline's confirmation line, as they lead a work
-commit's output.
+plain add runs from the seed's parent, the directory git strips, as every sweep
+runs. It runs before the baseline's other adds and tolerates only git's refusal
+of an ignored seed (exit 1, the hold the record pass then overrides); any other
+failure, such as a held `index.lock` or an unreadable record, fails the baseline
+with git's message and nothing staged, so a baseline never lands without its
+seed. A force-add of the whole dir would honor only the stage excludes, so every
+runtime file fractal's exclude block holds -- `tmp/`, an agent's `.err` capture,
+`.session`, `setup.log`, `__pycache__/` -- would ride the baseline onto the
+top-level branch. The record pass's notices lead the baseline's confirmation
+line, as they lead a work commit's output.
 
 fractal owns its estate staging (`_stage_records`): after the plain adds, any
 estate file an ignore rule held out is re-evaluated against fractal-normal rules
