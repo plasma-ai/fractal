@@ -500,9 +500,12 @@ What resuming restores
 A resumed loop **adopts its open run**: the same budgets and iteration
 count, with the interrupted step re-entered — resuming the recorded agent
 session when one exists, re-orienting fresh otherwise (session continuity is
-best-effort, not guaranteed). The pause and resume events are instants, and
-the paused span between them is credited back to the run and
-iteration deadlines, so parking a node does not burn its timeouts.
+best-effort, not guaranteed). The span from the moment the loop parks to the
+resume is credited back to the run and iteration deadlines, so parking a node
+does not burn its timeouts. The span starts at the park, not at the pause
+request: a step that works on past the request (an agent pausing its own node
+finishes its step first) is charged as working time, and a pause withdrawn
+before the loop parks credits nothing.
 
 If the resume races a loop that is still parking, the relaunch refuses with
 "the loop is still running or parking" and tells you to retry once it exits —

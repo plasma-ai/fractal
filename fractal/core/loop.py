@@ -19,8 +19,11 @@ from typing import Any, Optional, Union
 
 import fractal.util
 from fractal.constants import (
+    LATCH_PARK_REASON_PREFIX,
+    PARK_REASON,
     PAUSE_ABORT_FILE,
     PGID_FILE,
+    PREFLIGHT_PARK_REASON_PREFIX,
     SOCKET_FILE,
     STEER_REASON_PREFIX,
     STEP_PGID_FILE,
@@ -848,8 +851,10 @@ class Loop:
         # priced from the LiteLLM table -- a token-priced agent prices at the
         # served model its own session record names, configured model or
         # not, and a routed backend chain-prices its result usage; an agent
-        # that reports its own cost natively gives pricing nothing to do
+        # that reports its own cost natively needs none, though one that
+        # prices what its figure misses from the table wants it current
         self._needs_pricing = False
+        wants_pricing = False
         priced: list[tuple[pathlib.Path, Agent, str]] = []
         for path in sorted((node.node_dir / 'steps').glob('*.md')):
             # step files are hand-edited: a bad byte must abort through the
@@ -871,6 +876,8 @@ class Loop:
                 if backend.needs_pricing or backend.provider is not None:
                     self._needs_pricing = True
                     priced.append((path, backend, step.model or self._node_model))
+            elif backend.wants_pricing:
+                wants_pricing = True
         # refresh model pricing before the run; a fetch failure with no cache
         # is fatal -- the cost/cap pipeline cannot price token usage without it
         if self._needs_pricing:
@@ -879,6 +886,23 @@ class Loop:
                 reason = 'Could not fetch pricing and no cached pricing.json exists.'
                 print(f'Error: {reason}', file=sys.stderr)
                 self._abort_preflight(reason)
+            if status == 'stale':
+                print(
+                    'Warning: could not refresh pricing; using cached pricing.json.',
+                    file=sys.stderr,
+                )
+        # a cost-reporting agent prices only what its own figure misses, so a
+        # day-old table serves and a failed fetch only warns -- every launch
+        # that reports its figure still books it
+        elif wants_pricing:
+            status = pricing.update(max_age='24h')
+            if status == 'missing':
+                print(
+                    'Warning: could not fetch pricing and no cached pricing.json'
+                    ' exists; a launch that ends without its own cost figure'
+                    ' books unpriced.',
+                    file=sys.stderr,
+                )
             if status == 'stale':
                 print(
                     'Warning: could not refresh pricing; using cached pricing.json.',
@@ -1007,7 +1031,7 @@ class Loop:
                     if stood_down not in ('retired', 'killed'):
                         event_id = self.node.record.event_start(
                             'pause',
-                            metadata=f'resume preflight failed: {reason}',
+                            metadata=f'{PREFLIGHT_PARK_REASON_PREFIX}{reason}',
                         )
                         self.node.record.event_end(
                             event_id=event_id, status='completed'
@@ -1067,7 +1091,7 @@ class Loop:
             return False
         print(f'=== Parked at boot: {latched} is paused ===')
         try:
-            node.record.signal_set('pause', f'via pause latch ({latched})')
+            node.record.signal_set('pause', f'{LATCH_PARK_REASON_PREFIX}({latched})')
         except Exception:
             pass
         # open the pause span -- without the instant, the parked time would
@@ -1075,7 +1099,7 @@ class Loop:
         try:
             event_id = node.record.event_start(
                 'pause',
-                metadata=f'via pause latch ({latched})',
+                metadata=f'{LATCH_PARK_REASON_PREFIX}({latched})',
                 run_id=self._run_id,
             )
             if event_id is not None:
@@ -1203,7 +1227,7 @@ class Loop:
         except Exception:
             pass
         # close the pause span for the deadline credit even when no resume CLI
-        # ran (a bare --resume launch) -- a resume event with no open pause
+        # ran (a bare --resume launch) -- a resume event with no open park
         # is inert to the credit walk, so the CLI-then-boot double write is safe
         try:
             event_id = node.record.event_start('resume', run_id=self._run_id)
@@ -4740,15 +4764,15 @@ class Loop:
         # mid-step state resume continues from); _on_exit reads the paused
         # stamp and leaves it alone
         if self._paused:
-            # (re)open the pause span at the park instant -- a duplicate
-            # pause event collapses in the credit walk, and a park after a
-            # withdrawn pause (whose resume event closed the span) would
-            # otherwise burn its parked wall-clock against
-            # the adopted deadlines
+            # open the pause span at the park instant -- the credit walk
+            # opens spans only at the loop's park rows, never at the pause
+            # request (the step may have worked on past it), so without
+            # this row the parked wall-clock would burn against the
+            # adopted deadlines
             try:
                 event_id = node.record.event_start(
                     'pause',
-                    metadata='parked',
+                    metadata=PARK_REASON,
                     run_id=self._run_id,
                 )
                 if event_id is not None:

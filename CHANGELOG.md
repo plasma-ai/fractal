@@ -354,6 +354,14 @@ may include breaking changes, each listed under a Breaking heading.
 - A killed Claude step's settle also reads the transcripts of a workflow's
   sub-agents, kept a folder deeper under `subagents/workflows/`, and skips
   sub-agent transcripts last written before the launch started.
+- A run with a native Claude step refreshes the price table
+  (`~/.fractal/pricing.json`) at run start when it is missing or more than a day
+  old. A Claude launch that ends without its result figure (killed, capped,
+  paused, or with the figure refused) is priced from its transcript at the
+  table's rates, but only a codex or openrouter-routed step refreshed the table,
+  so on a host with no cache, or a stale one missing a new model, such a launch
+  booked no cost and armed caps counted it as $0. A failed fetch only warns, and
+  the run goes on.
 - A Claude step's spend after its result frame is booked: Claude Code outlives
   its result while background sub-agents run, and the replies they complete
   after the result were never counted. Once the process ends — exit 0, a
@@ -475,6 +483,12 @@ may include breaking changes, each listed under a Breaking heading.
   agent was not aborted. `fractal node _reap` reports that case with its own
   exit 3, so a helper that cannot run at all (a broken install's failed import
   exits 1) still ends the step through the pause's own TERM of its group.
+- Run and iteration deadlines credit a pause from the moment the loop parks to
+  the resume, in the loop and in `fractal node time remaining` alike. The credit
+  ran from the pause request, so the time a step worked on past the request (an
+  agent pausing its own node finishes its step before the loop parks) was
+  refunded to the deadlines as paused time, and a pause that a resume withdrew
+  before the loop parked credited the time the node kept working.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives the template variables (the paths, the branch, and the spawn
@@ -641,6 +655,15 @@ may include breaking changes, each listed under a Breaking heading.
   its scope from outside it, naming the old path, as the merge's footprint check
   does. The scope check read git's rename-detecting diff, which names only a
   rename's new path, so the deletion outside the scope committed unchecked.
+- On git 2.54 and 2.55, `fractal commit` stages the new files of a node in a
+  sub-project: a scoped child's seed at `--init`, a new file in its scope at a
+  work commit, and the project wiki a user node's baseline creates there. Those
+  git versions misread fractal's runtime-file excludes once the paths a commit
+  stages share a directory of five or more characters (`backend`, `apps/web`,
+  but not `app`), so the commits took edits to tracked files and no new file,
+  without a warning. The new work reached history only through the loop's
+  backstop save, which skips the lint and the scope check, and a user baseline
+  that left the wiki untracked made the next `node init` in that project refuse.
 - `fractal destroy --help` and `fractal reset --help` say the command deletes
   the tree's local node branches, unmerged work included, while the root branch
   and remote branches remain. Only the confirmation prompt said so, and

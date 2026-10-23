@@ -37,7 +37,12 @@ from typing import Optional
 
 import pytest
 
-from fractal.constants import STEER_REASON_PREFIX
+from fractal.constants import (
+    LATCH_PARK_REASON_PREFIX,
+    PARK_REASON,
+    PREFLIGHT_PARK_REASON_PREFIX,
+    STEER_REASON_PREFIX,
+)
 from fractal.core.node import Node
 from tests._helpers import _age_iter, _age_run, _age_step, _past_timestamp
 
@@ -72,6 +77,21 @@ TIMEOUT_SECONDS = 600.0
 # a node step_timeout below the step file's own timeout: line
 NODE_STEP_TIMEOUT = '2h'
 NODE_STEP_TIMEOUT_SECONDS = 7200.0
+
+# the pause-credit event rows by role, as (event, reason, status): the pause
+# verb's request carries the caller's reason, each loop park its own
+PAUSE_ROWS = {
+    'request': ('pause', 'operator request', 'completed'),
+    'park': ('pause', PARK_REASON, 'completed'),
+    'latch-park': ('pause', f'{LATCH_PARK_REASON_PREFIX}(root)', 'completed'),
+    'preflight-park': (
+        'pause',
+        f'{PREFLIGHT_PARK_REASON_PREFIX}OPENROUTER_API_KEY is not set',
+        'completed',
+    ),
+    'resume': ('resume', '', 'completed'),
+    'failed-resume': ('resume', '', 'failed'),
+}
 
 
 # ------ deadlines
@@ -579,57 +599,90 @@ def test_steered_step_counts_down_from_its_stuck_launch(
 # ------ pause credit
 
 
-def test_time_remaining_credits_paused_spans(node_with_db: Node) -> None:
-    """Run and iteration deadlines credit the time spent paused.
+@pytest.mark.parametrize(
+    argnames=('events', 'run_credit', 'iter_credit'),
+    argvalues=[
+        ([('request', 4000.0), ('park', 1000.0), ('resume', 400.0)], 600.0, 600.0),
+        ([('request', 4000.0), ('resume', 400.0)], 0.0, 0.0),
+        (
+            [
+                ('request', 4000.0),
+                ('request', 3000.0),
+                ('park', 1000.0),
+                ('resume', 400.0),
+            ],
+            600.0,
+            600.0,
+        ),
+        ([('latch-park', 1000.0), ('resume', 400.0)], 600.0, 600.0),
+        (
+            [
+                ('request', 4500.0),
+                ('park', 3000.0),
+                ('resume', 2500.0),
+                ('preflight-park', 1000.0),
+                ('resume', 400.0),
+            ],
+            1100.0,
+            600.0,
+        ),
+        ([('park', 3000.0), ('resume', 1000.0)], 2000.0, 1000.0),
+        ([('park', 1000.0), ('failed-resume', 400.0)], 1000.0, 1000.0),
+    ],
+    ids=[
+        'park-after-request',
+        'request-withdrawn-before-park',
+        'duplicate-requests',
+        'latch-park',
+        'preflight-repark',
+        'park-straddles-iteration',
+        'failed-resume',
+    ],
+)
+def test_time_remaining_credits_paused_spans(
+    node_with_db: Node,
+    events: list[tuple[str, float]],
+    run_credit: float,
+    iter_credit: float,
+) -> None:
+    """Run and iteration deadlines credit the time the loop spent parked.
 
     The rows stay open across a pause, so the raw wall clock would charge
     the frozen span against ``--timeout``/``--iter-timeout`` and a long
-    pause would end the run the moment it resumed. The pause/resume event
-    instants give the span back; an iteration credits only the part inside
-    it.
+    pause would end the run the moment it resumed. Each span runs from the
+    loop's own park to the resume that relaunches it: a step in flight
+    works on past the pause request until the loop parks, so the request
+    opens no span, and a resume that withdraws it before any park credits
+    nothing. An iteration credits only the part inside it, and a failed
+    resume never relaunched the loop, so its span keeps accruing.
     """
     node = node_with_db
-    node.config.set('timeout', '10m')
-    node.config.set('iter_timeout', '5m')
+    node.config.set('timeout', '2h')
+    node.config.set('iter_timeout', '1h')
     node.status_set('active')
     run_id = node.record.run_start()
-    _age_run(node, run_id, 300.0)
+    _age_run(node, run_id, 5000.0)
     iter_id = node.record.iter_start(run_id=run_id, iter=1)
-    _age_iter(node, iter_id, 150.0)
-    # a pause span from 240s ago to 60s ago (180s parked; 90s inside the iter)
-    for event, seconds_ago in (('pause', 240.0), ('resume', 60.0)):
-        event_id = node.record.event_start(event)
-        node.record.event_end(event_id=event_id, status='completed')
-        node.db.update(
-            data={'created_at': _past_timestamp(seconds_ago)},
-            table='events',
-            where={'event_id': event_id},
-        )
-    # run: 600 - (300 elapsed - 180 credit) = 480
-    run_remaining = node.time.remaining(scope='run', run_id=run_id)
-    assert run_remaining is not None
-    assert 470.0 < run_remaining <= 481.0
-    # iter: 300 - (150 elapsed - 90 credit clipped to the iter) = 240
-    iter_remaining = node.time.remaining(scope='iter', run_id=run_id)
-    assert iter_remaining is not None
-    assert 230.0 < iter_remaining <= 241.0
-    # a failed resume never relaunched the loop: the span it would have
-    # closed stays open and keeps accruing (pause 30s ago -> ~30s more)
-    for event, status, seconds_ago in (
-        ('pause', 'completed', 30.0),
-        ('resume', 'failed', 10.0),
-    ):
-        event_id = node.record.event_start(event)
+    _age_iter(node, iter_id, 2000.0)
+    for role, seconds_ago in events:
+        event, reason, status = PAUSE_ROWS[role]
+        event_id = node.record.event_start(event, metadata=reason, run_id=run_id)
         node.record.event_end(event_id=event_id, status=status)
         node.db.update(
             data={'created_at': _past_timestamp(seconds_ago)},
             table='events',
             where={'event_id': event_id},
         )
-    # run: 600 - (300 elapsed - (180 + ~30) credit) = ~510
+    # run: 7200 - (5000 elapsed - credit)
     run_remaining = node.time.remaining(scope='run', run_id=run_id)
     assert run_remaining is not None
-    assert 500.0 < run_remaining <= 511.0
+    expected = 7200.0 - 5000.0 + run_credit
+    assert expected - 10.0 < run_remaining <= expected + 1.0
+    # iter: 3600 - (2000 elapsed - credit clipped to the iter)
+    iter_remaining = node.time.remaining(scope='iter', run_id=run_id)
+    assert iter_remaining is not None
+    expected = 3600.0 - 2000.0 + iter_credit
+    assert expected - 10.0 < iter_remaining <= expected + 1.0
 
 
 # ------ helpers

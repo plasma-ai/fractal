@@ -279,7 +279,10 @@ possibly work:
   keeps it — paid inference that lands on no step row and, events carrying
   no cost, counts toward no cap;
 - a run whose agent prices from tokens needs the pricing cache — a stale
-  cache warns and is used, a missing cache that cannot be fetched aborts.
+  cache warns and is used, a missing cache that cannot be fetched aborts;
+- a run with a native ``claude`` step refreshes a pricing cache older than
+  a day, since a launch that ends without its own cost figure is priced
+  from it — a failed fetch only warns, and the run goes on.
 
 A failed preflight on a fresh or continued start records the run as
 ``exited`` with the reason. On ``fractal node resume`` the paused run is

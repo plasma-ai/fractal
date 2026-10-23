@@ -52,6 +52,12 @@ STEER_REASON_PREFIX = 'steered: '
 UNAVAILABLE_REASON_PREFIX = 'provider unavailable: '
 #: step-row reason prefix of a failed step the loop refused before its launch
 UNLAUNCHED_REASON_PREFIX = 'not launched: '
+#: pause-event reason of the loop's park at a pause checkpoint
+PARK_REASON = 'parked'
+#: pause-event reason prefix of a boot the pause latch parks
+LATCH_PARK_REASON_PREFIX = 'via pause latch '
+#: pause-event reason prefix of a resume boot its failed preflight re-parks
+PREFLIGHT_PARK_REASON_PREFIX = 'resume preflight failed: '
 
 #: lifecycle status set shared by the node status file and the record rows
 STATUSES = (

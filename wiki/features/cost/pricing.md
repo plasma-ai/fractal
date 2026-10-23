@@ -37,9 +37,14 @@ node re-prices against a live table); at both points `missing` is fatal (the
 cost/cap pipeline cannot price usage without a table) while `stale` degrades to
 a warning over the cached table ([[features/cost/budgets|budgets]]). A
 successful fetch also invalidates the in-process memo so the run re-reads the
-fresh table. Cost-reporting agents read the cache only opportunistically, so for
-them a missing or corrupt cache degrades to no pricing -- streams record
-unpriced, never crash mid-step.
+fresh table. Cost-reporting agents read the cache only for what their own figure
+misses: Claude prices its streaming estimate and the settle of a launch with no
+result figure (killed, capped, paused, or with the figure refused) from it. A
+run with a native Claude step (an agent declaring `wants_pricing`) therefore
+refreshes the table once at run start under the same 24-hour max age; there
+`missing` and `stale` only warn, since every launch that reports its figure
+still books it. For these agents a missing or corrupt cache degrades to no
+pricing -- streams record unpriced, never crash mid-step.
 
 Claude's cache writes bill by their lifetime. A usage record's `cache_creation`
 split names the one-hour writes (`ephemeral_1h_input_tokens`), which price at
