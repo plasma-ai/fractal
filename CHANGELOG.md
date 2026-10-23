@@ -320,9 +320,18 @@ may include breaking changes, each listed under a Breaking heading.
   so on its output before each wait. A merge refuses only an `active` node, so a
   boot that landed mid-merge could have its worktree reset or carried by the
   merge while its agent started.
+- `node merge` checks its target again once it holds the merge lock, and refuses
+  a target that went `active` or `paused` while the merge waited. A target
+  re-armed with `start --continue` during the wait could go live, and the squash
+  then landed in its running worktree.
 - A resume boot whose `active` stamp fails says the node reads `paused` for the
   run, which it keeps. The banner said `idle (starting)`, which only a start
   keeps.
+- A resumed run that ends before re-entering its parked iteration, because its
+  run deadline ran out or `max_iters` was lowered while it was parked, closes
+  that iteration as the run ends: `failed` with `timed out` for the deadline,
+  `stopped` for the cap. The iteration stayed `active` until the next run healed
+  it as a crash, and the timeout reason named the iteration before it.
 - `fractal node list` no longer shows `PAUSED: billing` for a run of instant,
   unpriced failures the loop judged provider outages, such as codex's
   model-at-capacity refusals: the failed step row's reason now leads with
@@ -621,6 +630,9 @@ may include breaking changes, each listed under a Breaking heading.
   node as `PAUSED: billing`. The refused step's row reason leads with
   `not launched:`, so `fractal node list` never shows such a run as
   `PAUSED: billing` either.
+- With no before-step SYNC, an armed billing breaker holds a step's launch once.
+  The step waited out the backoff twice before its probe launch, up to two hours
+  at the cap.
 - A step whose agent names an error on its stream and then exits non-zero
   reports the real exit status: the step banner and the row's reason read
   `agent error (exit N)` with the stream detail and the stderr tail behind it,
@@ -719,6 +731,10 @@ may include breaking changes, each listed under a Breaking heading.
   start's or resume's check aborts the loop's boot on record: a start or
   continue ends `exited` with the reason on its run, and a resume stays paused
   with its paused time still credited.
+- A `node start --continue --max-cost` refused over the node's stored config or
+  agent (a hand-edited duration without a unit, a mistyped agent) keeps the old
+  cap. The new cap stayed in the node's config and registry row although nothing
+  launched.
 
 ## [1.3.0] - 2026-09-17
 
