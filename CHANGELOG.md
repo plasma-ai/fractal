@@ -731,6 +731,9 @@ may include breaking changes, each listed under a Breaking heading.
   start's or resume's check aborts the loop's boot on record: a start or
   continue ends `exited` with the reason on its run, and a resume stays paused
   with its paused time still credited.
+- A tree's `agents.py` hook file that fails to load aborts a loop's boot on
+  record, as a bad `config.json` value does, instead of killing it with nothing
+  recorded. The recorded reason names the file from the repo root.
 - A `node start --continue --max-cost` refused over the node's stored config or
   agent (a hand-edited duration without a unit, a mistyped agent) keeps the old
   cap. The new cap stayed in the node's config and registry row although nothing

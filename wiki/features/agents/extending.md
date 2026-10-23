@@ -108,4 +108,8 @@ the name and win over the hook file. A deployment can instead drop a hook file
 in the tree's data directory; the registry consults it once per process, so
 injected subclasses resolve across every process boundary (tmux loop relaunches,
 CLI, TUI). A hook file that fails to load is a sticky error, re-raised on every
-later resolve for that tree.
+later resolve for that tree. `start` and `resume` meet it in their up-front
+agent check and refuse before they change anything; a loop boot that meets it
+aborts on record like a bad config value (`Loop._read_boot_config`), the
+recorded reason naming the file from the repo root (`_abort_preflight` strips
+the repo prefix from every reason it persists).

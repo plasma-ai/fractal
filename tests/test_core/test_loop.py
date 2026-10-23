@@ -43,7 +43,7 @@ from fractal.constants import (
     STEP_PGID_FILE,
     WORKTREES_FOLDER,
 )
-from fractal.core import loop as loop_module, pricing, worktree
+from fractal.core import agent as agent_module, loop as loop_module, pricing, worktree
 from fractal.core.agent import Agent, Invocation, Settlement, StreamEvent, StreamResult
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
@@ -109,6 +109,7 @@ __all__ = [
     'test_resume_refuses_an_invalid_config',
     'test_tree_resume_refuses_a_descendants_invalid_config',
     'test_a_config_broken_after_the_resume_check_aborts_the_boot',
+    'test_a_broken_agent_hook_file_aborts_the_boot',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
     'test_the_steer_runs_on_what_the_stuck_launch_left',
     'test_a_capped_or_idle_sync_runs_to_its_result',
@@ -257,8 +258,8 @@ class MockLoop(Loop):
 
     The double reads the run parameters at construction, as a boot does,
     so a test can drive the loop's parts without booting it; ``run()``
-    reads them again at its boot, and a config that read refuses is left
-    for that boot to abort on.
+    reads them again at its boot, and a config (or agent hook file) that
+    read refuses is left for that boot to abort on.
     """
 
     def __init__(
@@ -269,7 +270,7 @@ class MockLoop(Loop):
     ) -> None:
         """Initialize ``MockLoop``."""
         super().__init__(node, **kwargs)
-        with contextlib.suppress(ValueError):
+        with contextlib.suppress(ValueError, RuntimeError):
             self._read_run_parameters()
         self.results = list(results or [])
         self.launched: list[str] = []
@@ -2828,6 +2829,35 @@ def test_a_config_broken_after_the_resume_check_aborts_the_boot(
     credit = [event for event in events if event['event'] in ('pause', 'resume')]
     assert [event['event'] for event in credit] == ['pause', 'resume', 'pause']
     assert re.search(match, credit[-1]['metadata'])
+
+
+def test_a_broken_agent_hook_file_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom-agent hook file that fails to load aborts the boot on record.
+
+    The tree's ``agents.py`` loads at the boot's first agent resolve, and
+    a file this environment cannot import fails naming itself, so the
+    fault lands like a bad config value: the node reads ``exited`` and a
+    closed run row carries the reason, never a crash with nothing
+    recorded. The recorded reason names the file relative to the repo
+    root, as all persisted data does.
+    """
+    monkeypatch.setenv('_NODE', '')
+    # the hook file loads once per tree per process, as in a fresh boot
+    monkeypatch.setattr(agent_module, '_LOADED', {})
+    hook = loop_node.db.path.parent / 'agents.py'
+    hook.write_text('import fractal_missing_backend\n', encoding='utf-8')
+    loop = MockLoop(loop_node)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    relative = hook.relative_to(loop_node.repo_dir)
+    assert run['metadata'] == f"{relative}: No module named 'fractal_missing_backend'"
+    assert f'{loop_node.repo_dir}' not in run['metadata']
 
 
 @pytest.mark.parametrize(
