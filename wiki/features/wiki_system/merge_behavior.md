@@ -92,12 +92,14 @@ it holds. A refresh step that fails restores the target like a conflict; the
 reset keeps untracked files, so the merge also removes each index and `.wiki/`
 file the refresh created and had not yet staged, and the retry lands instead of
 refusing it as an untracked file. A direct `merge.sh` call that passes no
-`--target-wiki` reads the project-wiki folder from the target's config, then the
-node's, and refuses the merge the same way when neither read answers: a guessed
-`wiki/` would refresh, and stage past the footprint check, whatever ordinary
-content sits there. A wiki declared at the worktree root refuses the merge
-outright: it encloses every folder, so each refresh would walk the whole
-worktree, and node init refuses to spawn under one for the same reason.
+`--target-wiki` reads the project-wiki folder and its project from one config,
+the target's, or the merging node's when the target's cannot be read, and
+refuses the merge the same way when neither answers: a guessed `wiki/`, or one
+config's folder under the other's project, would refresh, and stage past the
+footprint check, whatever ordinary content sits there. A wiki declared at the
+worktree root refuses the merge outright: it encloses every folder, so each
+refresh would walk the whole worktree, and node init refuses to spawn under one
+for the same reason.
 
 ## The parent's reconciliation job
 

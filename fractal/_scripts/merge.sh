@@ -44,9 +44,9 @@ Options:
     --target-wiki=PATH    Worktree-relative project-wiki folder the index
                           refresh regenerates after the squash (Node.merge
                           passes the folder the node's spawn gave it under the
-                          node's own project; a direct call reads the target's
-                          config, then the node's, and refuses the merge when
-                          neither read answers).
+                          node's own project; a direct call reads the folder and
+                          its project from the target's config, else from the
+                          node's, and refuses the merge when neither answers).
     --help|-h             Show this help message
 USAGE
     exit 0
@@ -1373,7 +1373,15 @@ wiki_owned() {
 # silenced so the merge summary below stays the single user-facing line; a
 # failed refresh restores the parent exactly like a conflict
 if command -v wiki &>/dev/null; then
-    PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo ".")
+    # the target's own project locates its memory wiki; a failed read takes
+    # the root project, a guess that stays inside the target's own seed --
+    # and a target no config resolves (a --base branch that is no node, a
+    # root checked out in a linked worktree) tracks no memory wiki at all
+    PARENT_PROJECT_READ=true
+    if ! PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null); then
+        PARENT_PROJECT="."
+        PARENT_PROJECT_READ=false
+    fi
     if [[ "$PARENT_PROJECT" == "." ]]; then
         MEMORY_DIR="$PARENT_WORKTREE_DIR/.fractal/$PARENT_BRANCH/memory"
     else
@@ -1383,23 +1391,28 @@ if command -v wiki &>/dev/null; then
     # folder the node's spawn gave it under the node's own project, so a
     # hand-edited config.json never steers the refresh and a sub-project
     # node's pages are indexed where they landed; a direct call reads the
-    # target's config, and a --base target that is no node has none, so the
-    # merging node then names the folder; fail closed when neither read
-    # answers -- a guessed default would refresh, and stage past the footprint
-    # check, whatever ordinary content sits at wiki/ (an unset key answers
-    # empty, and that does mean wiki/)
+    # folder and its project from one config -- the target's, or the merging
+    # node's when the target's cannot be read -- and fails closed when neither
+    # answers: a guessed default, or one config's folder under the other's
+    # project, would refresh, and stage past the footprint check, whatever
+    # ordinary content sits there (an unset key answers empty, which is the
+    # default wiki/ itself)
     if [[ -n "$TARGET_WIKI" ]]; then
         WIKI_DIR="$PARENT_WORKTREE_DIR/$TARGET_WIKI"
     else
-        if ! PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null) \
-            && ! PARENT_WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null); then
-            fail_target "reading the project-wiki folder from the config of $PARENT_BRANCH" \
-                "or $BRANCH failed; name the folder with --target-wiki=<path>"
+        WIKI_PROJECT="$PARENT_PROJECT"
+        if [[ "$PARENT_PROJECT_READ" != true ]] \
+            || ! PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null); then
+            if ! PARENT_WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null) \
+                || ! WIKI_PROJECT=$(fractal config _get project --path="$WORKTREE_DIR" 2>/dev/null); then
+                fail_target "reading the project-wiki folder from the config of $PARENT_BRANCH" \
+                    "or $BRANCH failed; name the folder with --target-wiki=<path>"
+            fi
         fi
-        if [[ "$PARENT_PROJECT" == "." ]]; then
+        if [[ "$WIKI_PROJECT" == "." ]]; then
             WIKI_DIR="$PARENT_WORKTREE_DIR/${PARENT_WIKI:-wiki}"
         else
-            WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/${PARENT_WIKI:-wiki}"
+            WIKI_DIR="$PARENT_WORKTREE_DIR/$WIKI_PROJECT/${PARENT_WIKI:-wiki}"
         fi
     fi
     # a wiki declared at the worktree root encloses every folder, so each
