@@ -43,7 +43,10 @@ the tree exactly as a spawn adds one. A run that ended on its cost budget never
 re-arms silently: a bare `--continue` refuses, naming the spent and armed
 figures, until an explicit `--max-cost` rides it (applied through the parent's
 retune — see [[features/cost/budgets|budgets]]). A tree-wide pause latch makes
-any start refuse until resume.
+any start refuse until resume. A start or continue also refuses, before it
+changes anything, an effort ladder committed on the root branch that the loop's
+boot would refuse (see
+[[features/agents/models_and_effort#The effort ladder|models_and_effort]]).
 
 ## finish and stop
 
@@ -105,7 +108,10 @@ exists, else re-orienting fresh), and credits the paused span back to run and
 iteration deadlines. Resuming a node that is still parking withdraws the pending
 pause instead; if the loop already read the signal it parks anyway, and the next
 resume relaunches it. Resume refuses on a node that is not paused or pausing,
-and refuses under a paused ancestor until that ancestor is resumed first.
+and refuses under a paused ancestor until that ancestor is resumed first. It
+also refuses when the effort ladder committed on the root branch is invalid for
+any node it would relaunch, checked before the latch lifts or any node is
+touched.
 
 ## retire and unretire
 

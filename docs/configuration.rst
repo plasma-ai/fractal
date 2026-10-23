@@ -612,13 +612,18 @@ The loop reads the file as committed on the tree's root branch each time it
 starts or resumes, and holds the ladder for the run. A node editing its own
 copy changes nothing, and a change committed on the root branch takes effect
 at each node's next start or resume. A ladder with a bad shape refuses
-wherever the file is read: the loop's boot, ``fractal init``,
-``fractal commit --init``, each spawn, and the merge footprint check where it
-reads the root branch's copy (for a node in another sub-project than its
-parent, or one whose parent is checked out nowhere). An unknown agent name or a reversed
-ladder refuses at the loop's boot, once the tree's custom agents are
-registered. Fractal does not check the levels against the ones the agent
-accepts, so a level the agent rejects fails the steered launch.
+wherever the file is read: each start or resume, the loop's boot,
+``fractal init``, ``fractal commit --init``, each spawn, and the merge
+footprint check where it reads the root branch's copy (for a node in another
+sub-project than its parent, or one whose parent is checked out nowhere). An
+unknown agent name or a reversed ladder refuses at each start or resume and
+at the loop's boot, once the tree's custom agents are registered. A start or
+resume refuses before it changes anything, checking every node it would
+launch. The boot reads the file again, so a bad ladder committed after that
+check still aborts it on record: a start or continue ends ``exited`` with the
+reason on its run, and a resume stays paused for the next resume. Fractal
+does not check the levels against the ones the agent accepts, so a level the
+agent rejects fails the steered launch.
 
 The cleanup reserve
 -------------------

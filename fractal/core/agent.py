@@ -435,6 +435,10 @@ class Agent:
     # token-priced: cost only via the LiteLLM cache; pricing fetch is fatal
     # at run start
     needs_pricing: bool = False
+    # cost-reporting, but prices a launch its own figure misses (a kill, a
+    # refused figure) via the LiteLLM cache; the run start refreshes a
+    # day-old cache, and a failed fetch only warns
+    wants_pricing: bool = False
     # 'call' (per-invocation figures) or 'thread' (cumulative totals settled
     # against prior sibling steps)
     cost_scope: str = 'call'

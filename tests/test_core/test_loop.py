@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections.abc import Callable, Collection, Iterator
 from typing import Any, Optional
 
@@ -51,6 +52,7 @@ from fractal.exceptions import AgentStreamError, _Abort
 from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
 from fractal.impl.codex import CodexAgent
+from fractal.impl.opencode import OpencodeAgent
 from tests._helpers import (
     _LOCK_HOLDER,
     _age_run,
@@ -101,6 +103,9 @@ __all__ = [
     'test_claude_step_in_a_codex_node_steers_on_the_claude_ladder',
     'test_project_settings_override_the_ladder',
     'test_invalid_effort_setting_fails_boot',
+    'test_launch_verbs_refuse_an_invalid_effort_ladder',
+    'test_tree_resume_refuses_an_invalid_effort_ladder',
+    'test_a_ladder_broken_after_the_launch_check_aborts_the_boot',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
     'test_the_steer_runs_on_what_the_stuck_launch_left',
     'test_a_capped_or_idle_sync_runs_to_its_result',
@@ -140,6 +145,8 @@ __all__ = [
     'test_preflight_abort_honors_a_kill_that_reaped_the_probe',
     'test_boot_reaps_an_orphaned_probe_group',
     'test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model',
+    'test_boot_refreshes_a_day_old_price_table_for_a_claude_step',
+    'test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -857,6 +864,19 @@ def scripted_claude(
                 pass
             process.wait(timeout=5)
             process.stdout.close()
+
+
+@pytest.fixture
+def price_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> Iterator[pathlib.Path]:
+    """Yield a temp pricing-cache path, resetting the process cache around it."""
+    path = tmp_path / 'pricing.json'
+    monkeypatch.setattr(pricing, '_PRICING_CACHE', str(path))
+    pricing._load.cache_clear()
+    yield path
+    pricing._load.cache_clear()
 
 
 # ------ step parsing and discovery
@@ -2472,9 +2492,18 @@ def test_project_settings_override_the_ladder(
     capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
     resumed = _claude_script(_INIT, _RESULT)
     agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
-    loop = ScriptedLoop(loop_node, agent)
-    _commit_settings(loop_node, unchanged)
-    loop.run()
+
+    class _Recommitting(ScriptedLoop):
+        """Commit the edited ladder on the root branch as the first step launches."""
+
+        def _launch(
+            self: _Recommitting, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            if not agent.argvs:
+                _commit_settings(loop_node, unchanged)
+            return super()._launch(step, prompt, **kwargs)
+
+    _Recommitting(loop_node, agent).run()
     assert [_effort(argv) for argv in agent.argvs] == ['high', 'low', 'high']
     assert _step_efforts(loop_node) == ['high', 'low', 'high']
 
@@ -2528,21 +2557,142 @@ def test_project_settings_override_the_ladder(
 )
 def test_invalid_effort_setting_fails_boot(
     loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
     ladders: Any,
     match: str,
 ) -> None:
-    """An invalid committed effort ladder fails the loop's boot, naming the file.
+    """An invalid committed effort ladder aborts the loop's boot, naming the file.
 
     Beyond its shape, a ladder must name a registered agent, and a ladder
     built only from levels its agent declares must list them in the
     agent's own order, lowest first -- a misspelled name would otherwise
     keep the default ladder, and a reversed one would raise the effort.
+    The abort lands on record: the node reads ``exited`` and a closed run
+    row carries the reason.
     """
+    monkeypatch.setenv('_NODE', '')
     _commit_settings(loop_node, {'effort_ladder': ladders})
-    with pytest.raises(ValueError, match=match) as excinfo:
-        MockLoop(loop_node)
-    assert '.fractal/.settings.json' in str(excinfo.value)
-    assert loop_node.branch in str(excinfo.value)
+    loop = MockLoop(loop_node)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    assert re.search(match, run['metadata'])
+    assert '.fractal/.settings.json' in run['metadata']
+    assert loop_node.branch in run['metadata']
+
+
+# a committed ladder naming no registered agent (a misspelled claude)
+_MISSPELLED_LADDER = {
+    'effort_ladder': {'cluade': {'levels': ['low', 'high'], 'floor': 'low'}},
+}
+
+
+@pytest.mark.parametrize(argnames='launch', argvalues=['start', 'continue', 'resume'])
+def test_launch_verbs_refuse_an_invalid_effort_ladder(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    launch: str,
+) -> None:
+    """A start, continue, or resume refuses a bad committed ladder up front.
+
+    The loop's boot aborts on a bad ladder, so each verb runs the boot's
+    own check before it changes anything: the refusal names the setting
+    and its fault, no launch script runs, and the node's status, its
+    rows, and a paused run's credit span are as the verb found them.
+    """
+    node = loop_node
+    _ready_for_launch(node, launch)
+    _commit_settings(node, _MISSPELLED_LADDER)
+    status = node.status()
+    runs = node.db.read('runs')
+    events = node.db.read('events')
+    run_scripts = _stub_run_script(monkeypatch, node)
+    refusal = (
+        r'"effort_ladder\.cluade" in \.fractal/\.settings\.json on .+'
+        r' names no registered agent'
+    )
+    with pytest.raises(ValueError, match=refusal):
+        _launch_verb(node, launch)
+    assert run_scripts == []
+    assert node.status() == status
+    # the event rows hold the pause credit span a resume event would close
+    assert node.db.read('runs') == runs
+    assert node.db.read('events') == events
+
+
+def test_tree_resume_refuses_an_invalid_effort_ladder(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree-wide resume refuses a bad ladder before it releases the tree.
+
+    Every parked loop the resume relaunches reads the ladder at boot, so
+    the refusal lands before the tree's pause latch lifts or any node
+    relaunches.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    user = Node(git_repo)
+    run_scripts = _stub_run_script(monkeypatch, Node)
+    user.pause(reason='brake')
+    # both loops park (simulated -- the loops are stubbed here)
+    parent.status_set('paused')
+    child.status_set('paused')
+    _commit_settings(user, _MISSPELLED_LADDER)
+    events = user.db.read('events')
+    run_scripts.clear()
+    with pytest.raises(ValueError, match='names no registered agent'):
+        user.resume()
+    assert run_scripts == []
+    assert child.pause_latched(tree_only=True) == user.branch
+    assert (parent.status(), child.status()) == ('paused', 'paused')
+    assert user.db.read('events') == events
+
+
+@pytest.mark.parametrize(
+    argnames=('launch', 'status'),
+    argvalues=[
+        pytest.param('start', 'exited', id='start'),
+        pytest.param('continue', 'exited', id='continue'),
+        pytest.param('resume', 'paused', id='resume'),
+    ],
+)
+def test_a_ladder_broken_after_the_launch_check_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    launch: str,
+    status: str,
+) -> None:
+    """A ladder committed bad after the verb's check aborts the boot on record.
+
+    The boot reads the ladder under the preflight abort, so the fault
+    never dies unrecorded with the pane: a start or continue lands
+    ``exited`` with the reason on a closed run row (the status a continue
+    retries from), and a resume stays paused with its run open and the
+    pause credit span, which its resume event closed, open again.
+    """
+    node = loop_node
+    monkeypatch.setenv('_NODE', '')
+    _ready_for_launch(node, launch)
+    _stub_run_script(monkeypatch, node)
+    _launch_verb(node, launch)
+    _commit_settings(node, _MISSPELLED_LADDER)
+    loop = MockLoop(node, continue_=launch == 'continue', resume=launch == 'resume')
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert node.status() == status
+    run = node.record.runs(limit=1)[0]
+    if launch == 'resume':
+        assert run['ended_at'] is None
+        events = node.db.read('events', where={'run_id': run['run_id']})
+        events.sort(key=lambda event: event['event_id'])
+        credit = [event for event in events if event['event'] in ('pause', 'resume')]
+        assert [event['event'] for event in credit] == ['pause', 'resume', 'pause']
+        assert '"effort_ladder.cluade"' in credit[-1]['metadata']
+    else:
+        assert run['status'] == 'exited'
+        assert '"effort_ladder.cluade"' in run['metadata']
 
 
 @pytest.mark.parametrize(
@@ -4476,6 +4626,135 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
     loop._preflight()
     assert refreshed == [None]
     assert 'will not be tracked' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('agents', 'claude'),
+    argvalues=[
+        pytest.param(('claude', None), True, id='node_agent'),
+        pytest.param(('opencode', 'claude'), True, id='step_agent'),
+        pytest.param(('opencode', None), False, id='no_claude'),
+    ],
+)
+@pytest.mark.parametrize(
+    argnames=('age', 'stale'),
+    argvalues=[
+        pytest.param(None, True, id='missing'),
+        pytest.param(2 * 86400, True, id='stale'),
+        pytest.param(60, False, id='fresh'),
+    ],
+)
+def test_boot_refreshes_a_day_old_price_table_for_a_claude_step(
+    loop_node: Node,
+    price_cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    agents: tuple[str, Optional[str]],
+    claude: bool,
+    age: Optional[int],
+    stale: bool,
+) -> None:
+    """A run with a native claude step refreshes a missing or day-old price table.
+
+    A claude launch that ends without its own result figure (killed,
+    capped, paused, or with the figure refused) is priced from its
+    transcript at the table's rates, so the boot fetches the table once
+    when none is cached or the cache is over a day old, whether the
+    claude step runs on the node's agent or a step file's ``agent:``. A
+    fresher cache serves as-is, and a run whose agents all report their
+    own cost and price nothing never fetches.
+    """
+    node_agent, step_agent = agents
+    _configure(loop_node, agent=node_agent)
+    if step_agent is not None:
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            f'---\nagent: {step_agent}\n---\n# PLAN\n\nWork.\n', encoding='utf-8'
+        )
+    # the cache sits `age` seconds old, or is absent
+    if age is not None:
+        price_cache.write_text('{}', encoding='utf-8')
+        stamp = time.time() - age
+        os.utime(price_cache, (stamp, stamp))
+    fetched: list[str] = []
+
+    def retrieve(url: str, filename: str) -> None:
+        fetched.append(url)
+        pathlib.Path(filename).write_text(json.dumps(_CLAUDE_PRICING), encoding='utf-8')
+
+    monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
+    loop = Loop(loop_node)
+    # `sh` stands in for the node agent's binary; neither backend probes
+    backend = ClaudeAgent if node_agent == 'claude' else OpencodeAgent
+    monkeypatch.setattr(loop, '_agent', backend(loop_node, 'sh'))
+    loop._preflight()
+    if claude and stale:
+        # one fetch, and the settle's rates read the fetched table
+        assert fetched == [pricing._PRICING_URL]
+        assert pricing.rates('claude-fable-5') == _CLAUDE_PRICING['claude-fable-5']
+    else:
+        assert fetched == []
+    assert 'Warning:' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('cached', 'warning'),
+    argvalues=[
+        pytest.param(
+            True,
+            'Warning: could not refresh pricing; using cached pricing.json.',
+            id='stale',
+        ),
+        pytest.param(
+            False,
+            'Warning: could not fetch pricing and no cached pricing.json exists;',
+            id='missing',
+        ),
+    ],
+)
+def test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds(
+    loop_node: Node,
+    price_cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    cached: bool,
+    warning: str,
+) -> None:
+    """A claude run whose price refresh fails warns once at boot and runs.
+
+    A native claude launch still books its own result figure, so a fetch
+    that fails costs only the transcript settle its rates: unlike a
+    token-priced run, which cannot price anything without a table, the
+    boot warns once, whether a day-old cache serves or none exists, and
+    every iteration launches without fetching again.
+    """
+    _configure(loop_node, max_iters=2)
+    if cached:
+        price_cache.write_text('{}', encoding='utf-8')
+        stamp = time.time() - 2 * 86400
+        os.utime(price_cache, (stamp, stamp))
+    attempts: list[str] = []
+
+    def retrieve(url: str, filename: str) -> None:
+        attempts.append(url)
+        raise OSError('offline')
+
+    monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
+
+    class BootLoop(MockLoop):
+        """Mock loop that runs the REAL preflight."""
+
+        def _preflight(self: BootLoop) -> None:
+            """Run the base preflight so the boot's refresh executes."""
+            Loop._preflight(self)
+
+    loop = BootLoop(loop_node)
+    # `sh` stands in for the claude binary; native claude runs no probe
+    monkeypatch.setattr(loop, '_agent', ClaudeAgent(loop_node, 'sh'))
+    assert loop.run() == 0
+    # one attempt and one warning at boot, and both iterations ran both steps
+    assert attempts == [pricing._PRICING_URL]
+    assert capsys.readouterr().err.count(warning) == 1
+    assert len(loop.launched) == 4
 
 
 def test_preflight_logs_what_a_passed_probe_spent(
@@ -9040,9 +9319,34 @@ def _configure(node: Node, **values: Any) -> None:
     path.write_text(json.dumps(config, indent=2), encoding='utf-8')
 
 
+def _launch_verb(node: Node, launch: str) -> str:
+    """Run the ``launch`` verb (``start``, ``continue``, or ``resume``) on ``node``."""
+    if launch == 'resume':
+        return node.resume()
+    return node.start(continue_run=launch == 'continue')
+
+
 def _locked_list(**kwargs: Any) -> list[Any]:
     """Fail the live subtree probe like a contended central-DB read."""
     raise sqlite3.OperationalError('database is locked')
+
+
+def _ready_for_launch(node: Node, launch: str) -> None:
+    """Leave ``node`` where ``launch`` starts from: idle, settled, or paused.
+
+    A continue starts from a run that exited; a resume from an open run
+    parked with its pause credit span open.
+    """
+    if launch == 'continue':
+        run_id = node.record.run_start()
+        node.record.run_end(run_id=run_id, status='exited', exit_code=1)
+        node.status_set('exited')
+    if launch == 'resume':
+        node.status_set('active')
+        node.record.run_start()
+        pause_id = node.record.event_start('pause')
+        node.record.event_end(event_id=pause_id, status='completed')
+        node.status_set('paused')
 
 
 def _record_unpriced_step(node: Node, *, run_id: int) -> None:

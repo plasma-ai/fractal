@@ -250,16 +250,16 @@ may include breaking changes, each listed under a Breaking heading.
   The worktree-root file passes as init's own edit — at a child's
   `fractal commit --init` baseline, at a scoped commit, and at the `node merge`
   footprint check — when HEAD's content is followed by the wiki tool's index
-  lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`), by those lines
-  and page lines (`# Wiki page merge driver`, `**/*.md merge=wiki`), or by the
-  page lines alone over a file already holding `**/_index.md merge=wiki`, with
-  LF or CRLF line endings. Any other added or removed line still makes the file
-  an ordinary out-of-scope path. The memory wiki's own `.gitattributes` commits
-  with the node's records, so a child's baseline carries it; a `.gitattributes`
-  anywhere else in a node's data directory is withheld and named. `fractal init`
-  on an adopted wiki warns when the repo-root `.gitattributes` lacks
-  `**/_index.md merge=wiki` or the wiki's own `.gitattributes` lacks
-  `*.md merge=wiki` as a whole line, naming each missing line and its file.
+  lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`), with LF or
+  CRLF line endings. A page mapping there would take over the merge of every
+  Markdown file in the repository, so a page line, like any other added or
+  removed line, still makes the file an ordinary out-of-scope path. The memory
+  wiki's own `.gitattributes` commits with the node's records, so a child's
+  baseline carries it; a `.gitattributes` anywhere else in a node's data
+  directory is withheld and named. `fractal init` on an adopted wiki warns when
+  the repo-root `.gitattributes` lacks `**/_index.md merge=wiki` or the wiki's
+  own `.gitattributes` lacks `*.md merge=wiki` as a whole line, naming each
+  missing line and its file.
 - A Claude step stuck at a thinking cap is steered one effort level lower: a
   `max` step's steer runs at `xhigh`, an `xhigh` step's at `high`. The step's
   effort is its `effort:` frontmatter, else the node's `effort`, else Claude's
@@ -354,6 +354,14 @@ may include breaking changes, each listed under a Breaking heading.
 - A killed Claude step's settle also reads the transcripts of a workflow's
   sub-agents, kept a folder deeper under `subagents/workflows/`, and skips
   sub-agent transcripts last written before the launch started.
+- A run with a native Claude step refreshes the price table
+  (`~/.fractal/pricing.json`) at run start when it is missing or more than a day
+  old. A Claude launch that ends without its result figure (killed, capped,
+  paused, or with the figure refused) is priced from its transcript at the
+  table's rates, but only a codex or openrouter-routed step refreshed the table,
+  so on a host with no cache, or a stale one missing a new model, such a launch
+  booked no cost and armed caps counted it as $0. A failed fetch only warns, and
+  the run goes on.
 - A Claude step's spend after its result frame is booked: Claude Code outlives
   its result while background sub-agents run, and the replies they complete
   after the result were never counted. Once the process ends — exit 0, a
@@ -524,8 +532,9 @@ may include breaking changes, each listed under a Breaking heading.
   committed bytes, `updated:` stamp included, and the node's own edits to an
   index survive. In the working tree the rows come back at the next
   `wiki update`. A failed rebuild warns in one line and the commit lands with
-  the indexes as staged. The refresh indexed every file on disk, so each refused
-  file's row dangled in every clean checkout.
+  the indexes as staged, the working tree still matching them. The refresh
+  indexed every file on disk, so each refused file's row dangled in every clean
+  checkout.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The
@@ -640,6 +649,15 @@ may include breaking changes, each listed under a Breaking heading.
   its scope from outside it, naming the old path, as the merge's footprint check
   does. The scope check read git's rename-detecting diff, which names only a
   rename's new path, so the deletion outside the scope committed unchecked.
+- On git 2.54 and 2.55, `fractal commit` stages the new files of a node in a
+  sub-project: a scoped child's seed at `--init`, a new file in its scope at a
+  work commit, and the project wiki a user node's baseline creates there. Those
+  git versions misread fractal's runtime-file excludes once the paths a commit
+  stages share a directory of five or more characters (`backend`, `apps/web`,
+  but not `app`), so the commits took edits to tracked files and no new file,
+  without a warning. The new work reached history only through the loop's
+  backstop save, which skips the lint and the scope check, and a user baseline
+  that left the wiki untracked made the next `node init` in that project refuse.
 - `fractal destroy --help` and `fractal reset --help` say the command deletes
   the tree's local node branches, unmerged work included, while the root branch
   and remote branches remain. Only the confirmation prompt said so, and
@@ -657,6 +675,17 @@ may include breaking changes, each listed under a Breaking heading.
   force-added, and the baseline's output names it. The baseline force-added the
   whole seed directory, so every ignored file in it rode the commit onto the
   top-level branch.
+- `fractal node start` (with or without `--continue`), `fractal node resume`,
+  and `fractal resume` refuse an invalid effort ladder committed on the tree's
+  root branch before they change anything, naming the setting and its fault; a
+  resume checks every node it would relaunch. Such a ladder (a bad shape, an
+  unregistered agent, or the agent's own levels out of order) killed the loop's
+  boot after the command reported success, with nothing recorded: a fresh start
+  stayed `idle`, a continue stayed `idle` and refused its own retry, and a
+  resume stayed `paused` with the parked time charged against the run's
+  deadlines. A ladder committed after the command's check aborts the boot on
+  record: a start or continue ends `exited` with the reason on its run, and a
+  resume stays paused for the next resume.
 
 ## [1.3.0] - 2026-09-17
 

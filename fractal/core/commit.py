@@ -594,15 +594,14 @@ def commit_user_init(node: Node, message: str) -> str:
         denied = _estate_denied(node, seed, estates)
         if estates:
             withheld = [f':(exclude,literal){node.worktree / path}' for path in denied]
-            # add from inside the seed, so every pathspec shares its prefix
-            # (git 2.54 and 2.55 can stage nothing for a nested directory
-            # pathspec beside an exclude outside it), and first, so a failure
-            # leaves the index untouched; only git's refusal of an ignored
-            # seed (exit 1, the hold the record pass overrides) is tolerated --
-            # any other failure fails the baseline rather than land it without
-            # the seed; LC_ALL pins the refusal's wording
-            cmd = ['git', '-C', f'{node.node_dir}', 'add', '--', '.']
-            cmd += [*_STAGE_EXCLUDES, *withheld]
+            # add from the seed's parent, the directory git strips, as _sweep
+            # adds (older git can stage no new file otherwise), and first, so
+            # a failure leaves the index untouched; only git's refusal of an
+            # ignored seed (exit 1, the hold the record pass overrides) is
+            # tolerated -- any other failure fails the baseline rather than
+            # land it without the seed; LC_ALL pins the refusal's wording
+            cmd = ['git', '-C', f'{node.node_dir.parent}', 'add', '--']
+            cmd += [f':(literal){node.node_dir}', *_STAGE_EXCLUDES, *withheld]
             env = {**os.environ, 'LC_ALL': 'C'}
             result = subprocess.run(cmd, capture_output=True, text=True, env=env)
             refusal = 'The following paths are ignored by one of your .gitignore files'
@@ -616,10 +615,9 @@ def commit_user_init(node: Node, message: str) -> str:
         # -f mirrors the work commits' record pass: the wiki's paths are
         # explicit and exclude-filtered, so an external ignore rule cannot
         # silently eat the wiki
-        forced = [f':(literal){path}' for path in paths if path != seed_dir]
+        forced = [node.worktree / path for path in paths if path != seed_dir]
         if forced:
-            cmd = ['add', '-f', '--', *forced, *_STAGE_EXCLUDES]
-            fractal.util.git.run(cmd, cwd=node.worktree)
+            _sweep(node, forced, force=True)
         notices[:], _ = _stage_records(node, seed, estates, denied)
 
     _stage_paths()
@@ -940,15 +938,11 @@ def _scope_check(node: Node, bounds: Scope) -> None:
 
 
 #: the merge-driver lines a worktree-root .gitattributes may gain as init's
-#: edit: the index lines the wiki tool writes there, then page lines, which
-#: assign only the wiki's merge driver; merge.sh's footprint check mirrors
-#: them for the target's staged copy
-_ATTRIBUTES_INIT_LINES = (
-    '# Wiki index merge driver',
-    '**/_index.md merge=wiki',
-    '# Wiki page merge driver',
-    '**/*.md merge=wiki',
-)
+#: edit: the index lines the wiki tool writes there, and no page lines -- the
+#: tool maps pages in each wiki root's own file, and a page mapping at the
+#: root would take over the merge of every Markdown file in the repository;
+#: merge.sh's footprint check mirrors them for the target's staged copy
+_ATTRIBUTES_INIT_LINES = ('# Wiki index merge driver', '**/_index.md merge=wiki')
 #: the page merge-driver block the wiki tool writes to each wiki root's own
 #: .gitattributes
 _WIKI_ROOT_ATTRIBUTES_LINES = ('# Wiki page merge driver', '*.md merge=wiki')
@@ -960,12 +954,11 @@ def _attributes_is_init_edit(node: Node) -> bool:
     Init writes the memory wiki's index ``merge=wiki`` attribute at the
     worktree root when the base lacks it -- an artifact outside every scope
     root, committable exactly while it is init's own uncommitted edit:
-    HEAD's content followed by the block's index lines, its index and page
-    lines, or its page lines alone over a base already mapping the index.
-    The match is line-exact, in either line ending, and covers the whole
-    change, so an attribute line assigning some other merge driver, or any
-    other line riding beside init's, makes the file an ordinary
-    out-of-scope path.
+    HEAD's content followed by the wiki tool's index lines. The match is
+    line-exact, in either line ending, and covers the whole change, so a
+    page line, an attribute line assigning some other merge driver, or any
+    other line riding beside init's makes the file an ordinary out-of-scope
+    path.
 
     Args:
         node: The node whose worktree to check.
@@ -987,9 +980,7 @@ def _attributes_is_init_edit(node: Node) -> bool:
     if lines[: len(committed_lines)] != committed_lines:
         return False
     added = [line for line in lines[len(committed_lines) :] if line]
-    # the whole block, its page lines, or its index lines alone
-    block = list(_ATTRIBUTES_INIT_LINES)
-    return added in (block, block[2:], block[:2])
+    return added == list(_ATTRIBUTES_INIT_LINES)
 
 
 #: estate subdirectories whose contents are node records canon requires
@@ -1125,7 +1116,6 @@ def _stage(
     # is already outside the sweep anyway
     estates = _estate_roots(node, fractal_prefix)
     denied = _estate_denied(node, fractal_prefix, estates)
-    withheld = [f':(exclude,literal){path}' for path in denied]
     # heal a baseline that force-tracked the wiki tool's self-ignored derived
     # cache: drop it from the index -- never the disk, the tool owns the bytes
     # -- so this commit converges the tree and the cache's own ignore keeps it
@@ -1145,31 +1135,73 @@ def _stage(
         paths = []
         for scope in commit_scopes:
             if (worktree / scope).exists():
-                paths.append(f'{worktree / scope}')
+                paths.append(worktree / scope)
         # the shared project wiki is committable regardless of scope
         if (worktree / wiki_prefix).is_dir():
-            paths.append(f'{worktree / wiki_prefix}')
+            paths.append(worktree / wiki_prefix)
         # init's own .gitattributes edit rides the sweep
         if _attributes_is_init_edit(node):
-            attributes = worktree / '.gitattributes'
-            paths.append(f'{attributes}')
+            paths.append(worktree / '.gitattributes')
         if paths:
-            # literal pathspec magic: a glob char in an on-disk path (e.g. a
-            # bracketed project dir) must not widen or empty the match
-            specs = [f':(literal){path}' for path in paths]
-            cmd = ['add', *specs, *_STAGE_EXCLUDES, *withheld]
-            fractal.util.git.run(cmd, cwd=worktree)
+            _sweep(node, paths, denied=denied)
         # the estates ride their own plain add: it must be able to fail
         # (everything under it ignored) without unstaging the scope sweep
         folder = worktree / fractal_prefix
         if folder.is_dir():
-            cmd = ['add', f':(literal){folder}', *_STAGE_EXCLUDES, *withheld]
-            fractal.util.git.run(cmd, cwd=worktree, check=False)
+            _sweep(node, [folder], denied=denied, check=False)
     else:
-        cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
-        fractal.util.git.run(cmd, cwd=worktree)
+        _sweep(node, [worktree], denied=denied)
     notices, unstaged = _stage_records(node, fractal_prefix, estates, denied)
     return notices, denied + unstaged
+
+
+def _sweep(
+    node: Node,
+    paths: list[pathlib.Path],
+    *,
+    denied: Iterable[str] = (),
+    force: bool = False,
+    check: bool = True,
+) -> None:
+    """Add paths past the stage excludes, from the directory git strips.
+
+    git before 2.56 strips the positive pathspecs' common directory prefix
+    from each exclude pathspec as well as from the path it tests, so an
+    exclude that does not begin with that prefix (``**/.db`` beside
+    ``backend/src`` and ``backend/wiki``) can match every untracked file:
+    the add stages edits to tracked files but no new file, and says
+    nothing. From that directory git prefixes every exclude with it, and
+    the strip is exact on every version. Every path sits strictly below
+    the directory, so a ``**/<name>`` exclude, which needs a slash before
+    the name, still matches an entry directly inside a path.
+
+    Args:
+        node: The node whose worktree holds the paths.
+        paths: Absolute paths to add, each present on disk.
+        denied: Worktree-relative estate paths the content law withholds.
+        force: Add ignored paths too.
+        check: Raise ``RuntimeError`` on a failed add.
+
+    """
+    # the deepest directory holding every path's parent -- the prefix git
+    # strips -- and the worktree root for the worktree itself
+    parents = [path.parent for path in paths]
+    directory = pathlib.Path(os.path.commonpath(parents))
+    if not directory.is_relative_to(node.worktree):
+        directory = node.worktree
+    # literal pathspec magic: a glob char in an on-disk path (e.g. a
+    # bracketed project dir) must not widen or empty the match
+    specs = [f':(literal){path}' for path in paths]
+    # a withheld path outside the directory matches nothing the add reaches,
+    # and named anyway it would not begin with the prefix git strips
+    withheld = [
+        f':(exclude,literal){node.worktree / path}'
+        for path in denied
+        if (node.worktree / path).is_relative_to(directory)
+    ]
+    cmd = ['add', '-f'] if force else ['add']
+    cmd += ['--', *specs, *_STAGE_EXCLUDES, *withheld]
+    fractal.util.git.run(cmd, cwd=directory, check=check)
 
 
 def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
@@ -1426,8 +1458,11 @@ def _restage_memory_indexes(
     index whose rebuild differs from HEAD's copy only in its ``updated:``
     stamp keeps HEAD's bytes, so a refused file never moves the stamp. Each
     index whose bytes differ from what is staged is written back to the git
-    index and the working tree alike, keeping the tree clean for the
-    loop's dirty check; page writes are discarded with the temp tree.
+    index and then the working tree, keeping the tree clean for the loop's
+    dirty check: a failed staging leaves both as they were, and a failed
+    tree write restages what the tree holds for every index it did not
+    reach, so a failure never leaves the two apart. Page writes are
+    discarded with the temp tree.
 
     Args:
         node: The node whose staged memory to rebuild.
@@ -1538,21 +1573,61 @@ def _restage_memory_indexes(
             if any(part.startswith('.') for part in relative.parts):
                 continue
             rebuilt[f'{prefix}/{relative.as_posix()}'] = index.read_bytes()
-    # write back each index whose bytes differ from what is staged -- HEAD's
+    # collect each index whose bytes differ from what is staged -- HEAD's
     # bytes where the rebuild matches them but for the stamp
-    written = []
+    changed: dict[str, bytes] = {}
     for path, data in sorted(rebuilt.items()):
         committed = _tree_bytes(node, 'HEAD', path)
         if committed is not None and _same_but_stamp(data, committed):
             data = committed
-        if data == before.get(path):
-            continue
-        fractal.util.filesystem.write_atomic(worktree / path, data)
-        written.append(path)
-    if written:
-        specs = [f':(literal){worktree / path}' for path in written]
-        fractal.util.git.run(['add', '-f', *specs], cwd=worktree)
-    return bool(written)
+        if data != before.get(path):
+            changed[path] = data
+    if not changed:
+        return False
+    # stage the changes before the tree sees them: hash each into the object
+    # store through its path's filters, as an add does, then repoint the git
+    # index in one update, at each entry's staged mode (raw git calls
+    # bypassing util.git.run -- the helper feeds no stdin); the entries carry
+    # no stat data until the commit refreshes them, before any hook runs
+    specs = [f':(literal){worktree / path}' for path in changed]
+    cmd = ['ls-files', '-s', '-z', '--', *specs]
+    raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
+    modes: dict[str, str] = {}
+    for entry in filter(None, os.fsdecode(raw).split('\0')):
+        info, path = entry.split('\t', 1)
+        modes[path] = info.split(' ', 1)[0]
+    payload = b''
+    for path, data in changed.items():
+        cmd = [
+            'git',
+            '-C',
+            f'{worktree}',
+            'hash-object',
+            '-w',
+            f'--path={path}',
+            '--stdin',
+        ]
+        result = subprocess.run(cmd, input=data, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(f'git hash-object failed (exit {result.returncode})')
+        blob = result.stdout.decode().strip()
+        mode = modes.get(path, '100644')
+        payload += os.fsencode(f'{mode} {blob}\t{path}') + b'\0'
+    cmd = ['git', '-C', f'{worktree}', 'update-index', '-z', '--index-info']
+    result = subprocess.run(cmd, input=payload, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(f'git update-index failed (exit {result.returncode})')
+    # then write the tree; a failed write restages what the tree holds for
+    # each index it did not reach, so the tree and the git index agree
+    paths = list(changed)
+    for done, path in enumerate(paths):
+        try:
+            fractal.util.filesystem.write_atomic(worktree / path, changed[path])
+        except Exception:
+            specs = [f':(literal){worktree / rest}' for rest in paths[done:]]
+            fractal.util.git.run(['add', '-f', '--all', '--', *specs], cwd=worktree)
+            raise
+    return True
 
 
 #: an index frontmatter's ``updated:`` stamp line

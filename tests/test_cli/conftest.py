@@ -67,9 +67,15 @@ def _cli_home(tmp_path_factory: pytest.TempPathFactory) -> None:
     threaded to ``_cli_env`` through the module global, so plain-function
     callers (``_run`` and the launch helpers) never ride the fixture graph.
     Tests that need a specific ``HOME`` overlay their own via ``extra``.
+    The home carries a fresh, empty price table: it prices nothing, as a
+    missing one does, and a loop boot's max-age refresh reads it as
+    current instead of fetching over the network.
     """
     global _CLI_HOME
     _CLI_HOME = str(tmp_path_factory.mktemp('cli_home'))
+    cache = pathlib.Path(_CLI_HOME) / '.fractal' / 'pricing.json'
+    cache.parent.mkdir()
+    cache.write_text('{}', encoding='utf-8')
 
 
 def _cli_env(**extra: str) -> dict:

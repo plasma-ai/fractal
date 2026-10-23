@@ -30,6 +30,7 @@ __all__ = [
     'test_commit_pushes_unless_local',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
     'test_user_init_baseline_fails_when_its_seed_cannot_stage',
+    'test_sub_project_user_baseline_commits_its_wiki',
     'test_child_baseline_carries_only_its_seed',
     'test_child_baseline_refuses_a_file_moved_into_its_seed',
     'test_child_baseline_commits_its_memory_wiki_attributes',
@@ -66,6 +67,7 @@ __all__ = [
     'test_dot_scope_root_bounds_the_whole_project',
     'test_scoped_commit_refuses_a_file_moved_into_scope',
     'test_sub_project_commit_boundary',
+    'test_scoped_sub_project_node_commits_its_new_files',
     'test_wiki_setting_moves_the_scope_exemption',
     'test_commit_refuses_an_invalid_stored_wiki',
     'test_scoped_commit_handles_non_ascii_and_whitespace_paths',
@@ -102,8 +104,10 @@ _SHADOW_WARNING = (
 )
 
 # the merge-driver lines a worktree-root .gitattributes passes with as init's
-# edit: the index lines the wiki tool writes there, and the page lines
+# edit: the index lines the wiki tool writes there
 _WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
+# a repo-wide page merge-driver block, which would take over the merge of
+# every Markdown file
 _WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
 # the page merge-driver block the wiki tool writes to each wiki root's own
 # .gitattributes
@@ -321,6 +325,36 @@ def test_user_init_baseline_fails_when_its_seed_cannot_stage(
     # nothing committed and nothing left staged
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     assert _git(repo, 'diff', '--cached', '--name-only').stdout == ''
+
+
+@pytest.mark.parametrize('project', ['backend', 'apps/web'])
+def test_sub_project_user_baseline_commits_its_wiki(
+    tmp_path: pathlib.Path,
+    project: str,
+) -> None:
+    """A sub-project's user baseline commits the wiki init scaffolds there.
+
+    With the root ``.gitattributes`` already mapping the wiki indexes, every
+    path the baseline adds sits in the project's directory, beside the stage
+    excludes; git before 2.56 strips that shared directory from each exclude
+    as well, so an add run from the worktree root stages no new file once
+    the directory is no shorter than an exclude. The new wiki must land
+    regardless: it is the base-branch precondition every spawn in the
+    project checks.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # the root attributes already map the wiki indexes, so init's edit
+    # leaves the file as committed and the baseline's add skips it
+    (repo / '.gitattributes').write_text(_WIKI_INDEX_LINES, encoding='utf-8')
+    _git(repo, 'add', '.gitattributes')
+    _git(repo, 'commit', '-m', 'map the wiki indexes')
+    Node(repo).init(path=project, agent='claude', user=True)
+    output = Node(repo).commit('configure', init=True)
+    assert output.endswith('Committed user node baseline on main.')
+    tracked = _git(repo, 'ls-files', project).stdout
+    assert f'{project}/wiki/_index.md' in tracked
+    # the committed wiki admits a child into the project
+    Node(repo).init(name='task', agent='claude', local=True)
 
 
 def test_child_baseline_carries_only_its_seed(tmp_path: pathlib.Path) -> None:
@@ -1897,6 +1931,78 @@ def test_a_failed_memory_index_rebuild_never_fails_the_commit(
     assert '[[dump.tar' in index
 
 
+@pytest.mark.parametrize('fault', ['index-lock', 'read-only-memory'])
+def test_a_failed_memory_index_write_back_leaves_the_tree_as_staged(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    """A rebuild that fails to write back leaves the tree matching the git index.
+
+    The rebuilt indexes reach the git index and the working tree alike, and
+    a failure in either write leaves the two agreeing: another process
+    holding the index lock fails the staging, and a read-only memory folder
+    fails the tree write. The commit lands the indexes as staged, with the
+    warning, and the tree reads back clean, so the loop's dirty check finds
+    nothing of the rebuild's for a backstop to save.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    # the lock another git process holds while it writes the git index
+    git_path = _git(project_dir, 'rev-parse', '--git-path', 'index.lock').stdout
+    lock = project_dir / git_path.strip()
+
+    # raise the fault for the rebuild's write-back, and lift it for the commit
+    def _fault(raised: bool) -> None:
+        if fault == 'read-only-memory':
+            memory.chmod(0o555 if raised else 0o755)
+        elif raised:
+            lock.touch()
+        else:
+            lock.unlink(missing_ok=True)
+
+    real_run = subprocess.run
+
+    def _run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(cmd, list) and cmd[:1] == ['git'] and 'commit' in cmd:
+            _fault(raised=False)
+        result = real_run(cmd, *args, **kwargs)
+        # the rebuild's wiki run is the only one outside the worktree
+        is_update = isinstance(cmd, list) and cmd[1:2] == ['update']
+        if is_update and pathlib.Path(cmd[0]).name == 'wiki':
+            path = pathlib.Path(cmd[2].removeprefix('--path='))
+            if not path.is_relative_to(project_dir):
+                _fault(raised=True)
+        return result
+
+    monkeypatch.setattr(subprocess, 'run', _run)
+    head_before = _head(project_dir)
+    result = node.commit('notes beside a refused archive')
+
+    assert _head(project_dir) != head_before
+    warnings = [
+        line
+        for line in result.splitlines()
+        if line.startswith('Warning: memory index not rebuilt')
+    ]
+    assert len(warnings) == 1, result
+    index = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert '[[dump.tar' in index
+    assert _git(project_dir, 'diff', '--name-only').stdout == ''
+    node.commit(check=True)
+
+
 # ------ scope boundaries
 
 
@@ -2141,6 +2247,58 @@ def test_sub_project_commit_boundary(
     assert tracked == inside
 
 
+@pytest.mark.parametrize('project', ['backend', 'apps/web'])
+def test_scoped_sub_project_node_commits_its_new_files(
+    tmp_path: pathlib.Path,
+    project: str,
+) -> None:
+    """A scoped node in a sub-project commits every new file it stages.
+
+    The baseline's estate add and a work commit's scope sweep stage paths
+    sharing the project's directory, beside the stage excludes; git before
+    2.56 strips that shared directory from each exclude as well, so an add
+    run from the worktree root stages no new file once the directory is no
+    shorter than an exclude. The baseline must land every seed file, and a
+    work commit the new file in its scope, however long the project's path
+    is.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # a committed sub-project wiki -- the base-ref precondition for the init
+    index = repo / project / 'wiki' / '_index.md'
+    index.parent.mkdir(parents=True)
+    index.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+    _git(repo, 'add', project)
+    _git(repo, 'commit', '-m', 'add the project wiki')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        path=project,
+        scope=['src'],
+    )
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    worktree = node.worktree
+    # the baseline commits every seed file, so the tree reads clean
+    node.commit('configure', init=True)
+    node.commit(check=True)
+    # stub the lint gate (not under test) so staging alone decides
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+    # a new file in scope rides the work commit
+    module = worktree / project / 'src' / 'module.py'
+    module.parent.mkdir()
+    module.write_text('VALUE = 1\n', encoding='utf-8')
+    node.commit('add a module')
+    result = _git(worktree, 'ls-files', f'{project}/src')
+    assert result.stdout.split() == [f'{project}/src/module.py']
+    node.commit(check=True)
+
+
 @pytest.mark.parametrize(
     argnames=('root_wiki', 'wiki', 'project', 'exempt', 'stray'),
     argvalues=[
@@ -2352,20 +2510,13 @@ def test_scoped_child_baseline_commits_init_gitattributes(
 @pytest.mark.parametrize(
     argnames=('base', 'edit', 'admitted'),
     argvalues=[
-        pytest.param(None, _WIKI_INDEX_LINES + _WIKI_PAGE_LINES, True, id='block'),
+        pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
         pytest.param(
             '*.md text\n',
-            '\n' + _WIKI_INDEX_LINES + _WIKI_PAGE_LINES,
+            '\n' + _WIKI_INDEX_LINES,
             True,
-            id='block-after-own-lines',
+            id='index-lines-after-own-lines',
         ),
-        pytest.param(
-            '*.md text\n\n' + _WIKI_INDEX_LINES,
-            _WIKI_PAGE_LINES,
-            True,
-            id='page-lines',
-        ),
-        pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
         pytest.param(
             '*.png binary\r\n',
             '\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
@@ -2380,13 +2531,31 @@ def test_scoped_child_baseline_commits_init_gitattributes(
         ),
         pytest.param(
             None,
-            _WIKI_INDEX_LINES + _WIKI_PAGE_LINES + '*.bin binary\n',
+            _WIKI_INDEX_LINES + '\n' + _WIKI_PAGE_LINES,
+            False,
+            id='repo-wide-page-lines',
+        ),
+        pytest.param(
+            '*.md text\n\n' + _WIKI_INDEX_LINES,
+            '\n' + _WIKI_PAGE_LINES,
+            False,
+            id='page-lines-alone',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '\n' + _WIKI_ROOT_PAGE_LINES,
+            False,
+            id='wiki-root-page-lines',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '*.bin binary\n',
             False,
             id='foreign-line',
         ),
         pytest.param(
             None,
-            _WIKI_INDEX_LINES + _WIKI_PAGE_LINES.replace('=wiki', '=union'),
+            _WIKI_INDEX_LINES.replace('=wiki', '=union'),
             False,
             id='changed-line',
         ),
@@ -2402,12 +2571,13 @@ def test_scoped_child_baseline_admits_only_the_wiki_attributes_edit(
 
     The wiki tool appends its index lines to HEAD's copy, in the file's own
     line ending: CRLF when the file already holds a CRLF line. That is
-    init's own edit, and so are the page lines, after the index lines or
-    alone over a file already mapping the index. A scoped child's baseline
-    sweeps the edit in although the file sits outside every scope root. A
-    foreign line beside the block, or the block with a line changed, makes
-    the file an ordinary out-of-scope path, which the baseline refuses by
-    name.
+    init's own edit, which a scoped child's baseline sweeps in although the
+    file sits outside every scope root. The tool maps pages in each wiki
+    root's own file, never this one, where a page line in either spelling
+    would take over the merge of every Markdown file in the repository. So
+    page lines, beside the index lines or alone, a foreign line, or the
+    index lines with one changed make the file an ordinary out-of-scope
+    path, which the baseline refuses by name.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     if base is not None:
