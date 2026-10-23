@@ -485,6 +485,7 @@ class ClaudeAgent(Agent):
     can_fork = True
     mints_session = False
     needs_pricing = False
+    wants_pricing = True
     cost_scope = 'call'
     enforces_budget = True
     reports_progress = True

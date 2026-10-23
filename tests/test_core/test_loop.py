@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections.abc import Callable, Collection, Iterator
 from typing import Any, Optional
 
@@ -51,6 +52,7 @@ from fractal.exceptions import AgentStreamError, _Abort
 from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
 from fractal.impl.codex import CodexAgent
+from fractal.impl.opencode import OpencodeAgent
 from tests._helpers import (
     _LOCK_HOLDER,
     _age_run,
@@ -143,6 +145,8 @@ __all__ = [
     'test_preflight_abort_honors_a_kill_that_reaped_the_probe',
     'test_boot_reaps_an_orphaned_probe_group',
     'test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model',
+    'test_boot_refreshes_a_day_old_price_table_for_a_claude_step',
+    'test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -839,6 +843,19 @@ def scripted_claude(
                 pass
             process.wait(timeout=5)
             process.stdout.close()
+
+
+@pytest.fixture
+def price_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> Iterator[pathlib.Path]:
+    """Yield a temp pricing-cache path, resetting the process cache around it."""
+    path = tmp_path / 'pricing.json'
+    monkeypatch.setattr(pricing, '_PRICING_CACHE', str(path))
+    pricing._load.cache_clear()
+    yield path
+    pricing._load.cache_clear()
 
 
 # ------ step parsing and discovery
@@ -4574,6 +4591,135 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
     loop._preflight()
     assert refreshed == [None]
     assert 'will not be tracked' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('agents', 'claude'),
+    argvalues=[
+        pytest.param(('claude', None), True, id='node_agent'),
+        pytest.param(('opencode', 'claude'), True, id='step_agent'),
+        pytest.param(('opencode', None), False, id='no_claude'),
+    ],
+)
+@pytest.mark.parametrize(
+    argnames=('age', 'stale'),
+    argvalues=[
+        pytest.param(None, True, id='missing'),
+        pytest.param(2 * 86400, True, id='stale'),
+        pytest.param(60, False, id='fresh'),
+    ],
+)
+def test_boot_refreshes_a_day_old_price_table_for_a_claude_step(
+    loop_node: Node,
+    price_cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    agents: tuple[str, Optional[str]],
+    claude: bool,
+    age: Optional[int],
+    stale: bool,
+) -> None:
+    """A run with a native claude step refreshes a missing or day-old price table.
+
+    A claude launch that ends without its own result figure (killed,
+    capped, paused, or with the figure refused) is priced from its
+    transcript at the table's rates, so the boot fetches the table once
+    when none is cached or the cache is over a day old, whether the
+    claude step runs on the node's agent or a step file's ``agent:``. A
+    fresher cache serves as-is, and a run whose agents all report their
+    own cost and price nothing never fetches.
+    """
+    node_agent, step_agent = agents
+    _configure(loop_node, agent=node_agent)
+    if step_agent is not None:
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            f'---\nagent: {step_agent}\n---\n# PLAN\n\nWork.\n', encoding='utf-8'
+        )
+    # the cache sits `age` seconds old, or is absent
+    if age is not None:
+        price_cache.write_text('{}', encoding='utf-8')
+        stamp = time.time() - age
+        os.utime(price_cache, (stamp, stamp))
+    fetched: list[str] = []
+
+    def retrieve(url: str, filename: str) -> None:
+        fetched.append(url)
+        pathlib.Path(filename).write_text(json.dumps(_CLAUDE_PRICING), encoding='utf-8')
+
+    monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
+    loop = Loop(loop_node)
+    # `sh` stands in for the node agent's binary; neither backend probes
+    backend = ClaudeAgent if node_agent == 'claude' else OpencodeAgent
+    monkeypatch.setattr(loop, '_agent', backend(loop_node, 'sh'))
+    loop._preflight()
+    if claude and stale:
+        # one fetch, and the settle's rates read the fetched table
+        assert fetched == [pricing._PRICING_URL]
+        assert pricing.rates('claude-fable-5') == _CLAUDE_PRICING['claude-fable-5']
+    else:
+        assert fetched == []
+    assert 'Warning:' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('cached', 'warning'),
+    argvalues=[
+        pytest.param(
+            True,
+            'Warning: could not refresh pricing; using cached pricing.json.',
+            id='stale',
+        ),
+        pytest.param(
+            False,
+            'Warning: could not fetch pricing and no cached pricing.json exists;',
+            id='missing',
+        ),
+    ],
+)
+def test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds(
+    loop_node: Node,
+    price_cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    cached: bool,
+    warning: str,
+) -> None:
+    """A claude run whose price refresh fails warns once at boot and runs.
+
+    A native claude launch still books its own result figure, so a fetch
+    that fails costs only the transcript settle its rates: unlike a
+    token-priced run, which cannot price anything without a table, the
+    boot warns once, whether a day-old cache serves or none exists, and
+    every iteration launches without fetching again.
+    """
+    _configure(loop_node, max_iters=2)
+    if cached:
+        price_cache.write_text('{}', encoding='utf-8')
+        stamp = time.time() - 2 * 86400
+        os.utime(price_cache, (stamp, stamp))
+    attempts: list[str] = []
+
+    def retrieve(url: str, filename: str) -> None:
+        attempts.append(url)
+        raise OSError('offline')
+
+    monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
+
+    class BootLoop(MockLoop):
+        """Mock loop that runs the REAL preflight."""
+
+        def _preflight(self: BootLoop) -> None:
+            """Run the base preflight so the boot's refresh executes."""
+            Loop._preflight(self)
+
+    loop = BootLoop(loop_node)
+    # `sh` stands in for the claude binary; native claude runs no probe
+    monkeypatch.setattr(loop, '_agent', ClaudeAgent(loop_node, 'sh'))
+    assert loop.run() == 0
+    # one attempt and one warning at boot, and both iterations ran both steps
+    assert attempts == [pricing._PRICING_URL]
+    assert capsys.readouterr().err.count(warning) == 1
+    assert len(loop.launched) == 4
 
 
 def test_preflight_logs_what_a_passed_probe_spent(

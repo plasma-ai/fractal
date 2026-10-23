@@ -354,6 +354,14 @@ may include breaking changes, each listed under a Breaking heading.
 - A killed Claude step's settle also reads the transcripts of a workflow's
   sub-agents, kept a folder deeper under `subagents/workflows/`, and skips
   sub-agent transcripts last written before the launch started.
+- A run with a native Claude step refreshes the price table
+  (`~/.fractal/pricing.json`) at run start when it is missing or more than a day
+  old. A Claude launch that ends without its result figure (killed, capped,
+  paused, or with the figure refused) is priced from its transcript at the
+  table's rates, but only a codex or openrouter-routed step refreshed the table,
+  so on a host with no cache, or a stale one missing a new model, such a launch
+  booked no cost and armed caps counted it as $0. A failed fetch only warns, and
+  the run goes on.
 - A Claude step's spend after its result frame is booked: Claude Code outlives
   its result while background sub-agents run, and the replies they complete
   after the result were never counted. Once the process ends — exit 0, a

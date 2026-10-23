@@ -30,11 +30,14 @@ declared capability attributes rather than code paths: whether the session can
 be forked; whether the agent mints its own session id (codex) or the caller
 mints and pre-stamps it (claude); whether cost figures are per-invocation or
 cumulative thread totals settled against prior sibling steps; whether the
-backend needs LiteLLM token pricing (fatal at run start if the fetch fails);
-whether it accepts a hard per-step budget flag; whether its stream marks when
-the agent takes and hands off control (`reports_progress`: claude), which arms
-the no-progress watchdog; and whether it emits one result frame per step
-(opencode) rather than one terminal result per turn.
+backend needs LiteLLM token pricing (fatal at run start if the fetch fails), or,
+reporting its own cost, wants the table for what that figure misses
+(`wants_pricing`: claude, whose run start refreshes a day-old table and only
+warns when the fetch fails); whether it accepts a hard per-step budget flag;
+whether its stream marks when the agent takes and hands off control
+(`reports_progress`: claude), which arms the no-progress watchdog; and whether
+it emits one result frame per step (opencode) rather than one terminal result
+per turn.
 
 ## The registry
 
