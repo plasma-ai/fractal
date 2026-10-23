@@ -403,6 +403,22 @@ may include breaking changes, each listed under a Breaking heading.
   base rates, so it read as whole while missing the difference. This holds for a
   killed launch and, past a result, for a reply after it. A `global` reply, and
   a large prompt at a model whose table entry names no threshold, stay whole.
+- A Claude step priced from its transcripts is marked `; partly unpriced` when a
+  reply in them ran in fast mode. Claude Code bills a reply whose usage names
+  `speed: "fast"` at twice the price table's rates on `claude-opus-5-5`,
+  `claude-opus-5` and `claude-opus-4-8`, and six times them on `claude-opus-4-6`
+  and `claude-opus-4-7`, so the step books the standard rates and read as whole
+  while missing the difference. This holds for a killed launch and, past a
+  result, for a reply after it.
+- A Claude step's streamed cost estimate prices each reply once when parallel
+  sub-agents interleave their frames on the stream. It priced a reply again at
+  each of its frames that followed another reply's, so a step killed while
+  sub-agents ran could book several times its spend, above the figure its
+  transcripts hold, and unmarked.
+- The loop's `Warning:` line for a step whose record leaves spend out ends on
+  the marker its row gets: `(unpriced)` when the row holds no figure, as when a
+  killed launch left no transcript and streamed no usage, and
+  `(partly unpriced)` when it holds one. It read `(partly unpriced)` either way.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed

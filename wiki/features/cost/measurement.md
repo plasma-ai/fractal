@@ -239,6 +239,10 @@ model; an unpriced model (or a zeroed gateway figure) drops out without voiding
 the rest, and a reply holding tokens at an unpriced model marks the step
 (below).
 
+The parser prices each reply once, at its first frame: it keeps every message id
+it priced, since parallel sub-agents interleave their replies' frames on the
+stream, so a reply's later frames never price again whatever lands between them.
+
 For a launch whose stream did not end final, the sum lands as a `final=False`
 figure when it exceeds the recorded one -- both undercount a killed launch, so
 the higher is the closer -- and lands as-is: it is the launch's own spend, so a
@@ -291,16 +295,19 @@ reads it from each transcript it opens:
   result, only a reply after it counts;
 - a reply billed above the pricing table's rates. Claude Code bills a reply
   whose usage names `inference_geo: "us"` at 1.1 times its token cost (no other
-  geography, `global` included, costs more on 2.1.300). It also bills a reply
+  geography, `global` included, costs more on 2.1.300). It bills a reply whose
+  usage names `speed: "fast"` from fast-mode rates: 2 times the standard rates
+  for `claude-opus-5-5`, `claude-opus-5` and `claude-opus-4-8`, and 6 times for
+  `claude-opus-4-6` and `claude-opus-4-7`, on 2.1.300. It also bills a reply
   whose prompt is above a long-prompt threshold at higher rates. The threshold
   is the one the model's table entry names in an
   `input_cost_per_token_above_<N>k_tokens` key, and the prompt is the input with
   its cache reads and writes, strictly above `N` thousand tokens, as Claude Code
   counts it. Few Claude models name one (`claude-haiku-5-5` names 100k, as
   Claude Code's own catalog does), and a model that names none is never marked
-  for its prompt's size. Neither the premium nor the long-prompt rates are
-  priced, so the step books the base rates. Past a result, only a reply after it
-  counts;
+  for its prompt's size. The premium, the fast-mode rates and the long-prompt
+  rates are not priced, so the step books the base rates. Past a result, only a
+  reply after it counts;
 - a sub-agent transcript it cannot read, and, on a launch with no result figure,
   a missing or unreadable session transcript or a settle that raises (the loop
   marks the last itself);
@@ -345,9 +352,12 @@ returns the verdict, and the loop prints
 too, which appends `; partly unpriced` to the row's metadata at any terminal
 when the row holds a figure; a row with no figure is not partly priced, so its
 end marks it `; unpriced` instead, at any terminal -- a completed launch whose
-record leaves spend out and holds none never reads as a silent `NULL`.
-`step_cost`'s strip of a stale `unpriced` marker leaves `partly unpriced` alone,
-since the missing part stays unpriced.
+record leaves spend out and holds none never reads as a silent `NULL`. The
+warning, and the refused figure's warning (above), end on the marker the row
+gets, read from the row once the settle is done: `(partly unpriced)` for a row
+holding a figure, `(unpriced)` for one holding none. `step_cost`'s strip of a
+stale `unpriced` marker leaves `partly unpriced` alone, since the missing part
+stays unpriced.
 
 The settle runs after every launch and parses every line of each transcript it
 opens, before the window check (a `StructuredOutput` call can precede the

@@ -3312,11 +3312,25 @@ class Loop:
                 # whatever the failed settle would have added; past one, the
                 # figure leaves out the spend the stream saw after it
                 self._step_partly_unpriced = after is None or trailing
+            # name the marker the step's close gives the row: one holding no
+            # figure is unpriced, not partly unpriced (a contended read keeps
+            # the partial wording)
+            marker = 'partly unpriced'
+            if self._step_partly_unpriced or refused:
+                try:
+                    rows = node.db.read(
+                        'steps',
+                        where={'step_id': self._step_id},
+                        limit=1,
+                    )
+                except Exception:
+                    rows = []
+                if rows and rows[0]['cost'] is None:
+                    marker = 'unpriced'
             if self._step_partly_unpriced:
                 print(
                     "Warning: part of the launch's spend is missing from its"
-                    ' record; its step books the spend recorded (partly'
-                    ' unpriced)',
+                    f' record; its step books the spend recorded ({marker})',
                     file=sys.stderr,
                 )
             # a refused result figure leaves the step the record's own figure
@@ -3326,7 +3340,7 @@ class Loop:
                 print(
                     "Warning: the launch's result figure could not be settled"
                     " against its session's earlier spend; its step books the"
-                    ' spend recorded (partly unpriced)',
+                    f' spend recorded ({marker})',
                     file=sys.stderr,
                 )
                 self._step_partly_unpriced = True
