@@ -2765,6 +2765,21 @@ class Node:
         # paths below roll a persisted retune back through them, so a refused
         # or failed continue never keeps a --max-cost the caller passed
         changes: dict[str, tuple[Any, Any]] = {}
+
+        def _restore() -> None:
+            # restore the priors in both stores (config.json, and the
+            # registry row for its one table-backed key)
+            for key, values in changes.items():
+                prior, _ = values
+                self.config.set(key, prior)
+            if 'max_cost' in changes:
+                prior, _ = changes['max_cost']
+                self.db.update(
+                    data={'max_cost': prior},
+                    table='nodes',
+                    where={'node': self.branch},
+                )
+
         # a budget-ended run (the exited/0 landing) never re-arms silently --
         # continuing spends real money the caller must re-authorize, so a bare
         # continue refuses with the recorded figures, and an explicit new cap
@@ -2810,10 +2825,9 @@ class Node:
                 # line form C-quotes spaces and non-ASCII, defeating the prefix
                 # exemption -- and needs the unstripped run_bytes: strip would
                 # eat the first entry's leading status space, shifting offsets
-                porcelain = fractal.util.git.run_bytes(
-                    ['status', '--porcelain', '-z', '--untracked-files=all'],
-                    cwd=self._root,
-                )
+                cmd = ['--no-optional-locks', 'status', '--porcelain', '-z']
+                cmd += ['--untracked-files=all']
+                porcelain = fractal.util.git.run_bytes(cmd, cwd=self._root)
                 # fail closed: a status failure must not read as a clean tree
                 if porcelain is None:
                     raise RuntimeError('Cannot continue: git status failed.')
@@ -2870,29 +2884,35 @@ class Node:
                     if prior is None:
                         prior = 'unset'
                     notices.append(f'{key}: {prior} -> {value}')
-        # a non-positive ceiling launches straight into a degenerate $0 finish, so
-        # reject it; a missing ceiling means uncapped -- allowed but warned loudly
-        # since spend is then bounded only by --max-iters/--timeout (a token-priced
-        # agent with no model set can only run this way -- a cost cap requires a
-        # model)
-        max_cost = self.config.get('max_cost')
-        if max_cost is not None and max_cost <= 0:
-            raise RuntimeError(
-                'Cannot start with a non-positive max_cost;'
-                ' set a positive cap with `fractal node update --max-cost=<usd>`'
-                ' or unset it to run uncapped.'
-            )
-        if max_cost is None:
-            self.log(
-                message=f'Warning: starting {self.branch} without a cost cap;'
-                ' spend is bounded only by --max-iters/--timeout.',
-                level=logging.WARNING,
-            )
-        # re-validate the rest of the config the loop reads -- the documented
-        # steering path edits config.json directly, bypassing the init/update
-        # setters' checks; a bad duration or cost ordering would otherwise abort
-        # the loop's boot after start prints "Started"
-        self._check_launch_config()
+        # the launch checks read the retuned config, so a refusal rolls the
+        # retune back as the re-arm gate's does
+        try:
+            # a non-positive ceiling launches straight into a degenerate $0 finish, so
+            # reject it; a missing ceiling means uncapped -- allowed but warned loudly
+            # since spend is then bounded only by --max-iters/--timeout (a token-priced
+            # agent with no model set can only run this way -- a cost cap requires a
+            # model)
+            max_cost = self.config.get('max_cost')
+            if max_cost is not None and max_cost <= 0:
+                raise RuntimeError(
+                    'Cannot start with a non-positive max_cost;'
+                    ' set a positive cap with `fractal node update --max-cost=<usd>`'
+                    ' or unset it to run uncapped.'
+                )
+            if max_cost is None:
+                self.log(
+                    message=f'Warning: starting {self.branch} without a cost cap;'
+                    ' spend is bounded only by --max-iters/--timeout.',
+                    level=logging.WARNING,
+                )
+            # re-validate the rest of the config the loop reads -- the documented
+            # steering path edits config.json directly, bypassing the init/update
+            # setters' checks; a bad duration or cost ordering would otherwise abort
+            # the loop's boot after start prints "Started"
+            self._check_launch_config()
+        except Exception:
+            _restore()
+            raise
         # a blind node reads no channels -- sweep any subscriptions that
         # landed between init (which seeds none) and this launch
         if self.config.get('blind'):
@@ -2972,19 +2992,8 @@ class Node:
                         self.status_set(current_status)
                         raise
             except Exception:
-                # a refused gate or failed launch must not keep the retune --
-                # restore the priors in both stores (config.json, and the
-                # registry row for its one table-backed key)
-                for key, values in changes.items():
-                    prior, _ = values
-                    self.config.set(key, prior)
-                if 'max_cost' in changes:
-                    prior, _ = changes['max_cost']
-                    self.db.update(
-                        data={'max_cost': prior},
-                        table='nodes',
-                        where={'node': self.branch},
-                    )
+                # a refused gate or failed launch must not keep the retune
+                _restore()
                 raise
         else:
             # serialize the boot handoff across runtime backends: the loop
@@ -4291,7 +4300,9 @@ class Node:
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
         worktree -- except from inside the target's own loop, which merges
-        its settled children as part of its normal iteration.
+        its settled children as part of its normal iteration. The target is
+        checked again once the merge holds the lock, since a re-armed
+        target's boot also goes ``active`` under it.
 
         Returns:
             Tuple of script output and collected stderr notices (e.g. a
@@ -4318,21 +4329,25 @@ class Node:
         # and leave a target that does not resolve to merge.sh's own errors
         target_branch = self._merge_target()
         target_worktree = fractal.util.git.find_worktree(self.repo_dir, target_branch)
-        if target_worktree is not None:
-            target = self.__class__(target_worktree)
-            if not target._is_own_loop():
-                target._reconcile_status()
-                target_status = target.status()
-                if target_status == 'active':
-                    raise RuntimeError(
-                        f'Cannot merge into active target {target_branch}.'
-                        ' Stop or kill it first.'
-                    )
-                if target_status == 'paused':
-                    raise RuntimeError(
-                        f'Cannot merge into paused target {target_branch}.'
-                        ' Resume or kill it first.'
-                    )
+
+        def _check_target() -> None:
+            if target_worktree is not None:
+                target = self.__class__(target_worktree)
+                if not target._is_own_loop():
+                    target._reconcile_status()
+                    target_status = target.status()
+                    if target_status == 'active':
+                        raise RuntimeError(
+                            f'Cannot merge into active target {target_branch}.'
+                            ' Stop or kill it first.'
+                        )
+                    if target_status == 'paused':
+                        raise RuntimeError(
+                            f'Cannot merge into paused target {target_branch}.'
+                            ' Resume or kill it first.'
+                        )
+
+        _check_target()
         # run merge script -- merge.sh resolves the target and logs the
         # merge event on it (it's the single source of truth for the target)
         args = [f'{self._root}']
@@ -4373,6 +4388,9 @@ class Node:
                     f'Cannot merge: the node went from {current} to {status}'
                     ' while the merge waited. Merge again.'
                 )
+            # a re-armed target's boot stamps active under this lock too, so
+            # a target that went live while the merge waited refuses here
+            _check_target()
             # a frozen step can stop inside a git operation, which the carried
             # advance would move the branch under (git itself refuses to
             # switch branches mid-merge); a probe that cannot answer raises
@@ -4625,6 +4643,7 @@ class Node:
             excludes = [f':!{seed}']
         # list the branch's own changes, minus its seed and the wiki's generated state
         cmd = [
+            '--no-optional-locks',
             'diff',
             '--name-only',
             '-z',
@@ -4641,7 +4660,8 @@ class Node:
             return ''
         # only paths still differing on the target would be discarded
         specs = [f':(literal){path}' for path in changed]
-        cmd = ['diff', '--quiet', target, self.branch, '--', *specs]
+        cmd = ['--no-optional-locks', 'diff', '--quiet', target, self.branch]
+        cmd += ['--', *specs]
         if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is not None:
             return ''
         # word for word the line delete.sh prints: the CLI drops the script's

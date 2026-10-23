@@ -93,7 +93,8 @@ class Files:
             # loop commit landing mid-poll
             head = fractal.util.git.run(['rev-parse', 'HEAD'], cwd=self.worktree)
             # line stats per changed path ('-' marks a binary file)
-            cmd = ['diff', '--numstat', '--no-renames', '-z', f'{anchor}...{head}']
+            cmd = ['--no-optional-locks', 'diff', '--numstat', '--no-renames', '-z']
+            cmd += [f'{anchor}...{head}']
             raw = fractal.util.git.run_bytes(cmd, cwd=self.worktree) or b''
             out = os.fsdecode(raw)
             for entry in filter(None, out.split('\0')):
@@ -106,7 +107,8 @@ class Files:
                     'deletions': int(deleted) if deleted.isdigit() else None,
                 }
             # change kind per path (T -- a type change -- reads as modified)
-            cmd = ['diff', '--name-status', '--no-renames', '-z', f'{anchor}...{head}']
+            cmd = ['--no-optional-locks', 'diff', '--name-status', '--no-renames']
+            cmd += ['-z', f'{anchor}...{head}']
             raw = fractal.util.git.run_bytes(cmd, cwd=self.worktree) or b''
             out = os.fsdecode(raw)
             fields = [field for field in out.split('\0') if field]
@@ -134,7 +136,7 @@ class Files:
             touched = {rel for rel in os.fsdecode(raw).split('\0') if rel}
             candidates = [rel for rel in changes if rel in touched]
         else:
-            cmd = ['ls-files', '-z']
+            cmd = ['--no-optional-locks', 'ls-files', '-z']
             raw = fractal.util.git.run_bytes(cmd, cwd=self.worktree) or b''
             out = os.fsdecode(raw)
             candidates = [rel for rel in out.split('\0') if rel]
@@ -231,14 +233,14 @@ class Files:
         spec = f':(literal){norm}'
         # membership: the tracked set, else (with an anchor) the changed set
         # -- O(1) probes, not a full listing, so a poller never pays O(repo)
-        cmd = ['ls-files', '--error-unmatch', '--', spec]
+        cmd = ['--no-optional-locks', 'ls-files', '--error-unmatch', '--', spec]
         tracked = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
         anchor = self._diff_anchor(since) if since is not None else None
         if not tracked:
             in_changed = False
             if anchor:
-                cmd = ['diff', '--name-only', '--no-renames', '-z']
-                cmd += [f'{anchor}...HEAD', '--', spec]
+                cmd = ['--no-optional-locks', 'diff', '--name-only', '--no-renames']
+                cmd += ['-z', f'{anchor}...HEAD', '--', spec]
                 in_changed = bool(
                     fractal.util.git.run(cmd, cwd=self.worktree, check=False)
                 )
@@ -329,7 +331,8 @@ class Files:
         """
         norm = self._validate_relpath(path)
         # literal pathspec magic, as for a read
-        cmd = ['ls-files', '--error-unmatch', '--', f':(literal){norm}']
+        cmd = ['--no-optional-locks', 'ls-files', '--error-unmatch']
+        cmd += ['--', f':(literal){norm}']
         tracked = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
         abs_path = self.worktree / norm
         # containment at the serving boundary, as for a read: an escaping
@@ -418,7 +421,8 @@ class Files:
         # stage just these paths (pathspec), so other staged work is untouched
         fractal.util.git.run(['add', '--', *specs], cwd=self.worktree)
         # benign no-op when the paths hold nothing new to commit
-        cmd = ['diff', '--cached', '--name-only', '-z', '--', *specs]
+        cmd = ['--no-optional-locks', 'diff', '--cached', '--name-only', '-z']
+        cmd += ['--', *specs]
         if not fractal.util.git.run(cmd, cwd=self.worktree):
             return {'committed': False, 'sha': None, 'paths': norm}
         # commit only these paths (pathspec); --no-verify because bypassing

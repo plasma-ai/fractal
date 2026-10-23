@@ -171,13 +171,13 @@ if [[ -n "$MERGE_TARGET" ]] \
         CHANGED_PATHS=()
         while IFS= read -r -d '' CHANGED_PATH; do
             CHANGED_PATHS+=("$CHANGED_PATH")
-        done < <(git -C "$REPO_DIR" diff --name-only -z "$MERGE_BASE" "$BRANCH" \
+        done < <(git -C "$REPO_DIR" --no-optional-locks diff --name-only -z "$MERGE_BASE" "$BRANCH" \
             -- "${SEED_EXCLUDE[@]}" ":(exclude,glob)$WIKI_PREFIX/**/_index.md" \
             ":(exclude)$WIKI_PREFIX/.wiki" 2>/dev/null || true)
         # warn only when the target still differs from the branch on those paths
         # (after a squash merge the target already matches them -> no warning)
         if [[ ${#CHANGED_PATHS[@]} -gt 0 ]] \
-            && ! git -C "$REPO_DIR" diff --quiet "$MERGE_TARGET" "$BRANCH" \
+            && ! git -C "$REPO_DIR" --no-optional-locks diff --quiet "$MERGE_TARGET" "$BRANCH" \
                 -- "${CHANGED_PATHS[@]}" 2>/dev/null; then
             # word for word the line Node.unmerged_warning builds: the CLI
             # prints that one before its prompt and drops this copy by equality

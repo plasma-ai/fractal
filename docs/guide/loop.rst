@@ -399,7 +399,7 @@ list`` never counts such a row toward ``PAUSED: billing``. Paused and
 budget-skipped steps bought no launch and leave the streak untouched.
 
 While the breaker is armed, every launch — the SYNC and the work step alike
-— is held behind a backoff that starts at 60 seconds and doubles per further
+— is held once behind a backoff that starts at 60 seconds and doubles per further
 failure to a one-hour cap, announced on the pane as ``=== PAUSED: billing —
 N instant zero-cost failure(s); probing again in Ns ===``. A failed step's
 retry under the breaker waits that clock instead of ``step_retry_backoff``
@@ -794,7 +794,15 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``Held out``.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
    caller's run/iteration/step lineage. "Nothing staged" is a tolerated
-   no-op.
+   no-op. A staging or commit call that finds the worktree's ``index.lock``
+   held by another process — a ``git status`` refreshing the index, an
+   editor's git — waits two seconds and retries once. The lock is never
+   removed: one still held then fails the commit with git's own message
+   (``Unable to create '.../index.lock': File exists``), not as a hook
+   failure. fractal's own reads never take the lock: each one that reads the
+   index or the working tree passes ``--no-optional-locks``, and the
+   working-tree checks read ``git status``, since a working-tree ``git diff``
+   rewrites the index under the lock even then.
 6. **Recovers from hooks.** If the commit fails and a
    ``.pre-commit-config.yaml`` exists, the pipeline re-stages the hook's
    edits and retries once. Wiki pages (the project wiki and the node memory

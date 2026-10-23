@@ -3,8 +3,8 @@ name: features/loop/commit_pipeline
 desc: |
   The work-product commit pipeline behind fractal commit: scope enforcement,
   wiki index refresh and lint, staging excludes and warnings, the memory index
-  rebuild, subject composition, the hook retry, the force-commit backstop, and
-  the report log.
+  rebuild, subject composition, held index locks, the hook retry, the
+  force-commit backstop, and the report log.
 created: 2026-07-21T05:04:14Z
 updated: 2026-07-21T05:04:14Z
 ---
@@ -182,13 +182,14 @@ pass over that one estate, never another tree's seed sharing `.fractal/`. The
 plain add runs from the seed's parent, the directory git strips, as every sweep
 runs. It runs before the baseline's other adds and tolerates only git's refusal
 of an ignored seed (exit 1, the hold the record pass then overrides); any other
-failure, such as a held `index.lock` or an unreadable record, fails the baseline
-with git's message and nothing staged, so a baseline never lands without its
-seed. A force-add of the whole dir would honor only the stage excludes, so every
-runtime file fractal's exclude block holds -- `tmp/`, an agent's `.err` capture,
-`.session`, `setup.log`, `__pycache__/` -- would ride the baseline onto the
-top-level branch. The record pass's notices lead the baseline's confirmation
-line, as they lead a work commit's output.
+failure, such as an `index.lock` still held after the pipeline's one wait (see
+below) or an unreadable record, fails the baseline with git's message and
+nothing staged, so a baseline never lands without its seed. A force-add of the
+whole dir would honor only the stage excludes, so every runtime file fractal's
+exclude block holds -- `tmp/`, an agent's `.err` capture, `.session`,
+`setup.log`, `__pycache__/` -- would ride the baseline onto the top-level
+branch. The record pass's notices lead the baseline's confirmation line, as they
+lead a work commit's output.
 
 fractal owns its estate staging (`_stage_records`): after the plain adds, any
 estate file an ignore rule held out is re-evaluated against fractal-normal rules
@@ -199,9 +200,10 @@ law. A stray broad exclude line therefore neither silently unstages nor
 hard-fails the audit trail canon requires nodes to commit; the user node's
 self-ignored seed dir stays untracked by design. The force-add stages every
 record it can: a record the add cannot take -- vanished after the snapshot,
-unreadable on disk -- is named in a warning rather than aborting the commit, and
-both notices report worktree-relative paths, since a force commit folds them
-into its body.
+unreadable on disk -- is named in a warning rather than aborting the commit
+(only an `index.lock` still held after the wait aborts it, since every record
+would fail behind it), and both notices report worktree-relative paths, since a
+force commit folds them into its body.
 
 ## The memory index rebuild
 
@@ -256,6 +258,32 @@ with the indexes as staged. Both lines ride with the record pass's notices, so a
 force commit folds them into its body.
 
 ## Commit, retry, and the backstop
+
+Another process can hold the worktree's `index.lock` -- a `git status`
+refreshing the index, an operator's or an editor's git command -- and a write
+that meets it fails at once. So every staging and commit call in the pipeline
+(the adds, the cache untrack, the memory index restage's index update, the
+commit, the hook recovery's `write-tree`, `checkout`, and `rm`, and the user
+baseline's seed add) waits two seconds (`INDEX_LOCK_WAIT`) and retries once:
+through `fractal.util.git.run`'s `lock_retry`, or the same `index_locked` check
+for the raw calls. The lock is never removed, since one still held after the
+wait may belong to a live process as easily as to a killed one. The call then
+raises `IndexLockedError` with git's own message naming the lock. Hook recovery
+lets it through untouched -- the commit never ran, so there is nothing to
+re-stage -- and it fails even a staging call whose other failures the pipeline
+tolerates, so a held lock never silently drops paths from a commit.
+
+The pipeline's own reads never take the lock. Every read that loads the index or
+the working tree -- `status`, `diff`, `ls-files`, `check-ignore`, and the rest
+-- passes `--no-optional-locks`, which keeps `git status` from writing back the
+index it refreshes. A working-tree `git diff` writes it back under the lock even
+then, and the plumbing `diff-index` and `diff-files` list a file whose stat data
+is stale though its content is unchanged, so the scope and baseline checks read
+their changed paths from one `git status` listing: its index column against
+`HEAD` and its worktree column against the index cover every path either
+changes, and `-uall` adds the untracked files. `Node`, `Loop`, and `Files`
+follow the same rule, and so do the lifecycle scripts (see
+[[features/lifecycle/script_delegation]]).
 
 A sweep that stages nothing is a tolerated no-op, reported rather than failed.
 If a pre-commit hook mutates files and aborts, the pipeline re-stages and

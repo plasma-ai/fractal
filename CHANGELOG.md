@@ -320,9 +320,18 @@ may include breaking changes, each listed under a Breaking heading.
   so on its output before each wait. A merge refuses only an `active` node, so a
   boot that landed mid-merge could have its worktree reset or carried by the
   merge while its agent started.
+- `node merge` checks its target again once it holds the merge lock, and refuses
+  a target that went `active` or `paused` while the merge waited. A target
+  re-armed with `start --continue` during the wait could go live, and the squash
+  then landed in its running worktree.
 - A resume boot whose `active` stamp fails says the node reads `paused` for the
   run, which it keeps. The banner said `idle (starting)`, which only a start
   keeps.
+- A resumed run that ends before re-entering its parked iteration, because its
+  run deadline ran out or `max_iters` was lowered while it was parked, closes
+  that iteration as the run ends: `failed` with `timed out` for the deadline,
+  `stopped` for the cap. The iteration stayed `active` until the next run healed
+  it as a crash, and the timeout reason named the iteration before it.
 - `fractal node list` no longer shows `PAUSED: billing` for a run of instant,
   unpriced failures the loop judged provider outages, such as codex's
   model-at-capacity refusals: the failed step row's reason now leads with
@@ -549,6 +558,15 @@ may include breaking changes, each listed under a Breaking heading.
   the indexes as staged, the working tree still matching them. The refresh
   indexed every file on disk, so each refused file's row dangled in every clean
   checkout.
+- `fractal commit` waits out an `index.lock` another process holds briefly: a
+  staging or commit call that finds it waits two seconds and retries once, and a
+  lock still held then fails the commit with git's own message, not as a hook
+  failure. The lock is never removed. fractal's own git reads never take the
+  lock, so they never fail a `git add` or `git commit` running beside them: each
+  read of the index or the working tree, in the engine and the lifecycle
+  scripts, passes `--no-optional-locks`, and the working-tree checks read
+  `git status`. fractal's `git status` and working-tree `git diff` calls rewrote
+  the index under the lock, and a commit meeting any held lock failed at once.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The
@@ -612,6 +630,9 @@ may include breaking changes, each listed under a Breaking heading.
   node as `PAUSED: billing`. The refused step's row reason leads with
   `not launched:`, so `fractal node list` never shows such a run as
   `PAUSED: billing` either.
+- With no before-step SYNC, an armed billing breaker holds a step's launch once.
+  The step waited out the backoff twice before its probe launch, up to two hours
+  at the cap.
 - A step whose agent names an error on its stream and then exits non-zero
   reports the real exit status: the step banner and the row's reason read
   `agent error (exit N)` with the stream detail and the stderr tail behind it,
@@ -713,6 +734,10 @@ may include breaking changes, each listed under a Breaking heading.
 - A tree's `agents.py` hook file that fails to load aborts a loop's boot on
   record, as a bad `config.json` value does, instead of killing it with nothing
   recorded. The recorded reason names the file from the repo root.
+- A `node start --continue --max-cost` refused over the node's stored config or
+  agent (a hand-edited duration without a unit, a mistyped agent) keeps the old
+  cap. The new cap stayed in the node's config and registry row although nothing
+  launched.
 
 ## [1.3.0] - 2026-09-17
 
