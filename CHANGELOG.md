@@ -712,7 +712,7 @@ may include breaking changes, each listed under a Breaking heading.
   with its paused time still credited.
 - A tree's `agents.py` hook file that fails to load aborts a loop's boot on
   record, as a bad `config.json` value does, instead of killing it with nothing
-  recorded.
+  recorded. The recorded reason names the file from the repo root.
 
 ## [1.3.0] - 2026-09-17
 

@@ -1007,6 +1007,9 @@ class Loop:
         there the durable exited record must land, or the node wedges
         ``paused`` with no reason and only ``kill`` recovers.
         """
+        # persisted data names paths from the repo root -- the caller already
+        # printed the reason whole (an absolute path reads fine on the pane)
+        reason = reason.replace(f'{self.node.repo_dir}{os.sep}', '')
         # a resume boot preserves its paused run: the open run and iteration
         # rows are exactly what `resume` re-adopts, and the frozen worktree is
         # what pause preserves -- recording a fresh exited run would reconcile

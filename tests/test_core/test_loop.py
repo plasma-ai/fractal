@@ -2818,7 +2818,8 @@ def test_a_broken_agent_hook_file_aborts_the_boot(
     a file this environment cannot import fails naming itself, so the
     fault lands like a bad config value: the node reads ``exited`` and a
     closed run row carries the reason, never a crash with nothing
-    recorded.
+    recorded. The recorded reason names the file relative to the repo
+    root, as all persisted data does.
     """
     monkeypatch.setenv('_NODE', '')
     # the hook file loads once per tree per process, as in a fresh boot
@@ -2831,7 +2832,9 @@ def test_a_broken_agent_hook_file_aborts_the_boot(
     assert loop_node.status() == 'exited'
     run = loop_node.record.runs(limit=1)[0]
     assert run['status'] == 'exited'
-    assert f'{hook}: No module named' in run['metadata']
+    relative = hook.relative_to(loop_node.repo_dir)
+    assert run['metadata'] == f"{relative}: No module named 'fractal_missing_backend'"
+    assert f'{loop_node.repo_dir}' not in run['metadata']
 
 
 @pytest.mark.parametrize(
