@@ -12,6 +12,7 @@ import threading
 
 import pytest
 
+from fractal.core import db
 from fractal.core.db import Database
 
 __all__ = [
@@ -47,6 +48,42 @@ _NODE = 'main'
 def _run(**extra: object) -> dict:
     """A minimal valid ``runs`` row (override or extend via ``extra``)."""
     return {'node': _NODE, 'status': 'active', 'started_at': _STARTED, **extra}
+
+
+def _version(database: Database) -> int:
+    """Return the stamped schema version, read without lifting it."""
+    connection = sqlite3.connect(f'file:{database.path}?mode=ro', uri=True)
+    try:
+        version, *_ = connection.execute('PRAGMA user_version').fetchone()
+    finally:
+        connection.close()
+    return version
+
+
+def _step_columns(database: Database) -> list[str]:
+    """Return the ``steps`` table's column names, read without lifting."""
+    connection = sqlite3.connect(f'file:{database.path}?mode=ro', uri=True)
+    try:
+        return [row[1] for row in connection.execute('PRAGMA table_info(steps)')]
+    finally:
+        connection.close()
+
+
+def _downgrade(database: Database, version: int = 1) -> None:
+    """Put a current database back at ``version``, dropping the columns it predates.
+
+    Version 1 predates the step row's ``effort`` and ``timeout`` columns,
+    version 2 only its ``timeout`` column.
+    """
+    columns = ['effort', 'timeout'] if version == 1 else ['timeout']
+    connection = sqlite3.connect(f'{database.path}')
+    try:
+        for column in columns:
+            connection.execute(f'ALTER TABLE steps DROP COLUMN {column}')
+        connection.execute(f'PRAGMA user_version = {version}')
+        connection.commit()
+    finally:
+        connection.close()
 
 
 # ------ schema and init
@@ -88,7 +125,7 @@ def test_init_stamps_schema_version(database: Database) -> None:
     ``init`` stamps ``PRAGMA user_version`` so the version step on connect
     can tell an older database from a current one.
     """
-    assert _version(database) == 3
+    assert _version(database) == db._SCHEMA_VERSION
 
 
 @pytest.mark.parametrize(
@@ -109,26 +146,27 @@ def test_connect_lifts_an_older_database(
     nothing to do, and a column already present (a database altered out
     of band) is stamped past rather than refused.
     """
+    current = db._SCHEMA_VERSION
     _downgrade(database, version)
     assert not set(added) & set(_step_columns(database))
     # a read-only handle lifts it like a writable one
     database.connect(read_only=True).close()
-    assert _version(database) == 3
+    assert _version(database) == current
     assert set(added) <= set(_step_columns(database))
     # a lifted database is left alone
     database.connect().close()
-    assert _version(database) == 3
+    assert _version(database) == current
     # a column added out of band is stamped past
     _downgrade(database, version)
     connection = database.connect(read_only=True)
     connection.close()
-    assert _version(database) == 3
+    assert _version(database) == current
     connection = sqlite3.connect(f'{database.path}')
     connection.execute(f'PRAGMA user_version = {version}')
     connection.commit()
     connection.close()
     database.connect().close()
-    assert _version(database) == 3
+    assert _version(database) == current
     assert [name for name in _step_columns(database) if name in added] == added
 
 
@@ -152,9 +190,17 @@ def test_two_writers_lift_the_same_database_once(database: Database) -> None:
         )
         for _ in range(2)
     ]
-    outcomes = [writer.communicate(timeout=60) for writer in writers]
+    outcomes = []
+    for writer in writers:
+        try:
+            outcome = writer.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            # each writer is a single leaf process, so a pid kill reaps it fully
+            writer.kill()
+            outcome = writer.communicate()
+        outcomes.append(outcome)
     assert [writer.returncode for writer in writers] == [0, 0], outcomes
-    assert _version(database) == 3
+    assert _version(database) == db._SCHEMA_VERSION
     added = ['effort', 'timeout']
     assert [name for name in _step_columns(database) if name in added] == added
 
@@ -189,43 +235,7 @@ def test_failed_lift_leaves_the_database_at_its_version(
                 os.chmod(sidecar, 0o644)
     # the next writable handle lifts it
     database.connect().close()
-    assert _version(database) == 3
-
-
-def _version(database: Database) -> int:
-    """Return the stamped schema version, read without lifting it."""
-    connection = sqlite3.connect(f'file:{database.path}?mode=ro', uri=True)
-    try:
-        version, *_ = connection.execute('PRAGMA user_version').fetchone()
-    finally:
-        connection.close()
-    return version
-
-
-def _step_columns(database: Database) -> list[str]:
-    """Return the ``steps`` table's column names, read without lifting."""
-    connection = sqlite3.connect(f'file:{database.path}?mode=ro', uri=True)
-    try:
-        return [row[1] for row in connection.execute('PRAGMA table_info(steps)')]
-    finally:
-        connection.close()
-
-
-def _downgrade(database: Database, version: int = 1) -> None:
-    """Put a current database back at ``version``, dropping the columns it predates.
-
-    Version 1 predates the step row's ``effort`` and ``timeout`` columns,
-    version 2 only its ``timeout`` column.
-    """
-    columns = ['effort', 'timeout'] if version == 1 else ['timeout']
-    connection = sqlite3.connect(f'{database.path}')
-    try:
-        for column in columns:
-            connection.execute(f'ALTER TABLE steps DROP COLUMN {column}')
-        connection.execute(f'PRAGMA user_version = {version}')
-        connection.commit()
-    finally:
-        connection.close()
+    assert _version(database) == db._SCHEMA_VERSION
 
 
 def test_activity_start_rows_snapshot_the_launch(database: Database) -> None:

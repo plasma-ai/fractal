@@ -100,6 +100,7 @@ __all__ = [
     'test_seed_skips_uncarriable_instructions_codex',
     'test_transcript_globs_the_dated_rollouts',
     'test_preflight_probes_model_acceptance',
+    'test_preflight_names_what_a_passed_probe_spent',
     'test_preflight_timeout_reaps_a_term_ignoring_probe',
     'test_preflight_timeout_never_kills_a_group_term_ended',
     'test_preflight_timeout_reaps_the_probes_tool_groups',

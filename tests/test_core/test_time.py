@@ -78,6 +78,10 @@ TIMEOUT_SECONDS = 600.0
 NODE_STEP_TIMEOUT = '2h'
 NODE_STEP_TIMEOUT_SECONDS = 7200.0
 
+# the step file's own timeout: line, above the node step_timeout
+STEP_FILE_TIMEOUT = '6h'
+STEP_FILE_TIMEOUT_SECONDS = 21600.0
+
 # the pause-credit event rows by role, as (event, reason, status): the pause
 # verb's request carries the caller's reason, each loop park its own
 PAUSE_ROWS = {
@@ -284,7 +288,7 @@ def test_default_reports_soonest_of_run_and_iter(node_with_db: Node) -> None:
 @pytest.mark.parametrize(
     argnames=('frontmatter', 'limit'),
     argvalues=[
-        ('---\ntimeout: 6h\n---\n', 21600.0),
+        (f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n', STEP_FILE_TIMEOUT_SECONDS),
         ('', NODE_STEP_TIMEOUT_SECONDS),
         ('---\ntimeout: soon\n---\n', NODE_STEP_TIMEOUT_SECONDS),
     ],
@@ -322,7 +326,9 @@ def test_step_limit_follows_the_active_steps_timeout(
     argvalues=[
         lambda path: path.unlink(),
         lambda path: path.chmod(0),
-        lambda path: path.write_bytes(b'---\ntimeout: 6h\n---\n\xff'),
+        lambda path: path.write_bytes(
+            f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n'.encode() + b'\xff'
+        ),
     ],
     ids=['vanished', 'unreadable', 'undecodable'],
 )
@@ -338,7 +344,7 @@ def test_step_limit_survives_an_unusable_step_file(
     """
     node = node_with_db
     node.config.set('step_timeout', NODE_STEP_TIMEOUT)
-    _active_step(node, '---\ntimeout: 6h\n---\n')
+    _active_step(node, f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n')
     damage(node.node_dir / 'steps' / '01-EXECUTE.md')
     assert node.time.limit('step') == NODE_STEP_TIMEOUT_SECONDS
 
@@ -348,8 +354,8 @@ def test_step_limit_survives_an_unusable_step_file(
     argvalues=[
         (True, '14400', 14400.0),
         (True, '-1', None),
-        (True, 'soon', 21600.0),
-        (False, '14400', 21600.0),
+        (True, 'soon', STEP_FILE_TIMEOUT_SECONDS),
+        (False, '14400', STEP_FILE_TIMEOUT_SECONDS),
     ],
     ids=['own-seat', 'own-seat-unbounded', 'own-seat-malformed', 'other-caller'],
 )
@@ -372,7 +378,7 @@ def test_step_limit_prefers_the_seats_exported_ceiling(
     """
     node = node_with_db
     node.config.set('step_timeout', NODE_STEP_TIMEOUT)
-    step_id = _active_step(node, '---\ntimeout: 6h\n---\n')
+    step_id = _active_step(node, f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n')
     # the launch exported its ceiling; the file was edited to 6h since
     monkeypatch.setenv('STEP_ID', f'{step_id if seat else step_id + 1}')
     monkeypatch.setenv('STEP_TIMEOUT_SECONDS', exported)
@@ -398,7 +404,7 @@ def test_step_limit_reads_the_ceiling_its_launch_recorded(
     """
     node = node_with_db
     node.config.set('step_timeout', NODE_STEP_TIMEOUT)
-    step_id = _active_step(node, '---\ntimeout: 6h\n---\n')
+    step_id = _active_step(node, f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n')
     node.record.step_timeout(step_id=step_id, seconds=recorded)
     assert node.time.limit('step') == limit
 
@@ -412,7 +418,7 @@ def test_step_limit_reads_a_database_it_cannot_lift(node_with_db: Node) -> None:
     """
     node = node_with_db
     node.config.set('step_timeout', NODE_STEP_TIMEOUT)
-    _active_step(node, '---\ntimeout: 6h\n---\n')
+    _active_step(node, f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n')
     # stamp the database before the column, then deny this reader writes
     connection = sqlite3.connect(f'{node.db.path}')
     try:
@@ -422,7 +428,7 @@ def test_step_limit_reads_a_database_it_cannot_lift(node_with_db: Node) -> None:
     finally:
         connection.close()
     node.db.path.chmod(0o444)
-    assert node.time.limit('step') == 21600.0
+    assert node.time.limit('step') == STEP_FILE_TIMEOUT_SECONDS
 
 
 @pytest.mark.parametrize(
@@ -472,7 +478,7 @@ def test_step_limit_tells_same_named_step_files_apart(
     argvalues=[
         (True, ((1, 'SYNC'),), NODE_STEP_TIMEOUT_SECONDS),
         (False, ((0, 'SYNC'),), NODE_STEP_TIMEOUT_SECONDS),
-        (False, ((1, 'PLAN'), (2, 'SYNC')), 21600.0),
+        (False, ((1, 'PLAN'), (2, 'SYNC')), STEP_FILE_TIMEOUT_SECONDS),
     ],
     ids=['sync-pass', 'drain-pass', 'user-step'],
 )
@@ -496,7 +502,7 @@ def test_step_limit_tells_a_sync_pass_from_a_user_sync_step(
     steps_dir.mkdir()
     (steps_dir / '01-PLAN.md').write_text('# PLAN\n', encoding='utf-8')
     (steps_dir / '02-SYNC.md').write_text(
-        '---\ntimeout: 6h\n---\n# SYNC\n',
+        f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n# SYNC\n',
         encoding='utf-8',
     )
     run_id = node.record.run_start()
@@ -516,8 +522,12 @@ def test_step_limit_tells_a_sync_pass_from_a_user_sync_step(
 @pytest.mark.parametrize(
     argnames=('node_timeout', 'frontmatter', 'limit'),
     argvalues=[
-        (None, '---\ntimeout: 6h\n---\n', 21600.0),
-        (NODE_STEP_TIMEOUT, '---\ntimeout: 6h\n---\n', NODE_STEP_TIMEOUT_SECONDS),
+        (None, f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n', STEP_FILE_TIMEOUT_SECONDS),
+        (
+            NODE_STEP_TIMEOUT,
+            f'---\ntimeout: {STEP_FILE_TIMEOUT}\n---\n',
+            NODE_STEP_TIMEOUT_SECONDS,
+        ),
         (None, '', None),
     ],
     ids=['step-files-only', 'node-step-timeout', 'none'],

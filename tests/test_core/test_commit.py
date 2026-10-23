@@ -63,6 +63,7 @@ __all__ = [
     'test_rebuilt_memory_index_reads_a_colon_path_literally',
     'test_memory_index_rebuild_waits_for_a_left_out_file',
     'test_a_failed_memory_index_rebuild_never_fails_the_commit',
+    'test_a_failed_memory_index_write_back_leaves_the_tree_as_staged',
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
     'test_multi_scope_commit_boundary',
     'test_dot_scope_root_bounds_the_whole_project',
@@ -2042,6 +2043,8 @@ def test_a_failed_memory_index_write_back_leaves_the_tree_as_staged(
         return result
 
     monkeypatch.setattr(subprocess, 'run', _run)
+    # the held lock outlasts the staging's wait, so the wait is zeroed
+    monkeypatch.setattr('fractal.util.git.INDEX_LOCK_WAIT', 0)
     head_before = _head(project_dir)
     result = node.commit('notes beside a refused archive')
 

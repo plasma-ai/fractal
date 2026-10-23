@@ -9,6 +9,7 @@ from .test_db import *
 from .test_event import *
 from .test_files import *
 from .test_governance import *
+from .test_index_lock import *
 from .test_init import *
 from .test_lifecycle import *
 from .test_list import *

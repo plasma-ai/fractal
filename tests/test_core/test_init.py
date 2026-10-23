@@ -244,7 +244,7 @@ def test_init_sets_the_worktree_commit_identity(git_repo: pathlib.Path) -> None:
     assert author.stdout.strip() == 'Test'
 
 
-@pytest.mark.parametrize(argnames='extension', argvalues=['json', 'txt', 'py'])
+@pytest.mark.parametrize('extension', ['json', 'txt', 'py'])
 def test_init_seeds_wikis_that_accept_dotted_file_names(
     tmp_path: pathlib.Path,
     extension: str,
