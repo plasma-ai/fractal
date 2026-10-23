@@ -1361,7 +1361,7 @@ wiki_owned() {
 # changes, and adding it would fail); the refresh reads the disk, so an
 # untracked file under the project wiki would be indexed into the squash
 # commit and dangle in every clean checkout -- the merge refuses it by name
-# (the memory wiki is the merging node's own, and its next commit lands what
+# (the memory wiki is the target's, and the target's next commit lands what
 # it holds); the add is scoped to what the refresh owns -- tracked-file
 # updates plus any new _index.md and tool-owned .wiki/ state; stdout is
 # silenced so the merge summary below stays the single user-facing line; a

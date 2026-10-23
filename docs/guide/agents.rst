@@ -391,7 +391,8 @@ From the user's point of view:
   are covered in :doc:`/guide/loop`.
 - **A cost cap requires trackable spend.** On a token-priced or routed
   agent the model must be set and present in the pricing table, or the
-  step fails at launch with a specific error.
+  run aborts at preflight naming the step; a step file edited mid-run to
+  such a model fails at launch with a specific error.
 
 Sessions and transcripts
 ------------------------

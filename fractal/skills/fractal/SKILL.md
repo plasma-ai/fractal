@@ -280,9 +280,8 @@ manages this automatically: its runtime artifacts (worktrees, the central
 database, status, agent logs) ride the repo-local `.git/info/exclude`, and the
 top-level `.fractal/<branch>/` hides itself with its own ignore file — the
 committed `.gitignore` is never touched. Keep your own ignore patterns anchored
-(`/artifacts/`, not `artifacts/`), or they also match — and silently hide —
-same-named subtrees at any depth, such as a node's committable
-`.fractal/<node>/artifacts/`.
+(`/plans/`, not `plans/`), or they also match — and silently hide — same-named
+subtrees at any depth, such as a node's committable `.fractal/<node>/plans/`.
 
 `fractal init` also wires the wiki merge driver: the committed repo-root
 `.gitattributes` assigns `merge=wiki` to the generated wiki `_index.md` files
@@ -309,7 +308,7 @@ project wiki or memory wiki (`<node_dir>/memory`) lets them browse in Obsidian
 The shared project wiki — the one folder every node may commit to regardless of
 its scope — is `wiki/` by default. A project whose `wiki/` holds other content
 names a different folder in a committed `.fractal/.settings.json` (or
-`<path>/.fractal/.settings.json` for a sub-project), whose only key is `wiki`:
+`<path>/.fractal/.settings.json` for a sub-project), under its `wiki` key:
 `{"wiki": "docs"}`. The value is a folder relative to the project: never
 absolute, never `.` or `null`, with no `..`, no `.fractal`, `.worktrees`, or
 `.git` component, and written canonically (`docs`, not `./docs/`). Write the

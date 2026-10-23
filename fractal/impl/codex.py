@@ -888,7 +888,7 @@ class UsageWindow:
         path = _find_rollout(self.home, session)
         # a rollout new or grown since capture that opens as a thread this one
         # spawned holds sub-agent spend the step owns; one the window cannot
-        # place refuses the step
+        # place leaves the step unpriced
         spawned = _spawned_rollouts(self.home, session, known=self.existing, own=path)
         return path, spawned
 
@@ -1006,7 +1006,7 @@ def _spawned_rollouts(
     ``session`` spawned, which the mapping holds; a sibling root (``exec``,
     ``cli``, a chat with the node) or any sub-agent of another root in the
     home, whose rows never name ``session``, which is skipped; or one the
-    window cannot explain, which refuses the step.
+    window cannot explain, which leaves the step unpriced.
     """
     spawned: dict[pathlib.Path, tuple[str, int, int]] = {}
     threads: set[str] = set()

@@ -449,7 +449,7 @@ Landing a paused node
 
 ``fractal node merge <node>`` on a paused node lands its *committed* work in
 its merge target and leaves it ``paused``: its run, iteration, and step rows
-are untouched, so ``fractal resume`` adopts the same run afterwards. The
+are untouched, so ``fractal node resume`` adopts the same run afterwards. The
 frozen step's uncommitted work stays in the node's worktree. A step frozen
 inside a git operation — a merge, squash merge, cherry-pick, or revert
 stopped on a conflict, a rebase stopped part-way, or the ``index.lock`` of a

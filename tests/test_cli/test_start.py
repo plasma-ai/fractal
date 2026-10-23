@@ -323,12 +323,10 @@ def test_start_revalidates_hand_edited_config(
     """``start`` re-validates a hand-edited ``config.json`` and fails loudly.
 
     The documented steering path is to edit ``config.json`` directly, which
-    bypasses the init/update setters' checks. A bad duration (no unit suffix)
-    would otherwise abort the loop's boot after ``start`` already
-    printed success; a broken cost ordering would launch
-    a degenerate budget; a per-iter cap whose ceiling was edited away would
-    spend unbounded once the iteration's budget drains; an agent the registry
-    does not know would abort the boot the same way.
+    bypasses the init/update setters' checks. A bad duration (no unit
+    suffix), a broken cost ordering, a per-iter cap whose ceiling was edited
+    away, or an agent the registry does not know would otherwise abort the
+    loop's boot after ``start`` already printed success.
     ``start`` must reject each before launching -- exit non-zero with a clear
     message and no "Started" output.
     """

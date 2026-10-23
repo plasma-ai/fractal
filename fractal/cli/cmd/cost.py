@@ -71,8 +71,8 @@ def cost_remaining(app: typer.Typer) -> typer.Typer:
         # persists, but remaining never answers through the caller
         node, deleted, _ = resolve_ledger_target(path, node)
         require_scope_owner(
-            node,
-            deleted or node.branch,
+            node=node,
+            branch=deleted or node.branch,
             run_id=run_id,
             iter_id=iter_id,
             step_id=step_id,
@@ -141,8 +141,8 @@ def cost_spent(app: typer.Typer) -> typer.Typer:
         # precedence over the caller's own scope
         node, deleted, latest = resolve_ledger_target(path, node)
         require_scope_owner(
-            node,
-            deleted or node.branch,
+            node=node,
+            branch=deleted or node.branch,
             run_id=run_id,
             iter_id=iter_id,
             step_id=step_id,
