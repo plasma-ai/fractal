@@ -1599,8 +1599,9 @@ class Node:
                 # a file the copy loops would silently skip -- a stray
                 # under steps/ or scripts/, a loose skills/ file, an
                 # unknown or loose agents/ entry -- would deploy nothing,
-                # print success, and drift on every later diff, so it
-                # refuses here like a credential
+                # print success, and drift on every later diff, and one
+                # the commit never stores would live on this disk alone,
+                # so each refuses here like a credential
                 vet(bundle)
                 # render from the unmodified source snapshot, including files
                 # the output listing omitted; values are never template source
@@ -2517,8 +2518,9 @@ class Node:
                         exclude=record.get('exclude'),
                         strict=False,
                     )
-                    # a file the copy loops would silently skip refuses here
-                    # exactly as at init, judging the effective set
+                    # a file the copy loops would silently skip or the commit
+                    # never stores refuses here exactly as at init, judging
+                    # the effective set
                     vet(bundle)
                     fill(
                         bundle,

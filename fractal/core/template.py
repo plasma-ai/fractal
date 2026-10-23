@@ -792,7 +792,7 @@ def trim(
 
 
 def vet(bundle: pathlib.Path) -> None:
-    """Refuse effective-set files the seed's copy loops would skip.
+    """Refuse effective-set files the seed would skip or the commit never stores.
 
     The copy loops deploy a fixed shape per surface: ``steps/`` copies
     top-level ``*.md`` files, ``scripts/`` copies top-level files
@@ -802,7 +802,10 @@ def vet(bundle: pathlib.Path) -> None:
     success, and drift on every later diff -- refused here, post-trim,
     so an excluded stray can neither refuse the seed nor slip past it.
     Root-level extras outside the surfaces (a ``README.md`` beside
-    them) are documentation and pass.
+    them) are documentation and pass. The ``steps/``, ``scripts/``, and
+    ``skills/`` files deploy into the node's estate, so each must also
+    pass the commit's estate content law: a file it refuses would deploy
+    but never commit, and every clone would lack it.
 
     Args:
         bundle: The bundle root.
@@ -811,11 +814,13 @@ def vet(bundle: pathlib.Path) -> None:
         ValueError: If a surface directory is named in the wrong case,
             ``steps/`` or ``scripts/`` holds a file the copy loop would
             skip, ``skills/`` holds a loose file or hidden directory,
-            or ``agents/`` holds an unknown or loose entry or a
-            ``skills`` entry shadowing the mount.
+            ``agents/`` holds an unknown or loose entry or a ``skills``
+            entry shadowing the mount, or a ``steps/``, ``scripts/``, or
+            ``skills/`` file is no record the commit stores.
 
     """
     from .agent import supported
+    from .commit import _RECORD_SUFFIXES, _is_committable
 
     # surface names are exact: a case-variant folder (Steps/) deploys
     # through the seed's case-insensitive filesystem lookups on macOS
@@ -909,6 +914,28 @@ def vet(bundle: pathlib.Path) -> None:
                     " node's skills/ -- put skill directories under the"
                     " template's top-level skills/ instead."
                 )
+    # records: steps, scripts, and skills deploy into the node's estate,
+    # where the commit's content law stages only text records -- the law
+    # itself judges each file (the bundle root stands in for the estate
+    # root), so the two can never disagree about what a clone receives
+    unstored = []
+    for surface in ('steps', 'scripts', 'skills'):
+        surface_dir = bundle / surface
+        if not surface_dir.is_dir():
+            continue
+        for entry in sorted(surface_dir.rglob('*')):
+            relfile = entry.relative_to(bundle).as_posix()
+            if entry.is_file() and not _is_committable(relfile, '.'):
+                unstored.append(relfile)
+    if unstored:
+        listing = ', '.join(unstored)
+        suffixes = ', '.join(_RECORD_SUFFIXES)
+        raise ValueError(
+            f'Template has seed files the commit never stores: {listing}'
+            ' (the commit stores only non-hidden text records with these'
+            f' suffixes: {suffixes}); rename each with a record suffix, or'
+            ' keep it outside the seed surfaces.'
+        )
 
 
 def vet_steps(
@@ -1274,9 +1301,10 @@ def diff(
 
     Raises:
         ValueError: If the provenance record refuses
-            (:func:`read_provenance`), or the recorded folder or a shared
+            (:func:`read_provenance`), the recorded folder or a shared
             file it includes does not read at its commit
-            (:func:`materialize`, :func:`read_shared`).
+            (:func:`materialize`, :func:`read_shared`), or the effective
+            set carries a file init and reseed refuse (:func:`vet`).
 
     """
     record = read_provenance(node_dir)
@@ -1303,6 +1331,9 @@ def diff(
             exclude=record.get('exclude'),
             strict=False,
         )
+        # a file init and reseed refuse is a refusal here too, never a
+        # missing-file finding no reseed could clear
+        vet(bundle)
         fill(
             bundle,
             sources=sources,
