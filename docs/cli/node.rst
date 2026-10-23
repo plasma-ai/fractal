@@ -166,8 +166,12 @@ node at ``--path``.
        the preset; the preset beats an inherited value). Every template
        refusal — an untracked folder, a symlink, a credential-named file
        anywhere in the folder, a file a seed surface would silently skip,
-       a broken ``steps/`` contract, missing required Jinja inputs, a
-       truncated charter — fires before any worktree exists. One notice
+       a ``steps/``, ``scripts/``, or ``skills/`` file the commit never
+       stores (only non-hidden text records at the estate content law's
+       suffixes commit, so a suffix-less script or a skill's ``.js``
+       helper refuses by name), a broken ``steps/`` contract, missing
+       required Jinja inputs, a truncated charter — fires before any
+       worktree exists. One notice
        appended to the init output names the ``@<ref>`` form when the
        root branch holds a different copy of the folder or of a shared file
        it includes, naming each shared file that differs.
@@ -850,8 +854,10 @@ drift, since trust enables project-local settings, as is a projects table
 carrying more than the trusted level. Literal braces are valid output and are
 compared like any
 other text. Source defaults are not merged again; deleting a required recorded
-input causes a rendering refusal. The recorded commit resolves as long as it
-is reachable, so a template folder
+input causes a rendering refusal. A recorded folder that init and reseed would
+refuse for a file the seed would skip or the commit never stores refuses here
+too, naming the file, rather than reporting it as missing from the node. The
+recorded commit resolves as long as it is reachable, so a template folder
 moved or deleted later still diffs at the commit that seeded the node. The
 shared files the folder includes re-read at that commit too, so a hand edit to
 an included part of ``NODE.md`` is drift.

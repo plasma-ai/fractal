@@ -72,12 +72,13 @@ __all__ = [
     'test_transcript_resolves_the_config_home_slug',
     'test_settle_cost_adds_each_readable_sub_agent_transcript',
     'test_settle_reads_workflow_sub_agent_transcripts',
+    'test_parallel_sub_agents_price_each_reply_once',
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
     'test_settle_marks_a_record_missing_part_of_a_reply',
     'test_settle_marks_an_entry_it_cannot_read_whole',
     'test_settle_marks_a_reply_it_cannot_price',
     'test_settle_marks_a_reply_that_searched_the_web',
-    'test_settle_marks_a_reply_billed_in_the_us_geography',
+    'test_settle_marks_a_reply_billed_at_a_premium',
     'test_settle_marks_a_reply_above_a_long_prompt_threshold',
     'test_settle_marks_sub_agent_spend_it_cannot_book_after_the_result',
     'test_settle_prices_a_recorded_launch_as_its_cost_record_does',
@@ -1820,6 +1821,52 @@ def test_settle_reads_workflow_sub_agent_transcripts(
     assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
 
 
+def test_parallel_sub_agents_price_each_reply_once(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A killed launch's parallel sub-agents book each reply once.
+
+    Parallel sub-agents interleave their replies' block frames on the
+    stream, so the stream's estimate prices each reply once, at its first
+    frame, below its final usage. With no result figure, the settle books
+    the sub-agents' transcripts over that estimate.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    node = node_with_db
+    backend, step_id = _settling(node, tmp_path, monkeypatch, '')
+    session = node.db.read('steps', where={'step_id': step_id})[0]['session']
+    # two sub-agents' replies, two block frames apiece, interleaved, no result
+    parents = {'msg_a': 'toolu_a', 'msg_b': 'toolu_b'}
+    usages = {'msg_a': _USAGE_FIRST, 'msg_b': _USAGE_SECOND}
+    frames = [
+        {
+            'type': 'assistant',
+            'message': {'id': message_id, 'usage': usages[message_id]},
+            'parent_tool_use_id': parents[message_id],
+            'session_id': session,
+        }
+        for message_id in ('msg_a', 'msg_b', 'msg_a', 'msg_b')
+    ]
+    backend.stream(_lines(frames), step_id=step_id, model='claude-fable-5')
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(_USAGE_FIRST_COST + _USAGE_SECOND_COST)
+    # each sub-agent's transcript holds its reply at its final usage, a
+    # hundred output tokens past its first frame's
+    transcript = pathlib.Path(backend.transcript(session)['path'])
+    subagents = transcript.with_suffix('') / 'subagents'
+    subagents.mkdir(parents=True)
+    for message_id, usage in usages.items():
+        final = {**usage, 'output_tokens': usage['output_tokens'] + 100}
+        line = _transcript_line(message_id, final)
+        (subagents / f'agent-{message_id}.jsonl').write_text(line, encoding='utf-8')
+    assert backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED) is False
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    settled = _USAGE_FIRST_COST + _USAGE_SECOND_COST + 2 * 100 * 1.5e-5
+    assert row['cost'] == pytest.approx(settled)
+
+
 def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(
     node_with_db: Node,
     tmp_path: pathlib.Path,
@@ -2087,33 +2134,43 @@ def test_settle_marks_a_reply_that_searched_the_web(
 
 
 @pytest.mark.parametrize(
-    argnames=('after', 'geo', 'marked'),
+    argnames=('after', 'served', 'marked'),
     argvalues=[
         # a killed launch's reply served in the us geography
-        pytest.param(None, 'us', True, id='killed-us'),
+        pytest.param(None, {'inference_geo': 'us'}, True, id='killed-us'),
         # past a result, a reply after it served in the us geography
-        pytest.param(_AFTER, 'us', True, id='after-us'),
-        # a reply served anywhere bills its tokens alone
-        pytest.param(None, 'global', False, id='global'),
+        pytest.param(_AFTER, {'inference_geo': 'us'}, True, id='after-us'),
+        # a killed launch's reply served in fast mode
+        pytest.param(None, {'speed': 'fast'}, True, id='killed-fast'),
+        # past a result, a reply after it served in fast mode
+        pytest.param(_AFTER, {'speed': 'fast'}, True, id='after-fast'),
+        # a reply served anywhere at standard speed bills its tokens alone
+        pytest.param(
+            None,
+            {'inference_geo': 'global', 'speed': 'standard'},
+            False,
+            id='standard',
+        ),
     ],
 )
-def test_settle_marks_a_reply_billed_in_the_us_geography(
+def test_settle_marks_a_reply_billed_at_a_premium(
     node_with_db: Node,
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     after: Optional[str],
-    geo: str,
+    served: dict[str, str],
     marked: bool,
 ) -> None:
-    """A reply served in the us geography books its tokens, marked for the premium.
+    """A reply billed at a premium books its tokens, marked for the premium.
 
     Claude Code bills a reply whose usage names the ``us`` inference
-    geography at a premium over its token cost, which the price table does
-    not carry, so the step books the tokens and is marked partly unpriced
-    -- killed, or past a result.
+    geography at a premium over its token cost, and one served in fast
+    mode (``speed: "fast"``) at a multiple of its model's rates. The price
+    table carries neither, so the step books the tokens and is marked
+    partly unpriced -- killed, or past a result.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
-    usage = {**_USAGE_SECOND, 'inference_geo': geo}
+    usage = {**_USAGE_SECOND, **served}
     content = _transcript_line('msg_a', _USAGE_FIRST)
     content += _transcript_line('msg_b', usage, stamp=_LATE)
     backend, step_id = _settling(node_with_db, tmp_path, monkeypatch, content)

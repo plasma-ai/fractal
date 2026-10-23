@@ -38,6 +38,7 @@ from fractal.constants import (
     STATUSES,
     STEP_PGID_FILE,
     UNAVAILABLE_REASON_PREFIX,
+    UNLAUNCHED_REASON_PREFIX,
     WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
@@ -1599,8 +1600,9 @@ class Node:
                 # a file the copy loops would silently skip -- a stray
                 # under steps/ or scripts/, a loose skills/ file, an
                 # unknown or loose agents/ entry -- would deploy nothing,
-                # print success, and drift on every later diff, so it
-                # refuses here like a credential
+                # print success, and drift on every later diff, and one
+                # the commit never stores would live on this disk alone,
+                # so each refuses here like a credential
                 vet(bundle)
                 # render from the unmodified source snapshot, including files
                 # the output listing omitted; values are never template source
@@ -2517,8 +2519,9 @@ class Node:
                         exclude=record.get('exclude'),
                         strict=False,
                     )
-                    # a file the copy loops would silently skip refuses here
-                    # exactly as at init, judging the effective set
+                    # a file the copy loops would silently skip or the commit
+                    # never stores refuses here exactly as at init, judging
+                    # the effective set
                     vet(bundle)
                     fill(
                         bundle,
@@ -5426,7 +5429,9 @@ class Node:
         -- the step row's own exit code is the binary failure marker, so
         the reason is where the code survives). A failure the loop judged
         a provider outage (its reason leads ``provider unavailable: ``)
-        breaks the streak too, as it never arms the loop's breaker.
+        breaks the streak too, as it never arms the loop's breaker, and so
+        does a step the loop refused before its launch (its reason leads
+        ``not launched: ``), which bought no inference to count.
         Active nodes only: a settled node's trailing failures are history.
         """
         if self.status() != 'active':
@@ -5451,6 +5456,10 @@ class Node:
             # either, however instant and unpriced -- its verdict leads the
             # reason, so a launch-authored tail can never forge it
             if row['metadata'].startswith(UNAVAILABLE_REASON_PREFIX):
+                return False
+            # nor is a step the loop refused before its launch, which bought
+            # no inference -- its refusal leads the reason the same way
+            if row['metadata'].startswith(UNLAUNCHED_REASON_PREFIX):
                 return False
             if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
                 return False

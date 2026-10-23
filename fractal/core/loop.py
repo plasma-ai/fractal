@@ -25,6 +25,7 @@ from fractal.constants import (
     STEER_REASON_PREFIX,
     STEP_PGID_FILE,
     UNAVAILABLE_REASON_PREFIX,
+    UNLAUNCHED_REASON_PREFIX,
 )
 from fractal.exceptions import AgentStreamError, _Abort, _ThinkingCap
 
@@ -2391,6 +2392,10 @@ class Loop:
                         # never reads an instant unpriced outage as billing
                         if result.unavailable:
                             step_reason = f'{UNAVAILABLE_REASON_PREFIX}{step_reason}'
+                        # and so does a refusal before the launch, which bought
+                        # nothing for the census to read as dead credits
+                        elif not self._step_launched:
+                            step_reason = f'{UNLAUNCHED_REASON_PREFIX}{step_reason}'
                     elif step_status == 'completed':
                         # a drop marks its own attempt's row -- the durable
                         # fact `node list` composes into its detail column
@@ -3330,11 +3335,25 @@ class Loop:
                 # whatever the failed settle would have added; past one, the
                 # figure leaves out the spend the stream saw after it
                 self._step_partly_unpriced = after is None or trailing
+            # name the marker the step's close gives the row: one holding no
+            # figure is unpriced, not partly unpriced (a contended read keeps
+            # the partial wording)
+            marker = 'partly unpriced'
+            if self._step_partly_unpriced or refused:
+                try:
+                    rows = node.db.read(
+                        'steps',
+                        where={'step_id': self._step_id},
+                        limit=1,
+                    )
+                except Exception:
+                    rows = []
+                if rows and rows[0]['cost'] is None:
+                    marker = 'unpriced'
             if self._step_partly_unpriced:
                 print(
                     "Warning: part of the launch's spend is missing from its"
-                    ' record; its step books the spend recorded (partly'
-                    ' unpriced)',
+                    f' record; its step books the spend recorded ({marker})',
                     file=sys.stderr,
                 )
             # a refused result figure leaves the step the record's own figure
@@ -3344,7 +3363,7 @@ class Loop:
                 print(
                     "Warning: the launch's result figure could not be settled"
                     " against its session's earlier spend; its step books the"
-                    ' spend recorded (partly unpriced)',
+                    f' spend recorded ({marker})',
                     file=sys.stderr,
                 )
                 self._step_partly_unpriced = True
@@ -3719,6 +3738,9 @@ class Loop:
                 # the outage verdict leads the reason, as on a work step's row
                 if result.unavailable:
                     sync_reason = f'{UNAVAILABLE_REASON_PREFIX}{result.reason}'
+                # and so does a refusal before the launch
+                elif not self._step_launched:
+                    sync_reason = f'{UNLAUNCHED_REASON_PREFIX}{result.reason}'
             else:
                 sync_status, sync_exit_code = 'completed', 0
         else:
