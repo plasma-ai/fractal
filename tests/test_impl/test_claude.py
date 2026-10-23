@@ -1154,10 +1154,10 @@ def test_stream_survives_missing_pricing_cache(
 ) -> None:
     """No pricing cache degrades to unpriced accrual, never a crash.
 
-    ``needs_pricing`` gates the run-start cache bootstrap to token-priced
-    agents, so a claude-only host may carry no ``~/.fractal/pricing.json``
-    at all -- best-effort accrual must skip pricing (no flush), never break
-    the stream mid-step.
+    A claude-only run refreshes the cache best-effort, so a host whose
+    fetch fails may carry no ``~/.fractal/pricing.json`` at all --
+    best-effort accrual must skip pricing (no flush), never break the
+    stream mid-step.
     """
     monkeypatch.setattr(pricing, '_PRICING_CACHE', str(tmp_path / 'absent.json'))
     pricing._load.cache_clear()

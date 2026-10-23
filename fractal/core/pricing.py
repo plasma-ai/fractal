@@ -123,9 +123,10 @@ def rates(model: str, /) -> Optional[dict[str, Any]]:
 def _load() -> dict[str, Any]:
     """Load cached pricing data (once per process).
 
-    The cache is populated by the loop's run-start pricing refresh, but only for
-    token-priced agents (``needs_pricing``); claude's best-effort accrual reads
-    it opportunistically, so a missing or corrupt cache degrades to no pricing
+    The cache is populated by the loop's run-start pricing refresh: required
+    for token-priced agents (``needs_pricing``) and best-effort for claude's
+    accrual and settle (``wants_pricing``), where a failed fetch leaves the
+    run going -- so a missing or corrupt cache degrades to no pricing
     (streams record unpriced, never crash mid-step).
     """
     cache = pathlib.Path(_PRICING_CACHE).expanduser()

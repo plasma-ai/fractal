@@ -825,8 +825,10 @@ class Loop:
         # priced from the LiteLLM table -- a token-priced agent prices at the
         # served model its own session record names, configured model or
         # not, and a routed backend chain-prices its result usage; an agent
-        # that reports its own cost natively gives pricing nothing to do
+        # that reports its own cost natively needs none, though one that
+        # prices what its figure misses from the table wants it current
         self._needs_pricing = False
+        wants_pricing = False
         priced: list[tuple[pathlib.Path, Agent, str]] = []
         for path in sorted((node.node_dir / 'steps').glob('*.md')):
             # step files are hand-edited: a bad byte must abort through the
@@ -848,6 +850,8 @@ class Loop:
                 if backend.needs_pricing or backend.provider is not None:
                     self._needs_pricing = True
                     priced.append((path, backend, step.model or self._node_model))
+            elif backend.wants_pricing:
+                wants_pricing = True
         # refresh model pricing before the run; a fetch failure with no cache
         # is fatal -- the cost/cap pipeline cannot price token usage without it
         if self._needs_pricing:
@@ -856,6 +860,23 @@ class Loop:
                 reason = 'Could not fetch pricing and no cached pricing.json exists.'
                 print(f'Error: {reason}', file=sys.stderr)
                 self._abort_preflight(reason)
+            if status == 'stale':
+                print(
+                    'Warning: could not refresh pricing; using cached pricing.json.',
+                    file=sys.stderr,
+                )
+        # a cost-reporting agent prices only what its own figure misses, so a
+        # day-old table serves and a failed fetch only warns -- every launch
+        # that reports its figure still books it
+        elif wants_pricing:
+            status = pricing.update(max_age='24h')
+            if status == 'missing':
+                print(
+                    'Warning: could not fetch pricing and no cached pricing.json'
+                    ' exists; a launch that ends without its own cost figure'
+                    ' books unpriced.',
+                    file=sys.stderr,
+                )
             if status == 'stale':
                 print(
                     'Warning: could not refresh pricing; using cached pricing.json.',
