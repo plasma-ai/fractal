@@ -615,15 +615,14 @@ def commit_user_init(node: Node, message: str) -> str:
         denied = _estate_denied(node, seed, estates)
         if estates:
             withheld = [f':(exclude,literal){node.worktree / path}' for path in denied]
-            # add from inside the seed, so every pathspec shares its prefix
-            # (git 2.54 and 2.55 can stage nothing for a nested directory
-            # pathspec beside an exclude outside it), and first, so a failure
-            # leaves the index untouched; only git's refusal of an ignored
-            # seed (exit 1, the hold the record pass overrides) is tolerated --
-            # any other failure fails the baseline rather than land it without
-            # the seed; LC_ALL pins the refusal's wording
-            cmd = ['git', '-C', f'{node.node_dir}', 'add', '--', '.']
-            cmd += [*_STAGE_EXCLUDES, *withheld]
+            # add from the seed's parent, the directory git strips, as _sweep
+            # adds (older git can stage no new file otherwise), and first, so
+            # a failure leaves the index untouched; only git's refusal of an
+            # ignored seed (exit 1, the hold the record pass overrides) is
+            # tolerated -- any other failure fails the baseline rather than
+            # land it without the seed; LC_ALL pins the refusal's wording
+            cmd = ['git', '-C', f'{node.node_dir.parent}', 'add', '--']
+            cmd += [f':(literal){node.node_dir}', *_STAGE_EXCLUDES, *withheld]
             env = {**os.environ, 'LC_ALL': 'C'}
             result = subprocess.run(cmd, capture_output=True, text=True, env=env)
             # another process's index lock is waited out once, as the other
@@ -644,10 +643,9 @@ def commit_user_init(node: Node, message: str) -> str:
         # -f mirrors the work commits' record pass: the wiki's paths are
         # explicit and exclude-filtered, so an external ignore rule cannot
         # silently eat the wiki
-        forced = [f':(literal){path}' for path in paths if path != seed_dir]
+        forced = [node.worktree / path for path in paths if path != seed_dir]
         if forced:
-            cmd = ['add', '-f', '--', *forced, *_STAGE_EXCLUDES]
-            fractal.util.git.run(cmd, cwd=node.worktree, lock_retry=True)
+            _sweep(node, forced, force=True)
         notices[:], _ = _stage_records(node, seed, estates, denied)
 
     _stage_paths()
@@ -1154,7 +1152,6 @@ def _stage(
     # is already outside the sweep anyway
     estates = _estate_roots(node, fractal_prefix)
     denied = _estate_denied(node, fractal_prefix, estates)
-    withheld = [f':(exclude,literal){path}' for path in denied]
     # heal a baseline that force-tracked the wiki tool's self-ignored derived
     # cache: drop it from the index -- never the disk, the tool owns the bytes
     # -- so this commit converges the tree and the cache's own ignore keeps it
@@ -1175,31 +1172,74 @@ def _stage(
         paths = []
         for scope in commit_scopes:
             if (worktree / scope).exists():
-                paths.append(f'{worktree / scope}')
+                paths.append(worktree / scope)
         # the shared project wiki is committable regardless of scope
         if (worktree / wiki_prefix).is_dir():
-            paths.append(f'{worktree / wiki_prefix}')
+            paths.append(worktree / wiki_prefix)
         # init's own .gitattributes edit rides the sweep
         if _attributes_is_init_edit(node):
-            attributes = worktree / '.gitattributes'
-            paths.append(f'{attributes}')
+            paths.append(worktree / '.gitattributes')
         if paths:
-            # literal pathspec magic: a glob char in an on-disk path (e.g. a
-            # bracketed project dir) must not widen or empty the match
-            specs = [f':(literal){path}' for path in paths]
-            cmd = ['add', *specs, *_STAGE_EXCLUDES, *withheld]
-            fractal.util.git.run(cmd, cwd=worktree, lock_retry=True)
+            _sweep(node, paths, denied=denied)
         # the estates ride their own plain add: it must be able to fail
         # (everything under it ignored) without unstaging the scope sweep
         folder = worktree / fractal_prefix
         if folder.is_dir():
-            cmd = ['add', f':(literal){folder}', *_STAGE_EXCLUDES, *withheld]
-            fractal.util.git.run(cmd, cwd=worktree, check=False, lock_retry=True)
+            _sweep(node, [folder], denied=denied, check=False)
     else:
-        cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
-        fractal.util.git.run(cmd, cwd=worktree, lock_retry=True)
+        _sweep(node, [worktree], denied=denied)
     notices, unstaged = _stage_records(node, fractal_prefix, estates, denied)
     return notices, denied + unstaged
+
+
+def _sweep(
+    node: Node,
+    paths: list[pathlib.Path],
+    *,
+    denied: Iterable[str] = (),
+    force: bool = False,
+    check: bool = True,
+) -> None:
+    """Add paths past the stage excludes, from the directory git strips.
+
+    git before 2.56 strips the positive pathspecs' common directory prefix
+    from each exclude pathspec as well as from the path it tests, so an
+    exclude that does not begin with that prefix (``**/.db`` beside
+    ``backend/src`` and ``backend/wiki``) can match every untracked file:
+    the add stages edits to tracked files but no new file, and says
+    nothing. From that directory git prefixes every exclude with it, and
+    the strip is exact on every version. Every path sits strictly below
+    the directory, so a ``**/<name>`` exclude, which needs a slash before
+    the name, still matches an entry directly inside a path.
+
+    Args:
+        node: The node whose worktree holds the paths.
+        paths: Absolute paths to add, each present on disk.
+        denied: Worktree-relative estate paths the content law withholds.
+        force: Add ignored paths too.
+        check: Raise ``RuntimeError`` on a failed add (another process's
+            index lock that outlasts the wait raises either way).
+
+    """
+    # the deepest directory holding every path's parent -- the prefix git
+    # strips -- and the worktree root for the worktree itself
+    parents = [path.parent for path in paths]
+    directory = pathlib.Path(os.path.commonpath(parents))
+    if not directory.is_relative_to(node.worktree):
+        directory = node.worktree
+    # literal pathspec magic: a glob char in an on-disk path (e.g. a
+    # bracketed project dir) must not widen or empty the match
+    specs = [f':(literal){path}' for path in paths]
+    # a withheld path outside the directory matches nothing the add reaches,
+    # and named anyway it would not begin with the prefix git strips
+    withheld = [
+        f':(exclude,literal){node.worktree / path}'
+        for path in denied
+        if (node.worktree / path).is_relative_to(directory)
+    ]
+    cmd = ['add', '-f'] if force else ['add']
+    cmd += ['--', *specs, *_STAGE_EXCLUDES, *withheld]
+    fractal.util.git.run(cmd, cwd=directory, check=check, lock_retry=True)
 
 
 def _estate_roots(node: Node, fractal_prefix: str) -> list[pathlib.Path]:
