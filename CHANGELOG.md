@@ -601,6 +601,11 @@ may include breaking changes, each listed under a Breaking heading.
   in, the folder the node's spawn gave it: a node in a sub-project merging into
   a target in another project, such as the root, refreshed the target project's
   `wiki/` instead and left its landed pages out of their index.
+- A direct `merge.sh` call that passes no `--target-wiki` and can read the
+  project-wiki folder from neither the target's config nor the node's refuses
+  the merge, naming the read, and restores the target. It guessed `wiki/`
+  instead, refreshing and staging whatever ordinary content sat there past the
+  footprint check.
 - A codex `error` frame inside the active turn — the frame codex writes when it
   retries a stream error and then completes the turn — no longer fails a step
   whose process exits 0; the recovered step is priced normally. A `turn.failed`
