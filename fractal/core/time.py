@@ -7,7 +7,12 @@ import typing
 from typing import Optional
 
 import fractal.util
-from fractal.constants import STEER_REASON_PREFIX
+from fractal.constants import (
+    LATCH_PARK_REASON_PREFIX,
+    PARK_REASON,
+    PREFLIGHT_PARK_REASON_PREFIX,
+    STEER_REASON_PREFIX,
+)
 
 if typing.TYPE_CHECKING:
     from collections.abc import Iterable
@@ -248,12 +253,15 @@ class Time:
         run_id: int,
         since: Optional[str] = None,
     ) -> float:
-        """Return seconds the run spent paused, from its pause/resume instants.
+        """Return seconds the run spent parked, from its park/resume instants.
 
-        Sums the pause->resume spans recorded on the run's events, clipping
+        Sums the park->resume spans recorded on the run's events, clipping
         each to ``since`` (an iteration deadline credits only the span inside
-        the iteration); an unmatched trailing pause accrues to now (the node
-        is still parked). The instants are the substrate for pause-aware cost
+        the iteration); an unmatched trailing park accrues to now (the node
+        is still parked). A span opens at the loop's own park row, never at
+        the pause request: a step in flight works on past the request until
+        the loop parks, and a resume can withdraw the request before any
+        park. The instants are the substrate for pause-aware cost
         attribution as well.
 
         Args:
@@ -268,17 +276,27 @@ class Time:
             'events',
             where={'node': self._node.branch, 'run_id': run_id},
         )
-        # a failed resume never relaunched the loop (the node is still
-        # parked), so only a completed one closes a span; a failed pause
-        # still opens one -- its signal is durable and the loop parks anyway
+        # a span opens at a pause row the loop wrote as it parked (at a
+        # pause checkpoint, at a latched boot, or at a resume boot's failed
+        # preflight), told from the pause verb's request by its reason; a
+        # failed resume never relaunched the loop (the node is still
+        # parked), so only a completed one closes a span
         spans = [
             row
             for row in rows
-            if row['event'] == 'pause'
+            if (
+                row['event'] == 'pause'
+                and (
+                    row['metadata'] == PARK_REASON
+                    or row['metadata'].startswith(
+                        (LATCH_PARK_REASON_PREFIX, PREFLIGHT_PARK_REASON_PREFIX)
+                    )
+                )
+            )
             or (row['event'] == 'resume' and row['status'] == 'completed')
         ]
         spans.sort(key=lambda row: row['created_at'])
-        # walk the interleaved instants; duplicate pauses collapse onto the
+        # walk the interleaved instants; duplicate parks collapse onto the
         # first, duplicate resumes are inert, and the fixed-width UTC format
         # makes string comparison safe
         credit = 0.0
