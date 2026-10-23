@@ -241,16 +241,16 @@ may include breaking changes, each listed under a Breaking heading.
   The worktree-root file passes as init's own edit — at a child's
   `fractal commit --init` baseline, at a scoped commit, and at the `node merge`
   footprint check — when HEAD's content is followed by the wiki tool's index
-  lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`), by those lines
-  and page lines (`# Wiki page merge driver`, `**/*.md merge=wiki`), or by the
-  page lines alone over a file already holding `**/_index.md merge=wiki`, with
-  LF or CRLF line endings. Any other added or removed line still makes the file
-  an ordinary out-of-scope path. The memory wiki's own `.gitattributes` commits
-  with the node's records, so a child's baseline carries it; a `.gitattributes`
-  anywhere else in a node's data directory is withheld and named. `fractal init`
-  on an adopted wiki warns when the repo-root `.gitattributes` lacks
-  `**/_index.md merge=wiki` or the wiki's own `.gitattributes` lacks
-  `*.md merge=wiki` as a whole line, naming each missing line and its file.
+  lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`), with LF or
+  CRLF line endings. A page mapping there would take over the merge of every
+  Markdown file in the repository, so a page line, like any other added or
+  removed line, still makes the file an ordinary out-of-scope path. The memory
+  wiki's own `.gitattributes` commits with the node's records, so a child's
+  baseline carries it; a `.gitattributes` anywhere else in a node's data
+  directory is withheld and named. `fractal init` on an adopted wiki warns when
+  the repo-root `.gitattributes` lacks `**/_index.md merge=wiki` or the wiki's
+  own `.gitattributes` lacks `*.md merge=wiki` as a whole line, naming each
+  missing line and its file.
 - A Claude step stuck at a thinking cap is steered one effort level lower: a
   `max` step's steer runs at `xhigh`, an `xhigh` step's at `high`. The step's
   effort is its `effort:` frontmatter, else the node's `effort`, else Claude's
@@ -499,8 +499,9 @@ may include breaking changes, each listed under a Breaking heading.
   committed bytes, `updated:` stamp included, and the node's own edits to an
   index survive. In the working tree the rows come back at the next
   `wiki update`. A failed rebuild warns in one line and the commit lands with
-  the indexes as staged. The refresh indexed every file on disk, so each refused
-  file's row dangled in every clean checkout.
+  the indexes as staged, the working tree still matching them. The refresh
+  indexed every file on disk, so each refused file's row dangled in every clean
+  checkout.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The

@@ -758,8 +758,8 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    there at the next refresh. The output says ``Memory index rebuilt without
    N file(s) the commit leaves out`` beside the warning that names each file.
    The rebuild also runs on ``--force`` saves and skips ``--init``; a failure
-   warns (``Warning: memory index not rebuilt (...)``) and never fails the
-   commit.
+   warns (``Warning: memory index not rebuilt (...)``), never fails the
+   commit, and leaves the working tree matching the indexes it commits.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
    rules and staged files of 10 MB or more. The ignore warning names the first
    ten eaten paths, each with the rule that ate it as ``git check-ignore -v``
