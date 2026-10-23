@@ -710,6 +710,9 @@ may include breaking changes, each listed under a Breaking heading.
   start's or resume's check aborts the loop's boot on record: a start or
   continue ends `exited` with the reason on its run, and a resume stays paused
   with its paused time still credited.
+- A tree's `agents.py` hook file that fails to load aborts a loop's boot on
+  record, as a bad `config.json` value does, instead of killing it with nothing
+  recorded.
 
 ## [1.3.0] - 2026-09-17
 
