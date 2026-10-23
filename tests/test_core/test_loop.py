@@ -364,6 +364,27 @@ _TOOL_FRAME = {
     'parent_tool_use_id': None,
     'session_id': 'SID',
 }
+# a second call of the same reply, run in parallel with the first, and its result
+_SECOND_TOOL_FRAME = {
+    'type': 'assistant',
+    'message': {
+        'id': 'msg_1',
+        'role': 'assistant',
+        'content': [{'type': 'tool_use', 'id': 'toolu_2', 'name': 'Bash', 'input': {}}],
+        'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_SECOND_TOOL_RESULT = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_2', 'content': 'ok'}],
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
 _MESSAGE_START = {
     'type': 'stream_event',
     'event': {'type': 'message_start', 'message': {'id': 'msg_2', 'content': []}},
@@ -2636,6 +2657,20 @@ def test_a_capped_or_idle_sync_runs_to_its_result(
         pytest.param(
             _claude_script(_INIT, _TOOL_FRAME, 'sleep 3', _TOOL_RESULT, _RESULT),
             id='assistant-frame-tool',
+        ),
+        # one reply's parallel calls: the first result lands while the
+        # second tool still runs
+        pytest.param(
+            _claude_script(
+                _INIT,
+                _TOOL_FRAME,
+                _SECOND_TOOL_FRAME,
+                _TOOL_RESULT,
+                'sleep 3',
+                _SECOND_TOOL_RESULT,
+                _RESULT,
+            ),
+            id='parallel-calls',
         ),
         # an API retry's backoff is no time of the agent's
         pytest.param(
@@ -6051,14 +6086,15 @@ def test_failed_drop_redispatch_keeps_the_failure(
 def test_spent_deadline_abandons_the_drop_redispatch(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A drop past the iteration deadline fails without a re-dispatch.
 
     The re-dispatch's own launch pre-check would only convert the
     completed work into a timed-out failure, so a spent deadline buys no
-    second launch -- but the pin is still law: the unresolved drop books
-    the step (and iteration) failed with the drop named, never a clean
-    completion off wrong-model output.
+    second launch, nor the backoff before one -- but the pin is still
+    law: the unresolved drop books the step (and iteration) failed with
+    the drop named, never a clean completion off wrong-model output.
     """
     monkeypatch.setenv('_NODE', '')
     _seed_steps(loop_node, ['01-PLAN.md'])
@@ -6084,8 +6120,9 @@ def test_spent_deadline_abandons_the_drop_redispatch(
 
     loop = OverrunningLoop(loop_node, serves=['dropped-model'])
     assert loop.run() == 0
-    # the spent deadline bought no re-dispatch
+    # the spent deadline bought no re-dispatch, nor the backoff before one
     assert loop.launched == ['step 1 of 1 (PLAN)']
+    assert 'retrying after model drop' not in capsys.readouterr().out
     row = loop_node.db.read('steps', where={'step_name': 'PLAN'})[0]
     assert (row['status'], row['metadata']) == (
         'completed',

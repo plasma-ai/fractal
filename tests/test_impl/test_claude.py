@@ -73,6 +73,7 @@ __all__ = [
     'test_settle_cost_adds_each_readable_sub_agent_transcript',
     'test_settle_reads_workflow_sub_agent_transcripts',
     'test_parallel_sub_agents_price_each_reply_once',
+    'test_settle_prices_a_reply_in_two_transcripts_once_at_its_latest_line',
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
     'test_settle_marks_a_record_missing_part_of_a_reply',
     'test_settle_marks_an_entry_it_cannot_read_whole',
@@ -1865,6 +1866,34 @@ def test_parallel_sub_agents_price_each_reply_once(
     row = node.db.read('steps', where={'step_id': step_id})[0]
     settled = _USAGE_FIRST_COST + _USAGE_SECOND_COST + 2 * 100 * 1.5e-5
     assert row['cost'] == pytest.approx(settled)
+
+
+def test_settle_prices_a_reply_in_two_transcripts_once_at_its_latest_line(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply id written to two transcripts prices once, at its latest line.
+
+    The latest line holds the reply's final usage, whichever file it sits
+    in, so an earlier copy in the session's transcript neither adds to it
+    nor stands in for it.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    node = node_with_db
+    # the session's transcript holds the reply first, at its earlier usage
+    early = _transcript_line('msg_main', _USAGE_SECOND)
+    backend, step_id = _settling(node, tmp_path, monkeypatch, early)
+    session = node.db.read('steps', where={'step_id': step_id})[0]['session']
+    # a sub-agent's transcript holds the same reply later, at its final usage
+    transcript = pathlib.Path(backend.transcript(session)['path'])
+    subagents = transcript.with_suffix('') / 'subagents'
+    subagents.mkdir(parents=True)
+    late = _transcript_line('msg_main', _USAGE_FIRST, stamp=_LATE)
+    (subagents / 'agent-a.jsonl').write_text(late, encoding='utf-8')
+    backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED)
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(_USAGE_FIRST_COST)
 
 
 def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(
