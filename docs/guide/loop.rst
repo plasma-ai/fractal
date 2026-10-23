@@ -681,7 +681,12 @@ Pricing and untracked spend
 Token-priced backends and provider routes price usage from a cached copy of
 the LiteLLM price table (``~/.fractal/pricing.json``), refreshed at run start
 and daily during long runs. If the fetch fails and no cache exists, the run
-aborts at preflight; a stale cache warns and is used. A cost cap combined
+aborts at preflight; a stale cache warns and is used. A native ``claude``
+step prices from the same table only a launch that ends without its own
+cost figure (killed, capped, paused, or with the figure refused), so a run
+with one refreshes a cache older than a day at run start, and a failed
+fetch only warns: every launch that reports its figure still books it, and
+with no cache at all such a launch books unpriced. A cost cap combined
 with an agent whose spend cannot be priced aborts the run at preflight, before
 the run row commits and before any paid probe: every token-priced step's
 effective model (its own ``model:`` or the node's) is judged against the

@@ -29,9 +29,12 @@ from fractal.constants import (
     FRACTAL_FOLDER,
     HEADLESS_FILE,
     HEADLESS_LOG,
+    LATCH_PARK_REASON_PREFIX,
     LOCK_FILE,
+    PARK_REASON,
     PAUSED_FILE,
     PGID_FILE,
+    PREFLIGHT_PARK_REASON_PREFIX,
     PROJECT_FOLDER,
     SOCKET_FILE,
     STATUS_FILE,
@@ -2637,6 +2640,33 @@ class Node:
         """
         worktree.exclude_update(self.repo_dir)
 
+    def _check_launch_config(self: Node) -> None:
+        """Re-validate the stored config the loop's boot reads.
+
+        The documented steering path edits ``config.json`` directly,
+        bypassing the init/update setters' checks, so every verb that
+        launches a loop (``start``, ``resume``) runs this before it
+        changes anything: the launch invariants (:meth:`Config.validate`),
+        then the agent resolved against the registry the way the boot
+        resolves it.
+
+        Raises:
+            ValueError: If the config violates a launch invariant, names
+                no agent, or names one no backend is registered for.
+
+        """
+        from .agent import command_base, resolve
+
+        self.config.validate()
+        # the loop reads this node's own config key, never the ancestor walk
+        # -- the steering path can typo or drop it, and the loop's registry
+        # error would otherwise abort the boot after the launch
+        agent = self.config.get('agent')
+        if not agent:
+            raise ValueError('No agent configured; set --agent at node init.')
+        base_word = command_base(agent)
+        resolve(base_word, root=self.db.path.parent)
+
     def start(
         self: Node,
         *,
@@ -2689,7 +2719,6 @@ class Node:
             retune echo, the continue-from-killed countermand).
 
         """
-        from .agent import command_base, resolve
         from .loop import _effort_ladders
 
         # reject user nodes
@@ -2861,18 +2890,8 @@ class Node:
         # re-validate the rest of the config the loop reads -- the documented
         # steering path edits config.json directly, bypassing the init/update
         # setters' checks; a bad duration or cost ordering would otherwise abort
-        # the loop after start prints "Started", wedging the node idle with the
-        # only error on a dying pane or in headless.log
-        self.config.validate()
-        # resolve the stored agent against the registry the way the loop's
-        # boot does (the loop reads this node's own config key, never the
-        # ancestor walk) -- the same steering path can typo or drop it, and
-        # the loop's registry error would land on the same dying pane or log
-        agent = self.config.get('agent')
-        if not agent:
-            raise ValueError('No agent configured; set --agent at node init.')
-        base_word = command_base(agent)
-        resolve(base_word, root=self.db.path.parent)
+        # the loop's boot after start prints "Started"
+        self._check_launch_config()
         # a blind node reads no channels -- sweep any subscriptions that
         # landed between init (which seeds none) and this launch
         if self.config.get('blind'):
@@ -3883,7 +3902,29 @@ class Node:
         Returns:
             Confirmation message.
 
+        Raises:
+            ValueError: If ``reason`` uses the text the loop reserves for its
+                own park rows.
+
         """
+        # refuse the loop's park text before anything is written -- the
+        # deadline credit tells a park from a request by its reason; a prefix
+        # counts without its trailing space, since a fanned-out reason gains
+        # a ' (via pause of ...)' suffix
+        if reason:
+            prefixes = (LATCH_PARK_REASON_PREFIX, PREFLIGHT_PARK_REASON_PREFIX)
+            reserved = [
+                prefix.rstrip()
+                for prefix in prefixes
+                if reason.startswith(prefix.rstrip())
+            ]
+            if reason == PARK_REASON:
+                reserved.append(PARK_REASON)
+            if reserved:
+                raise ValueError(
+                    f'--reason must not use the reserved text {reserved[0]!r}'
+                    ' (the loop records its own parks with it).'
+                )
         # a tree-wide pause latches the root before fanning out, so a start
         # or spawn racing the sweep (even at depth 1, where no pausable
         # ancestor exists) refuses instead of slipping in unfrozen
@@ -4023,14 +4064,20 @@ class Node:
             raise RuntimeError(
                 'Cannot resume a node from a draining run (--drain forbids re-arms).'
             )
-        # refuse a bad committed effort ladder before anything changes -- each
-        # relaunched loop reads its own project's ladder at boot and would
-        # abort back to paused after the resume closed its pause credit span
+        # refuse a bad config or committed effort ladder before anything
+        # changes -- each relaunched loop reads its own config and its
+        # project's ladder at boot and would abort back to paused after the
+        # resume closed its pause credit span; the refusal names the node,
+        # since a tree-wide resume checks many
         relaunched = [node for _, node in self._live_descendants(status='paused')]
         if not self.is_user and self.status() == 'paused':
             relaunched.append(self)
         for node in relaunched:
-            _effort_ladders(node)
+            try:
+                node._check_launch_config()
+                _effort_ladders(node)
+            except ValueError as error:
+                raise ValueError(f'Cannot resume {node.branch}: {error}') from error
         # a tree-wide resume releases the latch first -- new starts and
         # spawns are legal again the moment the release begins, even when
         # nothing is left parked to relaunch
@@ -4058,8 +4105,8 @@ class Node:
                 )
         # a node still parking (active with a pending pause signal) has a live
         # loop that cannot be relaunched -- withdraw its pause instead, so the
-        # loop never parks; the resume event closes the span for the credit
-        # walk, and a loop that already read the signal parks anyway (honest:
+        # loop never parks; the request opened no credit span (only a park
+        # does), and a loop that already read the signal parks anyway (honest:
         # it lands paused for the next resume to relaunch)
         resumed_count = 0
         withdrawn = [

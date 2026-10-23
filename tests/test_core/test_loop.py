@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections.abc import Callable, Collection, Iterator
 from typing import Any, Optional
 
@@ -51,6 +52,7 @@ from fractal.exceptions import AgentStreamError, _Abort
 from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
 from fractal.impl.codex import CodexAgent
+from fractal.impl.opencode import OpencodeAgent
 from tests._helpers import (
     _LOCK_HOLDER,
     _age_run,
@@ -104,6 +106,9 @@ __all__ = [
     'test_launch_verbs_refuse_an_invalid_effort_ladder',
     'test_tree_resume_refuses_an_invalid_effort_ladder',
     'test_a_ladder_broken_after_the_launch_check_aborts_the_boot',
+    'test_resume_refuses_an_invalid_config',
+    'test_tree_resume_refuses_a_descendants_invalid_config',
+    'test_a_config_broken_after_the_resume_check_aborts_the_boot',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
     'test_the_steer_runs_on_what_the_stuck_launch_left',
     'test_a_capped_or_idle_sync_runs_to_its_result',
@@ -143,6 +148,8 @@ __all__ = [
     'test_preflight_abort_honors_a_kill_that_reaped_the_probe',
     'test_boot_reaps_an_orphaned_probe_group',
     'test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model',
+    'test_boot_refreshes_a_day_old_price_table_for_a_claude_step',
+    'test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -244,7 +251,13 @@ __all__ = [
 
 
 class MockLoop(Loop):
-    """Loop double: canned launch results, no preflight, no subprocesses."""
+    """Loop double: canned launch results, no preflight, no subprocesses.
+
+    The double reads the run parameters at construction, as a boot does,
+    so a test can drive the loop's parts without booting it; ``run()``
+    reads them again at its boot, and a config that read refuses is left
+    for that boot to abort on.
+    """
 
     def __init__(
         self: MockLoop,
@@ -254,6 +267,8 @@ class MockLoop(Loop):
     ) -> None:
         """Initialize ``MockLoop``."""
         super().__init__(node, **kwargs)
+        with contextlib.suppress(ValueError):
+            self._read_run_parameters()
         self.results = list(results or [])
         self.launched: list[str] = []
 
@@ -841,6 +856,19 @@ def scripted_claude(
             process.stdout.close()
 
 
+@pytest.fixture
+def price_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> Iterator[pathlib.Path]:
+    """Yield a temp pricing-cache path, resetting the process cache around it."""
+    path = tmp_path / 'pricing.json'
+    monkeypatch.setattr(pricing, '_PRICING_CACHE', str(path))
+    pricing._load.cache_clear()
+    yield path
+    pricing._load.cache_clear()
+
+
 # ------ step parsing and discovery
 
 
@@ -895,14 +923,19 @@ def test_step_load_parses_strict_flat_scalar_frontmatter(
 )
 def test_duration_validation_mirrors_the_launch_contract(
     loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
     key: str,
     value: str,
     match: str,
 ) -> None:
-    """A malformed or sub-second duration refuses the launch with its key."""
+    """A malformed or sub-second duration aborts the boot on record, naming its key."""
+    monkeypatch.setenv('_NODE', '')
     _configure(loop_node, **{key: value})
-    with pytest.raises(ValueError, match=match):
-        MockLoop(loop_node)
+    assert MockLoop(loop_node).run() == 1
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    assert match in run['metadata']
 
 
 def test_step_timeout_frontmatter_substitutes_at_launch(
@@ -2657,6 +2690,123 @@ def test_a_ladder_broken_after_the_launch_check_aborts_the_boot(
         assert '"effort_ladder.cluade"' in run['metadata']
 
 
+# config.json values a hand edit can break, each with the fault both the
+# launch check and the boot name
+_BAD_CONFIGS = [
+    pytest.param(
+        {'step_timeout': 'soon'},
+        'step_timeout must be a duration with a unit suffix',
+        id='malformed-duration',
+    ),
+    pytest.param(
+        {'max_iter_cost': 2.0},
+        'max_iter_cost requires max_cost',
+        id='iter-cap-without-ceiling',
+    ),
+    pytest.param(
+        {'interval': '10m', 'sleep': '1m'},
+        'interval and (--)?sleep are mutually exclusive',
+        id='rival-pacing',
+    ),
+    pytest.param(
+        {'agent': 'cluade'},
+        "Unsupported agent: 'cluade'",
+        id='unknown-agent',
+    ),
+    pytest.param({'agent': None}, 'No agent configured', id='no-agent'),
+]
+
+
+@pytest.mark.parametrize(argnames=('config', 'match'), argvalues=_BAD_CONFIGS)
+def test_resume_refuses_an_invalid_config(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, Any],
+    match: str,
+) -> None:
+    """A resume refuses a config edited while paused, before it acts.
+
+    The relaunched loop's boot aborts on the config ``start`` re-checks,
+    so a resume runs the same check first: the refusal names the node and
+    the fault, no launch script runs, and the node's status, its rows,
+    and its paused run's credit span are as the resume found them.
+    """
+    node = loop_node
+    _ready_for_launch(node, 'resume')
+    _configure(node, **config)
+    status = node.status()
+    runs = node.db.read('runs')
+    events = node.db.read('events')
+    run_scripts = _stub_run_script(monkeypatch, node)
+    with pytest.raises(ValueError, match=f'Cannot resume {node.branch}: {match}'):
+        node.resume()
+    assert run_scripts == []
+    assert node.status() == status
+    # the event rows hold the pause credit span a resume event would close
+    assert node.db.read('runs') == runs
+    assert node.db.read('events') == events
+
+
+def test_tree_resume_refuses_a_descendants_invalid_config(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree-wide resume refuses one parked node's bad config, naming it.
+
+    The check covers every node the resume would relaunch, and lands
+    before the tree's pause latch lifts or any node relaunches.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    user = Node(git_repo)
+    run_scripts = _stub_run_script(monkeypatch, Node)
+    user.pause(reason='brake')
+    # both loops park (simulated -- the loops are stubbed here)
+    parent.status_set('paused')
+    child.status_set('paused')
+    _configure(child, step_timeout='soon')
+    events = user.db.read('events')
+    run_scripts.clear()
+    with pytest.raises(ValueError, match=f'Cannot resume {child.branch}: step_timeout'):
+        user.resume()
+    assert run_scripts == []
+    assert child.pause_latched(tree_only=True) == user.branch
+    assert (parent.status(), child.status()) == ('paused', 'paused')
+    assert user.db.read('events') == events
+
+
+@pytest.mark.parametrize(argnames=('config', 'match'), argvalues=_BAD_CONFIGS)
+def test_a_config_broken_after_the_resume_check_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, Any],
+    match: str,
+) -> None:
+    """A config broken after the resume's check aborts the boot on record.
+
+    The boot reads the config under the preflight abort, so the fault
+    never dies unrecorded with the pane: the node stays paused with its
+    run open, and the pause credit span its resume event closed is open
+    again, carrying the fault.
+    """
+    node = loop_node
+    monkeypatch.setenv('_NODE', '')
+    _ready_for_launch(node, 'resume')
+    _stub_run_script(monkeypatch, node)
+    node.resume()
+    _configure(node, **config)
+    loop = MockLoop(node, resume=True)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert node.status() == 'paused'
+    run = node.record.runs(limit=1)[0]
+    assert run['ended_at'] is None
+    events = node.db.read('events', where={'run_id': run['run_id']})
+    events.sort(key=lambda event: event['event_id'])
+    credit = [event for event in events if event['event'] in ('pause', 'resume')]
+    assert [event['event'] for event in credit] == ['pause', 'resume', 'pause']
+    assert re.search(match, credit[-1]['metadata'])
+
+
 @pytest.mark.parametrize(
     argnames='trigger',
     argvalues=['no progress', 'thinking cap'],
@@ -4393,6 +4543,7 @@ def test_preflight_probe_rides_the_step_marker(
     # for scheduler lag under the parallel suite
     monkeypatch.setattr(codex, '_PREFLIGHT_GRACE', 2)
     loop = Loop(loop_node)
+    loop._read_run_parameters()
     # `sh` stands in for the codex binary, routed to a probe that never answers
     monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
     spawned = hung_probe(loop)
@@ -4454,6 +4605,7 @@ def test_preflight_abort_honors_a_kill_that_reaped_the_probe(
         run_id = loop_node.record.run_start()
         loop_node.status_set('paused')
     loop = Loop(loop_node, resume=resume)
+    loop._read_run_parameters()
     # `sh` stands in for the codex binary, routed to a probe that never answers
     monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
     spawned = hung_probe(loop)
@@ -4562,6 +4714,7 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
     """
     _configure(loop_node, agent='codex')
     loop = Loop(loop_node)
+    loop._read_run_parameters()
     # `sh` stands in for the codex binary; with no model there is no probe
     monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
     refreshed: list[Optional[str]] = []
@@ -4574,6 +4727,138 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
     loop._preflight()
     assert refreshed == [None]
     assert 'will not be tracked' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('agents', 'claude'),
+    argvalues=[
+        pytest.param(('claude', None), True, id='node_agent'),
+        pytest.param(('opencode', 'claude'), True, id='step_agent'),
+        pytest.param(('opencode', None), False, id='no_claude'),
+    ],
+)
+@pytest.mark.parametrize(
+    argnames=('age', 'stale'),
+    argvalues=[
+        pytest.param(None, True, id='missing'),
+        pytest.param(2 * 86400, True, id='stale'),
+        pytest.param(60, False, id='fresh'),
+    ],
+)
+def test_boot_refreshes_a_day_old_price_table_for_a_claude_step(
+    loop_node: Node,
+    price_cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    agents: tuple[str, Optional[str]],
+    claude: bool,
+    age: Optional[int],
+    stale: bool,
+) -> None:
+    """A run with a native claude step refreshes a missing or day-old price table.
+
+    A claude launch that ends without its own result figure (killed,
+    capped, paused, or with the figure refused) is priced from its
+    transcript at the table's rates, so the boot fetches the table once
+    when none is cached or the cache is over a day old, whether the
+    claude step runs on the node's agent or a step file's ``agent:``. A
+    fresher cache serves as-is, and a run whose agents all report their
+    own cost and price nothing never fetches.
+    """
+    node_agent, step_agent = agents
+    _configure(loop_node, agent=node_agent)
+    if step_agent is not None:
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            f'---\nagent: {step_agent}\n---\n# PLAN\n\nWork.\n', encoding='utf-8'
+        )
+    # the cache sits `age` seconds old, or is absent
+    if age is not None:
+        price_cache.write_text('{}', encoding='utf-8')
+        stamp = time.time() - age
+        os.utime(price_cache, (stamp, stamp))
+    fetched: list[str] = []
+
+    def retrieve(url: str, filename: str) -> None:
+        fetched.append(url)
+        pathlib.Path(filename).write_text(json.dumps(_CLAUDE_PRICING), encoding='utf-8')
+
+    monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
+    loop = Loop(loop_node)
+    loop._read_run_parameters()
+    # `sh` stands in for the node agent's binary; neither backend probes
+    backend = ClaudeAgent if node_agent == 'claude' else OpencodeAgent
+    monkeypatch.setattr(loop, '_agent', backend(loop_node, 'sh'))
+    loop._preflight()
+    if claude and stale:
+        # one fetch, and the settle's rates read the fetched table
+        assert fetched == [pricing._PRICING_URL]
+        assert pricing.rates('claude-fable-5') == _CLAUDE_PRICING['claude-fable-5']
+    else:
+        assert fetched == []
+    assert 'Warning:' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('cached', 'warning'),
+    argvalues=[
+        pytest.param(
+            True,
+            'Warning: could not refresh pricing; using cached pricing.json.',
+            id='stale',
+        ),
+        pytest.param(
+            False,
+            'Warning: could not fetch pricing and no cached pricing.json exists;',
+            id='missing',
+        ),
+    ],
+)
+def test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds(
+    loop_node: Node,
+    price_cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    cached: bool,
+    warning: str,
+) -> None:
+    """A claude run whose price refresh fails warns once at boot and runs.
+
+    A native claude launch still books its own result figure, so a fetch
+    that fails costs only the transcript settle its rates: unlike a
+    token-priced run, which cannot price anything without a table, the
+    boot warns once, whether a day-old cache serves or none exists, and
+    every iteration launches without fetching again.
+    """
+    _configure(loop_node, max_iters=2)
+    if cached:
+        price_cache.write_text('{}', encoding='utf-8')
+        stamp = time.time() - 2 * 86400
+        os.utime(price_cache, (stamp, stamp))
+    attempts: list[str] = []
+
+    def retrieve(url: str, filename: str) -> None:
+        attempts.append(url)
+        raise OSError('offline')
+
+    monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
+
+    class BootLoop(MockLoop):
+        """Mock loop that runs the REAL preflight."""
+
+        def _preflight(self: BootLoop) -> None:
+            """Run the base preflight so the boot's refresh executes."""
+            # `sh` stands in for the claude binary; native claude runs no
+            # probe (set after the boot's run-parameter read resolves the
+            # agent)
+            self._agent = ClaudeAgent(loop_node, 'sh')
+            Loop._preflight(self)
+
+    loop = BootLoop(loop_node)
+    assert loop.run() == 0
+    # one attempt and one warning at boot, and both iterations ran both steps
+    assert attempts == [pricing._PRICING_URL]
+    assert capsys.readouterr().err.count(warning) == 1
+    assert len(loop.launched) == 4
 
 
 def test_preflight_logs_what_a_passed_probe_spent(
@@ -4591,6 +4876,7 @@ def test_preflight_logs_what_a_passed_probe_spent(
     """
     _configure(loop_node, agent='codex', model='gpt-5-codex')
     loop = Loop(loop_node)
+    loop._read_run_parameters()
     # `sh` stands in for the codex binary, routed to a probe that answers
     # with one complete turn
     monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
@@ -4648,6 +4934,7 @@ def test_preflight_refuses_a_cap_over_an_unpriced_model(
 
     def boot() -> Loop:
         loop = Loop(loop_node)
+        loop._read_run_parameters()
         # `sh` stands in for the codex binary; a probe that runs answers
         # with a clean exit and is counted
         monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
@@ -4888,9 +5175,10 @@ def test_soft_cap_warning_fires_once_for_unbraked_caps(
     node = loop_node
     monkeypatch.setattr(MockLoop, '_preflight', lambda self: None)
     # force the flag off on the backend class before construction, so the
-    # warning rides its production call site (the end of ``__init__``)
+    # warning rides its production call site (the end of the run-parameter
+    # read, which the double makes at construction)
     monkeypatch.setattr(ClaudeAgent, 'enforces_budget', False)
-    # capped, non-enforcing, no timeouts: construction warns
+    # capped, non-enforcing, no timeouts: the read warns
     _configure(node, max_cost=10.0)
     loop = MockLoop(node)
     out = capsys.readouterr().out
@@ -6370,6 +6658,7 @@ def test_err_snapshots_keep_every_attempts_diagnosis(loop_node: Node) -> None:
 
     node = loop_node
     loop = Loop(node)
+    loop._read_run_parameters()
     loop._run_id = node.record.run_start()
     loop._iter = 1
     step = Step(node.node_dir / 'steps' / '01-PLAN.md', number=1)
@@ -8339,8 +8628,8 @@ def test_pending_finish_carries_to_the_continued_run(
         def _descendants_active(self: _TornDrain) -> bool:
             return True
 
+    _configure(node, wait='1s')
     torn = _TornDrain(node)
-    torn._wait_seconds = 1
     assert torn.run() == 0
     run = node.record.runs(limit=1)[0]
     assert run['status'] == 'stopped'
@@ -8399,8 +8688,8 @@ def test_stop_during_finish_drain_books_stopped(
         def _descendants_active(self: _StopMidDrain) -> bool:
             return True
 
+    _configure(loop_node, wait='1s')
     loop = _StopMidDrain(loop_node)
-    loop._wait_seconds = 1
     assert loop.run() == 0
     # the drain interrupted before the last step -- only the first launched
     assert len(loop.launched) == 1
@@ -8832,15 +9121,25 @@ def test_resume_preflight_abort_recredits_the_reparked_wait(
     ``pause`` event) so ``_pause_credit`` keeps crediting the re-parked wait.
     """
     node = node_with_db
+    node.config.set('timeout', '10m')
     node.status_set('active')
     run_id = node.record.run_start()
+    _age_run(node, run_id, 300.0)
     node.status_set('paused')
-    # the original pause opens a credit span; the failed resume's completed
-    # event (stamped by Node._resume before the loop boots) closes it
-    pause_id = node.record.event_start('pause')
-    node.record.event_end(event_id=pause_id, status='completed')
-    resume_id = node.record.event_start('resume')
-    node.record.event_end(event_id=resume_id, status='completed')
+    # the loop's park opens a credit span (200s ago); the failed resume's
+    # completed event (stamped by Node._resume before the loop boots) closes
+    # it (150s ago)
+    for event, metadata, seconds_ago in (
+        ('pause', 'parked', 200.0),
+        ('resume', '', 150.0),
+    ):
+        event_id = node.record.event_start(event, metadata=metadata)
+        node.record.event_end(event_id=event_id, status='completed')
+        node.db.update(
+            data={'created_at': _past_timestamp(seconds_ago)},
+            table='events',
+            where={'event_id': event_id},
+        )
     loop = MockLoop(node, resume=True)
     with pytest.raises(_Abort):
         loop._abort_preflight('OPENROUTER_API_KEY is not set')
@@ -8850,6 +9149,15 @@ def test_resume_preflight_abort_recredits_the_reparked_wait(
     events.sort(key=lambda e: e['event_id'])
     credit_seq = [e['event'] for e in events if e['event'] in ('pause', 'resume')]
     assert credit_seq == ['pause', 'resume', 'pause']
+    # the re-parked wait is credited: 600 - (300 elapsed - (50 + 100) parked)
+    node.db.update(
+        data={'created_at': _past_timestamp(100.0)},
+        table='events',
+        where={'event_id': events[-1]['event_id']},
+    )
+    remaining = node.time.remaining(scope='run', run_id=run_id)
+    assert remaining is not None
+    assert 440.0 < remaining <= 451.0
     # and the node is still paused with its run adoptable (unchanged)
     assert node.status() == 'paused'
     assert node.db.read('runs', where={'run_id': run_id})[0]['ended_at'] is None
@@ -8898,9 +9206,12 @@ def test_resume_anchors_run_deadline_on_credited_remaining(
     node.status_set('active')
     run_id = node.record.run_start()
     _age_run(node, run_id, 300.0)
-    # a closed 180s pause span (240s ago -> 60s ago) credits 180s back
-    for event, seconds_ago in (('pause', 240.0), ('resume', 60.0)):
-        event_id = node.record.event_start(event, run_id=run_id)
+    # a closed 180s park span (240s ago -> 60s ago) credits 180s back
+    for event, metadata, seconds_ago in (
+        ('pause', 'parked', 240.0),
+        ('resume', '', 60.0),
+    ):
+        event_id = node.record.event_start(event, metadata=metadata, run_id=run_id)
         node.record.event_end(event_id=event_id, status='completed')
         node.db.update(
             data={'created_at': _past_timestamp(seconds_ago)},

@@ -98,7 +98,10 @@ of every other signal — so a parent parked before its children can never
 drain-complete over them; it aborts the in-flight agent, and the loop exits with
 status `paused`, leaving the run and any open iteration rows open. A user-node
 pause first latches the whole tree (a `.paused` marker beside the central
-database), so even spawns and starts racing the sweep refuse.
+database), so even spawns and starts racing the sweep refuse. A reason the loop
+reserves for its own park rows (`parked`, or one starting with `via pause latch`
+or `resume preflight failed:`) is refused before anything is written, so a
+request is never read as a park (see [[features/cost/time_budgets]]).
 
 `resume` is the mirror: it fans out leaf-first (deepest first) so children
 already read `active` before their parent's drain-waits look at them. The
@@ -109,9 +112,9 @@ iteration deadlines. Resuming a node that is still parking withdraws the pending
 pause instead; if the loop already read the signal it parks anyway, and the next
 resume relaunches it. Resume refuses on a node that is not paused or pausing,
 and refuses under a paused ancestor until that ancestor is resumed first. It
-also refuses when the effort ladder committed on the root branch is invalid for
-any node it would relaunch, checked before the latch lifts or any node is
-touched.
+also refuses when any node it would relaunch has a stored config `start` would
+refuse or an invalid effort ladder committed on the root branch, naming that
+node; the check runs before the latch lifts or any node is touched.
 
 ## retire and unretire
 

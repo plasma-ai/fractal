@@ -481,16 +481,20 @@ tmux session — that is its normal state, not a crash. While a node (or the
 whole tree, via ``fractal pause``) is paused, spawning and starting refuse
 anywhere beneath it; the only legal verbs on a paused node are ``resume``,
 ``kill``, ``chat``, and ``merge`` (committed work only; the node stays
-paused).
+paused). The loop reserves ``parked``, and any reason starting with
+``via pause latch`` or ``resume preflight failed:``, for the pause events it
+records as it parks, so ``pause`` refuses such a ``--reason`` before anything
+is written.
 
 ``resume`` relaunches the parked subtree leaf-first. Each loop adopts its open
 run — same budgets and iteration count, the interrupted step re-entered
 (resuming the recorded agent session when one exists) — and run and iteration
 deadlines are credited for the paused span. A node still parking gets its
 pending pause withdrawn instead. Resuming refuses when the node is not paused,
-when an ancestor is still paused, or when the effort ladder committed on the
-tree's root branch is invalid for a node it would relaunch; the ladder refusal
-lands before any node is touched. ``resume`` returns once the loops are
+when an ancestor is still paused, or when a node it would relaunch has a
+stored config the launch re-validation rejects or an invalid effort ladder
+committed on the tree's root branch; those refusals name the node and land
+before any node is touched. ``resume`` returns once the loops are
 relaunched; a relaunched loop waits for a merge in progress before it goes
 ``active``, as every launch does (see ``start``).
 
@@ -1179,7 +1183,8 @@ The loop reads step files only once per iteration, so an edit made
 mid-iteration shows here from the step's next launch, when the loop enforces
 it; the node's own seat reads the same ceiling from ``$STEP_TIMEOUT_SECONDS``.
 A steered step counts down from its stuck launch, as the loop's
-deadline does. Paused spans are credited back to run and iteration deadlines.
+deadline does. Paused spans are credited back to run and iteration deadlines,
+each from the moment the loop parks (not the pause request) to the resume.
 Two non-numeric answers are distinct: ``no limit`` means no timeout is
 configured for the queried scope; ``not running`` means a limit exists but no
 run, iteration, or step is currently active. An idle node has no current step,
