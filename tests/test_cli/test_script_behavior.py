@@ -196,14 +196,18 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   by name, while one in a sibling a glob would match does not; an index in a
   folder its wiki excludes is skipped; and a failed refresh restores the
   target with the child unadvanced, as does a failed declaration read,
-  listing, or staging step around it. Untracked files are judged by the
-  wiki's ignore and dot rules: a file only a personal ignore hides refuses
-  the merge, since the wiki would index it, and one under a dot-prefixed
-  folder neither refuses it nor rides the squash; a symlink, or a file the
-  wiki's ``exclude.patterns`` matches, still refuses, which is safe, and
-  committing or moving the file clears it. A merged index whose folder encloses
-  another declared wiki, which the wiki refuses to sweep, lands as the
-  driver merged it, with a warning.
+  listing, or staging step around it, and a direct call that names no
+  project-wiki folder and can read it, with its project, from neither the
+  target's config nor the node's, rather than refreshing whatever sits at the
+  default ``wiki/`` -- one config names both, so a sub-project node's folder
+  never resolves under the root project.
+  Untracked files are judged by the wiki's ignore and dot rules: a file only a
+  personal ignore hides refuses the merge, since the wiki would index it, and
+  one under a dot-prefixed folder neither refuses it nor rides the squash; a
+  symlink, or a file the wiki's ``exclude.patterns`` matches, still refuses,
+  which is safe, and committing or moving the file clears it. A merged index
+  whose folder encloses another declared wiki, which the wiki refuses to sweep,
+  lands as the driver merged it, with a warning.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
   a conflicted merge with the merge's own tail -- ``.fractal/`` restore and
   seed strip, footprint check, commit, merge-base advance -- and refuses when
@@ -350,6 +354,8 @@ __all__ = [
     'test_merge_into_a_linked_root_holds_the_trees_wiki_folder',
     'test_merge_refreshes_a_sub_project_nodes_own_wiki',
     'test_merge_ignoring_scope_refreshes_the_folder_the_spawn_gave',
+    'test_merge_refuses_when_the_wiki_folder_read_fails',
+    'test_merge_reads_the_wiki_folder_and_its_project_from_one_config',
     'test_merge_refuses_a_node_whose_project_setting_changed_since_spawn',
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
     'test_merge_admits_only_the_wiki_attributes_edit',
@@ -5302,6 +5308,167 @@ def test_merge_ignoring_scope_refreshes_the_folder_the_spawn_gave(
     index = _git(linked, 'show', 'HEAD:docs/_index.md').stdout
     assert '[[page|page]]' in index, index
     assert _files(linked / 'wiki') == corpus
+
+
+def test_merge_refuses_when_the_wiki_folder_read_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A direct merge that cannot read its wiki folder refuses, never guesses.
+
+    With no ``--target-wiki``, ``merge.sh`` reads the project-wiki folder
+    from the target's config and then the node's; when neither read
+    answers, the default ``wiki/`` would be a guess that refreshes, and
+    stages past the footprint check, whatever ordinary content sits there.
+    The merge refuses naming the read, the target restored and the child
+    unadvanced, so a corpus ``wiki/`` beside the configured ``docs/`` keeps
+    its bytes; the folder passed with ``--target-wiki``, which the error
+    points at, lands the same merge. A ``fractal`` PATH shim fails every
+    read of the folder.
+    """
+    repo = _init_tree(tmp_path / 'wikireadrepo', wiki='docs')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'src').mkdir()
+    (worktree / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    _write_page(worktree / 'docs' / 'page.md')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    child = _git(repo, 'rev-parse', 'main.task').stdout
+    corpus = _files(repo / 'wiki')
+    # a fractal that fails every read of the wiki folder
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    shim = bindir / 'fractal'
+    shim.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ "$1 $2 $3" == "config _get wiki" ]]; then\n'
+        '    exit 1\n'
+        'fi\n'
+        f'exec "{_fractal_bin()}" "$@"\n',
+        encoding='utf-8',
+    )
+    shim.chmod(0o755)
+    env = _cli_env()
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+
+    refused = _script('merge.sh', repo, f'{worktree}', env=env)
+
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
+    assert (
+        'reading the project-wiki folder from the config of main or main.task failed'
+    ) in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    assert _git(repo, 'rev-parse', 'main.task').stdout == child
+    assert _files(repo / 'wiki') == corpus
+    # the folder named outright needs no read
+    retry = _script('merge.sh', repo, f'{worktree}', '--target-wiki=docs', env=env)
+    assert retry.returncode == 0, (retry.stdout, retry.stderr)
+    index = _git(repo, 'show', 'HEAD:docs/_index.md').stdout
+    assert '[[page|page]]' in index, index
+    assert _files(repo / 'wiki') == corpus
+
+
+@pytest.mark.parametrize(
+    argnames='readable',
+    argvalues=[True, False],
+    ids=['node_answers', 'node_unreadable'],
+)
+def test_merge_reads_the_wiki_folder_and_its_project_from_one_config(
+    tmp_path: pathlib.Path,
+    readable: bool,
+) -> None:
+    """A direct merge takes a sub-project node's wiki folder with its project.
+
+    A root checked out in a linked worktree carries no config to read, so a
+    direct ``merge.sh`` call with no ``--target-wiki`` takes the folder from
+    the merging node's config, and the project the folder sits under from
+    that same config, never the target's unread default: the node's page is
+    indexed in its own project's wiki, and a corpus ``wiki/`` at the repo
+    root, where the folder would land under the root project, keeps its
+    bytes. When the node's project cannot be read either, the merge refuses
+    naming the read, the target restored. A ``fractal`` PATH shim fails
+    every read of a project.
+    """
+    repo = _init_tree(tmp_path / 'subreadrepo', wiki='docs')
+    # a sub-project on the default folder, with the committed wiki there that
+    # the base-ref precondition requires
+    index = repo / 'app' / 'wiki' / '_index.md'
+    index.parent.mkdir(parents=True)
+    index.write_text('---\nname: wiki\n---\n# wiki\n\n***\n', encoding='utf-8')
+    _git(repo, 'add', 'app')
+    _git(repo, 'commit', '-m', 'add the app project')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--path',
+        'app',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'app' / 'src').mkdir()
+    (worktree / 'app' / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    _write_page(worktree / 'app' / 'wiki' / 'page.md')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    # the repo root parks on a side branch; main is checked out linked
+    _git(repo, 'checkout', '-b', 'side', 'main')
+    linked = tmp_path / 'main-wt'
+    _git(repo, 'worktree', 'add', f'{linked}', 'main')
+    head = _git(linked, 'rev-parse', 'HEAD').stdout
+    corpus = _files(linked / 'wiki')
+    env = _cli_env()
+    if not readable:
+        # a fractal that fails every read of a project
+        bindir = tmp_path / 'bin'
+        bindir.mkdir()
+        shim = bindir / 'fractal'
+        shim.write_text(
+            '#!/usr/bin/env bash\n'
+            'if [[ "$1 $2 $3" == "config _get project" ]]; then\n'
+            '    exit 1\n'
+            'fi\n'
+            f'exec "{_fractal_bin()}" "$@"\n',
+            encoding='utf-8',
+        )
+        shim.chmod(0o755)
+        path = env['PATH']
+        env['PATH'] = f'{bindir}{os.pathsep}{path}'
+
+    result = _script('merge.sh', repo, f'{worktree}', env=env)
+
+    assert _files(linked / 'wiki') == corpus
+    if readable:
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        landed = _git(linked, 'show', 'HEAD:app/wiki/_index.md').stdout
+        assert '[[page|page]]' in landed, landed
+        return
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert (
+        'reading the project-wiki folder from the config of main or main.task failed'
+    ) in result.stderr, result.stderr
+    assert _git(linked, 'rev-parse', 'HEAD').stdout == head
+    assert _git(linked, 'status', '--porcelain').stdout == ''
 
 
 def test_merge_refuses_a_node_whose_project_setting_changed_since_spawn(

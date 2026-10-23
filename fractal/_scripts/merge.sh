@@ -14,36 +14,40 @@ Squash-merge a node's branch into its parent branch.
 The full commit history is preserved on the node's branch.
 
 Options:
-    --carry-dirty     Advance the merge-base the way 'git checkout' moves a
-                      branch, carrying the node's uncommitted state (a paused
-                      node's frozen step): an advance that would touch a dirty
-                      path or an untracked or ignored file refuses the whole
-                      merge, and a failure after the commit rolls the target
-                      and the node back, so the merge lands whole or not at
-                      all (Node.merge passes it for a paused node).
-    --continue        Finish a hand-resolved squash: after a conflicted merge,
-                      redo 'git merge --squash <branch>' in the target worktree,
-                      resolve and stage the conflicts, then pass this flag to
-                      run the merge's own tail -- .fractal/ restore and seed
-                      strip, footprint check, index refresh, commit, merge-base
-                      advance -- exactly like a clean merge.
-    --ignore-scope    Land paths outside the node's scope instead of refusing
-                      the merge.
-    --message=TEXT    Commit the squash with TEXT instead of 'merge <branch>'.
-    --validate=PATH   Run a destination-relative bash script after restoration
-                      and index refresh, before committing. It must succeed
-                      without changing the staged tree or leaving tracked
-                      unstaged changes. No-op merges skip validation.
-    --user-target     Judge the target as its tree's user node (Node.merge
-                      passes it from the repo's record; the checkout probe is
-                      the fallback for a direct call).
-    --target-wiki=PATH
-                      Worktree-relative project-wiki folder the index refresh
-                      regenerates after the squash (Node.merge passes the
-                      folder the node's spawn gave it under the node's own
-                      project; a direct call reads the target's config, then
-                      the node's).
-    --help|-h         Show this help message
+    --carry-dirty         Advance the merge-base the way 'git checkout' moves a
+                          branch, carrying the node's uncommitted state (a
+                          paused node's frozen step): an advance that would
+                          touch a dirty path or an untracked or ignored file
+                          refuses the whole merge, and a failure after the
+                          commit rolls the target and the node back, so the
+                          merge lands whole or not at all (Node.merge passes it
+                          for a paused node).
+    --continue            Finish a hand-resolved squash: after a conflicted
+                          merge, redo 'git merge --squash <branch>' in the
+                          target worktree, resolve and stage the conflicts, then
+                          pass this flag to run the merge's own tail --
+                          .fractal/ restore and seed strip, footprint check,
+                          index refresh, commit, merge-base advance -- exactly
+                          like a clean merge.
+    --ignore-scope        Land paths outside the node's scope instead of
+                          refusing the merge.
+    --message=TEXT        Commit the squash with TEXT instead of
+                          'merge <branch>'.
+    --validate=PATH       Run a destination-relative bash script after
+                          restoration and index refresh, before committing. It
+                          must succeed without changing the staged tree or
+                          leaving tracked unstaged changes. No-op merges skip
+                          validation.
+    --user-target         Judge the target as its tree's user node (Node.merge
+                          passes it from the repo's record; the checkout probe
+                          is the fallback for a direct call).
+    --target-wiki=PATH    Worktree-relative project-wiki folder the index
+                          refresh regenerates after the squash (Node.merge
+                          passes the folder the node's spawn gave it under the
+                          node's own project; a direct call reads the folder and
+                          its project from the target's config, else from the
+                          node's, and refuses the merge when neither answers).
+    --help|-h             Show this help message
 USAGE
     exit 0
 }
@@ -254,7 +258,7 @@ fi
 # $1: with $2 "unstaged", each whose working-tree content differs from the
 # index (status's worktree column, the paths `git diff` lists), and with
 # "changed", each the index or the working tree changes against HEAD (either
-# column); further arguments pass to status. It stands in for a working-tree
+# column); further arguments pass to status; it stands in for a working-tree
 # diff, which refreshes the index under index.lock even with optional locks
 # off, while status compares content the same way but refreshes in memory
 # only: --untracked-files=no because the diff never lists an untracked file,
@@ -819,6 +823,8 @@ carry_return() {
         return 0
     fi
     INDEX_ENTRY=""
+    # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
+    # name is never C-quoted by core.quotePath into a path that exists nowhere
     while IFS= read -r -d '' LISTED_ENTRY; do
         [[ "${LISTED_ENTRY#*$'\t'}" == "$2" ]] || continue
         INDEX_ENTRY=${LISTED_ENTRY%%$'\t'*}
@@ -1304,8 +1310,8 @@ if [[ "$IGNORE_SCOPE" != true ]]; then
     ATTRIBUTES_FLAG=()
     ADDED_ATTRIBUTES="${STAGED_ATTRIBUTES#"$HEAD_ATTRIBUTES"}"
     ADDED_LINES=$(printf '%s\n' "$ADDED_ATTRIBUTES" | grep -v '^$' || true)
-    # the wiki tool's index lines (mirrors
-    # fractal.core.commit._ATTRIBUTES_INIT_LINES)
+    # the wiki tool's index
+    # lines (mirrors fractal.core.commit._ATTRIBUTES_INIT_LINES)
     WIKI_INDEX_LINES=$'# Wiki index merge driver\n**/_index.md merge=wiki'
     if [[ "$STAGED_ATTRIBUTES" == "$HEAD_ATTRIBUTES"* ]] \
         && [[ -z "$HEAD_ATTRIBUTES" || "$ADDED_ATTRIBUTES" == $'\n'* ]] \
@@ -1367,7 +1373,15 @@ wiki_owned() {
 # silenced so the merge summary below stays the single user-facing line; a
 # failed refresh restores the parent exactly like a conflict
 if command -v wiki &>/dev/null; then
-    PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null || echo ".")
+    # the target's own project locates its memory wiki; a failed read takes
+    # the root project, a guess that stays inside the target's own seed --
+    # and a target no config resolves (a --base branch that is no node, a
+    # root checked out in a linked worktree) tracks no memory wiki at all
+    PARENT_PROJECT_READ=true
+    if ! PARENT_PROJECT=$(fractal config _get project --path="$PARENT_WORKTREE_DIR" 2>/dev/null); then
+        PARENT_PROJECT="."
+        PARENT_PROJECT_READ=false
+    fi
     if [[ "$PARENT_PROJECT" == "." ]]; then
         MEMORY_DIR="$PARENT_WORKTREE_DIR/.fractal/$PARENT_BRANCH/memory"
     else
@@ -1377,19 +1391,28 @@ if command -v wiki &>/dev/null; then
     # folder the node's spawn gave it under the node's own project, so a
     # hand-edited config.json never steers the refresh and a sub-project
     # node's pages are indexed where they landed; a direct call reads the
-    # target's config, and a --base target that is no node has none, so the
-    # merging node then names the folder (a guessed default would refresh,
-    # and stage past the footprint check, whatever ordinary content sits at
-    # wiki/)
+    # folder and its project from one config -- the target's, or the merging
+    # node's when the target's cannot be read -- and fails closed when neither
+    # answers: a guessed default, or one config's folder under the other's
+    # project, would refresh, and stage past the footprint check, whatever
+    # ordinary content sits there (an unset key answers empty, which is the
+    # default wiki/ itself)
     if [[ -n "$TARGET_WIKI" ]]; then
         WIKI_DIR="$PARENT_WORKTREE_DIR/$TARGET_WIKI"
     else
-        PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null) \
-            || PARENT_WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null || true)
-        if [[ "$PARENT_PROJECT" == "." ]]; then
+        WIKI_PROJECT="$PARENT_PROJECT"
+        if [[ "$PARENT_PROJECT_READ" != true ]] \
+            || ! PARENT_WIKI=$(fractal config _get wiki --path="$PARENT_WORKTREE_DIR" 2>/dev/null); then
+            if ! PARENT_WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null) \
+                || ! WIKI_PROJECT=$(fractal config _get project --path="$WORKTREE_DIR" 2>/dev/null); then
+                fail_target "reading the project-wiki folder from the config of $PARENT_BRANCH" \
+                    "or $BRANCH failed; name the folder with --target-wiki=<path>"
+            fi
+        fi
+        if [[ "$WIKI_PROJECT" == "." ]]; then
             WIKI_DIR="$PARENT_WORKTREE_DIR/${PARENT_WIKI:-wiki}"
         else
-            WIKI_DIR="$PARENT_WORKTREE_DIR/$PARENT_PROJECT/${PARENT_WIKI:-wiki}"
+            WIKI_DIR="$PARENT_WORKTREE_DIR/$WIKI_PROJECT/${PARENT_WIKI:-wiki}"
         fi
     fi
     # a wiki declared at the worktree root encloses every folder, so each
