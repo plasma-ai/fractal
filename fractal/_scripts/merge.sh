@@ -250,9 +250,28 @@ if [[ -n "$LEAKED_REMAINING" ]]; then
         "&& git -C $PARENT_Q commit -m 'drop leaked node seeds'" >&2
 fi
 
+# list, one per line, the tracked paths git status reports changed in worktree
+# $1: with $2 "unstaged", each whose working-tree content differs from the
+# index (status's worktree column, the paths `git diff` lists), and with
+# "changed", each the index or the working tree changes against HEAD (either
+# column); further arguments pass to status. It stands in for a working-tree
+# diff, which refreshes the index under index.lock even with optional locks
+# off, while status compares content the same way but refreshes in memory
+# only: --untracked-files=no because the diff never lists an untracked file,
+# --no-renames so each entry names one path and a rename reads as its two
+# halves, and -z so a path with spaces or a newline parses whole
+status_paths() {
+    git -C "$1" --no-optional-locks status --porcelain -z --no-renames --untracked-files=no "${@:3}" \
+        | while IFS= read -r -d '' STATUS_ENTRY; do
+            [[ "$2" == changed || "${STATUS_ENTRY:1:1}" != " " ]] || continue
+            printf '%s\n' "${STATUS_ENTRY:3}"
+        done
+}
+
 if [[ "$CONTINUE" != true ]]; then
     # refuse if parent has uncommitted changes
-    if [[ -n "$(git -C "$PARENT_WORKTREE_DIR" status --porcelain --untracked-files=no)" ]]; then
+    if [[ -n "$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks status --porcelain \
+        --untracked-files=no)" ]]; then
         echo "Error: parent worktree $PARENT_BRANCH has uncommitted changes;" \
             "commit or stash them before merging $BRANCH" >&2
         exit 1
@@ -296,8 +315,8 @@ if [[ "$CONTINUE" != true ]]; then
                 break
             fi
         done
-    done < <(git -C "$PARENT_WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=AM \
-        "$MERGE_BASE" "$SQUASH_TIP")
+    done < <(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --name-only -z --no-renames \
+        --diff-filter=AM "$MERGE_BASE" "$SQUASH_TIP")
     if [[ -n "$COLLIDING" ]]; then
         echo "Error: merging $BRANCH into $PARENT_BRANCH would overwrite untracked files in" \
             "$PARENT_BRANCH's worktree: ${COLLIDING%, }; move them aside or drop them from" \
@@ -318,15 +337,14 @@ else
             "conflicts, then re-run with --continue" >&2
         exit 1
     fi
-    if [[ -n "$(git -C "$PARENT_WORKTREE_DIR" ls-files -u)" ]]; then
+    if [[ -n "$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -u)" ]]; then
         echo "Error: unresolved conflicts remain in $PARENT_BRANCH's worktree;" \
             "resolve and stage them (git add), then re-run with --continue" >&2
         exit 1
     fi
     # a hand-resolved squash is fully staged by contract; an unstaged edit to a
     # tracked .fractal/ path would be rewritten by the restore below
-    if ! git -C "$PARENT_WORKTREE_DIR" diff --quiet; then
-        UNSTAGED=$(git -C "$PARENT_WORKTREE_DIR" diff --name-only -z | tr '\0' '\n')
+    if ! UNSTAGED=$(status_paths "$PARENT_WORKTREE_DIR" unstaged) || [[ -n "$UNSTAGED" ]]; then
         echo "Error: unstaged changes remain in $PARENT_BRANCH's worktree: ${UNSTAGED//$'\n'/, };" \
             "save any copy you need, then stage (git add) the ones that belong to the resolution" \
             "and discard the rest (git -C $PARENT_Q checkout -- <path>) -- the merge restores" \
@@ -394,7 +412,8 @@ fi
 # restored means clean and out of the squash: reset's own exit status lies
 # when a ref lock fails it after the index and worktree are already written
 target_restored() {
-    [[ -z "$(git -C "$PARENT_WORKTREE_DIR" status --porcelain --untracked-files=no)" ]] || return 1
+    [[ -z "$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks status --porcelain \
+        --untracked-files=no)" ]] || return 1
     SQUASH_MARKER=$(git -C "$PARENT_WORKTREE_DIR" rev-parse --git-path SQUASH_MSG)
     [[ "$SQUASH_MARKER" = /* ]] || SQUASH_MARKER="$PARENT_WORKTREE_DIR/$SQUASH_MARKER"
     [[ ! -f "$SQUASH_MARKER" ]]
@@ -438,7 +457,7 @@ drop_refresh_residue() {
             LISTED+=("$LISTED_PATH")
         done <"$TMP_DIR/wiki-listed-$REFRESH_I"
         REFRESH_I=$((REFRESH_I + 1))
-        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z \
             --others --exclude-standard -- ":(literal)$REFRESH_FOLDER" >"$TMP_DIR/wiki-residue"; then
             RESIDUE+="the indexes the refresh created under $REFRESH_FOLDER (listing them failed), "
             continue
@@ -580,9 +599,11 @@ find_clobbered() {
     # name is never C-quoted by core.quotePath into a path that exists nowhere
     while IFS= read -r -d '' ADDED_PATH; do
         if [[ -e "$WORKTREE_DIR/$ADDED_PATH" || -L "$WORKTREE_DIR/$ADDED_PATH" ]]; then
-            [[ -z "$(git -C "$WORKTREE_DIR" ls-files -- ":(literal)$ADDED_PATH")" ]] || continue
+            [[ -z "$(git -C "$WORKTREE_DIR" --no-optional-locks ls-files \
+                -- ":(literal)$ADDED_PATH")" ]] || continue
             if [[ "$IGNORE_CASE" == true ]] \
-                && [[ -n "$(git -C "$WORKTREE_DIR" ls-files -- ":(icase,literal)$ADDED_PATH")" ]]; then
+                && [[ -n "$(git -C "$WORKTREE_DIR" --no-optional-locks ls-files \
+                    -- ":(icase,literal)$ADDED_PATH")" ]]; then
                 continue
             fi
             CLOBBERED+="$ADDED_PATH, "
@@ -597,7 +618,8 @@ find_clobbered() {
                 break
             fi
         done
-    done < <(git -C "$WORKTREE_DIR" diff --name-only -z --no-renames --diff-filter=A "$CHILD_OLD" "$1")
+    done < <(git -C "$WORKTREE_DIR" --no-optional-locks diff --name-only -z --no-renames \
+        --diff-filter=A "$CHILD_OLD" "$1")
 }
 # a paused node's advance carries its uncommitted state the way git checkout
 # moves a branch -- the frozen step's dirt is what resume continues from, so
@@ -684,8 +706,8 @@ carry_prepare() {
     # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
     # name is never C-quoted by core.quotePath into a path that exists nowhere
     while IFS= read -r -d '' STAGED_PATH; do
-        git -C "$WORKTREE_DIR" diff --quiet "$CHILD_OLD" "$ADVANCE_TREE" -- ":(literal)$STAGED_PATH" \
-            || ABSORBED+="$STAGED_PATH, "
+        git -C "$WORKTREE_DIR" --no-optional-locks diff --quiet "$CHILD_OLD" "$ADVANCE_TREE" \
+            -- ":(literal)$STAGED_PATH" || ABSORBED+="$STAGED_PATH, "
     done <"$TMP_DIR/carry-staged"
     if [[ -n "$ABSORBED" ]]; then
         CARRY_ERROR="advancing $BRANCH's merge-base would change its uncommitted state:"
@@ -791,7 +813,8 @@ carry_return() {
     CARRY_LEFT=false
     # the index entry, picked out by its exact path (a literal pathspec
     # also matches the entries under a directory of that name)
-    if ! git -C "$WORKTREE_DIR" ls-files -s -z -- ":(literal)$2" >"$TMP_DIR/carry-entry"; then
+    if ! git -C "$WORKTREE_DIR" --no-optional-locks ls-files -s -z -- ":(literal)$2" \
+        >"$TMP_DIR/carry-entry"; then
         UNRESTORED+="$2, "
         return 0
     fi
@@ -939,8 +962,12 @@ advance_merge_base() {
         return 0
     fi
     # the commit law's excludes hide edits to tracked files of those shapes
-    # (a force-added lock or status file), which reset --hard would overwrite
-    if ! git -C "$WORKTREE_DIR" diff --quiet HEAD; then
+    # (a force-added lock or status file), which reset --hard would overwrite;
+    # read as status_paths' changed set rather than `git diff --quiet HEAD`, so
+    # the gate holds no index lock: the set is the diff's (the working tree
+    # against HEAD) plus a staged change the working tree reverted, which
+    # reset --hard discards all the same
+    if ! CHILD_CHANGES=$(status_paths "$WORKTREE_DIR" changed) || [[ -n "$CHILD_CHANGES" ]]; then
         skip_advance "its worktree has uncommitted changes"
         return 0
     fi
@@ -958,7 +985,8 @@ advance_merge_base() {
     # the child's seed entries as its (clean) index holds them, in the
     # index-info shape update-index reads; a file, not a variable, because a
     # NUL-separated listing cannot ride a bash variable
-    if ! git -C "$WORKTREE_DIR" ls-files -s -z -- "${OWN_SEED_SPEC[@]}" >"$TMP_DIR/seed-info"; then
+    if ! git -C "$WORKTREE_DIR" --no-optional-locks ls-files -s -z -- "${OWN_SEED_SPEC[@]}" \
+        >"$TMP_DIR/seed-info"; then
         skip_advance "listing $BRANCH's seed failed"
         return 0
     fi
@@ -1016,10 +1044,16 @@ RESOLVED=""
 resolve_seed_conflicts() {
     UNMERGED=()
     # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
-    # name is never C-quoted by core.quotePath into a pathspec matching nothing
+    # name is never C-quoted by core.quotePath into a pathspec matching nothing;
+    # plumbing diff-files, not `git diff`, which refreshes the index under
+    # index.lock: it never refreshes, so it would list a stat-stale file as
+    # modified, but --diff-filter=U keeps only the unmerged paths, each listed
+    # once as the diff lists it; like the diff it never lists an untracked
+    # file, and --no-renames keeps each entry to one path
     while IFS= read -r -d '' UNMERGED_PATH; do
         UNMERGED+=("$UNMERGED_PATH")
-    done < <(git -C "$PARENT_WORKTREE_DIR" diff --name-only --diff-filter=U -z)
+    done < <(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff-files --name-only \
+        --no-renames --diff-filter=U -z)
     [[ ${#UNMERGED[@]} -gt 0 ]] || return 1
     for UNMERGED_PATH in "${UNMERGED[@]}"; do
         [[ "$UNMERGED_PATH" =~ $SEED_PATH_RE ]] || return 1
@@ -1069,7 +1103,8 @@ if [[ "$CONTINUE" != true ]]; then
     # top-level node the target is the user's own root worktree; refusing here, before
     # the trap is armed, keeps that reset scoped to merge.sh's own staged squash (tree
     # verified clean immediately prior)
-    if [[ -n "$(git -C "$PARENT_WORKTREE_DIR" status --porcelain --untracked-files=no)" ]]; then
+    if [[ -n "$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks status --porcelain \
+        --untracked-files=no)" ]]; then
         end_merge_event failed
         echo "Error: parent worktree $PARENT_BRANCH has uncommitted changes;" \
             "commit or stash them before merging $BRANCH" >&2
@@ -1109,7 +1144,7 @@ if [[ "$CONTINUE" != true ]]; then
         # or a racing writer holding the parent index); only the conflict resets
         # -- a blanket reset --hard would wipe whatever a concurrent sibling
         # merge had staged in the shared parent worktree
-        CONFLICTED=$(git -C "$PARENT_WORKTREE_DIR" ls-files -u)
+        CONFLICTED=$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -u)
         if [[ -z "$CONFLICTED" ]] || ! resolve_seed_conflicts; then
             end_merge_event failed
             if [[ -n "$CONFLICTED" ]]; then
@@ -1172,17 +1207,18 @@ RESTORE_SPEC=(":(glob)**/.fractal/**" ${SCOPE_EXCLUDES[@]+"${SCOPE_EXCLUDES[@]}"
 # removed (the node's branch history keeps its copy); --no-renames so a
 # rename lists as its two halves
 DROPPED_SPEC=("${RESTORE_SPEC[@]}" ":(exclude)$SEED_PREFIX/$BRANCH" ":(exclude,glob)**/.fractal/$BRANCH.*/**")
-if ! RESTORED=$(git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
-    --diff-filter=a HEAD -- "${DROPPED_SPEC[@]}" | tr '\0' '\n') \
-    || ! REMOVED=$(git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
-        --diff-filter=A HEAD -- "${DROPPED_SPEC[@]}" | tr '\0' '\n'); then
+if ! RESTORED=$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --cached --name-only -z \
+    --no-renames --diff-filter=a HEAD -- "${DROPPED_SPEC[@]}" | tr '\0' '\n') \
+    || ! REMOVED=$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --cached --name-only -z \
+        --no-renames --diff-filter=A HEAD -- "${DROPPED_SPEC[@]}" | tr '\0' '\n'); then
     fail_target "listing $BRANCH's changes under .fractal/ failed"
 fi
 # one command drops added paths from index and disk and returns modified,
 # deleted, and unmerged paths to HEAD; the guard keeps restore from exiting 1
 # on a pathspec that matches nothing (git >= 2.23); --quiet: the Warning:
 # lines below name every restored and removed path
-if ! git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet --no-renames HEAD -- "${RESTORE_SPEC[@]}"; then
+if ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --cached --quiet --no-renames HEAD \
+    -- "${RESTORE_SPEC[@]}"; then
     if ! git -C "$PARENT_WORKTREE_DIR" restore --staged --worktree --source=HEAD --quiet \
         -- "${RESTORE_SPEC[@]}"; then
         fail_target "restoring $PARENT_BRANCH's .fractal/ after the squash of $BRANCH failed"
@@ -1216,7 +1252,7 @@ fi
 # of the child's work, so it runs the rest of the tail (merge-base advanced)
 # and only the commit is skipped -- exiting as the fresh arm does would replay
 # the very conflict the operator just resolved on the next merge
-if git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet; then
+if git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --cached --quiet; then
     trap - INT TERM
     clear_squash_markers
     if [[ "$CONTINUE" != true ]]; then
@@ -1250,8 +1286,8 @@ fi
 if [[ "$IGNORE_SCOPE" != true ]]; then
     # after the restore every staged .fractal/ path is the merge's own -- a
     # scope-root edit or the seed strip's deletion -- so the rest is judged
-    if ! git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames HEAD -- . \
-        ":(exclude,glob)**/.fractal/**" >"$TMP_DIR/footprint"; then
+    if ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --cached --name-only -z --no-renames \
+        HEAD -- . ":(exclude,glob)**/.fractal/**" >"$TMP_DIR/footprint"; then
         fail_target "listing the paths of $BRANCH's squash failed"
     fi
     # the worktree-root .gitattributes is admitted only as init's own edit --
@@ -1362,7 +1398,8 @@ if command -v wiki &>/dev/null; then
     # a wiki declared at the worktree root encloses every folder, so each
     # refresh below would walk the whole worktree and write past the squash;
     # node init refuses to spawn under one, and the merge refuses it too
-    if ! ROOT_DECLARED=$(git -C "$PARENT_WORKTREE_DIR" ls-files -- ':(literal).wiki/settings.json'); then
+    if ! ROOT_DECLARED=$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files \
+        -- ':(literal).wiki/settings.json'); then
         fail_target "reading the wiki declarations of $BRANCH's squash failed"
     fi
     if [[ -n "$ROOT_DECLARED" ]]; then
@@ -1376,7 +1413,8 @@ if command -v wiki &>/dev/null; then
         INDEX_REL=${INDEX_DIR#"$PARENT_WORKTREE_DIR"/}
         # guarded: a set -e exit from a failed ls-files would strand the
         # staged squash without the restore below
-        if ! TRACKED=$(git -C "$PARENT_WORKTREE_DIR" ls-files -- ":(literal)$INDEX_REL/_index.md"); then
+        if ! TRACKED=$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files \
+            -- ":(literal)$INDEX_REL/_index.md"); then
             fail_target "reading the tracked wiki index under $INDEX_DIR" \
                 "after merging $BRANCH failed"
         fi
@@ -1387,7 +1425,7 @@ if command -v wiki &>/dev/null; then
         # only a personal ignore hides would still get a row; the listing is
         # also what a failure keeps (drop_refresh_residue)
         LISTED_FILE="$TMP_DIR/wiki-listed-${#REFRESH_FOLDERS[@]}"
-        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z \
             --others --exclude-standard -- ":(literal)$INDEX_REL" >"$LISTED_FILE"; then
             fail_target "listing the untracked files under $INDEX_DIR failed"
         fi
@@ -1410,7 +1448,7 @@ if command -v wiki &>/dev/null; then
         fi
         if ! wiki update --path="$INDEX_DIR" >/dev/null \
             || ! git -C "$PARENT_WORKTREE_DIR" add -u -- ":(literal)$INDEX_REL" \
-            || ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
+            || ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z --others --exclude-standard \
                 -- ":(literal)$INDEX_REL" >"$TMP_DIR/wiki-created"; then
             fail_target "refreshing the wiki indexes under $INDEX_DIR" \
                 "after merging $BRANCH failed"
@@ -1437,9 +1475,9 @@ if command -v wiki &>/dev/null; then
     # name, as under the project wiki, and an index in a folder its wiki
     # excludes is skipped, as the wiki's own walk skips it; an index belongs to
     # the deepest root above it, and a failed listing fails closed
-    if ! git -C "$PARENT_WORKTREE_DIR" ls-files -z -- ':(glob)**/.wiki/settings.json' \
+    if ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z -- ':(glob)**/.wiki/settings.json' \
         ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-roots" \
-        || ! git -C "$PARENT_WORKTREE_DIR" diff --cached --name-only -z --no-renames \
+        || ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --cached --name-only -z --no-renames \
             --diff-filter=d HEAD -- ':(glob)**/_index.md' \
             ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-indexes"; then
         fail_target "listing the wiki indexes of $BRANCH's squash failed"
@@ -1498,7 +1536,7 @@ if command -v wiki &>/dev/null; then
         # wiki (mirrors plasma-wiki's Wiki._check_ignore), and the
         # listing is also what a failure keeps (drop_refresh_residue)
         LISTED_FILE="$TMP_DIR/wiki-listed-${#REFRESH_FOLDERS[@]}"
-        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" ls-files -z \
+        if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z \
             --others --exclude-standard -- ":(literal)$FOLDER" >"$LISTED_FILE"; then
             fail_target "listing the untracked files under $FOLDER_DIR failed"
         fi
@@ -1537,7 +1575,7 @@ if command -v wiki &>/dev/null; then
         # own index, the root's .wiki/ state -- an untracked file the walk
         # never lists stays out of the squash
         if ! git -C "$PARENT_WORKTREE_DIR" add -u -- ":(literal)$FOLDER" \
-            || ! git -C "$PARENT_WORKTREE_DIR" ls-files -z --others --exclude-standard \
+            || ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z --others --exclude-standard \
                 -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-created"; then
             fail_target "staging the refreshed wiki indexes under $FOLDER_DIR" \
                 "after merging $BRANCH failed"
@@ -1561,7 +1599,7 @@ fi
 # the pre-refresh guard cannot see, and the commit below would die on the
 # empty index; the squash staged content, so the markers exist on both paths
 # and are cleared like the no-op above
-if git -C "$PARENT_WORKTREE_DIR" diff --cached --quiet; then
+if git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --cached --quiet; then
     trap - INT TERM
     clear_squash_markers
     if [[ "$CONTINUE" != true ]]; then
@@ -1606,7 +1644,8 @@ if [[ "$VALIDATE" == true ]]; then
         fail_target "validation script '$VALIDATION_SCRIPT' resolves outside $PARENT_BRANCH's worktree"
     fi
     if ! VALIDATED_TREE=$(git -C "$PARENT_WORKTREE_DIR" write-tree) \
-        || ! git -C "$PARENT_WORKTREE_DIR" diff --quiet --ignore-submodules=none; then
+        || ! UNSTAGED=$(status_paths "$PARENT_WORKTREE_DIR" unstaged --ignore-submodules=none) \
+        || [[ -n "$UNSTAGED" ]]; then
         fail_target "the staged squash is not ready for validation; stage or discard tracked unstaged changes"
     fi
     if ! (cd "$PARENT_WORKTREE_DIR" && bash "./$VALIDATION_SCRIPT") >&2; then
@@ -1614,7 +1653,8 @@ if [[ "$VALIDATE" == true ]]; then
     fi
     if ! CURRENT_TREE=$(git -C "$PARENT_WORKTREE_DIR" write-tree) \
         || [[ "$CURRENT_TREE" != "$VALIDATED_TREE" ]] \
-        || ! git -C "$PARENT_WORKTREE_DIR" diff --quiet --ignore-submodules=none; then
+        || ! UNSTAGED=$(status_paths "$PARENT_WORKTREE_DIR" unstaged --ignore-submodules=none) \
+        || [[ -n "$UNSTAGED" ]]; then
         fail_target "validation script '$VALIDATION_SCRIPT' changed the staged tree or left tracked unstaged changes"
     fi
 fi

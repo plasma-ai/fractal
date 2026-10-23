@@ -501,6 +501,15 @@ may include breaking changes, each listed under a Breaking heading.
   `wiki update`. A failed rebuild warns in one line and the commit lands with
   the indexes as staged. The refresh indexed every file on disk, so each refused
   file's row dangled in every clean checkout.
+- `fractal commit` waits out an `index.lock` another process holds briefly: a
+  staging or commit call that finds it waits two seconds and retries once, and a
+  lock still held then fails the commit with git's own message, not as a hook
+  failure. The lock is never removed. fractal's own git reads never take the
+  lock, so they never fail a `git add` or `git commit` running beside them: each
+  read of the index or the working tree, in the engine and the lifecycle
+  scripts, passes `--no-optional-locks`, and the working-tree checks read
+  `git status`. fractal's `git status` and working-tree `git diff` calls rewrote
+  the index under the lock, and a commit meeting any held lock failed at once.
 - A node created without spawn limits renders `$MAX_DEPTH`, `$MAX_CHILDREN`, and
   `$MAX_DESCENDANTS` as `-1` (unlimited, as the node skill documents) instead of
   `None` in its charter and step prompts and in each step's environment. The

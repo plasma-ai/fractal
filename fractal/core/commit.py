@@ -11,13 +11,14 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import typing
 from collections.abc import Callable, Iterable
 from typing import Optional
 
 import fractal.util
 from fractal.constants import FRACTAL_FOLDER, SETTINGS_FILE, WIKI_FOLDER
-from fractal.exceptions import DirtyWorktreeError
+from fractal.exceptions import DirtyWorktreeError, IndexLockedError
 
 from . import worktree
 from .worktree import exclude_block_lines
@@ -257,6 +258,7 @@ def commit(
     # wiki .cache/, manages itself -- its collapsed dir line and the content
     # lines it also emits are one managed entity, not eaten files)
     cmd = [
+        '--no-optional-locks',
         'ls-files',
         '--others',
         '-i',
@@ -276,7 +278,16 @@ def commit(
         # and check-ignore's batch form reads its paths from --stdin; -z on
         # both sides so a non-ASCII path round-trips unquoted
         result = subprocess.run(
-            ['git', '-C', f'{worktree}', 'check-ignore', '-v', '--stdin', '-z'],
+            [
+                'git',
+                '-C',
+                f'{worktree}',
+                '--no-optional-locks',
+                'check-ignore',
+                '-v',
+                '--stdin',
+                '-z',
+            ],
             input=ignored,
             capture_output=True,
             text=True,
@@ -332,12 +343,13 @@ def commit(
         output.append(skip_warning)
     # an oversized staged file is usually an artifact staged by accident, but a
     # large commit is also legitimate -- so the size guard warns and never blocks
-    cmd = ['diff', '--cached', '--name-only', '--diff-filter=d', '-z']
+    cmd = ['--no-optional-locks', 'diff', '--cached', '--name-only']
+    cmd += ['--diff-filter=d', '-z']
     raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
     staged = os.fsdecode(raw)
     large = []
     for staged_path in filter(None, staged.split('\0')):
-        cmd = ['cat-file', '-s', f':0:{staged_path}']
+        cmd = ['--no-optional-locks', 'cat-file', '-s', f':0:{staged_path}']
         size = int(fractal.util.git.run(cmd, cwd=worktree, check=False) or 0)
         if size >= _LARGE_FILE_WARN_BYTES:
             large.append(f'{staged_path} ({size // 1024 // 1024}MB)')
@@ -389,7 +401,7 @@ def commit(
             for warning in (skip_warning, large_warning, shadow_warning)
             if warning
         )
-        cmd = ['diff', '--cached', '--stat']
+        cmd = ['--no-optional-locks', 'diff', '--cached', '--stat']
         stat = fractal.util.git.run(cmd, cwd=worktree, check=False) or ''
         lines = stat.splitlines()
         if len(lines) > _DIFFSTAT_CAP_LINES:
@@ -416,15 +428,20 @@ def commit(
         # pre-commit framework) report their findings to stdout, which a
         # stderr-only error would drop from the retry narration
         result = subprocess.run(cmd, capture_output=True, text=True)
+        # another process's index lock fails the commit before any hook runs,
+        # so it is waited out once, as the staging calls wait it out
+        if fractal.util.git.index_locked(result):
+            time.sleep(fractal.util.git.INDEX_LOCK_WAIT)
+            result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             error = '\n'.join(
                 stream.strip()
                 for stream in (result.stdout, result.stderr)
                 if stream.strip()
             )
-            raise RuntimeError(
-                f'git commit failed (exit {result.returncode}): {error!r}'
-            )
+            locked = fractal.util.git.index_locked(result)
+            error_type = IndexLockedError if locked else RuntimeError
+            raise error_type(f'git commit failed (exit {result.returncode}): {error!r}')
         committed = result.stdout.strip()
         if not init:
             sha = fractal.util.git.run(['rev-parse', 'HEAD'], cwd=worktree)
@@ -455,12 +472,16 @@ def commit(
     # tolerate "nothing staged" no-op; real failures must surface -- else it
     # would report success and push while HEAD never advanced (`--quiet`
     # exits zero exactly when nothing is staged)
-    cmd = ['diff', '--cached', '--quiet']
+    cmd = ['--no-optional-locks', 'diff', '--cached', '--quiet']
     if fractal.util.git.run(cmd, cwd=worktree, check=False) is not None:
         output.append('Nothing staged to commit')
     else:
         try:
             committed = _commit_once()
+        except IndexLockedError:
+            # a lock that outlasted the wait is git's to report, not a hook
+            # rewrite to recover from
+            raise
         except RuntimeError as error:
             # pre-commit hook may have reformatted and aborted; re-stage and
             # retry once, but only if re-staging actually changes the index
@@ -605,11 +626,18 @@ def commit_user_init(node: Node, message: str) -> str:
             cmd += [*_STAGE_EXCLUDES, *withheld]
             env = {**os.environ, 'LC_ALL': 'C'}
             result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            # another process's index lock is waited out once, as the other
+            # staging calls wait it out, and fails loud if it outlasts the wait
+            if fractal.util.git.index_locked(result):
+                time.sleep(fractal.util.git.INDEX_LOCK_WAIT)
+                result = subprocess.run(cmd, capture_output=True, text=True, env=env)
             refusal = 'The following paths are ignored by one of your .gitignore files'
             ignored = result.returncode == 1 and refusal in result.stderr
             if result.returncode != 0 and not ignored:
                 error = result.stderr.strip()
-                raise RuntimeError(
+                locked = fractal.util.git.index_locked(result)
+                error_type = IndexLockedError if locked else RuntimeError
+                raise error_type(
                     f'git add of {seed_dir} failed (exit {result.returncode}):'
                     f' {error!r}'
                 )
@@ -619,12 +647,12 @@ def commit_user_init(node: Node, message: str) -> str:
         forced = [f':(literal){path}' for path in paths if path != seed_dir]
         if forced:
             cmd = ['add', '-f', '--', *forced, *_STAGE_EXCLUDES]
-            fractal.util.git.run(cmd, cwd=node.worktree)
+            fractal.util.git.run(cmd, cwd=node.worktree, lock_retry=True)
         notices[:], _ = _stage_records(node, seed, estates, denied)
 
     _stage_paths()
     # benign no-op when nothing in scope changed (already committed)
-    cmd = ['diff', '--cached', '--name-only', '--', *specs]
+    cmd = ['--no-optional-locks', 'diff', '--cached', '--name-only', '--', *specs]
     if not fractal.util.git.run(cmd, cwd=node.worktree):
         confirmation = f'User node baseline already committed on {node.branch}.'
         return '\n'.join([*notices, confirmation])
@@ -634,10 +662,14 @@ def commit_user_init(node: Node, message: str) -> str:
 
     def _commit_paths() -> str:
         cmd = ['commit', '-m', msg, '--', *specs]
-        return fractal.util.git.run(cmd, cwd=node.worktree)
+        return fractal.util.git.run(cmd, cwd=node.worktree, lock_retry=True)
 
     try:
         _commit_paths()
+    except IndexLockedError:
+        # a lock that outlasted the wait is git's to report, not a hook
+        # rewrite to recover from
+        raise
     except RuntimeError as error:
         # a formatting hook may have rewritten the staged pages in the
         # working tree: every rewritten path is gated -- a wiki-page rewrite
@@ -795,7 +827,8 @@ def _check_clean(node: Node) -> None:
     # and a parked .ssh/ would read as dirt no expansion could ever clear
     project = node.project_path
     prefix = FRACTAL_FOLDER if project == '.' else f'{project}/{FRACTAL_FOLDER}'
-    cmd = ['status', '--porcelain', '-uall', '-z', '--', *_STAGE_EXCLUDES]
+    cmd = ['--no-optional-locks', 'status', '--porcelain', '-uall', '-z']
+    cmd += ['--', *_STAGE_EXCLUDES]
     raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
     for entry in filter(None, os.fsdecode(raw).split('\0')):
         # -z drops the rename arrow, so a rename's source rides as its own
@@ -818,22 +851,24 @@ def _changed_paths(node: Node) -> set[str]:
         against ``HEAD``, and the untracked paths the ignore rules admit.
 
     """
-    worktree = node.worktree
-    # -z everywhere so a non-ASCII path is never C-quoted (a quoted path
-    # starts with '"' and fails every prefix check); raw bytes so a first
-    # path's leading whitespace survives (run() strips)
-    changed: set[str] = set()
+    # one status listing names them all, in place of a working-tree diff that
+    # would rewrite the index under index.lock (status compares content the
+    # same way but refreshes in memory only): an entry's index column compares
+    # the index to HEAD and its worktree column the working tree to the index,
+    # so together they list every path `diff HEAD` or `diff --cached HEAD`
+    # lists, and -uall lists each untracked file one entry per file, as
+    # `ls-files --others` does
+    # -z so a path with spaces or a newline parses whole and a non-ASCII path
+    # is never C-quoted (a quoted path starts with '"' and fails every prefix
+    # check); raw bytes so a first entry's leading status space survives
+    # (run() strips)
     # --no-renames: rename detection lists only a rename's destination,
     # hiding the source's deletion from the scope and baseline checks
-    for cmd in (
-        ['diff', '--name-only', '--no-renames', '-z', 'HEAD'],
-        ['diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD'],
-        ['ls-files', '--others', '--exclude-standard', '-z'],
-    ):
-        raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
-        listing = os.fsdecode(raw)
-        changed.update(filter(None, listing.split('\0')))
-    return changed
+    cmd = ['--no-optional-locks', 'status', '--porcelain', '-z']
+    cmd += ['--no-renames', '-uall']
+    raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
+    # each entry is "XY <path>"
+    return {entry[3:] for entry in os.fsdecode(raw).split('\0') if entry}
 
 
 def _root_shadows(node: Node) -> list[str]:
@@ -860,7 +895,8 @@ def _root_shadows(node: Node) -> list[str]:
         return []
     # -z and raw bytes, as in _changed_paths; --no-renames so a path moved to
     # the root lists as the addition it is
-    cmd = ['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=A', '-z']
+    cmd = ['--no-optional-locks', 'diff', '--cached', '--name-only', '--no-renames']
+    cmd += ['--diff-filter=A', '-z']
     raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
     added = list(filter(None, os.fsdecode(raw).split('\0')))
     if not added:
@@ -1130,10 +1166,11 @@ def _stage(
     # cache: drop it from the index -- never the disk, the tool owns the bytes
     # -- so this commit converges the tree and the cache's own ignore keeps it
     # untracked from here on; unguarded, since upkeep must never block a save
+    # (all but a held index lock, which would fail the adds below as well)
     cache = worktree / wiki_prefix / '.wiki' / 'cache'
     cmd = ['rm', '-r', '--cached', '--quiet', '--ignore-unmatch']
     cmd += ['--', f':(literal){cache}']
-    fractal.util.git.run(cmd, cwd=worktree, check=False)
+    fractal.util.git.run(cmd, cwd=worktree, check=False, lock_retry=True)
     if scoped:
         # stage only paths that exist -- a scope dir that is planned
         # but not yet created would otherwise make `git add` fatal
@@ -1158,16 +1195,16 @@ def _stage(
             # bracketed project dir) must not widen or empty the match
             specs = [f':(literal){path}' for path in paths]
             cmd = ['add', *specs, *_STAGE_EXCLUDES, *withheld]
-            fractal.util.git.run(cmd, cwd=worktree)
+            fractal.util.git.run(cmd, cwd=worktree, lock_retry=True)
         # the estates ride their own plain add: it must be able to fail
         # (everything under it ignored) without unstaging the scope sweep
         folder = worktree / fractal_prefix
         if folder.is_dir():
             cmd = ['add', f':(literal){folder}', *_STAGE_EXCLUDES, *withheld]
-            fractal.util.git.run(cmd, cwd=worktree, check=False)
+            fractal.util.git.run(cmd, cwd=worktree, check=False, lock_retry=True)
     else:
         cmd = ['add', f':(literal){worktree}', *_STAGE_EXCLUDES, *withheld]
-        fractal.util.git.run(cmd, cwd=worktree)
+        fractal.util.git.run(cmd, cwd=worktree, lock_retry=True)
     notices, unstaged = _stage_records(node, fractal_prefix, estates, denied)
     return notices, denied + unstaged
 
@@ -1222,7 +1259,8 @@ def _estate_denied(
     if not estates:
         return []
     specs = [f':(literal){entry}' for entry in estates]
-    cmd = ['ls-files', '--others', '--exclude-standard', '-z', '--', *specs]
+    cmd = ['--no-optional-locks', 'ls-files', '--others', '--exclude-standard', '-z']
+    cmd += ['--', *specs]
     raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
     fresh = [path for path in os.fsdecode(raw).split('\0') if path]
     return [path for path in fresh if _is_refused_estate(path, fractal_prefix)]
@@ -1253,7 +1291,8 @@ def _stage_records(
     outside it is refused and named rather than staged, and every
     force-add is reported. A record the add cannot stage -- vanished
     after the snapshot, unreadable on disk -- is likewise reported by
-    name, never fatal.
+    name, never fatal; only an index lock another process holds past
+    the wait fails the pass, since every record would fail behind it.
 
     Args:
         node: The node whose worktree to stage.
@@ -1275,7 +1314,8 @@ def _stage_records(
     if estates:
         specs = [f':(literal){entry}' for entry in estates]
         # collect the estate files ignore rules held out of the plain adds
-        cmd = ['ls-files', '--others', '-i', '--exclude-standard', '-z', '--', *specs]
+        cmd = ['--no-optional-locks', 'ls-files', '--others', '-i']
+        cmd += ['--exclude-standard', '-z', '--', *specs]
         raw = fractal.util.git.run_bytes(cmd, cwd=node.worktree) or b''
         held = [path for path in os.fsdecode(raw).split('\0') if path]
     if held:
@@ -1290,6 +1330,7 @@ def _stage_records(
         assets = pathlib.Path(__file__).parent.parent / '_assets'
         template = assets / 'git' / 'exclude'
         cmd = [
+            '--no-optional-locks',
             'ls-files',
             '--others',
             '-i',
@@ -1320,10 +1361,21 @@ def _stage_records(
             # feeds exists precisely to rescue those
             specs = [f':(literal){node.worktree / path}' for path in forced]
             cmd = ['add', '-f', *specs]
-            if fractal.util.git.run(cmd, cwd=node.worktree, check=False) is None:
+            added = fractal.util.git.run(
+                cmd,
+                cwd=node.worktree,
+                check=False,
+                lock_retry=True,
+            )
+            if added is None:
                 for path in forced:
                     cmd = ['add', '-f', f':(literal){node.worktree / path}']
-                    result = fractal.util.git.run(cmd, cwd=node.worktree, check=False)
+                    result = fractal.util.git.run(
+                        cmd,
+                        cwd=node.worktree,
+                        check=False,
+                        lock_retry=True,
+                    )
                     if result is None:
                         failed.append(path)
                 forced = [path for path in forced if path not in failed]
@@ -1444,7 +1496,7 @@ def _restage_memory_indexes(
     """
     worktree = node.worktree
     # the staged memory tree: the exact bytes about to commit
-    cmd = ['ls-files', '-z', '--', f':(literal){prefix}']
+    cmd = ['--no-optional-locks', 'ls-files', '-z', '--', f':(literal){prefix}']
     raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
     staged = [path for path in os.fsdecode(raw).split('\0') if path]
     # leave out what the wiki's own ignore check skips, so the rebuild
@@ -1472,6 +1524,7 @@ def _restage_memory_indexes(
         'git',
         '-C',
         f'{worktree}',
+        '--no-optional-locks',
         '-c',
         f'core.excludesFile={os.devnull}',
         'check-ignore',
@@ -1503,6 +1556,7 @@ def _restage_memory_indexes(
             'git',
             '-C',
             f'{worktree}',
+            '--no-optional-locks',
             'checkout-index',
             '-z',
             '--stdin',
@@ -1551,7 +1605,7 @@ def _restage_memory_indexes(
         written.append(path)
     if written:
         specs = [f':(literal){worktree / path}' for path in written]
-        fractal.util.git.run(['add', '-f', *specs], cwd=worktree)
+        fractal.util.git.run(['add', '-f', *specs], cwd=worktree, lock_retry=True)
     return bool(written)
 
 
@@ -1629,9 +1683,9 @@ def _hook_retry(
     worktree = node.worktree
     # capture the failed commit's index, re-stage, and diff the trees --
     # recovery is only possible if re-staging actually changed the index
-    tree_before = fractal.util.git.run(['write-tree'], cwd=worktree)
+    tree_before = fractal.util.git.run(['write-tree'], cwd=worktree, lock_retry=True)
     stage()
-    tree_after = fractal.util.git.run(['write-tree'], cwd=worktree)
+    tree_after = fractal.util.git.run(['write-tree'], cwd=worktree, lock_retry=True)
     if tree_after == tree_before:
         if retry:
             # carry the underlying failure text -- the agent's remediation
@@ -1681,11 +1735,13 @@ def _hook_retry(
                 fractal.util.git.run(
                     ['rm', '-f', '--', f':(literal){path}'],
                     cwd=worktree,
+                    lock_retry=True,
                 )
             else:
                 fractal.util.git.run(
                     ['checkout', tree_before, '--', f':(literal){path}'],
                     cwd=worktree,
+                    lock_retry=True,
                 )
         # name each tier's refusal for what it is -- the wiki remediation
         # is meaningless for a byte-guarded seed page and vice versa
@@ -1767,6 +1823,7 @@ def _hook_retry(
                     fractal.util.git.run(
                         ['checkout', tree_before, '--', f':(literal){path}'],
                         cwd=worktree,
+                        lock_retry=True,
                     )
                 listing = ', '.join(restored)
                 findings = '; '.join(
@@ -1779,6 +1836,9 @@ def _hook_retry(
                 ) from error
     try:
         committed = commit()
+    except IndexLockedError:
+        # a lock that outlasted the wait is git's to report as it stands
+        raise
     except RuntimeError as e:
         raise RuntimeError(
             f'Commit still failed after re-staging hook changes: {e}'

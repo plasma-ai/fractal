@@ -322,6 +322,7 @@ __all__ = [
     'test_merge_continue_lands_the_resolution_on_the_node',
     'test_merge_continue_restores_a_foreign_seed_edit_the_hand_squash_carries',
     'test_merge_continue_refuses_unstaged_target_edits',
+    'test_merge_continue_reads_the_target_by_content',
     'test_merge_continue_refuses_commits_newer_than_the_squash',
     'test_merge_continue_refuses_unresolved_conflicts',
     'test_merge_continue_refuses_a_siblings_squash',
@@ -383,6 +384,10 @@ __all__ = [
 # edit: the index lines the wiki tool writes there, and the page lines
 _WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
 _WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
+
+# an mtime no checkout records, so a tracked file set to it has stale stat
+# data in the index while its bytes stay as committed
+_AGED_NS = 1_000_000_000 * 10**9
 
 
 # ------ init.sh: worktree paths with spaces
@@ -2135,13 +2140,13 @@ def test_merge_skips_the_merge_base_advance_for_dirty_tracked_work(
 
 
 @pytest.mark.parametrize(
-    argnames='edited',
-    argvalues=[True, False],
-    ids=['edited-on-disk', 'committed-clean'],
+    argnames='state',
+    argvalues=['edited', 'clean', 'touched'],
+    ids=['edited-on-disk', 'committed-clean', 'touch-only'],
 )
 def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     tmp_path: pathlib.Path,
-    edited: bool,
+    state: str,
 ) -> None:
     """An edit to a tracked file of a shape the law excludes still skips the advance.
 
@@ -2149,10 +2154,12 @@ def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     ``config.json.lock``, a ``.status`` -- so ``fractal commit --check``
     reads clean over an edit to one a node force-tracked, and the advance's
     ``reset --hard`` would write the target's copy over that edit. The
-    advance asks git for the tracked diff as well: such an edit skips it
+    advance asks git for the tracked changes as well: such an edit skips it
     with the uncommitted-changes warning and leaves the child's HEAD and the
     on-disk edit alone, while the same file committed clean lets the
-    advance run.
+    advance run. git status answers by content, as ``git diff --quiet
+    HEAD`` does, without the diff's index refresh under ``index.lock``, so
+    the file only touched (stale stat data, same bytes) reads clean too.
     """
     repo = _init_tree(tmp_path / 'lockshaperepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -2164,11 +2171,13 @@ def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     _git(worktree, 'add', '-A')
     _git(worktree, 'add', '-f', '--', '.fractal/main.task/config.json.lock')
     _git(worktree, 'commit', '-m', 'settle node scaffolding, lock tracked')
-    if edited:
+    if state == 'edited':
         lock.write_text('held\n', encoding='utf-8')
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', 'f.txt')
     _git(worktree, 'commit', '-m', 'child work')
+    if state == 'touched':
+        os.utime(lock, ns=(_AGED_NS, _AGED_NS))
     # the law reads the tree clean either way
     check = _run(worktree, 'commit', '--check')
     assert check.returncode == 0, (check.stdout, check.stderr)
@@ -2179,14 +2188,14 @@ def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
     assert (repo / 'f.txt').read_text(encoding='utf-8') == 'child work\n'
-    if edited:
+    if state == 'edited':
         # the advance was skipped and warned about; the edit is untouched
         assert 'skipped advancing' in result.stderr, result.stderr
         assert 'its worktree has uncommitted changes' in result.stderr, result.stderr
         assert _git(worktree, 'rev-parse', 'HEAD').stdout.strip() == child_head
         assert lock.read_text(encoding='utf-8') == 'held\n'
     else:
-        # committed clean, the advance ran and left the tree clean
+        # clean by content, the advance ran and left the tree clean
         assert 'skipped advancing' not in result.stderr, result.stderr
         subject = _git(worktree, 'log', '-1', '--format=%s').stdout.strip()
         assert subject == 'merge main (post-squash)', (subject, result.stderr)
@@ -3337,6 +3346,46 @@ def test_merge_continue_refuses_unstaged_target_edits(
     assert (repo / 'tracked.txt').read_text(encoding='utf-8') == 'resolved line\n'
 
 
+@pytest.mark.parametrize(
+    argnames='state',
+    argvalues=['touched', 'untracked'],
+    ids=['touch-only', 'untracked'],
+)
+def test_merge_continue_reads_the_target_by_content(
+    tmp_path: pathlib.Path,
+    state: str,
+) -> None:
+    """``--continue`` counts only a tracked edit left unstaged, judged by content.
+
+    The unstaged check lists the paths git status's worktree column reports,
+    as a working-tree ``git diff`` lists them, without the diff's index
+    refresh under ``index.lock``: a tracked file only touched beside the hand
+    squash (stale stat data, same bytes) reads clean, and an untracked file
+    never counts, as the diff never lists one, so either way the continue
+    lands. An edit left unstaged refuses it (see the refusal test above).
+    """
+    repo = _init_tree(tmp_path / 'contentrepo')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work')
+    # the operator squashes by hand, then leaves the target in the state
+    _git(repo, 'merge', '--squash', 'main.task')
+    if state == 'touched':
+        os.utime(repo / 'tracked.txt', ns=(_AGED_NS, _AGED_NS))
+    else:
+        (repo / 'scratch.txt').write_text('scratch\n', encoding='utf-8')
+    landed = _script('merge.sh', repo, f'{worktree}', '--continue')
+
+    assert landed.returncode == 0, (landed.stdout, landed.stderr)
+    assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
+    assert (repo / 'f.txt').read_text(encoding='utf-8') == 'child work\n'
+    expected = '?? scratch.txt\n' if state == 'untracked' else ''
+    assert _git(repo, 'status', '--porcelain').stdout == expected
+
+
 def test_merge_continue_refuses_commits_newer_than_the_squash(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -4053,11 +4102,17 @@ def test_merge_lands_a_multi_root_scope_with_a_fractal_root(
     ],
     ids=['purged', 'edited-on-both-sides'],
 )
+@pytest.mark.parametrize(
+    argnames='untracked',
+    argvalues=[False, True],
+    ids=['alone', 'beside-untracked'],
+)
 def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     tmp_path: pathlib.Path,
     seed: str,
     target_edit: Optional[str],
     node_copy: str,
+    untracked: bool,
 ) -> None:
     """A squash conflicting only under ``.fractal/`` outside the scope resolves itself.
 
@@ -4071,7 +4126,9 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     target's content. Either way the merge resolves the entries as the tail
     would and lands: the node's own seed is stripped and its live copy
     survives the advance, while the foreign path keeps the target's content,
-    stays tracked, and reaches the node as such.
+    stays tracked, and reaches the node as such. The unmerged paths come
+    from ``git diff-files --diff-filter=U``, which never lists an untracked
+    file, so one on the target beside the conflict changes nothing.
     """
     repo = _init_tree(tmp_path / 'seedconflictrepo')
     # a seed copy on the target before the fork
@@ -4095,6 +4152,8 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
+    if untracked:
+        (repo / 'scratch.txt').write_text('scratch\n', encoding='utf-8')
     result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed clean with the work on the target
@@ -4104,7 +4163,8 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     )
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
     assert (repo / 'f.txt').read_text(encoding='utf-8') == 'child work\n'
-    assert _git(repo, 'status', '--porcelain').stdout == ''
+    expected = '?? scratch.txt\n' if untracked else ''
+    assert _git(repo, 'status', '--porcelain').stdout == expected
     # the target holds its own answer for the path -- gone, or its own content
     # still tracked -- and the node holds its live seed or the target's content
     tracked = _git(repo, 'ls-files', f'.fractal/{seed}').stdout
