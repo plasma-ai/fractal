@@ -42,6 +42,17 @@ would race take the merge flock too, always before the `.worktrees` lock and
 never inside it: `reseed`, and every loop boot for its continue clean-up and its
 `active` stamp.
 
+A script's git reads never hold a worktree's index lock, which a node's own
+`git add` or `git commit` there would fail on. Every read of a real index --
+`status`, `diff`, `ls-files` -- passes `--no-optional-locks`, and a working-tree
+check reads `git status` instead of a working-tree `git diff`, whose index
+refresh takes the lock even then: `merge.sh`'s unstaged checks read status's
+worktree column, its advance gate any status entry, and its seed conflict pass
+the unmerged paths of `git diff-files --diff-filter=U`. Reads of a private index
+(`GIT_INDEX_FILE`) are left as they are; they never touch a worktree's own lock.
+The commit pipeline's side of the contract is in
+[[features/loop/commit_pipeline]].
+
 ## What the scripts do
 
 - `start.sh` launches the run's tmux session or, with `--headless`, a detached

@@ -2810,10 +2810,9 @@ class Node:
                 # line form C-quotes spaces and non-ASCII, defeating the prefix
                 # exemption -- and needs the unstripped run_bytes: strip would
                 # eat the first entry's leading status space, shifting offsets
-                porcelain = fractal.util.git.run_bytes(
-                    ['status', '--porcelain', '-z', '--untracked-files=all'],
-                    cwd=self._root,
-                )
+                cmd = ['--no-optional-locks', 'status', '--porcelain', '-z']
+                cmd += ['--untracked-files=all']
+                porcelain = fractal.util.git.run_bytes(cmd, cwd=self._root)
                 # fail closed: a status failure must not read as a clean tree
                 if porcelain is None:
                     raise RuntimeError('Cannot continue: git status failed.')
@@ -4625,6 +4624,7 @@ class Node:
             excludes = [f':!{seed}']
         # list the branch's own changes, minus its seed and the wiki's generated state
         cmd = [
+            '--no-optional-locks',
             'diff',
             '--name-only',
             '-z',
@@ -4641,7 +4641,8 @@ class Node:
             return ''
         # only paths still differing on the target would be discarded
         specs = [f':(literal){path}' for path in changed]
-        cmd = ['diff', '--quiet', target, self.branch, '--', *specs]
+        cmd = ['--no-optional-locks', 'diff', '--quiet', target, self.branch]
+        cmd += ['--', *specs]
         if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is not None:
             return ''
         # word for word the line delete.sh prints: the CLI drops the script's
