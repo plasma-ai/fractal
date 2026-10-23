@@ -199,6 +199,7 @@ __all__ = [
     'test_non_provider_failures_keep_the_fixed_backoff',
     'test_a_fast_outage_never_arms_the_billing_breaker',
     'test_the_census_reads_the_loops_outage_verdict',
+    'test_the_census_skips_steps_refused_before_launch',
     'test_an_outage_past_the_retries_holds_the_next_launch',
     'test_an_interrupted_outage_hold_books_the_consumed_steps',
     'test_the_outage_streak_moves_only_on_what_launches_say',
@@ -7125,6 +7126,52 @@ def test_the_census_reads_the_loops_outage_verdict(
         unavailable=unavailable,
     )
     loop = MockLoop(loop_node, results=[failure] * 3)
+    assert loop.run() == 0
+    # the census reads an active node's newest launches
+    loop_node.status_set('active')
+    assert ('PAUSED: billing' in loop_node.status_detail()) == billing
+
+
+@pytest.mark.parametrize(
+    argnames=('refused', 'billing'),
+    argvalues=[(None, True), ('step', False), ('sync', False)],
+    ids=['dead-credits', 'step-refused', 'sync-refused'],
+)
+def test_the_census_skips_steps_refused_before_launch(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    refused: Optional[str],
+    billing: bool,
+) -> None:
+    """The node listing's billing flag never counts a launch the loop refused.
+
+    A step refused before its launch books a failed, instant, zero-cost
+    row -- the dead-credits signature on its row alone -- but bought no
+    inference, so the loop's breaker never counts it and the row records
+    the refusal: a run of refused work steps, or refused SYNCs between
+    dead launches, never shows ``PAUSED: billing`` in ``node list``,
+    while three instant zero-cost launch failures still do.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, max_iters=3, sync=refused == 'sync', step_retries=0)
+    # a route the agent lacks refuses the step at dispatch, before any launch
+    route = '---\nprovider: bogus\n---\n'
+    if refused == 'step':
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            f'{route}# PLAN\n\nWork.\n', encoding='utf-8'
+        )
+    failure = StepResult(status='failed', exit_code=1, reason='agent error (exit 1)')
+    loop = MockLoop(loop_node, results=[failure] * 3)
+    if refused == 'sync':
+        # the SYNC mode doc is the installed package's own, so a copy carries
+        # the route
+        sync_file = tmp_path / 'SYNC.md'
+        body = loop._sync_file.read_text(encoding='utf-8')
+        sync_file.write_text(f'{route}{body}', encoding='utf-8')
+        loop._sync_file = sync_file
     assert loop.run() == 0
     # the census reads an active node's newest launches
     loop_node.status_set('active')
