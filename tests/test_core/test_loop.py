@@ -66,6 +66,7 @@ from tests.test_impl.rollouts import spawning_thread
 
 from ._agents import SampleAgent
 from .conftest import _record_step_cost, _spawn_parent_child
+from .streams import claude_background_wait
 
 __all__ = [
     'test_step_load_parses_strict_flat_scalar_frontmatter',
@@ -86,6 +87,7 @@ __all__ = [
     'test_a_failed_active_stamp_names_the_status_the_node_keeps',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
+    'test_continue_cleanup_discards_staged_project_changes',
     'test_stream_fault_attributes_to_the_stream_side',
     'test_agent_borne_stream_error_keeps_the_exit_code',
     'test_a_dead_stream_reaps_the_tree_and_spares_the_index_lock',
@@ -154,6 +156,8 @@ __all__ = [
     'test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds',
     'test_token_priced_boot_serves_the_cached_table_offline',
     'test_a_malformed_offline_mode_aborts_the_boot',
+    'test_preflight_logs_what_a_passed_probe_spent',
+    'test_preflight_refuses_a_cap_over_an_unpriced_model',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -225,7 +229,7 @@ __all__ = [
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
     'test_digest_renders_mail_as_inert_data',
-    'test_a_leftover_git_operation_opens_every_launch_prompt',
+    'test_a_leftover_git_operation_joins_every_launch_prompt_beneath_the_charter',
     'test_continue_leaves_a_pending_merge_for_the_agent',
     'test_a_clean_worktree_launch_prompt_carries_no_notice',
     'test_drain_survives_a_pause_and_resume',
@@ -349,11 +353,10 @@ class TrackingLoop(MockLoop):
         return event
 
 
-# a live claude 2.1.300 capture (trimmed, session as @SESSION@): a background
-# command, a turn's end and result, then claude's wake-up and a second reply
-_BACKGROUND_WAIT = (
-    pathlib.Path(__file__).parent / 'streams' / 'claude_background_wait.jsonl'
-)
+# the live background-wait capture's frames, its session as the stand-in's SID
+_BACKGROUND_WAIT = [
+    json.loads(line.replace('@SESSION@', 'SID')) for line in claude_background_wait
+]
 
 # claude stream-json frames for the scripted stand-in (SID: the
 # launch's session); a thinking block's start holds the clock until
@@ -1914,8 +1917,7 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
     loop._clean_worktree()
     assert _git('rev-parse', 'HEAD') == head
     # operator git surgery commits cleanly: a staged rename and a staged
-    # deletion are already fully staged, so the cleanup must not re-name
-    # their gone paths to the add
+    # deletion ride the operator-edit commit, gone paths and all
     _git('mv', f'{node.node_dir / "note.md"}', f'{node.node_dir / "moved.md"}')
     _git('rm', '-q', f'{node.node_dir / "config.json"}')
     loop._clean_worktree()
@@ -1925,6 +1927,97 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
     # the staged deletion committed: config.json's row is gone from the
     # index (nothing on disk to back up, so the config restore skips too)
     assert 'config.json' not in tracked
+
+
+@pytest.mark.parametrize(
+    argnames=('wrote', 'staging', 'carried'),
+    argvalues=[
+        # an edit to a tracked project file
+        pytest.param('README.md', ['add', 'README.md'], [], id='modified'),
+        # a new project file
+        pytest.param('added.md', ['add', 'added.md'], [], id='added'),
+        # a new project file the project ignores, force-added
+        pytest.param(
+            '.venv/added.py',
+            ['add', '-f', '.venv/added.py'],
+            [],
+            id='forced',
+        ),
+        # a deleted project file
+        pytest.param(None, ['rm', '-q', 'README.md'], [], id='deleted'),
+        # a rename inside the project
+        pytest.param(None, ['mv', 'README.md', 'moved.md'], [], id='renamed'),
+        # a rename into the node folder: its node-folder side is an operator
+        # edit, its project side is not
+        pytest.param(
+            None,
+            ['mv', 'README.md', '{node}/moved.md'],
+            ['{node}/moved.md'],
+            id='moved_in',
+        ),
+        # a rename out of the node folder, split the same way
+        pytest.param(
+            None,
+            ['mv', '{node}/NODE.md', 'moved.md'],
+            ['{node}/NODE.md'],
+            id='moved_out',
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    argnames='steered',
+    argvalues=[
+        pytest.param(False, id='unsteered'),
+        pytest.param(True, id='steered'),
+    ],
+)
+def test_continue_cleanup_discards_staged_project_changes(
+    node_with_db: Node,
+    wrote: Optional[str],
+    staging: list[str],
+    carried: list[str],
+    steered: bool,
+) -> None:
+    """The continue cleanup commits node-folder edits alone and discards the rest.
+
+    A continued node starts from its last committed state plus the
+    operator's node-folder edits, so a project change the operator staged is
+    discarded like an unstaged one and never rides the operator-edit commit,
+    whose files are the node folder's alone. A staged rename across the node
+    folder's edge splits the same way: its node-folder side is committed and
+    its project side discarded.
+    """
+    node = node_with_db
+    repo = node.worktree
+    prefix = node.node_dir.relative_to(repo).as_posix()
+    # the node folder committed, as an initialized node's is
+    (node.node_dir / 'NODE.md').write_text('# Charter\n', encoding='utf-8')
+    _git(repo, 'add', prefix)
+    _git(repo, 'commit', '-q', '-m', 'seed')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    # the operator's staged project change, and their steering note
+    if wrote is not None:
+        path = repo / wrote
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('staged\n', encoding='utf-8')
+    _git(repo, *[arg.format(node=prefix) for arg in staging])
+    committed = [path.format(node=prefix) for path in carried]
+    if steered:
+        (node.node_dir / 'note.md').write_text('steer\n', encoding='utf-8')
+        committed.append(f'{prefix}/note.md')
+    MockLoop(node)._clean_worktree()
+    # nothing the operator left, staged or not, outlives the clean
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+    assert status == ''
+    assert (repo / 'README.md').read_text(encoding='utf-8') == '# test\n'
+    # the operator-edit commit carries the node folder's edits alone, and
+    # without any there is no commit
+    if not committed:
+        assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+        return
+    assert _git(repo, 'rev-parse', 'HEAD~').stdout == head
+    cmd = ['diff-tree', '-r', '--name-only', '--no-commit-id', 'HEAD']
+    assert sorted(_git(repo, *cmd).stdout.split()) == sorted(committed)
 
 
 def test_stream_fault_attributes_to_the_stream_side(
@@ -2094,10 +2187,11 @@ def test_a_dead_stream_reaps_the_tree_and_spares_the_index_lock(
         encoding='utf-8',
     )
     pid_file = tmp_path / 'tool.pid'
+    # the stand-in waits up to 10s for the tool's pid, then breaks the stream
     agent = FaultingAgent(
         loop_node,
         f'{sys.executable} {tool} {lock} {pid_file} >/dev/null 2>&1 &'
-        f' while [ ! -s {pid_file} ]; do sleep 0.05; done;'
+        f' for _ in $(seq 200); do [ -s {pid_file} ] && break; sleep 0.05; done;'
         " echo '{}'; exec sleep 30",
     )
     # leave real uncommitted work for the backstop sweep to save
@@ -2616,7 +2710,7 @@ _MISSPELLED_LADDER = {
 }
 
 
-@pytest.mark.parametrize(argnames='launch', argvalues=['start', 'continue', 'resume'])
+@pytest.mark.parametrize('launch', ['start', 'continue', 'resume'])
 def test_launch_verbs_refuse_an_invalid_effort_ladder(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -2749,7 +2843,7 @@ _BAD_CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize(argnames=('config', 'match'), argvalues=_BAD_CONFIGS)
+@pytest.mark.parametrize(('config', 'match'), _BAD_CONFIGS)
 def test_resume_refuses_an_invalid_config(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -2806,7 +2900,7 @@ def test_tree_resume_refuses_a_descendants_invalid_config(
     assert user.db.read('events') == events
 
 
-@pytest.mark.parametrize(argnames=('config', 'match'), argvalues=_BAD_CONFIGS)
+@pytest.mark.parametrize(('config', 'match'), _BAD_CONFIGS)
 def test_a_config_broken_after_the_resume_check_aborts_the_boot(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -2972,8 +3066,7 @@ def test_a_capped_or_idle_sync_runs_to_its_result(
         # the live capture: the agent backgrounds a command and ends its turn
         # (a result), claude waits, then a task notice wakes it to finish
         pytest.param(
-            f"sed -n -e 's/@SESSION@/SID/g' -e '1,18p' {_BACKGROUND_WAIT}; sleep 3;"
-            f" sed -n -e 's/@SESSION@/SID/g' -e '19,$p' {_BACKGROUND_WAIT}",
+            _claude_script(*_BACKGROUND_WAIT[:18], 'sleep 3', *_BACKGROUND_WAIT[18:]),
             id='background-wait',
         ),
         # a tool call seen only on its assistant frame (no partial messages)
@@ -8234,23 +8327,25 @@ class PromptRecordingLoop(MockLoop):
     ],
     ids=['merge', 'squash', 'index-lock'],
 )
-def test_a_leftover_git_operation_opens_every_launch_prompt(
+def test_a_leftover_git_operation_joins_every_launch_prompt_beneath_the_charter(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
     marker: str,
     named: str,
 ) -> None:
-    """A git operation left in the worktree opens every launch's prompt.
+    """A git operation left in the worktree is named in every launch's prompt.
 
     A killed or paused step can leave a merge or squash unfinished, and the
     next agent otherwise starts git work on top of it blind. Every launch --
-    a retry and a resumed one included -- opens with the notice naming the
-    operation and its way out, ahead of the charter and any mode; a steer
-    opens with it ahead of its stall notice.
+    a retry and a resumed one included -- carries the notice naming the
+    operation and its way out beneath the charter, which still opens the
+    prompt; a steer has no charter, so the notice opens it ahead of its stall
+    notice.
     """
     monkeypatch.setenv('_NODE', '')
     node = loop_node
     _configure(node, step_retry_backoff='1s')
+    charter = (node.node_dir / 'NODE.md').read_text(encoding='utf-8')
     relpath = _git(node.worktree, 'rev-parse', '--git-path', marker).stdout
     path = node.worktree / relpath.strip()
     path.write_text('0' * 40 + '\n', encoding='utf-8')
@@ -8264,20 +8359,21 @@ def test_a_leftover_git_operation_opens_every_launch_prompt(
     # the failed launch, its retry, and the next step
     assert len(loop.prompts) == 3
     for prompt in loop.prompts:
-        assert prompt.startswith('## Git Operation Pending')
-        assert named in prompt[: prompt.index('# Charter')]
-    # a resumed launch opens with the notice ahead of its resume mode
+        assert prompt.startswith(charter)
+        assert named in prompt[prompt.index('## Git Pending Mode') :]
+    # a resumed launch carries the notice beside its resume mode
     loop._resume_mode = True
     prompt = loop._build_step_prompt(loop._discover_steps()[0])
-    assert prompt.startswith('## Git Operation Pending')
-    assert prompt.index('# Charter') < prompt.index('## Resume Mode')
-    # a steer's prompt is the stall notice alone, still opened by the notice
+    assert prompt.startswith(charter)
+    assert named in prompt[prompt.index('## Git Pending Mode') :]
+    assert '## Resume Mode' in prompt
+    # a steer's prompt is the stall notice alone, opened by the notice
     loop._resume_mode = False
     loop._steer_session = 'SID'
     prompt = loop._build_step_prompt(loop._discover_steps()[0])
-    assert prompt.startswith('## Git Operation Pending')
+    assert prompt.startswith('## Git Pending Mode')
     assert named in prompt[: prompt.index('## Stall Mode')]
-    assert '# Charter' not in prompt
+    assert charter not in prompt
 
 
 @pytest.mark.parametrize('conflicted', [False, True], ids=['staged', 'conflicted'])
@@ -8324,8 +8420,12 @@ def test_continue_leaves_a_pending_merge_for_the_agent(
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     merge_head = _git(repo, 'rev-parse', '--git-path', 'MERGE_HEAD').stdout
     assert (repo / merge_head.strip()).is_file()
+    # nothing is unstaged or removed either
+    staged = _git(repo, 'diff', '--cached', '--name-only').stdout
+    assert staged.split() == ['shared.txt']
+    assert (node.node_dir / 'note.md').read_text(encoding='utf-8') == 'steer\n'
     assert 'skipped the operator-edit commit and the clean' in capsys.readouterr().out
-    assert loop.prompts[0].startswith('## Git Operation Pending')
+    assert '## Git Pending Mode' in loop.prompts[0]
     assert 'a merge in progress (MERGE_HEAD)' in loop.prompts[0]
 
 

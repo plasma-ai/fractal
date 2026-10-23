@@ -5128,7 +5128,7 @@ def test_merge_refuses_a_hand_edited_wiki_folder(
     argvalues=[False, True],
     ids=['cli', 'script'],
 )
-@pytest.mark.parametrize(argnames='wiki', argvalues=['wiki', 'docs'])
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
 def test_merge_into_a_linked_root_holds_the_trees_wiki_folder(
     tmp_path: pathlib.Path,
     wiki: str,

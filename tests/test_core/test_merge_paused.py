@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import re
 import shutil
 import subprocess
-import sys
-import threading
-import time
+from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
-from fractal.constants import MERGE_LOCK_FILE, WORKTREES_FOLDER
+import fractal.core.worktree
 from fractal.core.node import Node
-from tests._helpers import _LOCK_HOLDER, _await_ready, _git
+from tests._helpers import _git
 
 from .conftest import _parse_project_dir
 
@@ -275,7 +275,7 @@ def test_paused_merge_refuses_a_branch_that_moved_mid_merge(
 
 def test_paused_merge_refuses_a_node_that_left_paused_while_it_waited(
     git_repo: pathlib.Path,
-    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A node that leaves ``paused`` while its merge waits for the lock refuses it.
 
@@ -287,44 +287,24 @@ def test_paused_merge_refuses_a_node_that_left_paused_while_it_waited(
     _, node = _paused_child(git_repo)
     _land_sibling(git_repo)
     before = _snapshot(git_repo, node)
-    lock_file = git_repo / WORKTREES_FOLDER / MERGE_LOCK_FILE
-    ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
-    holder = subprocess.Popen(
-        [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
-    )
-    errors: list[Exception] = []
+    real_merge_lock = fractal.core.worktree.merge_lock
 
-    def _merge() -> None:
-        try:
-            node.merge()
-        except Exception as error:
-            errors.append(error)
-
-    merger = threading.Thread(target=_merge)
-    try:
-        _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
-        merger.start()
-        # the merge read paused and now waits behind the held lock
-        merger.join(timeout=3)
-        assert merger.is_alive()
-        # the node goes active, then the holder dies and releases the lock
+    @contextlib.contextmanager
+    def raced_merge_lock(repo_dir: pathlib.Path, **kwargs: Any) -> Iterator[None]:
+        # the node goes active after the merge read it paused, before its
+        # acquisition of the lock: the window the merge waits in
         node.status_set('active')
-        holder.kill()
-        holder.wait(timeout=5)
-        merger.join(timeout=60)
-        assert not merger.is_alive()
-    finally:
-        # the holder is a single leaf process, so a pid kill reaps it fully
-        if holder.poll() is None:
-            holder.kill()
-            holder.wait()
-        if merger.is_alive():
-            merger.join(timeout=60)
+        with real_merge_lock(repo_dir, **kwargs):
+            yield
 
-    assert [f'{error}' for error in errors] == [
+    monkeypatch.setattr('fractal.core.worktree.merge_lock', raced_merge_lock)
+    with pytest.raises(RuntimeError) as refused:
+        node.merge()
+
+    assert f'{refused.value}' == (
         'Cannot merge: the node went from paused to active while the merge'
         ' waited. Merge again.'
-    ]
+    )
     assert _snapshot(git_repo, node) == before
 
 

@@ -8,16 +8,17 @@ merge-to-parent semantics.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import fcntl
 import json
 import os
 import pathlib
 import signal
 import subprocess
-import sys
 import threading
 import time
-from typing import NoReturn, Optional
+from collections.abc import Iterator
+from typing import Any, NoReturn, Optional
 
 import pytest
 
@@ -27,14 +28,10 @@ from fractal.constants import (
     HEADLESS_FILE,
     HEADLESS_LOG,
     LOCK_FILE,
-    MERGE_LOCK_FILE,
     PGID_FILE,
-    WORKTREES_FOLDER,
 )
 from fractal.core.node import Node
 from tests._helpers import (
-    _LOCK_HOLDER,
-    _await_ready,
     _commit_template,
     _files,
     _git,
@@ -2472,7 +2469,6 @@ def test_merge_refuses_settled_child_into_a_running_target(
 def test_merge_refuses_a_target_that_went_live_while_it_waited(
     git_repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path_factory: pytest.TempPathFactory,
     status: str,
     refusal: str,
 ) -> None:
@@ -2493,42 +2489,21 @@ def test_merge_refuses_a_target_that_went_live_while_it_waited(
     _git(child_wt, 'commit', '-m', 'child work')
     child.status_set('completed')
     parent.status_set('stopped')
-    lock_file = git_repo / WORKTREES_FOLDER / MERGE_LOCK_FILE
-    ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
-    holder = subprocess.Popen(
-        [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
-    )
-    errors: list[Exception] = []
+    real_merge_lock = fractal.core.worktree.merge_lock
 
-    def _merge() -> None:
-        try:
-            child.merge()
-        except Exception as error:
-            errors.append(error)
-
-    merger = threading.Thread(target=_merge)
-    try:
-        _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
-        merger.start()
-        # the merge read the target settled and now waits behind the held lock
-        merger.join(timeout=3)
-        assert merger.is_alive()
-        # the target leaves its settled status, then the holder dies and
-        # releases the lock
+    @contextlib.contextmanager
+    def raced_merge_lock(repo_dir: pathlib.Path, **kwargs: Any) -> Iterator[None]:
+        # the target's boot goes live after the merge's first target check,
+        # before its acquisition of the lock: the window the merge waits in
         parent.status_set(status)
-        holder.kill()
-        holder.wait(timeout=5)
-        merger.join(timeout=60)
-        assert not merger.is_alive()
-    finally:
-        # the holder is a single leaf process, so a pid kill reaps it fully
-        if holder.poll() is None:
-            holder.kill()
-            holder.wait()
-        if merger.is_alive():
-            merger.join(timeout=60)
+        with real_merge_lock(repo_dir, **kwargs):
+            yield
 
-    assert [f'{error}' for error in errors] == [refusal]
+    monkeypatch.setattr('fractal.core.worktree.merge_lock', raced_merge_lock)
+    with pytest.raises(RuntimeError) as refused:
+        child.merge()
+
+    assert f'{refused.value}' == refusal
     # the refusal never touched the target's worktree
     assert not (parent_wt / 'work.txt').exists()
 

@@ -63,30 +63,34 @@ live state: `STEP_LABEL`, `ITER_LABEL`, `ITER_TIMESTAMP`, `ITER_REF`,
 `TIME_BUDGET` (rebuilt per step, its step part naming that step's own ceiling),
 `COST_BUDGET`, and the run-scoped mode flags (`CONTINUE_MODE`, `RESUME_MODE`,
 `RESERVE_MODE`, and `DRAIN_MODE`, which is `true` for a drain run, launched with
-`--drain` or carrying the drain signal across a resume). A chat renders the same
-templates with an explicit `N/A (chat)` sentinel for the label and budget fields
--- a clear marker rather than a blank or stale value -- and `false` for the
-run-scoped mode flags, so no run-only mode document ever joins a chat prompt.
+`--drain` or carrying the drain signal across a resume). `GIT_PENDING_MODE` and
+its `GIT_OPERATIONS` list ride in the same way, probed per launch (see
+[[#Modes]]). A chat renders the same templates with an explicit `N/A (chat)`
+sentinel for the label and budget fields -- a clear marker rather than a blank
+or stale value -- and `false` for the run-scoped mode flags, so no run-only mode
+document ever joins a chat prompt.
 
 ## Modes
 
 Mode documents live in `fractal/_node/modes/`. A mode `<NAME>.md` joins the
 prompt exactly when `<NAME>_MODE` is `true` in the merged map: the static modes
 (detached, meta) derive from config, the run-scoped modes (continue, resume,
-reserve, drain) ride in on the loop's overrides. `SYNC.md` never joins the
-assembly -- sync runs as its own step. `STALL.md` never joins either: it is the
-whole prompt of a stuck step's steer, rendered with the same variable map, since
-the resumed session already holds the step (see [[features/loop/steps|steps]]).
-Chat turns are framed separately: the chat mode document, preceded by the
-`NODE.md` charter only for a fresh chat (a forked chat already carries the
-node's context).
+reserve, drain, git-pending) ride in on the loop's overrides. `SYNC.md` never
+joins the assembly -- sync runs as its own step. `STALL.md` never joins either:
+it is the whole prompt of a stuck step's steer, rendered with the same variable
+map, since the resumed session already holds the step (see
+[[features/loop/steps|steps]]). Chat turns are framed separately: the chat mode
+document, preceded by the `NODE.md` charter only for a fresh chat (a forked chat
+already carries the node's context).
 
-`GIT_PENDING.md` never joins by mode flag: the loop probes the worktree at every
-launch (`fractal.util.git.in_progress`) and, when a merge, squash merge,
-cherry-pick, revert, rebase, or `index.lock` is left there, renders it with the
-operation list as `GIT_OPERATIONS` and opens the prompt with it -- ahead of the
-charter, or of `STALL.md` for a steer -- so the seat finishes or aborts the
-operation before running git on top of it. A squash merge's line points at
+`GIT_PENDING.md` joins on `GIT_PENDING_MODE`, which the loop sets per launch: it
+probes the worktree at every launch (`fractal.util.git.in_progress`) and, when a
+merge, squash merge, cherry-pick, revert, rebase, or `index.lock` is left there,
+sets the flag and passes the operation list as `GIT_OPERATIONS`, so the seat
+finishes or aborts the operation before running git on top of it. The notice
+renders beneath the charter like every mode, since the charter owns the top of
+the prompt and its opening role sentence; a steer has no charter, so the loop
+puts the notice ahead of `STALL.md` there. A squash merge's line points at
 `fractal node merge <child> --continue` to finish and `git reset --merge` to
 abort (`git merge --abort` needs a `MERGE_HEAD` a squash never writes). The
 lock's line names it by its resolved path and age without judging staleness,
@@ -95,4 +99,5 @@ its own git dir, and a guessed `.git/index.lock` would be the main checkout's. A
 probe that cannot answer names nothing, and a clean worktree's prompt is
 unchanged. A `--continue` boot over such an operation skips its operator-edit
 commit and clean (`Loop._clean_worktree`), so the operation reaches this notice
-intact instead of being committed or crashing the boot.
+intact instead of being committed or crashing the boot, and `CONTINUE.md` tells
+the seat the worktree was left as found.

@@ -54,6 +54,13 @@ may include breaking changes, each listed under a Breaking heading.
 - `fractal pause` and `fractal node pause` refuse a `--reason` of `parked`, or
   one starting with `via pause latch` or `resume preflight failed:`, which 1.3.0
   accepted (see Fixed): give the pause another reason.
+- Every loop boot refuses an `OFFLINE_MODE` that holds a value other than `true`
+  or `false` (case-insensitive, whitespace stripped; empty or unset reads as
+  online), aborting on record (see Added): a start or continue ends `exited`
+  with the reason on its run, and a resume stays paused. 1.3.0 never read the
+  switch, and the `wiki` tool reads it only at `wiki init` and `wiki config`, so
+  a host whose `OFFLINE_MODE` holds another value now has every boot refuse. Set
+  it to `true` or `false`, or unset it.
 
 ### Added
 
@@ -73,6 +80,24 @@ may include breaking changes, each listed under a Breaking heading.
   through an API retry's backoff), marks the launch stuck exactly like a
   thinking cap — the first steers the step, a second stalls it — with the step
   row naming which trigger fired. Codex is not watched.
+- The steer for a Claude step stuck at a thinking cap (see Fixed) runs one
+  effort level lower: a `max` step's steer runs at `xhigh`, an `xhigh` step's at
+  `high`. The step's effort is its `effort:` frontmatter, else the node's
+  `effort`, else Claude's own `effortLevel`. The lowered level lasts only for
+  the steer, the steer's row records it in its `effort` column, and the pane
+  prints `(effort xhigh -> high for the steer)`. By default Claude never lowers
+  below `high`, and a step at or below that floor, or at a level off the ladder,
+  steers at its own effort. The no-action watchdog's steer keeps the effort, and
+  Codex never lowers. A project can set an agent's levels and floor with a new
+  `effort_ladder` key in `<project>/.fractal/.settings.json`, read from the
+  tree's root branch at each start or resume. A ladder with a bad shape refuses
+  wherever the file is read. `fractal node start` (with or without
+  `--continue`), `fractal node resume`, and `fractal resume` refuse an invalid
+  ladder (a bad shape, an unregistered agent, or the agent's own levels out of
+  order) before they change anything, naming the setting, its file, and its
+  fault; a resume checks every node it would relaunch. A ladder committed after
+  that check aborts the loop's boot on record: a start or continue ends `exited`
+  with the reason on its run, and a resume stays paused for the next resume.
 - `fractal node merge` lands a paused node's committed work into its merge
   target without leaving `paused`: the run, iteration, and step rows stay open
   for `fractal node resume`, and the frozen step's uncommitted state stays in
@@ -140,13 +165,15 @@ may include breaking changes, each listed under a Breaking heading.
   recorded before the lift read a blank effort.
 - Every step launch checks the node's worktree for a git operation left
   unfinished — a merge, squash merge, cherry-pick, revert, rebase, or held
-  `index.lock` — and, when it finds one, opens the prompt with a notice naming
-  each and saying to finish or abort it before starting any other git work. This
-  covers retried, resumed, and steered launches too. A squash merge points at
-  `fractal node merge <child> --continue` and `git reset --merge`, a held
-  `index.lock` is named by its resolved path and age, and a clean worktree's
-  prompt is unchanged. `fractal node start --continue` over such an operation
-  leaves the worktree as found, skipping its operator-edit commit and clean.
+  `index.lock` — and, when it finds one, adds a notice to the prompt beneath the
+  node's charter, naming each and saying to finish or abort it before starting
+  any other git work. This covers retried, resumed, and steered launches too; a
+  steer's prompt carries no charter, so the notice opens it. A squash merge
+  points at `fractal node merge <child> --continue` and `git reset --merge`, a
+  held `index.lock` is named by its resolved path and age, and a clean
+  worktree's prompt is unchanged. `fractal node start --continue` over such an
+  operation leaves the worktree as found, skipping its operator-edit commit and
+  clean, and the continued node's prompt says so.
 - `fractal commit` warns, without refusing, when it stages a new path at the
   worktree root whose top-level name matches an entry of the node's own folder
   (`plans/x.md` beside `.fractal/<node>/plans`) and the project had no top-level
@@ -299,24 +326,6 @@ may include breaking changes, each listed under a Breaking heading.
   the repo-root `.gitattributes` lacks `**/_index.md merge=wiki` or the wiki's
   own `.gitattributes` lacks `*.md merge=wiki` as a whole line, naming each
   missing line and its file.
-- A Claude step stuck at a thinking cap is steered one effort level lower: a
-  `max` step's steer runs at `xhigh`, an `xhigh` step's at `high`. The step's
-  effort is its `effort:` frontmatter, else the node's `effort`, else Claude's
-  own `effortLevel`. The lowered level lasts only for the steer, the steer's row
-  records it in its `effort` column, and the pane prints
-  `(effort xhigh -> high for the steer)`. By default Claude never lowers below
-  `high`, and a step at or below that floor, or at a level off the ladder,
-  steers at its own effort. The no-action watchdog's steer keeps the effort, and
-  Codex never lowers. A project can set an agent's levels and floor with a new
-  `effort_ladder` key in `<project>/.fractal/.settings.json`, read from the
-  tree's root branch at each start or resume. A ladder with a bad shape refuses
-  wherever the file is read. `fractal node start` (with or without
-  `--continue`), `fractal node resume`, and `fractal resume` refuse an invalid
-  ladder (a bad shape, an unregistered agent, or the agent's own levels out of
-  order) before they change anything, naming the setting, its file, and its
-  fault; a resume checks every node it would relaunch. A ladder committed after
-  that check aborts the loop's boot on record: a start or continue ends `exited`
-  with the reason on its run, and a resume stays paused for the next resume.
 - A node's config records where its cleanup reserve came from as `reserve_mode`:
   `default` for the 10% `node init` materializes, `explicit` for a figure set by
   `--reserve-budget` (at init or on `node update`), a template preset, or
@@ -361,6 +370,10 @@ may include breaking changes, each listed under a Breaking heading.
   so on its output before each wait. A merge refuses only an `active` node, so a
   boot that landed mid-merge could have its worktree reset or carried by the
   merge while its agent started.
+- `node start --continue` discards a project change the operator left staged, as
+  it does an unstaged one, and its operator-edit commit carries only the node
+  folder's edits. A staged project change survived the clean, and rode the
+  operator-edit commit whenever the node folder held edits too.
 - `node merge` checks its target again once it holds the merge lock, and refuses
   a target that went `active` or `paused` while the merge waited. A target
   re-armed with `start --continue` during the wait could go live, and the squash
