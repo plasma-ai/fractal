@@ -17,6 +17,15 @@ may include breaking changes, each listed under a Breaking heading.
   child's worktree after the init commit, which runs the lint the baseline
   skips. The user node's baseline still commits the project wiki and, when the
   project has one, its `.fractal/.settings.json`.
+- A template whose `steps/`, `scripts/`, or `skills/` carries a file the commit
+  never stores refuses at `node init` and `node reseed`, naming each such file
+  and the record suffixes, and `node diff` refuses it the same way instead of
+  reporting the file missing from the node. Only non-hidden text records with
+  those suffixes (`.md`, `.sh`, `.py`, `.json`, `.toml`, ...) commit from a
+  node's folder, so a suffix-less `scripts/run` or a skill's `helper.js` would
+  deploy, never commit, and be missing from every clone. An existing template
+  carrying such a file now refuses: rename the file with a record suffix, or
+  keep it outside the node folder.
 
 ### Added
 

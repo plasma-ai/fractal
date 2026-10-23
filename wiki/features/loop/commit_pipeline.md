@@ -156,6 +156,9 @@ state, and would change how git merges and checks out the records beside it.
 Every other dot-named path is machine or agent state and stays out. Only new
 content is judged: what an estate already tracks keeps committing, so the law
 gates what enters history and never the upkeep of history a node already owns.
+Template seeding judges a template's `steps/`, `scripts/`, and `skills/` files
+by this same predicate, so no template deploys an estate file the commit would
+withhold (see [[configuration/templates]]).
 
 Content the law refuses is withheld from the sweeps by name and reported, never
 staged and never silently dropped. The refused paths themselves are named as

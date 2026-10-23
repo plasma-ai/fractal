@@ -93,6 +93,7 @@ __all__ = [
     'test_diff_reports_drift_in_a_shared_include',
     'test_diff_never_judges_the_trust_stanza_for_this_repository',
     'test_diff_and_reseed_name_the_record_remedy_for_a_missing_value',
+    'test_diff_and_reseed_refuse_files_the_commit_never_stores',
     'test_reseed_keeps_recorded_values_and_adds_new_defaults',
     'test_reseed_restores_the_seed_surfaces_and_records_the_event',
     'test_reseed_ref_reads_another_commit_and_keeps_exclusions',
@@ -2395,6 +2396,54 @@ def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
             assert 'supply it with --set' not in result.stderr, result.stderr
     finally:
         _run(root, 'node', 'delete', 'main.slotcrew', '--force')
+
+
+def test_diff_and_reseed_refuse_files_the_commit_never_stores(repo: dict) -> None:
+    """A recorded commit carrying a seed file the commit never stores refuses.
+
+    ``_template.toml`` is hand-editable, so its commit can name a folder
+    whose ``scripts/`` gained a suffix-less file. ``diff`` and ``reseed``
+    judge that effective set exactly as init does: each refuses naming
+    the file, ``diff`` reports no missing-file drift for it, and
+    ``reseed`` deploys nothing.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/barecrew', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'barecrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/barecrew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.barecrew' / '.fractal' / 'main.barecrew'
+        # the template gains a suffix-less script, and the record names it
+        files = {
+            'scripts/run': 'echo run\n',
+        }
+        sha = _commit_template(root, 'templates/barecrew', files)
+        record = node_dir / '_template.toml'
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        data['commit'] = sha
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        for verb in ('diff', 'reseed'):
+            result = _run(root, 'node', verb, 'main.barecrew')
+            assert result.returncode == 2, result.stdout + result.stderr
+            assert 'never stores: scripts/run' in result.stderr, result.stderr
+            assert 'missing from the node' not in result.stdout, result.stdout
+        # nothing deployed: the script never reached the node
+        assert not (node_dir / 'scripts' / 'run').exists()
+    finally:
+        _run(root, 'node', 'delete', 'main.barecrew', '--force')
 
 
 # ------ reseed

@@ -73,6 +73,7 @@ __all__ = [
     'test_init_template_refuses_a_boundary_path',
     'test_init_template_refuses_credential_named_files',
     'test_init_template_refuses_files_the_seed_would_skip',
+    'test_init_template_refuses_files_the_commit_never_stores',
     'test_init_template_preset_refuses_disallowed_keys',
     'test_init_template_preset_caps_refuse_like_flags',
     'test_init_template_detached_refuses_a_bundled_detached_step',
@@ -1725,6 +1726,65 @@ def test_init_template_refuses_files_the_seed_would_skip(
     assert (node_dir / 'skills' / 'workflow' / 'SKILL.md').is_file()
     assert (node_dir / '.claude' / 'settings.json').is_file()
     assert not (node_dir / 'README.md').exists()
+
+
+@pytest.mark.parametrize(
+    argnames=('files', 'unstored'),
+    argvalues=[
+        ({'scripts/run': 'echo run\n'}, 'scripts/run'),
+        (
+            {
+                'skills/demo/SKILL.md': '# demo\n',
+                'skills/demo/helper.js': 'export {};\n',
+            },
+            'skills/demo/helper.js',
+        ),
+        (
+            {
+                'scripts/run.sh': 'echo run\n',
+                'skills/demo/SKILL.md': '# demo\n',
+                'skills/demo/helper.py': 'print()\n',
+            },
+            None,
+        ),
+    ],
+    ids=['bare_script', 'skill_helper', 'all_records'],
+)
+def test_init_template_refuses_files_the_commit_never_stores(
+    git_repo: pathlib.Path,
+    files: dict[str, str],
+    unstored: Optional[str],
+) -> None:
+    """A seed file the commit's estate law refuses refuses at init by name.
+
+    The steps, scripts, and skills surfaces deploy into the node's estate,
+    whose commit stores only text records at the law's suffixes -- a
+    suffix-less script or a skill's ``.js`` helper would deploy, work on
+    this disk alone, and be missing from every clone. Each refuses naming
+    the file and the suffixes before any worktree exists. A template whose
+    seed files all carry record suffixes deploys, and the child's baseline
+    commit tracks every one of them.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    path = 'templates/crew'
+    _commit_template(git_repo, path, {'config.json': '{}\n', **files})
+    template = f'{git_repo}/{path}'
+    if unstored is not None:
+        with pytest.raises(
+            ValueError,
+            match=rf'never stores: {re.escape(unstored)} \(.*\.md, .*\.sh,',
+        ):
+            Node(git_repo).init(name='task', template=template)
+        # nothing landed -- no worktree, no registry row
+        assert not (git_repo / '.worktrees' / 'main.task').exists()
+        assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+    else:
+        Node(git_repo).init(name='task', template=template)
+        worktree = git_repo / '.worktrees' / 'main.task'
+        Node(worktree).commit('baseline', init=True)
+        tracked = _git(worktree, 'ls-files', '.fractal/main.task').stdout.split()
+        for name in files:
+            assert f'.fractal/main.task/{name}' in tracked, tracked
 
 
 def test_init_template_preset_refuses_disallowed_keys(
