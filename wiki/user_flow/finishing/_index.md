@@ -97,11 +97,13 @@ should know:
   later only diffs its new work. [[user_flow/finishing/merge_base_advance]]
   covers the advance, when it is skipped, how a resolution on the target reaches
   the node, and the recipe for a node whose advance carried no content.
-- **Guards.** Merge refuses while the node or its target is active or paused,
-  while the target worktree has uncommitted changes, when the squash would write
-  over a file that exists untracked on the target's disk, and when the staged
-  paths fall outside the node's commit boundaries; a conflict restores the
-  target, and `--continue` finishes a hand-resolved squash.
+- **Guards.** Merge refuses while the node is active or its target is active or
+  paused, while a paused node's frozen step sits inside a git operation (a
+  paused node otherwise lands its committed work and stays paused), while the
+  target worktree has uncommitted changes, when the squash would write over a
+  file that exists untracked on the target's disk, and when the staged paths
+  fall outside the node's commit boundaries; a conflict restores the target, and
+  `--continue` finishes a hand-resolved squash.
   [[user_flow/finishing/merge_guards]] covers each refusal and its remedy, the
   restore verdicts, interrupts, and the `--continue` contract.
 

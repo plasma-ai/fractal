@@ -2859,10 +2859,12 @@ class Loop:
         meta target included, so a mid-run config edit cannot flip a run's
         mode composition. A steer renders ``STALL.md`` alone: its resumed
         session already holds the step. A git operation left unfinished in
-        the worktree opens either prompt with ``GIT_PENDING.md``.
+        the worktree joins as the ``GIT_PENDING`` mode, beneath the charter
+        like every mode, and opens a steer's prompt, which has no charter.
         """
         # refresh the cost budget so each step's context reflects spend so far
         self._build_cost_budget()
+        operations = self._git_pending_operations()
         overrides = {
             'STEP_LABEL': self._step_label,
             'ITER_LABEL': self._iter_label,
@@ -2878,31 +2880,35 @@ class Loop:
             'META_MODE': self._boot_modes['META_MODE'],
             'META_TARGET': self._boot_modes['META_TARGET'],
             'DRAIN_MODE': 'true' if self._drain else 'false',
+            # git-pending mode is per-launch (each launch can leave a git operation)
+            'GIT_PENDING_MODE': 'true' if operations else 'false',
+            'GIT_OPERATIONS': operations,
         }
         variables = {**self._step_vars, **overrides}
-        notice = self._git_pending_notice(variables)
         if self._steer_session is not None:
             text = self._stall_file.read_text(encoding='utf-8')
-            return f'{notice}{render.render(text, variables)}'
+            if operations:
+                notice = self._git_pending_file.read_text(encoding='utf-8')
+                text = f'{notice}\n{text}'
+            return render.render(text, variables)
         prompt = self.node.build_prompt(f'{step.path}', overrides=variables)
         # a resumed iteration replays a frozen plan -- the harness re-reads
         # the inbox at every attached seat, so directives that arrived after
         # the plan froze are in context before any replayed decision executes
         if self._resume_mode and (digest := self._inbox_digest()):
             prompt = f'{prompt}\n{digest}'
-        return f'{notice}{prompt}'
+        return prompt
 
-    def _git_pending_notice(self: Loop, variables: dict[str, str]) -> str:
-        """Render the leftover-git-operation notice a prompt opens with, or ``''``.
+    def _git_pending_operations(self: Loop) -> str:
+        """List the git operations left unfinished in the worktree, or ``''``.
 
         Probed at every launch: a killed, paused, or stuck step can stop
         inside a merge, squash, cherry-pick, revert, or rebase, or with
         ``index.lock`` held, and the next launch would otherwise run git on
-        top of it. A probe that cannot answer names nothing.
+        top of it. One bullet per operation, the ``GIT_OPERATIONS`` that
+        ``GIT_PENDING.md`` renders. A probe that cannot answer names nothing.
         """
         operations = fractal.util.git.in_progress(self.node.worktree, check=False)
-        if not operations:
-            return ''
         lines = []
         for operation, marker in operations:
             line = f'- {operation} ({marker.name})'
@@ -2920,9 +2926,7 @@ class Loop:
             if hint := _GIT_PENDING_HINTS.get(marker.name):
                 line = f'{line}: {hint}'
             lines.append(line)
-        text = self._git_pending_file.read_text(encoding='utf-8')
-        notice = render.render(text, {**variables, 'GIT_OPERATIONS': '\n'.join(lines)})
-        return f'{notice}\n'
+        return '\n'.join(lines)
 
     def _inbox_digest(self: Loop) -> str:
         """Render the unread inbox for a resumed seat's prompt, or ``''``.

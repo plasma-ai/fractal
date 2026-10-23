@@ -1,4 +1,4 @@
-## Git Operation Pending
+## Git Pending Mode
 
 Your worktree holds a git operation left unfinished:
 
