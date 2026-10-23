@@ -166,8 +166,12 @@ node at ``--path``.
        the preset; the preset beats an inherited value). Every template
        refusal — an untracked folder, a symlink, a credential-named file
        anywhere in the folder, a file a seed surface would silently skip,
-       a broken ``steps/`` contract, missing required Jinja inputs, a
-       truncated charter — fires before any worktree exists. One notice
+       a ``steps/``, ``scripts/``, or ``skills/`` file the commit never
+       stores (only non-hidden text records at the estate content law's
+       suffixes commit, so a suffix-less script or a skill's ``.js``
+       helper refuses by name), a broken ``steps/`` contract, missing
+       required Jinja inputs, a truncated charter — fires before any
+       worktree exists. One notice
        appended to the init output names the ``@<ref>`` form when the
        root branch holds a different copy of the folder or of a shared file
        it includes, naming each shared file that differs.
@@ -393,10 +397,11 @@ A fresh start requires status exactly ``idle``. Starting refuses on: the user
 node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a
 paused ancestor or tree-wide pause latch; a foreign tmux session already
 holding the node's session name; a node whose recorded process group is
-still alive (identity-verified, so a recycled group id never blocks); and a
-stored config the launch re-validation rejects. Continuing from ``killed``
-surfaces the recorded kill attribution as a notice. An uncapped start is
-allowed but warns loudly.
+still alive (identity-verified, so a recycled group id never blocks); a
+stored config the launch re-validation rejects; and an invalid effort ladder
+committed on the tree's root branch (see :doc:`/configuration`). Continuing
+from ``killed`` surfaces the recorded kill attribution as a notice. An
+uncapped start is allowed but warns loudly.
 
 A merge can rewrite the worktree of any node that is not ``active``, so every
 loop launch — a start, a continue, or a resume — waits for a merge in progress
@@ -482,8 +487,10 @@ paused).
 run — same budgets and iteration count, the interrupted step re-entered
 (resuming the recorded agent session when one exists) — and run and iteration
 deadlines are credited for the paused span. A node still parking gets its
-pending pause withdrawn instead. Resuming refuses when the node is not paused
-or when an ancestor is still paused. ``resume`` returns once the loops are
+pending pause withdrawn instead. Resuming refuses when the node is not paused,
+when an ancestor is still paused, or when the effort ladder committed on the
+tree's root branch is invalid for a node it would relaunch; the ladder refusal
+lands before any node is touched. ``resume`` returns once the loops are
 relaunched; a relaunched loop waits for a merge in progress before it goes
 ``active``, as every launch does (see ``start``).
 
@@ -849,8 +856,10 @@ drift, since trust enables project-local settings, as is a projects table
 carrying more than the trusted level. Literal braces are valid output and are
 compared like any
 other text. Source defaults are not merged again; deleting a required recorded
-input causes a rendering refusal. The recorded commit resolves as long as it
-is reachable, so a template folder
+input causes a rendering refusal. A recorded folder that init and reseed would
+refuse for a file the seed would skip or the commit never stores refuses here
+too, naming the file, rather than reporting it as missing from the node. The
+recorded commit resolves as long as it is reachable, so a template folder
 moved or deleted later still diffs at the commit that seeded the node. The
 shared files the folder includes re-read at that commit too, so a hand edit to
 an included part of ``NODE.md`` is drift.

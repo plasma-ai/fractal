@@ -50,6 +50,8 @@ CRASH_REASON = 'crashed: loop runtime gone, healed by reconcile'
 STEER_REASON_PREFIX = 'steered: '
 #: step-row reason prefix of a failed launch its agent named a provider outage
 UNAVAILABLE_REASON_PREFIX = 'provider unavailable: '
+#: step-row reason prefix of a failed step the loop refused before its launch
+UNLAUNCHED_REASON_PREFIX = 'not launched: '
 
 #: lifecycle status set shared by the node status file and the record rows
 STATUSES = (

@@ -101,6 +101,9 @@ __all__ = [
     'test_claude_step_in_a_codex_node_steers_on_the_claude_ladder',
     'test_project_settings_override_the_ladder',
     'test_invalid_effort_setting_fails_boot',
+    'test_launch_verbs_refuse_an_invalid_effort_ladder',
+    'test_tree_resume_refuses_an_invalid_effort_ladder',
+    'test_a_ladder_broken_after_the_launch_check_aborts_the_boot',
     'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
     'test_the_steer_runs_on_what_the_stuck_launch_left',
     'test_a_capped_or_idle_sync_runs_to_its_result',
@@ -199,6 +202,7 @@ __all__ = [
     'test_non_provider_failures_keep_the_fixed_backoff',
     'test_a_fast_outage_never_arms_the_billing_breaker',
     'test_the_census_reads_the_loops_outage_verdict',
+    'test_the_census_skips_steps_refused_before_launch',
     'test_an_outage_past_the_retries_holds_the_next_launch',
     'test_an_interrupted_outage_hold_books_the_consumed_steps',
     'test_the_outage_streak_moves_only_on_what_launches_say',
@@ -2450,9 +2454,18 @@ def test_project_settings_override_the_ladder(
     capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
     resumed = _claude_script(_INIT, _RESULT)
     agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
-    loop = ScriptedLoop(loop_node, agent)
-    _commit_settings(loop_node, unchanged)
-    loop.run()
+
+    class _Recommitting(ScriptedLoop):
+        """Commit the edited ladder on the root branch as the first step launches."""
+
+        def _launch(
+            self: _Recommitting, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            if not agent.argvs:
+                _commit_settings(loop_node, unchanged)
+            return super()._launch(step, prompt, **kwargs)
+
+    _Recommitting(loop_node, agent).run()
     assert [_effort(argv) for argv in agent.argvs] == ['high', 'low', 'high']
     assert _step_efforts(loop_node) == ['high', 'low', 'high']
 
@@ -2506,21 +2519,142 @@ def test_project_settings_override_the_ladder(
 )
 def test_invalid_effort_setting_fails_boot(
     loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
     ladders: Any,
     match: str,
 ) -> None:
-    """An invalid committed effort ladder fails the loop's boot, naming the file.
+    """An invalid committed effort ladder aborts the loop's boot, naming the file.
 
     Beyond its shape, a ladder must name a registered agent, and a ladder
     built only from levels its agent declares must list them in the
     agent's own order, lowest first -- a misspelled name would otherwise
     keep the default ladder, and a reversed one would raise the effort.
+    The abort lands on record: the node reads ``exited`` and a closed run
+    row carries the reason.
     """
+    monkeypatch.setenv('_NODE', '')
     _commit_settings(loop_node, {'effort_ladder': ladders})
-    with pytest.raises(ValueError, match=match) as excinfo:
-        MockLoop(loop_node)
-    assert '.fractal/.settings.json' in str(excinfo.value)
-    assert loop_node.branch in str(excinfo.value)
+    loop = MockLoop(loop_node)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    assert re.search(match, run['metadata'])
+    assert '.fractal/.settings.json' in run['metadata']
+    assert loop_node.branch in run['metadata']
+
+
+# a committed ladder naming no registered agent (a misspelled claude)
+_MISSPELLED_LADDER = {
+    'effort_ladder': {'cluade': {'levels': ['low', 'high'], 'floor': 'low'}},
+}
+
+
+@pytest.mark.parametrize(argnames='launch', argvalues=['start', 'continue', 'resume'])
+def test_launch_verbs_refuse_an_invalid_effort_ladder(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    launch: str,
+) -> None:
+    """A start, continue, or resume refuses a bad committed ladder up front.
+
+    The loop's boot aborts on a bad ladder, so each verb runs the boot's
+    own check before it changes anything: the refusal names the setting
+    and its fault, no launch script runs, and the node's status, its
+    rows, and a paused run's credit span are as the verb found them.
+    """
+    node = loop_node
+    _ready_for_launch(node, launch)
+    _commit_settings(node, _MISSPELLED_LADDER)
+    status = node.status()
+    runs = node.db.read('runs')
+    events = node.db.read('events')
+    run_scripts = _stub_run_script(monkeypatch, node)
+    refusal = (
+        r'"effort_ladder\.cluade" in \.fractal/\.settings\.json on .+'
+        r' names no registered agent'
+    )
+    with pytest.raises(ValueError, match=refusal):
+        _launch_verb(node, launch)
+    assert run_scripts == []
+    assert node.status() == status
+    # the event rows hold the pause credit span a resume event would close
+    assert node.db.read('runs') == runs
+    assert node.db.read('events') == events
+
+
+def test_tree_resume_refuses_an_invalid_effort_ladder(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree-wide resume refuses a bad ladder before it releases the tree.
+
+    Every parked loop the resume relaunches reads the ladder at boot, so
+    the refusal lands before the tree's pause latch lifts or any node
+    relaunches.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    user = Node(git_repo)
+    run_scripts = _stub_run_script(monkeypatch, Node)
+    user.pause(reason='brake')
+    # both loops park (simulated -- the loops are stubbed here)
+    parent.status_set('paused')
+    child.status_set('paused')
+    _commit_settings(user, _MISSPELLED_LADDER)
+    events = user.db.read('events')
+    run_scripts.clear()
+    with pytest.raises(ValueError, match='names no registered agent'):
+        user.resume()
+    assert run_scripts == []
+    assert child.pause_latched(tree_only=True) == user.branch
+    assert (parent.status(), child.status()) == ('paused', 'paused')
+    assert user.db.read('events') == events
+
+
+@pytest.mark.parametrize(
+    argnames=('launch', 'status'),
+    argvalues=[
+        pytest.param('start', 'exited', id='start'),
+        pytest.param('continue', 'exited', id='continue'),
+        pytest.param('resume', 'paused', id='resume'),
+    ],
+)
+def test_a_ladder_broken_after_the_launch_check_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    launch: str,
+    status: str,
+) -> None:
+    """A ladder committed bad after the verb's check aborts the boot on record.
+
+    The boot reads the ladder under the preflight abort, so the fault
+    never dies unrecorded with the pane: a start or continue lands
+    ``exited`` with the reason on a closed run row (the status a continue
+    retries from), and a resume stays paused with its run open and the
+    pause credit span, which its resume event closed, open again.
+    """
+    node = loop_node
+    monkeypatch.setenv('_NODE', '')
+    _ready_for_launch(node, launch)
+    _stub_run_script(monkeypatch, node)
+    _launch_verb(node, launch)
+    _commit_settings(node, _MISSPELLED_LADDER)
+    loop = MockLoop(node, continue_=launch == 'continue', resume=launch == 'resume')
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert node.status() == status
+    run = node.record.runs(limit=1)[0]
+    if launch == 'resume':
+        assert run['ended_at'] is None
+        events = node.db.read('events', where={'run_id': run['run_id']})
+        events.sort(key=lambda event: event['event_id'])
+        credit = [event for event in events if event['event'] in ('pause', 'resume')]
+        assert [event['event'] for event in credit] == ['pause', 'resume', 'pause']
+        assert '"effort_ladder.cluade"' in credit[-1]['metadata']
+    else:
+        assert run['status'] == 'exited'
+        assert '"effort_ladder.cluade"' in run['metadata']
 
 
 @pytest.mark.parametrize(
@@ -3279,30 +3413,39 @@ def test_streamed_background_spend_is_booked_once(
 
 
 @pytest.mark.parametrize(
-    argnames='record',
+    argnames=('record', 'streamed'),
     argvalues=[
         # claude's record never reached disk
-        pytest.param('no transcript', id='no-transcript'),
+        pytest.param('no transcript', True, id='no-transcript'),
         # a reply's output count is wire noise
-        pytest.param('malformed entry', id='malformed-entry'),
+        pytest.param('malformed entry', True, id='malformed-entry'),
+        # no record, and the stream flushed no estimate either
+        pytest.param('no transcript', False, id='no-transcript-no-estimate'),
     ],
 )
 def test_unreadable_record_marks_the_killed_step(
     loop_node: Node,
     scripted_claude: Callable[..., ScriptedClaude],
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
     record: str,
+    streamed: bool,
 ) -> None:
     """A killed launch whose record the settle cannot read whole is partly unpriced.
 
     With no transcript, the step keeps the stream's estimate, which leaves
     out whatever the record would have added. A count that is not a
     number prices as nothing rather than failing the settle. Either way
-    the row says its figure is partial.
+    the row says its figure is partial; with no estimate either, the row
+    holds no figure and is unpriced. The pane's warning names the row's
+    marker.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
     first = {'input_tokens': 100, 'output_tokens': 1}
-    stalled = _claude_script(_INIT, _assistant_frame('msg_a', first), 'exec sleep 30')
+    frames: list[Any] = [_INIT]
+    if streamed:
+        frames.append(_assistant_frame('msg_a', first))
+    stalled = _claude_script(*frames, 'exec sleep 30')
     finished = _claude_script(_INIT, _RESULT)
     transcripts: list[Optional[list[dict[str, Any]]]] = [None]
     if record == 'malformed entry':
@@ -3313,12 +3456,21 @@ def test_unreadable_record_marks_the_killed_step(
         transcripts=transcripts,
     )
     ScriptedLoop(loop_node, agent).run()
+    marker = 'partly unpriced' if streamed else 'unpriced'
     assert _step_rows(loop_node)[0] == (
-        'PLAN/stopped/steered: no action for 1s; partly unpriced'
+        f'PLAN/stopped/steered: no action for 1s; {marker}'
     )
     rows = loop_node.db.read('steps', where={'node': loop_node.branch})
     killed = min(rows, key=lambda row: row['step_id'])
-    assert killed['cost'] == pytest.approx(_price(first))
+    if streamed:
+        assert killed['cost'] == pytest.approx(_price(first))
+    else:
+        assert killed['cost'] is None
+    err = capsys.readouterr().err
+    assert (
+        "Warning: part of the launch's spend is missing from its record; its"
+        f' step books the spend recorded ({marker})'
+    ) in err
 
 
 @pytest.mark.parametrize(
@@ -3947,7 +4099,8 @@ def test_unsettled_result_figure_books_the_launch_record_instead(
     whole or less the total: the step books what its own transcript window
     prices, as a killed launch does, marked partly unpriced. A window that
     prices nothing leaves the completed step's cost unknown, marked
-    unpriced and counted as such.
+    unpriced and counted as such. The pane's warning names the row's
+    marker.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
     session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
@@ -3982,7 +4135,11 @@ def test_unsettled_result_figure_books_the_launch_record_instead(
     # only the first launch's result figure ever reached the ledger
     assert [cost for cost, final in agent.flushed if final] == [_SAVED_TOTALS[0]]
     err = capsys.readouterr().err
-    assert "Warning: the launch's result figure could not be settled" in err
+    assert (
+        "Warning: the launch's result figure could not be settled against its"
+        " session's earlier spend; its step books the spend recorded"
+        f' ({marker})'
+    ) in err
 
 
 def test_failed_codex_attempts_count_toward_the_cap(
@@ -7131,6 +7288,52 @@ def test_the_census_reads_the_loops_outage_verdict(
     assert ('PAUSED: billing' in loop_node.status_detail()) == billing
 
 
+@pytest.mark.parametrize(
+    argnames=('refused', 'billing'),
+    argvalues=[(None, True), ('step', False), ('sync', False)],
+    ids=['dead-credits', 'step-refused', 'sync-refused'],
+)
+def test_the_census_skips_steps_refused_before_launch(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    refused: Optional[str],
+    billing: bool,
+) -> None:
+    """The node listing's billing flag never counts a launch the loop refused.
+
+    A step refused before its launch books a failed, instant, zero-cost
+    row -- the dead-credits signature on its row alone -- but bought no
+    inference, so the loop's breaker never counts it and the row records
+    the refusal: a run of refused work steps, or refused SYNCs between
+    dead launches, never shows ``PAUSED: billing`` in ``node list``,
+    while three instant zero-cost launch failures still do.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, max_iters=3, sync=refused == 'sync', step_retries=0)
+    # a route the agent lacks refuses the step at dispatch, before any launch
+    route = '---\nprovider: bogus\n---\n'
+    if refused == 'step':
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            f'{route}# PLAN\n\nWork.\n', encoding='utf-8'
+        )
+    failure = StepResult(status='failed', exit_code=1, reason='agent error (exit 1)')
+    loop = MockLoop(loop_node, results=[failure] * 3)
+    if refused == 'sync':
+        # the SYNC mode doc is the installed package's own, so a copy carries
+        # the route
+        sync_file = tmp_path / 'SYNC.md'
+        body = loop._sync_file.read_text(encoding='utf-8')
+        sync_file.write_text(f'{route}{body}', encoding='utf-8')
+        loop._sync_file = sync_file
+    assert loop.run() == 0
+    # the census reads an active node's newest launches
+    loop_node.status_set('active')
+    assert ('PAUSED: billing' in loop_node.status_detail()) == billing
+
+
 def test_an_outage_past_the_retries_holds_the_next_launch(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -8933,9 +9136,34 @@ def _configure(node: Node, **values: Any) -> None:
     path.write_text(json.dumps(config, indent=2), encoding='utf-8')
 
 
+def _launch_verb(node: Node, launch: str) -> str:
+    """Run the ``launch`` verb (``start``, ``continue``, or ``resume``) on ``node``."""
+    if launch == 'resume':
+        return node.resume()
+    return node.start(continue_run=launch == 'continue')
+
+
 def _locked_list(**kwargs: Any) -> list[Any]:
     """Fail the live subtree probe like a contended central-DB read."""
     raise sqlite3.OperationalError('database is locked')
+
+
+def _ready_for_launch(node: Node, launch: str) -> None:
+    """Leave ``node`` where ``launch`` starts from: idle, settled, or paused.
+
+    A continue starts from a run that exited; a resume from an open run
+    parked with its pause credit span open.
+    """
+    if launch == 'continue':
+        run_id = node.record.run_start()
+        node.record.run_end(run_id=run_id, status='exited', exit_code=1)
+        node.status_set('exited')
+    if launch == 'resume':
+        node.status_set('active')
+        node.record.run_start()
+        pause_id = node.record.event_start('pause')
+        node.record.event_end(event_id=pause_id, status='completed')
+        node.status_set('paused')
 
 
 def _record_unpriced_step(node: Node, *, run_id: int) -> None:

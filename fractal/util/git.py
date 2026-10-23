@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import time
@@ -150,20 +151,21 @@ def run_bytes(
     return result.stdout
 
 
-def index_locked(result: subprocess.CompletedProcess[str]) -> bool:
+def index_locked(result: subprocess.CompletedProcess) -> bool:
     """Return whether a git call failed on another process's held index lock.
 
     git dies (exit 128) naming the ``index.lock`` it could not create, and
     the lock's path reads the same in every locale.
 
     Args:
-        result: The completed git call, its streams captured as text.
+        result: The completed git call, its streams captured as text or
+            bytes.
 
     Returns:
         Whether the call failed because the lock was held.
 
     """
-    return result.returncode == 128 and 'index.lock' in result.stderr
+    return result.returncode == 128 and 'index.lock' in os.fsdecode(result.stderr)
 
 
 def toplevel(path: pathlib.Path, *, check: bool = True) -> Optional[pathlib.Path]:

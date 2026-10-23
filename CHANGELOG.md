@@ -17,6 +17,15 @@ may include breaking changes, each listed under a Breaking heading.
   child's worktree after the init commit, which runs the lint the baseline
   skips. The user node's baseline still commits the project wiki and, when the
   project has one, its `.fractal/.settings.json`.
+- A template whose `steps/`, `scripts/`, or `skills/` carries a file the commit
+  never stores refuses at `node init` and `node reseed`, naming each such file
+  and the record suffixes, and `node diff` refuses it the same way instead of
+  reporting the file missing from the node. Only non-hidden text records with
+  those suffixes (`.md`, `.sh`, `.py`, `.json`, `.toml`, ...) commit from a
+  node's folder, so a suffix-less `scripts/run` or a skill's `helper.js` would
+  deploy, never commit, and be missing from every clone. An existing template
+  carrying such a file now refuses: rename the file with a record suffix, or
+  keep it outside the node folder.
 
 ### Added
 
@@ -241,16 +250,16 @@ may include breaking changes, each listed under a Breaking heading.
   The worktree-root file passes as init's own edit — at a child's
   `fractal commit --init` baseline, at a scoped commit, and at the `node merge`
   footprint check — when HEAD's content is followed by the wiki tool's index
-  lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`), by those lines
-  and page lines (`# Wiki page merge driver`, `**/*.md merge=wiki`), or by the
-  page lines alone over a file already holding `**/_index.md merge=wiki`, with
-  LF or CRLF line endings. Any other added or removed line still makes the file
-  an ordinary out-of-scope path. The memory wiki's own `.gitattributes` commits
-  with the node's records, so a child's baseline carries it; a `.gitattributes`
-  anywhere else in a node's data directory is withheld and named. `fractal init`
-  on an adopted wiki warns when the repo-root `.gitattributes` lacks
-  `**/_index.md merge=wiki` or the wiki's own `.gitattributes` lacks
-  `*.md merge=wiki` as a whole line, naming each missing line and its file.
+  lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`), with LF or
+  CRLF line endings. A page mapping there would take over the merge of every
+  Markdown file in the repository, so a page line, like any other added or
+  removed line, still makes the file an ordinary out-of-scope path. The memory
+  wiki's own `.gitattributes` commits with the node's records, so a child's
+  baseline carries it; a `.gitattributes` anywhere else in a node's data
+  directory is withheld and named. `fractal init` on an adopted wiki warns when
+  the repo-root `.gitattributes` lacks `**/_index.md merge=wiki` or the wiki's
+  own `.gitattributes` lacks `*.md merge=wiki` as a whole line, naming each
+  missing line and its file.
 - A Claude step stuck at a thinking cap is steered one effort level lower: a
   `max` step's steer runs at `xhigh`, an `xhigh` step's at `high`. The step's
   effort is its `effort:` frontmatter, else the node's `effort`, else Claude's
@@ -394,6 +403,22 @@ may include breaking changes, each listed under a Breaking heading.
   base rates, so it read as whole while missing the difference. This holds for a
   killed launch and, past a result, for a reply after it. A `global` reply, and
   a large prompt at a model whose table entry names no threshold, stay whole.
+- A Claude step priced from its transcripts is marked `; partly unpriced` when a
+  reply in them ran in fast mode. Claude Code bills a reply whose usage names
+  `speed: "fast"` at twice the price table's rates on `claude-opus-5-5`,
+  `claude-opus-5` and `claude-opus-4-8`, and six times them on `claude-opus-4-6`
+  and `claude-opus-4-7`, so the step books the standard rates and read as whole
+  while missing the difference. This holds for a killed launch and, past a
+  result, for a reply after it.
+- A Claude step's streamed cost estimate prices each reply once when parallel
+  sub-agents interleave their frames on the stream. It priced a reply again at
+  each of its frames that followed another reply's, so a step killed while
+  sub-agents ran could book several times its spend, above the figure its
+  transcripts hold, and unmarked.
+- The loop's `Warning:` line for a step whose record leaves spend out ends on
+  the marker its row gets: `(unpriced)` when the row holds no figure, as when a
+  killed launch left no transcript and streamed no usage, and
+  `(partly unpriced)` when it holds one. It read `(partly unpriced)` either way.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed
@@ -499,8 +524,9 @@ may include breaking changes, each listed under a Breaking heading.
   committed bytes, `updated:` stamp included, and the node's own edits to an
   index survive. In the working tree the rows come back at the next
   `wiki update`. A failed rebuild warns in one line and the commit lands with
-  the indexes as staged. The refresh indexed every file on disk, so each refused
-  file's row dangled in every clean checkout.
+  the indexes as staged, the working tree still matching them. The refresh
+  indexed every file on disk, so each refused file's row dangled in every clean
+  checkout.
 - `fractal commit` waits out an `index.lock` another process holds briefly: a
   staging or commit call that finds it waits two seconds and retries once, and a
   lock still held then fails the commit with git's own message, not as a hook
@@ -566,11 +592,13 @@ may include breaking changes, each listed under a Breaking heading.
   the stanza. A stanza trusting any other path is drift, since trust enables
   project-local settings, as is a projects table carrying more than the trusted
   level.
-- The billing breaker no longer counts a step refused before its launch — a cost
+- The billing breaker does not count a step refused before its launch — a cost
   cap over a model the price table cannot price, or a per-step agent or provider
   that cannot run — as an instant zero-cost failure: such a refusal bought no
-  inference and proves nothing about credits, so three of them no longer park
-  the node as `PAUSED: billing`.
+  inference and proves nothing about credits, so three of them never park the
+  node as `PAUSED: billing`. The refused step's row reason leads with
+  `not launched:`, so `fractal node list` never shows such a run as
+  `PAUSED: billing` either.
 - A step whose agent names an error on its stream and then exits non-zero
   reports the real exit status: the step banner and the row's reason read
   `agent error (exit N)` with the stream detail and the stderr tail behind it,
@@ -587,9 +615,7 @@ may include breaking changes, each listed under a Breaking heading.
   before the paid `codex` probe, naming the step and the gap
   (`a cost cap requires a model for <agent> in <step>`, or
   `cost cap set but model '<name>' (<step>) has no pricing entry`); the same gap
-  met at launch stays a step failure with the same words. Three such launch
-  refusals in a row read as the `PAUSED: billing` backoff, which the preflight
-  check forestalls.
+  met at launch stays a step failure with the same words.
 - A drain run's lineage guard recognizes its seat's commands: it looks for the
   recorded agent invocation among the caller's ancestors, so a command the agent
   CLI starts in a process group or a session of its own (Claude Code starts each
@@ -641,6 +667,17 @@ may include breaking changes, each listed under a Breaking heading.
   force-added, and the baseline's output names it. The baseline force-added the
   whole seed directory, so every ignored file in it rode the commit onto the
   top-level branch.
+- `fractal node start` (with or without `--continue`), `fractal node resume`,
+  and `fractal resume` refuse an invalid effort ladder committed on the tree's
+  root branch before they change anything, naming the setting and its fault; a
+  resume checks every node it would relaunch. Such a ladder (a bad shape, an
+  unregistered agent, or the agent's own levels out of order) killed the loop's
+  boot after the command reported success, with nothing recorded: a fresh start
+  stayed `idle`, a continue stayed `idle` and refused its own retry, and a
+  resume stayed `paused` with the parked time charged against the run's
+  deadlines. A ladder committed after the command's check aborts the boot on
+  record: a start or continue ends `exited` with the reason on its run, and a
+  resume stays paused for the next resume.
 
 ## [1.3.0] - 2026-09-17
 

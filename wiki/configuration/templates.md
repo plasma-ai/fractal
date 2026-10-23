@@ -81,6 +81,16 @@ under `agents/`.
   refuses too: that path is the mount of the node's `skills/`, so skill
   directories belong under the template's top-level `skills/`.
 
+`steps/`, `scripts/`, and `skills/` deploy into the node's estate, so each file
+there must also pass the commit's estate content law (see
+[[features/loop/commit_pipeline]]): a non-hidden text record at one of its
+suffixes (`.md`, `.sh`, `.py`, `.json`, `.toml`, ...). The law itself judges the
+template, so the two never disagree. A file it refuses -- a suffix-less
+`scripts/run`, a skill's `helper.js` -- would deploy, work on that one disk, and
+be missing from every clone, so init and reseed refuse it, naming every such
+file and the suffixes. Rename the file with a record suffix, or keep it outside
+the seed surfaces.
+
 A bundled surface is a rival source to inheriting the parent's:
 `--inherit=steps` (likewise `scripts` and `skills`) is refused when the template
 carries that surface. A template is self-contained -- a symlink inside the
@@ -379,10 +389,13 @@ more than the trusted level, or another level, is drift too. Literal braces are
 valid output and do not constitute drift on their own. The command prints a
 unified diff per drifted file and exits 0 when clean, 1 on drift, and 2 on a
 command error (a node with no template recorded included), so scripts branch on
-the exit code. The recorded commit always resolves while it is reachable, so a
-folder moved or deleted on a later commit still diffs at its recorded sha. The
-shared files the folder includes re-read at that commit too, so a hand edit to
-an included part of the live charter is drift like any other.
+the exit code. A recorded folder that init and reseed would refuse for a file
+the seed would skip or the commit never stores refuses `node diff` the same way,
+naming the file, rather than reporting it missing from the node -- no reseed
+could clear that finding. The recorded commit always resolves while it is
+reachable, so a folder moved or deleted on a later commit still diffs at its
+recorded sha. The shared files the folder includes re-read at that commit too,
+so a hand edit to an included part of the live charter is drift like any other.
 
 Diff uses exactly the recorded values, without merging source defaults again.
 Removing a required value from the record causes a rendering refusal.

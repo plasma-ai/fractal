@@ -976,15 +976,11 @@ def _scope_check(node: Node, bounds: Scope) -> None:
 
 
 #: the merge-driver lines a worktree-root .gitattributes may gain as init's
-#: edit: the index lines the wiki tool writes there, then page lines, which
-#: assign only the wiki's merge driver; merge.sh's footprint check mirrors
-#: them for the target's staged copy
-_ATTRIBUTES_INIT_LINES = (
-    '# Wiki index merge driver',
-    '**/_index.md merge=wiki',
-    '# Wiki page merge driver',
-    '**/*.md merge=wiki',
-)
+#: edit: the index lines the wiki tool writes there, and no page lines -- the
+#: tool maps pages in each wiki root's own file, and a page mapping at the
+#: root would take over the merge of every Markdown file in the repository;
+#: merge.sh's footprint check mirrors them for the target's staged copy
+_ATTRIBUTES_INIT_LINES = ('# Wiki index merge driver', '**/_index.md merge=wiki')
 #: the page merge-driver block the wiki tool writes to each wiki root's own
 #: .gitattributes
 _WIKI_ROOT_ATTRIBUTES_LINES = ('# Wiki page merge driver', '*.md merge=wiki')
@@ -996,12 +992,11 @@ def _attributes_is_init_edit(node: Node) -> bool:
     Init writes the memory wiki's index ``merge=wiki`` attribute at the
     worktree root when the base lacks it -- an artifact outside every scope
     root, committable exactly while it is init's own uncommitted edit:
-    HEAD's content followed by the block's index lines, its index and page
-    lines, or its page lines alone over a base already mapping the index.
-    The match is line-exact, in either line ending, and covers the whole
-    change, so an attribute line assigning some other merge driver, or any
-    other line riding beside init's, makes the file an ordinary
-    out-of-scope path.
+    HEAD's content followed by the wiki tool's index lines. The match is
+    line-exact, in either line ending, and covers the whole change, so a
+    page line, an attribute line assigning some other merge driver, or any
+    other line riding beside init's makes the file an ordinary out-of-scope
+    path.
 
     Args:
         node: The node whose worktree to check.
@@ -1023,9 +1018,7 @@ def _attributes_is_init_edit(node: Node) -> bool:
     if lines[: len(committed_lines)] != committed_lines:
         return False
     added = [line for line in lines[len(committed_lines) :] if line]
-    # the whole block, its page lines, or its index lines alone
-    block = list(_ATTRIBUTES_INIT_LINES)
-    return added in (block, block[2:], block[:2])
+    return added == list(_ATTRIBUTES_INIT_LINES)
 
 
 #: estate subdirectories whose contents are node records canon requires
@@ -1478,8 +1471,11 @@ def _restage_memory_indexes(
     index whose rebuild differs from HEAD's copy only in its ``updated:``
     stamp keeps HEAD's bytes, so a refused file never moves the stamp. Each
     index whose bytes differ from what is staged is written back to the git
-    index and the working tree alike, keeping the tree clean for the
-    loop's dirty check; page writes are discarded with the temp tree.
+    index and then the working tree, keeping the tree clean for the loop's
+    dirty check: a failed staging leaves both as they were, and a failed
+    tree write restages what the tree holds for every index it did not
+    reach, so a failure never leaves the two apart. Page writes are
+    discarded with the temp tree.
 
     Args:
         node: The node whose staged memory to rebuild.
@@ -1592,21 +1588,67 @@ def _restage_memory_indexes(
             if any(part.startswith('.') for part in relative.parts):
                 continue
             rebuilt[f'{prefix}/{relative.as_posix()}'] = index.read_bytes()
-    # write back each index whose bytes differ from what is staged -- HEAD's
+    # collect each index whose bytes differ from what is staged -- HEAD's
     # bytes where the rebuild matches them but for the stamp
-    written = []
+    changed: dict[str, bytes] = {}
     for path, data in sorted(rebuilt.items()):
         committed = _tree_bytes(node, 'HEAD', path)
         if committed is not None and _same_but_stamp(data, committed):
             data = committed
-        if data == before.get(path):
-            continue
-        fractal.util.filesystem.write_atomic(worktree / path, data)
-        written.append(path)
-    if written:
-        specs = [f':(literal){worktree / path}' for path in written]
-        fractal.util.git.run(['add', '-f', *specs], cwd=worktree, lock_retry=True)
-    return bool(written)
+        if data != before.get(path):
+            changed[path] = data
+    if not changed:
+        return False
+    # stage the changes before the tree sees them: hash each into the object
+    # store through its path's filters, as an add does, then repoint the git
+    # index in one update, at each entry's staged mode (raw git calls
+    # bypassing util.git.run -- the helper feeds no stdin); the entries carry
+    # no stat data until the commit refreshes them, before any hook runs
+    specs = [f':(literal){worktree / path}' for path in changed]
+    cmd = ['--no-optional-locks', 'ls-files', '-s', '-z', '--', *specs]
+    raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
+    modes: dict[str, str] = {}
+    for entry in filter(None, os.fsdecode(raw).split('\0')):
+        info, path = entry.split('\t', 1)
+        modes[path] = info.split(' ', 1)[0]
+    payload = b''
+    for path, data in changed.items():
+        cmd = [
+            'git',
+            '-C',
+            f'{worktree}',
+            'hash-object',
+            '-w',
+            f'--path={path}',
+            '--stdin',
+        ]
+        result = subprocess.run(cmd, input=data, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(f'git hash-object failed (exit {result.returncode})')
+        blob = result.stdout.decode().strip()
+        mode = modes.get(path, '100644')
+        payload += os.fsencode(f'{mode} {blob}\t{path}') + b'\0'
+    cmd = ['git', '-C', f'{worktree}', 'update-index', '-z', '--index-info']
+    result = subprocess.run(cmd, input=payload, capture_output=True)
+    # another process's index lock is waited out once, as the staging calls
+    # wait it out
+    if fractal.util.git.index_locked(result):
+        time.sleep(fractal.util.git.INDEX_LOCK_WAIT)
+        result = subprocess.run(cmd, input=payload, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(f'git update-index failed (exit {result.returncode})')
+    # then write the tree; a failed write restages what the tree holds for
+    # each index it did not reach, so the tree and the git index agree
+    paths = list(changed)
+    for done, path in enumerate(paths):
+        try:
+            fractal.util.filesystem.write_atomic(worktree / path, changed[path])
+        except Exception:
+            specs = [f':(literal){worktree / rest}' for rest in paths[done:]]
+            cmd = ['add', '-f', '--all', '--', *specs]
+            fractal.util.git.run(cmd, cwd=worktree, lock_retry=True)
+            raise
+    return True
 
 
 #: an index frontmatter's ``updated:`` stamp line

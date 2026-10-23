@@ -146,6 +146,14 @@ this hold is its only pacing). The gate never repeats its hold when no SYNC ran,
 since nothing launched to extend the streak, and an interrupted hold books the
 consumed steps `stopped` as the billing gate does.
 
+A step the loop refuses before its launch — a per-step agent, provider, or
+setting that cannot run, a prompt that cannot be built, or a cost cap over a
+model the price table cannot price — books a `failed` row at a knowable `$0`,
+the billing signature on the row alone. It bought no inference, so it proves
+nothing about credits: it breaks the billing breaker's streak, SYNC and work
+step alike, and its failed row's reason leads with `not launched:` so
+`fractal node list` breaks its streak the same way.
+
 ## Stuck steps
 
 Two triggers mark a launch stuck, and both take one path through the loop.

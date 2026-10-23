@@ -366,8 +366,8 @@ From the user's point of view:
   books the reply's tokens, but not the per-search fee. So is a
   ``claude`` step with a reply billed above its model's listed rates,
   since the step books it at the listed rates: a reply served in the ``us``
-  inference geography, or one whose prompt is above a long-prompt
-  threshold the price table names for its model.
+  inference geography, one served in fast mode, or one whose prompt is
+  above a long-prompt threshold the price table names for its model.
   ``cost spent`` and ``cost breakdown`` disclose how many such steps
   their sums count at recorded spend. A launch killed while a tool runs,
   or a workflow sub-agent ending on its structured output, is whole;

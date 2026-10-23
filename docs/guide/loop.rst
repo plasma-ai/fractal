@@ -394,8 +394,9 @@ below) is not billing-shaped and resets the streak to zero (which also
 disarms an armed breaker), and so is a step refused before
 its launch — a cost cap over a model the price table cannot price, or a
 per-step agent or provider that cannot run — since it bought no inference.
-Paused and budget-skipped steps bought no launch and leave the streak
-untouched.
+Its failed step row's reason leads with ``not launched:``, and ``fractal node
+list`` never counts such a row toward ``PAUSED: billing``. Paused and
+budget-skipped steps bought no launch and leave the streak untouched.
 
 While the breaker is armed, every launch — the SYNC and the work step alike
 — is held behind a backoff that starts at 60 seconds and doubles per further
@@ -758,8 +759,8 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    there at the next refresh. The output says ``Memory index rebuilt without
    N file(s) the commit leaves out`` beside the warning that names each file.
    The rebuild also runs on ``--force`` saves and skips ``--init``; a failure
-   warns (``Warning: memory index not rebuilt (...)``) and never fails the
-   commit.
+   warns (``Warning: memory index not rebuilt (...)``), never fails the
+   commit, and leaves the working tree matching the indexes it commits.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
    rules and staged files of 10 MB or more. The ignore warning names the first
    ten eaten paths, each with the rule that ate it as ``git check-ignore -v``
