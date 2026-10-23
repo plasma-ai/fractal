@@ -1361,8 +1361,10 @@ wiki_owned() {
 # when the target's index is already in its wiki class's form and the class
 # loads -- a hand-edited index, a failing .wiki/wiki.py hook, or a conflict
 # resolved by hand lands as merged, and no driver adds a row for a page
-# committed without one -- so regenerate each tracked wiki's indexes from the
-# merged filesystem and stage the refreshed bytes to ride the squash commit
+# committed without one, nor moves a stamp the squash left reading as the
+# target's -- so regenerate each tracked wiki's indexes from the merged
+# filesystem, restamping each page edited since its stamp, and stage the
+# refreshed bytes to ride the squash commit
 # (an untracked wiki -- the git-excluded default seed -- carries no merge
 # changes, and adding it would fail); the refresh reads the disk, so an
 # untracked file under the project wiki would be indexed into the squash
@@ -1487,20 +1489,21 @@ if command -v wiki &>/dev/null; then
         done <"$TMP_DIR/wiki-created"
     done
     # every other wiki root (a folder declaring a tracked .wiki/settings.json,
-    # outside node machinery) regenerates only the indexes the driver merged --
-    # staged bytes matching neither side's; one matching the node's arrives as
-    # the node committed it -- each by a refresh scoped to its folder (the
-    # whole root for the root's own index), so an index outside those folders
-    # keeps its bytes; an untracked file in a refreshed folder is refused by
-    # name, as under the project wiki, and an index in a folder its wiki
-    # excludes is skipped, as the wiki's own walk skips it; an index belongs to
-    # the deepest root above it, and a failed listing fails closed
+    # outside node machinery) that holds a path the squash adds, modifies, or
+    # deletes -- both halves of a move -- is refreshed whole, as the project
+    # wiki is: a page whose stamp still reads as the target's (edited without
+    # a restamp, or merged under the target's later stamp) lands restamped,
+    # every index there lists what landed, and a fix the target's root
+    # already needed rides the squash; an untracked file in a refreshed root
+    # is refused by name, as under the project wiki, but one in a folder its
+    # wiki excludes is not, since the wiki's own walk skips it; a path
+    # belongs to the deepest root above it, a root the wiki refuses to sweep
+    # lands as the squash left it, and a failed listing fails closed
     if ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z -- ':(glob)**/.wiki/settings.json' \
         ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-roots" \
         || ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks diff --cached --name-only -z --no-renames \
-            --diff-filter=d HEAD -- ':(glob)**/_index.md' \
-            ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-indexes"; then
-        fail_target "listing the wiki indexes of $BRANCH's squash failed"
+            HEAD -- ':(exclude,glob)**/.fractal/**' >"$TMP_DIR/wiki-changed"; then
+        fail_target "listing the wiki files of $BRANCH's squash failed"
     fi
     ROOTS=()
     # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
@@ -1509,107 +1512,163 @@ if command -v wiki &>/dev/null; then
         ROOT=${SETTINGS%.wiki/settings.json}
         ROOTS+=("${ROOT%/}")
     done <"$TMP_DIR/wiki-roots"
+    CHANGED_ROOTS=()
     # read NUL-delimited so a path with spaces stays one entry and a non-ASCII
     # name is never C-quoted by core.quotePath into a path that exists nowhere
-    while IFS= read -r -d '' INDEX; do
-        FOLDER=${INDEX%_index.md}
-        FOLDER=${FOLDER%/}
+    while IFS= read -r -d '' CHANGED; do
         OWNER=""
         # safe under set -u even on bash 3.2: an empty array reads as unset
         for ROOT in ${ROOTS[@]+"${ROOTS[@]}"}; do
-            if [[ "$FOLDER" == "$ROOT" || "$FOLDER" == "$ROOT"/* ]] \
-                && [[ ${#ROOT} -gt ${#OWNER} ]]; then
+            if [[ "$CHANGED" == "$ROOT"/* ]] && [[ ${#ROOT} -gt ${#OWNER} ]]; then
                 OWNER=$ROOT
             fi
         done
         [[ -n "$OWNER" ]] || continue
-        ROOT_DIR="$PARENT_WORKTREE_DIR/$OWNER"
-        FOLDER_DIR="$PARENT_WORKTREE_DIR/$FOLDER"
-        # the project wiki and the memory wiki were refreshed whole above
-        [[ "$FOLDER_DIR/" != "${WIKI_DIR%/}/"* && "$FOLDER_DIR/" != "${MEMORY_DIR%/}/"* ]] || continue
-        # the driver merged the index when its staged bytes match neither side's
-        STAGED=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify ":0:$INDEX" 2>/dev/null || true)
-        OURS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "HEAD:$INDEX" 2>/dev/null || true)
-        THEIRS=$(git -C "$PARENT_WORKTREE_DIR" rev-parse -q --verify "$SQUASH_TIP:$INDEX" 2>/dev/null || true)
-        [[ "$STAGED" != "$OURS" && "$STAGED" != "$THEIRS" ]] || continue
-        # the wiki refuses to sweep a folder that encloses another declared
-        # wiki (plasma-wiki's Wiki.update), so such a folder is never
-        # refreshed and its index lands as the driver merged it
-        NESTED=""
+        # the wiki's walk lists no dot-prefixed file or folder below its root
+        # (the dot rule wiki_owned mirrors), so such a path is in no index and
+        # refreshes nothing -- but for the root's settings and .wiki/wiki.py
+        # hook, which shape every index the root holds
+        if [[ "/${CHANGED#"$OWNER"/}" == */.* ]]; then
+            [[ "$CHANGED" == "$OWNER/.wiki/settings.json" || "$CHANGED" == "$OWNER/.wiki/wiki.py" ]] || continue
+        fi
+        # each root refreshes once, however many of its paths changed
+        KNOWN=false
         # safe under set -u even on bash 3.2: an empty array reads as unset
-        for ROOT in ${ROOTS[@]+"${ROOTS[@]}"}; do
-            if [[ "$ROOT" == "$FOLDER"/* ]]; then
-                NESTED=$ROOT
+        for KNOWN_ROOT in ${CHANGED_ROOTS[@]+"${CHANGED_ROOTS[@]}"}; do
+            if [[ "$KNOWN_ROOT" == "$OWNER" ]]; then
+                KNOWN=true
                 break
             fi
         done
-        if [[ -n "$NESTED" ]]; then
-            echo "Warning: $INDEX lands as merged, not refreshed: $FOLDER encloses the" \
-                "declared wiki $NESTED, which a wiki update cannot sweep" >&2
-            continue
-        fi
-        SUBTREE=${FOLDER#"$OWNER"}
-        SUBTREE=${SUBTREE#/}
-        # every pathspec names the folder literally, so a glob character
-        # in a folder name never matches a sibling; the strays are
-        # listed by the wiki's own ignore rules, as under the project
-        # wiki (mirrors plasma-wiki's Wiki._check_ignore), and the
-        # listing is also what a failure keeps (drop_refresh_residue)
+        [[ "$KNOWN" == true ]] || CHANGED_ROOTS+=("$OWNER")
+    done <"$TMP_DIR/wiki-changed"
+    # safe under set -u even on bash 3.2: an empty array reads as unset
+    for OWNER in ${CHANGED_ROOTS[@]+"${CHANGED_ROOTS[@]}"}; do
+        ROOT_DIR="$PARENT_WORKTREE_DIR/$OWNER"
+        # the project wiki and the memory wiki were refreshed whole above
+        [[ "$ROOT_DIR/" != "${WIKI_DIR%/}/"* && "$ROOT_DIR/" != "${MEMORY_DIR%/}/"* ]] || continue
+        # every pathspec names the root literally, so a glob character in
+        # its name never matches a sibling; the strays are listed by the
+        # wiki's own ignore rules, as under the project wiki (mirrors
+        # plasma-wiki's Wiki._check_ignore), and the listing is also what a
+        # failure keeps (drop_refresh_residue)
         LISTED_FILE="$TMP_DIR/wiki-listed-${#REFRESH_FOLDERS[@]}"
         if ! git -c core.excludesFile=/dev/null -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z \
-            --others --exclude-standard -- ":(literal)$FOLDER" >"$LISTED_FILE"; then
-            fail_target "listing the untracked files under $FOLDER_DIR failed"
+            --others --exclude-standard -- ":(literal)$OWNER" >"$LISTED_FILE"; then
+            fail_target "listing the untracked files under $ROOT_DIR failed"
         fi
-        REFRESH_FOLDERS+=("$FOLDER")
+        REFRESH_FOLDERS+=("$OWNER")
         REFRESH_OWNERS+=("$OWNER")
         STRAYS=""
+        PROBED=""
+        PROBED_EXCLUDED=false
         # read NUL-delimited so a path with spaces stays one
         # entry and a non-ASCII name is never C-quoted by
         # core.quotePath into a path that exists nowhere
         while IFS= read -r -d '' STRAY; do
             wiki_owned "$STRAY" "$OWNER" || continue
-            STRAYS+="$STRAY, "
-        done <"$LISTED_FILE"
-        if [[ -n "$STRAYS" ]]; then
-            # a folder its wiki excludes is never refreshed, strays or not
+            # a stray under a nested root belongs to that root, the deepest
+            # above it, whose own refresh judges it
+            STRAY_OWNER=$OWNER
+            # safe under set -u even on bash 3.2: an empty array reads as unset
+            for ROOT in ${ROOTS[@]+"${ROOTS[@]}"}; do
+                if [[ "$STRAY" == "$ROOT"/* ]] && [[ ${#ROOT} -gt ${#STRAY_OWNER} ]]; then
+                    STRAY_OWNER=$ROOT
+                fi
+            done
+            [[ "$STRAY_OWNER" == "$OWNER" ]] || continue
+            # a stray in a folder its wiki excludes is never indexed, which
+            # a check scoped to that folder answers by refusing it -- but for
+            # the root's own .wiki/ state, which the staging below takes; the
+            # next stray in the same folder reuses the answer
             # NOTE: the phrase is plasma-wiki's Wiki._resolve_folder refusal,
             #   which exits 2 like every wiki error -- a reworded message turns
             #   this skip into a refused merge, safe but blocking, and
             #   test_merge_skips_an_index_in_a_folder_its_wiki_excludes's
             #   pattern-untracked-file case pins it
-            wiki update --check --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} \
-                >/dev/null 2>"$TMP_DIR/wiki-err" || true
-            grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err" && continue
-            fail_target "untracked files under $FOLDER_DIR would be indexed by the" \
+            STRAY_DIR=${STRAY%/*}
+            if [[ "$STRAY_DIR" != "$OWNER" && "$STRAY" != "$OWNER/.wiki/"* ]]; then
+                if [[ "$STRAY_DIR" != "$PROBED" ]]; then
+                    PROBED=$STRAY_DIR
+                    PROBED_EXCLUDED=false
+                    wiki update --check --path="$ROOT_DIR" "${STRAY_DIR#"$OWNER"/}" \
+                        >/dev/null 2>"$TMP_DIR/wiki-err" || true
+                    if grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err"; then
+                        PROBED_EXCLUDED=true
+                    fi
+                fi
+                [[ "$PROBED_EXCLUDED" != true ]] || continue
+            fi
+            STRAYS+="$STRAY, "
+        done <"$LISTED_FILE"
+        if [[ -n "$STRAYS" ]]; then
+            fail_target "untracked files under $ROOT_DIR would be indexed by the" \
                 "squash of $BRANCH: ${STRAYS%, }; commit them or move them" \
                 "aside and merge again"
         fi
-        if ! wiki update --path="$ROOT_DIR" ${SUBTREE:+"$SUBTREE"} >/dev/null 2>"$TMP_DIR/wiki-err"; then
-            grep -q 'Path is inside an excluded directory' "$TMP_DIR/wiki-err" && continue
+        if ! wiki update --path="$ROOT_DIR" >/dev/null 2>"$TMP_DIR/wiki-err"; then
+            # the wiki refuses to sweep a root whose walk reaches another
+            # declared wiki (plasma-wiki's Wiki.update), before it writes
+            # anything, so such a root lands as the squash left it; a root
+            # whose settings exclude that wiki's folder walks past it and
+            # refreshes like any other
+            # NOTE: the phrase is plasma-wiki's Wiki.update refusal, which
+            #   exits 2 like every wiki error -- a reworded message turns this
+            #   skip into a refused merge, safe but blocking, and
+            #   test_merge_lands_a_merged_index_whose_folder_encloses_another_wiki
+            #   pins it
+            if grep -q 'Path encloses the wiki at' "$TMP_DIR/wiki-err"; then
+                NESTED=$(sed -n 's/^.*Path encloses the wiki at: \([^;]*\);.*$/\1/p' "$TMP_DIR/wiki-err")
+                NESTED=${NESTED%%$'\n'*}
+                NESTED=${NESTED#"$PARENT_WORKTREE_DIR"/}
+                echo "Warning: $OWNER lands as merged, not refreshed: it encloses the" \
+                    "declared wiki $NESTED, which a wiki update cannot sweep" >&2
+                continue
+            fi
             cat "$TMP_DIR/wiki-err" >&2
-            fail_target "refreshing the wiki indexes under $FOLDER_DIR" \
+            fail_target "refreshing the wiki indexes under $ROOT_DIR" \
                 "after merging $BRANCH failed"
         fi
         # stage what the refresh wrote, as the project wiki's is staged above:
-        # tracked-file updates, then the indexes it created and, for a root's
-        # own index, the root's .wiki/ state -- an untracked file the walk
-        # never lists stays out of the squash
-        if ! git -C "$PARENT_WORKTREE_DIR" add -u -- ":(literal)$FOLDER" \
+        # tracked-file updates, then the indexes it created and the root's
+        # .wiki/ state -- an untracked file the walk never lists stays out of
+        # the squash
+        if ! git -C "$PARENT_WORKTREE_DIR" add -u -- ":(literal)$OWNER" \
             || ! git -C "$PARENT_WORKTREE_DIR" --no-optional-locks ls-files -z --others --exclude-standard \
-                -- ":(literal)$FOLDER" >"$TMP_DIR/wiki-created"; then
-            fail_target "staging the refreshed wiki indexes under $FOLDER_DIR" \
+                -- ":(literal)$OWNER" >"$TMP_DIR/wiki-created"; then
+            fail_target "staging the refreshed wiki indexes under $ROOT_DIR" \
                 "after merging $BRANCH failed"
         fi
+        # an index there before the refresh -- in a folder its wiki excludes,
+        # or under a nested root -- is not the refresh's and stays out of the
+        # squash
+        LISTED=()
+        # read NUL-delimited so a path with spaces stays one
+        # entry and a non-ASCII name is never C-quoted by
+        # core.quotePath into a path that exists nowhere
+        while IFS= read -r -d '' LISTED_PATH; do
+            [[ "$LISTED_PATH" == */_index.md ]] || continue
+            LISTED+=("$LISTED_PATH")
+        done <"$LISTED_FILE"
         # read NUL-delimited so a path with spaces stays one
         # entry and a non-ASCII name is never C-quoted by
         # core.quotePath into a path that exists nowhere
         while IFS= read -r -d '' CREATED; do
             wiki_owned "$CREATED" "$OWNER" || continue
             [[ "$CREATED" == */_index.md || "$CREATED" == "$OWNER/.wiki/"* ]] || continue
+            CREATED_NEW=true
+            # safe under set -u even on bash 3.2: an empty array reads as unset
+            for LISTED_PATH in ${LISTED[@]+"${LISTED[@]}"}; do
+                if [[ "$LISTED_PATH" == "$CREATED" ]]; then
+                    CREATED_NEW=false
+                    break
+                fi
+            done
+            [[ "$CREATED_NEW" == true ]] || continue
             git -C "$PARENT_WORKTREE_DIR" add -- ":(literal)$CREATED" \
                 || fail_target "staging $CREATED after merging $BRANCH failed"
         done <"$TMP_DIR/wiki-created"
-    done <"$TMP_DIR/wiki-indexes"
+    done
 fi
 
 # ------ commit and advance
