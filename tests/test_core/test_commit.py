@@ -2302,35 +2302,47 @@ def test_sub_project_commit_boundary(
     assert tracked == inside
 
 
-@pytest.mark.parametrize('project', ['backend', 'apps/web'])
+@pytest.mark.parametrize(
+    argnames=('root_wiki', 'project', 'scope'),
+    argvalues=[
+        pytest.param('wiki', 'backend', 'src', id='backend'),
+        pytest.param('wiki', 'apps/web', 'src', id='apps/web'),
+        # the root project, its wiki and the scope sharing one folder
+        pytest.param('handbook/wiki', None, 'handbook/src', id='root-handbook'),
+    ],
+)
 def test_scoped_sub_project_node_commits_its_new_files(
     tmp_path: pathlib.Path,
-    project: str,
+    root_wiki: str,
+    project: Optional[str],
+    scope: str,
 ) -> None:
-    """A scoped node in a sub-project commits every new file it stages.
+    """A scoped node commits every new file it stages under a shared folder.
 
-    The baseline's estate add and a work commit's scope sweep stage paths
-    sharing the project's directory, beside the stage excludes; git before
-    2.56 strips that shared directory from each exclude as well, so an add
-    run from the worktree root stages no new file once the directory is no
-    shorter than an exclude. The baseline must land every seed file, and a
-    work commit the new file in its scope, however long the project's path
-    is.
+    In a sub-project, the baseline's estate add and a work commit's scope
+    sweep stage paths sharing the project's directory; in the root project,
+    a work commit's sweep stages a wiki and a scope sharing a folder. Git
+    before 2.56 strips that shared directory from each stage exclude as
+    well, so an add run from the worktree root stages no new file once the
+    directory is no shorter than an exclude. The baseline must land every
+    seed file, and a work commit the new file in its scope, however long
+    the shared path is.
     """
-    repo = _make_git_repo(tmp_path / 'repo')
+    repo = _make_git_repo(tmp_path / 'repo', wiki=root_wiki)
     # a committed sub-project wiki -- the base-ref precondition for the init
-    index = repo / project / 'wiki' / '_index.md'
-    index.parent.mkdir(parents=True)
-    index.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
-    _git(repo, 'add', project)
-    _git(repo, 'commit', '-m', 'add the project wiki')
+    if project is not None:
+        index = repo / project / 'wiki' / '_index.md'
+        index.parent.mkdir(parents=True)
+        index.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+        _git(repo, 'add', project)
+        _git(repo, 'commit', '-m', 'add the project wiki')
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(
         name='task',
         agent='claude',
         local=True,
         path=project,
-        scope=['src'],
+        scope=[scope],
     )
     project_dir = _parse_project_dir(output)
     # configure git identity in the worktree
@@ -2345,12 +2357,13 @@ def test_scoped_sub_project_node_commits_its_new_files(
     lint = node.node_dir / 'scripts' / 'lint.sh'
     lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
     # a new file in scope rides the work commit
-    module = worktree / project / 'src' / 'module.py'
+    folder = scope if project is None else f'{project}/{scope}'
+    module = worktree / folder / 'module.py'
     module.parent.mkdir()
     module.write_text('VALUE = 1\n', encoding='utf-8')
     node.commit('add a module')
-    result = _git(worktree, 'ls-files', f'{project}/src')
-    assert result.stdout.split() == [f'{project}/src/module.py']
+    result = _git(worktree, 'ls-files', folder)
+    assert result.stdout.split() == [f'{folder}/module.py']
     node.commit(check=True)
 
 
