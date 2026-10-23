@@ -26,6 +26,34 @@ may include breaking changes, each listed under a Breaking heading.
   deploy, never commit, and be missing from every clone. An existing template
   carrying such a file now refuses: rename the file with a record suffix, or
   keep it outside the node folder.
+- A node's agents and its `setup.sh` run without a `VIRTUAL_ENV` (see Fixed),
+  where 1.3.0 exported the repo's `.venv` or, with none, the launching shell's
+  venv. With no repo `.venv`, a venv activated outside the repo no longer
+  reaches `uv pip`: a `setup.sh` or an agent command running `uv pip install`
+  finds no environment and fails, and each iteration whose `setup.sh` fails is
+  skipped. `pip` and every CLI on `PATH` still resolve from that venv. Pass
+  `uv pip` the venv's interpreter (`--python <venv>/bin/python`), or use `pip`.
+- `fractal node merge` refuses an untracked file under the project wiki, or in
+  another wiki folder whose indexes it refreshes, naming the file (see Fixed):
+  the refresh would index it into the squash commit, where its row dangles in
+  every clean checkout. 1.3.0 merged past it. Commit the file or move it aside,
+  and merge again. A wiki declared at the worktree root (a tracked
+  `.wiki/settings.json` there) refuses every merge: declare it in a folder
+  instead.
+- A scoped node's `fractal commit` refuses a tracked file moved (`git mv`) into
+  its scope from outside it, naming the old path (see Fixed); 1.3.0 committed
+  the move, and with it a deletion outside the scope. Copy the file instead of
+  moving it, or commit the move with `--ignore-scope` when the deletion is
+  meant.
+- `fractal node cost remaining`, `spent`, and `breakdown` exit 2 on a `--run`,
+  `--iter`, or `--step` id that is not the target's own (see Fixed): another
+  node's id refuses with `Run N belongs to '<owner>', not '<target>'.`, and an
+  id no row carries with `No run N is recorded.` 1.3.0 answered both in the
+  target's name, so a script reading a child's run from the parent fails: name
+  the owning node, as in `fractal node cost spent <child> --run=N`.
+- `fractal pause` and `fractal node pause` refuse a `--reason` of `parked`, or
+  one starting with `via pause latch` or `resume preflight failed:`, which 1.3.0
+  accepted (see Fixed): give the pause another reason.
 
 ### Added
 
@@ -36,7 +64,9 @@ may include breaking changes, each listed under a Breaking heading.
   window, false otherwise, and null when the listing could not look (tmux gave
   no answer for a node that records no runtime of its own). The plain listing
   keeps the stored `idle` status, and `--live` keeps reading the row as `active`
-  so drains still wait for it. The stored status stays `idle`.
+  so drains still wait for it. The stored status stays `idle`. A boot whose
+  `active` stamp fails says so and names the status the node keeps for the run:
+  `idle (starting)` for a start, `paused` for a resume.
 - A no-progress watchdog for Claude steps: 30 minutes of the agent's own idle
   time, counted only while it holds control (paused while a tool runs, while it
   thinks, after its turn ends while Claude Code waits on background work, and
@@ -45,8 +75,8 @@ may include breaking changes, each listed under a Breaking heading.
   row naming which trigger fired. Codex is not watched.
 - `fractal node merge` lands a paused node's committed work into its merge
   target without leaving `paused`: the run, iteration, and step rows stay open
-  for `fractal resume`, and the frozen step's uncommitted state stays in the
-  node's worktree. The merge-base advance carries that state the way
+  for `fractal node resume`, and the frozen step's uncommitted state stays in
+  the node's worktree. The merge-base advance carries that state the way
   `git checkout` moves a branch; an advance that would touch a dirty path or an
   untracked or ignored file refuses the whole merge by name, and a failure after
   the squash commit rolls back both the target and the node (a `--continue`
@@ -71,15 +101,15 @@ may include breaking changes, each listed under a Breaking heading.
 - The shared project-wiki folder — the one folder every node commits to
   regardless of its scope — is a setting. A project names it in a committed
   `<project>/.fractal/.settings.json` (`{"wiki": "docs"}`, relative to the
-  project; `wiki` is the file's only key). `fractal init` reads the file and
-  records the folder as the user node's immutable `wiki` config key, and
-  `fractal commit --init` commits the file beside the wiki, refusing a file that
-  names another folder than the one recorded. Every spawn reads the setting
-  committed on the tree's root branch: a child in its parent's project inherits
-  the parent's folder and refuses when the root branch names another, and a
-  child that selects another sub-project takes that project's own setting. The
-  folder drives the commit scope exemption and the merge footprint check, the
-  commit-time and merge-time index refresh, the `node init` base-ref
+  project; `wiki` and `effort_ladder` are the file's only keys). `fractal init`
+  reads the file and records the folder as the user node's immutable `wiki`
+  config key, and `fractal commit --init` commits the file beside the wiki,
+  refusing a file that names another folder than the one recorded. Every spawn
+  reads the setting committed on the tree's root branch: a child in its parent's
+  project inherits the parent's folder and refuses when the root branch names
+  another, and a child that selects another sub-project takes that project's own
+  setting. The folder drives the commit scope exemption and the merge footprint
+  check, the commit-time and merge-time index refresh, the `node init` base-ref
   precondition, `$WIKI_DIR` in node prompts, the seeded `lint.sh`, the
   unmerged-work check of `node delete`, and the `destroy` report. The merge's
   index refresh regenerates the node's own project wiki under the target
@@ -99,14 +129,15 @@ may include breaking changes, each listed under a Breaking heading.
 - `node activity` rows carry `agent`, `model`, and `effort`: on a step's rows,
   the agent that ran it and the model that served it, as the step's own stream
   named them, and the effort its launch was handed (the step's `effort:` or the
-  node's); blank on run, iteration, and event rows. All three are read through
-  the listing's join on the step row. `effort` is a new `steps` column, and the
-  central database takes it without a rebuild: the schema version
-  (`PRAGMA user_version`) is now 2, every handle reads the stamp on open, and a
-  database at version 1 is lifted in one immediate transaction (two writers
-  racing it serialize, the second finds it done; a step that fails leaves the
-  database at version 1, readable as before). Steps recorded before the lift
-  read a blank effort.
+  node's); blank on run and iteration rows and on events recorded outside a
+  step, while an event recorded during a step carries its step's. All three are
+  read through the listing's join on the step row. `effort` is a new `steps`
+  column, and the central database takes it without a rebuild: every handle
+  reads the schema version (`PRAGMA user_version`) on open, and an older
+  database is lifted in place, one immediate transaction per version (two
+  writers racing a step serialize, the second finds it done; a step that fails
+  leaves the database at the version before it, readable as before). Steps
+  recorded before the lift read a blank effort.
 - Every step launch checks the node's worktree for a git operation left
   unfinished — a merge, squash merge, cherry-pick, revert, rebase, or held
   `index.lock` — and, when it finds one, opens the prompt with a notice naming
@@ -167,7 +198,9 @@ may include breaking changes, each listed under a Breaking heading.
   (`=== Provider unavailable — N consecutive failure(s); probing again in Ns ===`),
   so the outage paces the iterations after it too, with `step_retries` 0
   included. A named outage never arms the billing breaker, however fast and
-  unpriced its failure.
+  unpriced its failure, and the failed step row's reason leads with
+  `provider unavailable:`, so `fractal node list` never reads such a run as
+  `PAUSED: billing` either.
 - A node's record directories admit `.py`, `.diff`, and `.patch` files — plain
   text like the seeded `.sh` scripts — so a Python checker under `memory/` or
   `scripts/`, or a patch kept under `plans/`, commits instead of being withheld
@@ -195,7 +228,8 @@ may include breaking changes, each listed under a Breaking heading.
   output, the push notice, and, when the commit fails, a failing hook's output
   in its error. Each entry opens with `=== Commit at <UTC time> (<sha>) ===`,
   naming the commit it landed, or `(no commit)`; a failed commit's entry holds
-  its `Error:` text and reads `(failed)`. `--check` logs nothing. The log is
+  its `Error:` text and reads `(failed)`, or the sha when the commit landed
+  before the failure (a failed push). `--check` logs nothing. The log is
   git-ignored scratch: it is never committed and survives
   `node start --continue --clean`.
 - The packaged node charter and memory skill tell a node to name its own files
@@ -211,7 +245,7 @@ may include breaking changes, each listed under a Breaking heading.
   landed.
 - The packaged codex node seed turns both sub-agent features (`multi_agent` and
   `multi_agent_v2`) on in its `config.toml`: the rollout window prices every
-  spawned thread into the step or refuses the step.
+  spawned thread into the step or leaves the step unpriced.
 - `codex` steps whose turn spawns or drives sub-agent threads are priced in
   full: each child's session log is summed past its captured length at the
   child's own served model's rates and added to the step's cost, while the step
@@ -222,13 +256,13 @@ may include breaking changes, each listed under a Breaking heading.
   unpriced child model, a driven child's log shorter than its captured length or
   grown across an unterminated line, a child log the window cannot open, a
   second log new or grown since capture naming one spawned thread — records
-  `NULL` cost and logs the reason naming the log; a new or grown log the window
-  cannot explain (one whose first line is not session metadata — a new, still
-  empty file is skipped — a log naming a session the node's codex home does not
-  hold as a recognized root, a sub-agent of another kind — `review`, `compact`,
-  `memory_consolidation` — on the step's thread, a plain-source log naming the
-  step's thread as its session, or a spawned log whose id is the step's own
-  thread) refuses the step with
+  `NULL` cost and logs the reason naming the log; so does a new or grown log the
+  window cannot explain (one whose first line is not session metadata — a new,
+  still empty file is skipped — a log naming a session the node's codex home
+  does not hold as a recognized root, a sub-agent of another kind — `review`,
+  `compact`, `memory_consolidation` — on the step's thread, a plain-source log
+  naming the step's thread as its session, or a spawned log whose id is the
+  step's own thread), logging
   `codex usage unpriced: Rollout window saw a rollout it cannot explain: <file>`.
   Another plain-source root's log beside the step's, or any log naming that root
   as its session, whatever its own source, new or grown, is ignored only when
@@ -236,7 +270,7 @@ may include breaking changes, each listed under a Breaking heading.
   session, and recognized: its metadata names the root as its own id and carries
   a plain string `source`. A root with an object `source` (`custom`,
   `internal`), one whose metadata names no id, or one with no rollout or two is
-  not recognized, and a log naming it refuses the step.
+  not recognized, and a log naming it leaves the step unpriced.
 - The `plasma-wiki` runtime requirement is `>=1.7,<2`: the seeded wiki skill
   relies on `wiki update` pruning stale index rows without a flag and the
   `_index.md` merge driver fractal installs unions both sides' link rows, both
@@ -269,10 +303,15 @@ may include breaking changes, each listed under a Breaking heading.
   `high`, and a step at or below that floor, or at a level off the ladder,
   steers at its own effort. The no-action watchdog's steer keeps the effort, and
   Codex never lowers. A project can set an agent's levels and floor with a new
-  `effort_ladder` key in `.fractal/.settings.json`, read from the tree's root
-  branch at each start or resume. A ladder with a bad shape refuses wherever the
-  file is read, and one naming an unregistered agent or listing the agent's own
-  levels out of order refuses at the loop's boot.
+  `effort_ladder` key in `<project>/.fractal/.settings.json`, read from the
+  tree's root branch at each start or resume. A ladder with a bad shape refuses
+  wherever the file is read. `fractal node start` (with or without
+  `--continue`), `fractal node resume`, and `fractal resume` refuse an invalid
+  ladder (a bad shape, an unregistered agent, or the agent's own levels out of
+  order) before they change anything, naming the setting, its file, and its
+  fault; a resume checks every node it would relaunch. A ladder committed after
+  that check aborts the loop's boot on record: a start or continue ends `exited`
+  with the reason on its run, and a resume stays paused for the next resume.
 - A node's config records where its cleanup reserve came from as `reserve_mode`:
   `default` for the 10% `node init` materializes, `explicit` for a figure set by
   `--reserve-budget` (at init or on `node update`), a template preset, or
@@ -307,9 +346,6 @@ may include breaking changes, each listed under a Breaking heading.
   their sweep of the node's worktree and leave it running. The seed now says so
   and asks nodes to end every background job they start before the step ends;
   the lifecycle guide and the `node` CLI reference describe the class.
-- A `node merge` whose wiki refresh fails after creating an index removes that
-  index along with the rest of the squash, so the retry lands instead of
-  refusing it as an untracked file under the wiki.
 - `node merge` reads the merging node's tip once, before the squash: the squash,
   its collision and `--continue` provenance checks, the wiki-root refresh's
   judgement, and the merge-base advance all take that commit, so a commit the
@@ -324,19 +360,11 @@ may include breaking changes, each listed under a Breaking heading.
   a target that went `active` or `paused` while the merge waited. A target
   re-armed with `start --continue` during the wait could go live, and the squash
   then landed in its running worktree.
-- A resume boot whose `active` stamp fails says the node reads `paused` for the
-  run, which it keeps. The banner said `idle (starting)`, which only a start
-  keeps.
 - A resumed run that ends before re-entering its parked iteration, because its
   run deadline ran out or `max_iters` was lowered while it was parked, closes
   that iteration as the run ends: `failed` with `timed out` for the deadline,
   `stopped` for the cap. The iteration stayed `active` until the next run healed
   it as a crash, and the timeout reason named the iteration before it.
-- `fractal node list` no longer shows `PAUSED: billing` for a run of instant,
-  unpriced failures the loop judged provider outages, such as codex's
-  model-at-capacity refusals: the failed step row's reason now leads with
-  `provider unavailable:`, and that verdict breaks the census's billing streak
-  as it breaks the loop's own breaker.
 - A wait the loop holds a launch through — a retry backoff, a provider outage's
   doubling wait, the billing breaker's — ends at the run or iteration deadline
   instead of sleeping past it by up to its one-hour cap; the launch it was
@@ -348,8 +376,10 @@ may include breaking changes, each listed under a Breaking heading.
   background work ends, reopens the figure, so a step killed in that wake-up is
   priced the same way. Each reply written during the launch counts once, at its
   final token usage and its own model, including the sub-agent replies Claude
-  Code keeps in transcripts of their own beside the session's; the sum is booked
-  as a non-final figure when it is higher than the streamed one. With no
+  Code keeps in transcripts of their own beside the session's and a workflow's
+  sub-agents a folder deeper under `subagents/workflows/`, while a sub-agent
+  transcript last written before the launch started is skipped; the sum is
+  booked as a non-final figure when it is higher than the streamed one. With no
   readable transcript the step keeps the streamed figure (or `NULL`) and the
   agent logs `launch unpriced: <reason>`; a sub-agent transcript it cannot read
   is left out with `launch partly unpriced: <reason>`.
@@ -360,9 +390,6 @@ may include breaking changes, each listed under a Breaking heading.
   killed-step settle. The openrouter route's `modelUsage` table carries no
   split, so it stays at the five-minute rate. A direct step's result-frame cost
   was already right.
-- A killed Claude step's settle also reads the transcripts of a workflow's
-  sub-agents, kept a folder deeper under `subagents/workflows/`, and skips
-  sub-agent transcripts last written before the launch started.
 - A run with a native Claude step refreshes the price table
   (`~/.fractal/pricing.json`) at run start when it is missing or more than a day
   old. A Claude launch that ends without its result figure (killed, capped,
@@ -376,57 +403,44 @@ may include breaking changes, each listed under a Breaking heading.
   after the result were never counted. Once the process ends — exit 0, a
   non-zero exit, or the deadline — the transcript replies completing after the
   result are priced and added to its figure.
-- A Claude step whose record leaves part of a reply out (a transcript ends on a
-  user turn no reply follows, or on a reply line written before the reply
-  completed, which a completed sub-agent's last line can be) books the spend
+- A Claude step whose record leaves part of its spend out books the spend
   recorded, with no estimate for the missing part, and its row's metadata gains
-  `; partly unpriced`; the loop prints a `Warning:` line, and
-  `fractal node cost spent` and `breakdown` disclose how many such steps they
-  count. Anything else the figure leaves out marks it too: a malformed usage
-  count or tool id, an unreadable sub-agent transcript, and, with no result
-  frame, a missing session transcript or a failed settle. A launch killed while
-  a tool runs (some of a reply's parallel calls still out), and a workflow
-  sub-agent ending on a clean `StructuredOutput` result, are whole, and a launch
-  whose result frame named its cost counts only what follows the result, booked
-  once from the transcript rather than also from the stream. A reply the loop
-  ends at the output cap books the usage the stream recorded for it, so a
-  thinking-cap kill reads as whole unless the stream reported no usage. A Codex
-  step that ends non-zero is marked the same way when its session log ends on a
-  request in flight.
-- A Claude step whose stream shows a sub-agent still running after the result
-  frame is marked `; partly unpriced` when none of that later spend can be
-  priced: its transcript is missing or unreadable, its model is unpriced, or the
-  settle fails. The step booked the result's figure as whole, though the stream
-  had seen spend past it. A step whose stream shows nothing after its result
-  stays whole whatever the settle finds. Claude Code 2.1.300 holds its result
-  until background agents finish, so it streams no such frames.
-- A Claude step priced from its transcripts is marked `; partly unpriced` when a
-  reply in them holds tokens at a model with no price entry. That reply drops
-  out of the sum and the others still book, so the step read as whole while
-  missing its spend. This holds for a killed launch and, past a result, for a
-  reply after it. A synthetic reply, Claude Code's stand-in for an API error,
-  holds no tokens and leaves the step whole.
-- A Claude step priced from its transcripts is marked `; partly unpriced` when a
-  reply in them searched the web. Claude Code charges each search a fee beside
-  the tokens, and the price table does not carry it, so the step books the
-  reply's tokens and read as whole while missing the fee. This holds for a
-  killed launch and, past a result, for a reply after it. A web fetch bills only
-  its tokens and leaves the step whole.
-- A Claude step priced from its transcripts is marked `; partly unpriced` when a
-  reply in them bills above the price table's rates: Claude Code bills a reply
-  served in the `us` inference geography at 1.1 times its token cost, and a
-  prompt above a long-prompt threshold the table names for the model (such as
-  `input_cost_per_token_above_100k_tokens`) at higher rates. The step books the
-  base rates, so it read as whole while missing the difference. This holds for a
-  killed launch and, past a result, for a reply after it. A `global` reply, and
-  a large prompt at a model whose table entry names no threshold, stay whole.
-- A Claude step priced from its transcripts is marked `; partly unpriced` when a
-  reply in them ran in fast mode. Claude Code bills a reply whose usage names
-  `speed: "fast"` at twice the price table's rates on `claude-opus-5-5`,
-  `claude-opus-5` and `claude-opus-4-8`, and six times them on `claude-opus-4-6`
-  and `claude-opus-4-7`, so the step books the standard rates and read as whole
-  while missing the difference. This holds for a killed launch and, past a
-  result, for a reply after it.
+  `; partly unpriced`. A row that holds no figure is marked `; unpriced`
+  instead, even for a completed step, such as a waiting SYNC whose failed launch
+  left no transcript. The loop prints a `Warning:` line ending on the row's
+  marker, `(partly unpriced)` or `(unpriced)`, and `fractal node cost spent` and
+  `breakdown` count the partly unpriced steps on stderr as
+  `(some spend missing from the record)`. A transcript leaves part of a reply
+  out when it ends on a user turn no reply follows, or on a reply line written
+  before the reply completed, which a completed sub-agent's last line can be.
+  Anything else the figure leaves out marks it too: a malformed usage count or
+  tool id, an unreadable sub-agent transcript, and, with no result frame, a
+  missing session transcript or a failed settle. A step whose stream shows a
+  sub-agent still running after the result frame is marked when none of that
+  later spend can be priced: its transcript is missing or unreadable, its model
+  is unpriced, or the settle fails; a step whose stream shows nothing after its
+  result stays whole whatever the settle finds, and Claude Code 2.1.300 holds
+  its result until background agents finish, so it streams no such frames. A
+  reply priced from the transcripts, in a killed launch or past a result, marks
+  the step when the price table cannot price all of it, and the step books what
+  the table prices: tokens at a model with no price entry (that reply drops out
+  of the sum), a web search (Claude Code charges each search a fee beside the
+  tokens), a reply served in the `us` inference geography (billed at 1.1 times
+  its token cost), a prompt above a long-prompt threshold the table names for
+  the model (such as `input_cost_per_token_above_100k_tokens`), and a reply
+  whose usage names `speed: "fast"` (billed at twice the table's rates on
+  `claude-opus-5-5`, `claude-opus-5` and `claude-opus-4-8`, and six times them
+  on `claude-opus-4-6` and `claude-opus-4-7`). A synthetic reply, Claude Code's
+  stand-in for an API error, a web fetch, a `global` reply, and a large prompt
+  at a model whose table entry names no threshold leave the step whole. A launch
+  killed while a tool runs (some of a reply's parallel calls still out), and a
+  workflow sub-agent ending on a clean `StructuredOutput` result, are whole, and
+  a launch whose result frame named its cost counts only what follows the
+  result, booked once from the transcript rather than also from the stream. A
+  reply the loop ends at the output cap books the usage the stream recorded for
+  it, so a thinking-cap kill reads as whole unless the stream reported no usage.
+  A Codex step that ends non-zero is marked the same way when its session log
+  ends on a request in flight.
 - A Claude step's streamed cost estimate prices each reply once when parallel
   sub-agents interleave their frames on the stream. It priced a reply again at
   each of its frames that followed another reply's, so a step killed while
@@ -437,10 +451,6 @@ may include breaking changes, each listed under a Breaking heading.
   every frame at the step's model, so a step killed while a cheaper sub-agent
   ran, such as Haiku under Opus, could book above the figure its transcripts
   hold, and unmarked.
-- The loop's `Warning:` line for a step whose record leaves spend out ends on
-  the marker its row gets: `(unpriced)` when the row holds no figure, as when a
-  killed launch left no transcript and streamed no usage, and
-  `(partly unpriced)` when it holds one. It read `(partly unpriced)` either way.
 - A Claude step that resumes a session books its own spend instead of the
   session's running total. Claude Code 2.1.300 saves the total to the session
   transcript (a `cost-state` record) as each launch exits and counts a resumed
@@ -453,18 +463,12 @@ may include breaking changes, each listed under a Breaking heading.
   step is priced from its transcript as a killed step is, marked
   `; partly unpriced`, and the loop prints a `Warning:` line. A transcript with
   no saved total, as older Claude Code writes, books the result whole as before.
-  A step whose record leaves spend out and holds no figure, such as a waiting
-  SYNC whose failed launch left no transcript, is now marked `; unpriced` even
-  when it completed.
 - `fractal node chat` and the cockpit's chat pane show a reply on a resumed or
   forked Claude session at the turn's own cost instead of the session's running
   total. A fork counts its result figure on from the source session's saved
   total just as a resume does, so the turn reads that total before it spawns and
   shows the figure less it, as the loop books a resumed step, or `$?` when the
-  total cannot be read. The partly unpriced disclosure of
-  `fractal node cost spent` and `breakdown` reads
-  `(some spend missing from the record)`, since it also counts steps whose
-  result figure was refused.
+  total cannot be read.
 - A Claude step whose reply hits the output-token cap while still thinking no
   longer spends the step's time restarting one thought. Claude Code's
   auto-continuation drops the cut-off thinking, so the agent restarted the
@@ -503,9 +507,9 @@ may include breaking changes, each listed under a Breaking heading.
   agent pausing its own node finishes its step before the loop parks) was
   refunded to the deadlines as paused time, and a pause that a resume withdrew
   before the loop parked credited the time the node kept working.
-- `fractal pause` and `fractal node pause` refuse a `--reason` of `parked`, or
+  `fractal pause` and `fractal node pause` refuse a `--reason` of `parked`, or
   one starting with `via pause latch` or `resume preflight failed:`, the text
-  the loop records its own parks with, so the request can never count as a park.
+  the loop records its own parks with, so a request can never count as a park.
 - A mid-run edit of a node's spawn limits (`fractal node update --max-children`,
   `--max-depth`, `--max-descendants`) reaches the next step's environment — each
   step re-derives the template variables (the paths, the branch, and the spawn
@@ -536,8 +540,10 @@ may include breaking changes, each listed under a Breaking heading.
   neither refuses the merge nor rides the squash commit. A symlink, or a file
   the wiki's `exclude.patterns` matches, still refuses though the wiki would
   skip it, which is safe; committing or moving the file clears the refusal. A
-  wiki declared at the worktree root refuses the merge by name, since every
-  refresh would walk the whole worktree and leave the target dirty.
+  refresh that fails after creating an index removes it along with the rest of
+  the squash, so the retry lands. A wiki declared at the worktree root refuses
+  the merge by name, since every refresh would walk the whole worktree and leave
+  the target dirty.
 - The wikis fractal creates, the project wiki `fractal init` scaffolds and each
   node's memory wiki, accept dotted file names such as `controls.json`,
   `notes.txt`, and `fit.py`: their seeded ascii/identifier naming policy allows
@@ -582,14 +588,10 @@ may include breaking changes, each listed under a Breaking heading.
   the result frame's `modelUsage` table and sums them, so a sub-agent's spend on
   another model reaches the step's cost; a model the pricing chain cannot
   resolve closes unpriced instead of booking the parent alone.
-- The merge's post-squash index refresh takes its folder from `Node.merge`
-  (`merge.sh --target-wiki=<folder>`), the node's own project wiki as its spawn
-  gave it, instead of the target checkout's config with the node's `wiki` key as
-  the fallback: a root checked out in a linked worktree has no config there, so
-  a `config.json` hand-edited to another folder steered the refresh under
-  `--ignore-scope`, and a sub-project node merging into the root refreshed the
-  root's wiki rather than its own project's, leaving the landed pages out of
-  their index.
+- `node merge` refreshes the index of the project wiki the merged pages landed
+  in, the folder the node's spawn gave it: a node in a sub-project merging into
+  a target in another project, such as the root, refreshed the target project's
+  `wiki/` instead and left its landed pages out of their index.
 - A codex `error` frame inside the active turn — the frame codex writes when it
   retries a stream error and then completes the turn — no longer fails a step
   whose process exits 0; the recovered step is priced normally. A `turn.failed`
@@ -649,7 +651,8 @@ may include breaking changes, each listed under a Breaking heading.
   before the paid `codex` probe, naming the step and the gap
   (`a cost cap requires a model for <agent> in <step>`, or
   `cost cap set but model '<name>' (<step>) has no pricing entry`); the same gap
-  met at launch stays a step failure with the same words.
+  met at launch, from a step file edited mid-run, stays a step failure naming
+  the gap.
 - A drain run's lineage guard recognizes its seat's commands: it looks for the
   recorded agent invocation among the caller's ancestors, so a command the agent
   CLI starts in a process group or a session of its own (Claude Code starts each
@@ -710,17 +713,6 @@ may include breaking changes, each listed under a Breaking heading.
   force-added, and the baseline's output names it. The baseline force-added the
   whole seed directory, so every ignored file in it rode the commit onto the
   top-level branch.
-- `fractal node start` (with or without `--continue`), `fractal node resume`,
-  and `fractal resume` refuse an invalid effort ladder committed on the tree's
-  root branch before they change anything, naming the setting and its fault; a
-  resume checks every node it would relaunch. Such a ladder (a bad shape, an
-  unregistered agent, or the agent's own levels out of order) killed the loop's
-  boot after the command reported success, with nothing recorded: a fresh start
-  stayed `idle`, a continue stayed `idle` and refused its own retry, and a
-  resume stayed `paused` with the parked time charged against the run's
-  deadlines. A ladder committed after the command's check aborts the boot on
-  record: a start or continue ends `exited` with the reason on its run, and a
-  resume stays paused for the next resume.
 - `fractal node resume` and `fractal resume` re-validate the `config.json` of
   every node they would relaunch before they change anything, with the checks
   and messages `fractal node start` uses, and name the node that fails. A config

@@ -1224,7 +1224,7 @@ def test_merge_lands_a_paused_node_under_its_message(tmp_path: pathlib.Path) -> 
     """``node merge --message`` lands a paused node's committed work, keeping it paused.
 
     The squash lands under the given message, and the node stays paused for
-    ``fractal resume`` with its frozen step's uncommitted edit and scratch
+    ``fractal node resume`` with its frozen step's uncommitted edit and scratch
     file still in its worktree.
     """
     root = tmp_path

@@ -656,7 +656,7 @@ def node_merge(app: typer.Typer) -> typer.Typer:
 
         A paused node merges too: its committed work lands, its uncommitted
         mid-step state stays in its worktree, and it stays paused for
-        ``fractal resume``.
+        ``fractal node resume``.
         """
         node = resolve_target(path, node)
         # --delete tears down the subtree; pre-flight every one of the
@@ -1673,7 +1673,7 @@ def node_reap(app: typer.Typer) -> typer.Typer:
         owner = node.node_dir / PGID_FILE if node else None
         mark = pathlib.Path(abort_marker) if abort_marker else None
         reaped = fractal.util.process.reap(
-            pgid,
+            roots=pgid,
             worktree=worktree_dir,
             owner=owner,
             mark=mark,

@@ -278,7 +278,7 @@ reads it from each transcript it opens:
 - a reply whose final line has a null `stop_reason`, anywhere in the window: the
   line was written before the reply completed. A killed reply ends this way, and
   so can a completed sub-agent whose last line Claude Code wrote mid-stream
-  (seen on 2.1.286 to 2.1.299): its final text is there, but its usage is
+  (seen on 2.1.286 to 2.1.300): its final text is there, but its usage is
   partial, its `output_tokens` a handful on a full answer;
 - a window whose last turn is a `user` turn whose reply's request was in flight:
   a prompt, Claude's continuation past the output cap,

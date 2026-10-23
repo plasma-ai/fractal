@@ -981,8 +981,9 @@ header name, not position): ``timestamp``, ``node``, ``event_id``,
 ``exit_code``, ``metadata``, ``duration``, ``cost``. ``agent``, ``model``, and
 ``effort`` are a step's own — the agent that ran it and the model that served
 it, as its stream named them, and the effort its launch was handed — and are
-blank on every other row. The ``cost`` column is the row's
-own-node step cost only — subtree spend, children included, is
+blank on run and iteration rows and on events recorded outside a step; an
+event recorded during a step carries its step's. The ``cost`` column is the
+row's own-node step cost only — subtree spend, children included, is
 ``fractal node cost spent``. ``--limit <n>`` bounds the rows returned;
 ``--json`` emits a JSON array of row objects (mutually exclusive with
 ``--csv``).
@@ -1251,7 +1252,9 @@ Print a per-node table — columns ``node``, ``max_cost``, ``spent`` — for the
 current run (or ``--run <id>``). The target's own row leads, followed by each
 in-subtree descendant; descendants whose registry rows are gone but whose
 spend is still recorded append as ``<branch> (deleted)`` rows, so the rows
-always sum to ``cost spent``.
+always sum to ``cost spent``. The same two stderr disclosures as ``cost spent``
+follow the table: how many unpriced steps were excluded, and how many steps
+count only their recorded spend.
 
 .. code-block:: console
 
@@ -1306,9 +1309,9 @@ change retunes it, and clearing the reserve clears its mode; the derived
 ``reserve_mode`` is echoed when it changes. ``reserve_mode`` itself refuses:
 it records how the reserve was set.
 
-A *change* to the init-fixed keys ``root``, ``user``, and ``project`` always
-refuses: ``<key> is fixed at init and cannot be set.`` (Re-setting the
-currently stored value is accepted as a no-op.)
+A *change* to the init-fixed keys ``root``, ``user``, ``project``, and
+``wiki`` always refuses: ``<key> is fixed at init and cannot be set.``
+(Re-setting the currently stored value is accepted as a no-op.)
 
 .. code-block:: console
 

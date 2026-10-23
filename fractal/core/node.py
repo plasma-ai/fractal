@@ -6715,9 +6715,9 @@ class Node:
         """Run a commit and append its report to ``tmp/commit.log``.
 
         Each entry opens with a banner stamped with the UTC time and the sha
-        HEAD moved to (``no commit`` when it did not move, ``failed`` when
-        the commit raised); a failed commit's ``Error:`` text stands in for
-        the report. A failed write warns and never fails the commit.
+        HEAD moved to, a failed push's landed commit included; when HEAD did
+        not move, ``failed`` if the commit raised and ``no commit`` if not.
+        A failed commit's ``Error:`` text stands in for the report. A failed write warns and never fails the commit.
 
         Args:
             run: The commit to run, returning its report.

@@ -304,7 +304,7 @@ Plain values
        error.
    * - ``reserve_mode``
      - ``default`` for init's own reserve, ``explicit`` for a flag or preset
-       one; absent without a reserve
+       one; ``null`` without a reserve
      - Where the stored ``reserve_budget`` came from: a cap change retunes a
        ``default`` reserve and leaves an ``explicit`` one (see
        `The cleanup reserve`_). Recorded by fractal; ``config set`` refuses

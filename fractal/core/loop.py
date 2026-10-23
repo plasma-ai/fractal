@@ -19,11 +19,13 @@ from typing import Any, Optional, Union
 
 import fractal.util
 from fractal.constants import (
+    FRACTAL_FOLDER,
     LATCH_PARK_REASON_PREFIX,
     PARK_REASON,
     PAUSE_ABORT_FILE,
     PGID_FILE,
     PREFLIGHT_PARK_REASON_PREFIX,
+    SETTINGS_FILE,
     SOCKET_FILE,
     STEER_REASON_PREFIX,
     STEP_PGID_FILE,
@@ -1366,7 +1368,9 @@ class Loop:
         # reverts them (--no-verify, unguarded: failing loud beats destroying
         # them); the excludes-scoped -uall probe keeps runtime artifacts from
         # triggering or riding the commit, and the add takes its listed paths
-        # -- an exclude-riding add silently stages nothing over an untracked tree
+        # without the excludes: git before 2.56 strips the paths' common
+        # directory from each exclude, which can then match every untracked
+        # file, so an add carrying them stages no new file (see commit._sweep)
         cmd = [
             '--no-optional-locks',
             'status',
@@ -5492,7 +5496,12 @@ def _effort_ladders(node: Node) -> dict[str, tuple[tuple[str, ...], str]]:
         ref=ref,
         project=node.project_path,
     )
-    _check_effort_ladders(ladders, ref=ref, root=node.db.path.parent)
+    _check_effort_ladders(
+        ladders=ladders,
+        ref=ref,
+        project=node.project_path,
+        root=node.db.path.parent,
+    )
     return ladders
 
 
@@ -5500,6 +5509,7 @@ def _check_effort_ladders(
     ladders: dict[str, tuple[tuple[str, ...], str]],
     *,
     ref: str,
+    project: str,
     root: pathlib.Path,
 ) -> None:
     """Refuse committed effort ladders that name no agent or invert one.
@@ -5513,6 +5523,8 @@ def _check_effort_ladders(
     Args:
         ladders: The committed ladders, keyed by agent name.
         ref: The root branch they were read from.
+        project: The project whose settings file holds them (``.`` for
+            the repo root).
         root: The tree's data dir, whose hook file registers custom agents.
 
     Raises:
@@ -5520,8 +5532,9 @@ def _check_effort_ladders(
             agent's own levels out of the agent's order.
 
     """
+    settings = pathlib.PurePosixPath(project, FRACTAL_FOLDER, SETTINGS_FILE)
     for name, (levels, _) in ladders.items():
-        setting = f'"effort_ladder.{name}" in .fractal/.settings.json on {ref!r}'
+        setting = f'"effort_ladder.{name}" in {settings} on {ref!r}'
         try:
             declared = resolve(name, root=root).effort_levels
         except ValueError as error:

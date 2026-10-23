@@ -87,7 +87,7 @@ mirror the walk's other exclusions: a symlink, or a file the wiki's
 `exclude.patterns` matches, still refuses though the refresh would skip it,
 which is safe, and committing or moving the file clears the refusal. The refresh
 stages only tracked files it updated, indexes it created, and a root's `.wiki/`
-state. The memory wiki is the merging node's own, and its next commit lands what
+state. The memory wiki is the target's, and the target's next commit lands what
 it holds. A refresh step that fails restores the target like a conflict; the
 reset keeps untracked files, so the merge also removes each index and `.wiki/`
 file the refresh created and had not yet staged, and the retry lands instead of

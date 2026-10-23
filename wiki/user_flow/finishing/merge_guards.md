@@ -32,8 +32,8 @@ writes to the worktree or goes live while a merge runs.
 ## Paused nodes
 
 A paused node merges without leaving `paused`: it runs no loop and no agent, and
-its run, iteration, and step rows stay open for `fractal resume` to adopt. A
-resumed loop waits for a running merge before it goes `active`, as every boot
+its run, iteration, and step rows stay open for `fractal node resume` to adopt.
+A resumed loop waits for a running merge before it goes `active`, as every boot
 does, so the merge never carries the worktree under a starting agent; a merge
 that waited while the node left `paused` refuses, and a commit the node gains
 during the merge anyway (a hand commit) refuses the merge
