@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+import fractal.util.git
 from fractal.core.node import Node
 from tests._helpers import _await_ready, _git
 
@@ -39,18 +40,20 @@ _FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
 # set to it is stale and a refreshing read would rewrite the index
 _AGED_NS = 1_000_000_000 * 10**9
 
-# creates the index lock as git does (an exclusive create), holds it for
-# argv[2] seconds, then removes it; the lock file is its own ready marker
+# creates the index lock as git does (an exclusive create), holds it until
+# the release marker argv[2] appears, then removes it; the lock file is its
+# own ready marker, and a holder never released exits 1 within a minute
 _INDEX_LOCK_HOLDER = (
-    'import os, sys, time; '
-    'os.close(os.open(sys.argv[1], os.O_CREAT | os.O_EXCL | os.O_WRONLY)); '
-    'time.sleep(float(sys.argv[2])); '
-    'os.remove(sys.argv[1])'
+    'import os, pathlib, sys, time\n'
+    'lock, release = (pathlib.Path(arg) for arg in sys.argv[1:])\n'
+    'os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))\n'
+    'deadline = time.monotonic() + 60\n'
+    'while not release.exists():\n'
+    '    if time.monotonic() > deadline:\n'
+    '        sys.exit(1)\n'
+    '    time.sleep(0.02)\n'
+    'lock.unlink()\n'
 )
-
-# how long the holder keeps the lock: under a second, as a reader's refresh
-# or an operator's quick git command would
-_BRIEF_HOLD_SECONDS = 0.8
 
 
 # ------ reads
@@ -204,8 +207,8 @@ _MOMENTS = [
 ]
 
 
-@pytest.mark.parametrize(argnames='pipeline', argvalues=_PIPELINES)
-@pytest.mark.parametrize(argnames='moment', argvalues=_MOMENTS)
+@pytest.mark.parametrize('pipeline', _PIPELINES)
+@pytest.mark.parametrize('moment', _MOMENTS)
 def test_commit_waits_out_a_briefly_held_index_lock(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -214,28 +217,41 @@ def test_commit_waits_out_a_briefly_held_index_lock(
 ) -> None:
     """A commit meeting another process's brief index lock waits and lands.
 
-    The holder takes the lock as git does and releases it within a second;
-    the pipeline call that meets it fails on the held lock, waits, and
-    retries once, so the commit lands with nothing removed by fractal.
+    The holder takes the lock as git does and lets it go while the pipeline
+    waits; the pipeline call that meets it fails on the held lock, waits,
+    and retries once, so the commit lands with nothing removed by fractal.
     """
     worktree, commit = pipeline(tmp_path)
     lock = _git_path(worktree, 'index.lock')
+    release = tmp_path / 'gate_release'
     head = _git(worktree, 'rev-parse', 'HEAD').stdout
     holders: list[subprocess.Popen] = []
+    met: list[subprocess.CompletedProcess] = []
 
     def _hold() -> None:
         holder = subprocess.Popen(
-            [
-                sys.executable,
-                '-c',
-                _INDEX_LOCK_HOLDER,
-                f'{lock}',
-                f'{_BRIEF_HOLD_SECONDS}',
-            ]
+            [sys.executable, '-c', _INDEX_LOCK_HOLDER, f'{lock}', f'{release}']
         )
         holders.append(holder)
         _await_ready(lock, proc=holder, deadline=time.monotonic() + 10)
 
+    real_index_locked = fractal.util.git.index_locked
+
+    def releasing_index_locked(result: subprocess.CompletedProcess) -> bool:
+        # a write that met the held lock releases the holder and outlasts it,
+        # so the lock is gone by the one retry
+        locked = real_index_locked(result)
+        if locked:
+            met.append(result)
+            release.touch()
+            for holder in holders:
+                holder.wait(timeout=10)
+        return locked
+
+    # the shim pins the window between the failed write and its retry at the
+    # lock check every retry site makes, so the wait itself is zeroed
+    monkeypatch.setattr(fractal.util.git, 'index_locked', releasing_index_locked)
+    monkeypatch.setattr(fractal.util.git, 'INDEX_LOCK_WAIT', 0)
     try:
         if moment == 'stage':
             _hold()
@@ -249,15 +265,16 @@ def test_commit_waits_out_a_briefly_held_index_lock(
                 holder.kill()
             holder.wait()
 
-    # the holder released its own lock, and the commit landed
+    # one write met the lock, the holder released it, and the commit landed
+    assert len(met) == 1
     assert [holder.returncode for holder in holders] == [0]
     assert _git(worktree, 'rev-parse', 'HEAD').stdout != head
     subject = _git(worktree, 'log', '-1', '--format=%s').stdout.strip()
     assert subject.endswith(': init (configure)')
 
 
-@pytest.mark.parametrize(argnames='pipeline', argvalues=_PIPELINES)
-@pytest.mark.parametrize(argnames='moment', argvalues=_MOMENTS)
+@pytest.mark.parametrize('pipeline', _PIPELINES)
+@pytest.mark.parametrize('moment', _MOMENTS)
 def test_commit_fails_with_git_message_on_a_held_index_lock(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -280,6 +297,8 @@ def test_commit_fails_with_git_message_on_a_held_index_lock(
         lock.write_bytes(b'held\n')
         found.append(_index_state(lock)[:3])
 
+    # the lock outlasts any wait, so the wait is zeroed
+    monkeypatch.setattr(fractal.util.git, 'INDEX_LOCK_WAIT', 0)
     if moment == 'stage':
         _hold()
     else:

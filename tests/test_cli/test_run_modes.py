@@ -1510,13 +1510,14 @@ def test_abort_falls_back_when_the_reap_helper_fails(repo: dict, script: str) ->
         assert not (node_dir / '.pgid').exists()
         assert not (node_dir / '.step_pgid').exists()
         groups = [step_pgid, loop_pgid]
-    # kill delivery is asynchronous: wait for the signaled groups to empty
+    # kill delivery is asynchronous: wait for the signaled groups to empty,
+    # re-arming the wait as each survivor dies
     gone = _await_progress(
-        check=lambda: not any(_group_alive(group) for group in groups),
-        progress=lambda: None,
+        check=lambda: not _alive_group_pids(groups),
+        progress=lambda: tuple(_alive_group_pids(groups)),
         deadline=time.monotonic() + 15,
     )
-    assert gone, [group for group in groups if _group_alive(group)]
+    assert gone, _alive_group_pids(groups)
 
 
 def test_tree_latch_parks_a_booting_loop(repo: dict) -> None:
@@ -4164,13 +4165,19 @@ def _alive_pids(pids: list[int]) -> list[int]:
     return alive
 
 
-def _group_alive(pgid: int) -> bool:
-    """Whether process group ``pgid`` still answers a null signal."""
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+def _alive_group_pids(pgids: list[int]) -> list[int]:
+    """The pids still running in process groups ``pgids`` (zombies count as dead)."""
+    result = subprocess.run(
+        ['ps', '-A', '-o', 'pid=,pgid=,stat='],
+        capture_output=True,
+        text=True,
+    )
+    alive = []
+    for line in result.stdout.splitlines():
+        pid, pgid, stat = line.split(None, 2)
+        if int(pgid) in pgids and not stat.startswith('Z'):
+            alive.append(int(pid))
+    return alive
 
 
 def _tool_pids(capture: pathlib.Path) -> list[int]:

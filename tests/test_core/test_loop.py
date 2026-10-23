@@ -66,6 +66,7 @@ from tests.test_impl.rollouts import spawning_thread
 
 from ._agents import SampleAgent
 from .conftest import _record_step_cost, _spawn_parent_child
+from .streams import claude_background_wait
 
 __all__ = [
     'test_step_load_parses_strict_flat_scalar_frontmatter',
@@ -154,6 +155,8 @@ __all__ = [
     'test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds',
     'test_token_priced_boot_serves_the_cached_table_offline',
     'test_a_malformed_offline_mode_aborts_the_boot',
+    'test_preflight_logs_what_a_passed_probe_spent',
+    'test_preflight_refuses_a_cap_over_an_unpriced_model',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -349,11 +352,10 @@ class TrackingLoop(MockLoop):
         return event
 
 
-# a live claude 2.1.300 capture (trimmed, session as @SESSION@): a background
-# command, a turn's end and result, then claude's wake-up and a second reply
-_BACKGROUND_WAIT = (
-    pathlib.Path(__file__).parent / 'streams' / 'claude_background_wait.jsonl'
-)
+# the live background-wait capture's frames, its session as the stand-in's SID
+_BACKGROUND_WAIT = [
+    json.loads(line.replace('@SESSION@', 'SID')) for line in claude_background_wait
+]
 
 # claude stream-json frames for the scripted stand-in (SID: the
 # launch's session); a thinking block's start holds the clock until
@@ -2094,10 +2096,11 @@ def test_a_dead_stream_reaps_the_tree_and_spares_the_index_lock(
         encoding='utf-8',
     )
     pid_file = tmp_path / 'tool.pid'
+    # the stand-in waits up to 10s for the tool's pid, then breaks the stream
     agent = FaultingAgent(
         loop_node,
         f'{sys.executable} {tool} {lock} {pid_file} >/dev/null 2>&1 &'
-        f' while [ ! -s {pid_file} ]; do sleep 0.05; done;'
+        f' for _ in $(seq 200); do [ -s {pid_file} ] && break; sleep 0.05; done;'
         " echo '{}'; exec sleep 30",
     )
     # leave real uncommitted work for the backstop sweep to save
@@ -2616,7 +2619,7 @@ _MISSPELLED_LADDER = {
 }
 
 
-@pytest.mark.parametrize(argnames='launch', argvalues=['start', 'continue', 'resume'])
+@pytest.mark.parametrize('launch', ['start', 'continue', 'resume'])
 def test_launch_verbs_refuse_an_invalid_effort_ladder(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -2749,7 +2752,7 @@ _BAD_CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize(argnames=('config', 'match'), argvalues=_BAD_CONFIGS)
+@pytest.mark.parametrize(('config', 'match'), _BAD_CONFIGS)
 def test_resume_refuses_an_invalid_config(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -2806,7 +2809,7 @@ def test_tree_resume_refuses_a_descendants_invalid_config(
     assert user.db.read('events') == events
 
 
-@pytest.mark.parametrize(argnames=('config', 'match'), argvalues=_BAD_CONFIGS)
+@pytest.mark.parametrize(('config', 'match'), _BAD_CONFIGS)
 def test_a_config_broken_after_the_resume_check_aborts_the_boot(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -2972,8 +2975,7 @@ def test_a_capped_or_idle_sync_runs_to_its_result(
         # the live capture: the agent backgrounds a command and ends its turn
         # (a result), claude waits, then a task notice wakes it to finish
         pytest.param(
-            f"sed -n -e 's/@SESSION@/SID/g' -e '1,18p' {_BACKGROUND_WAIT}; sleep 3;"
-            f" sed -n -e 's/@SESSION@/SID/g' -e '19,$p' {_BACKGROUND_WAIT}",
+            _claude_script(*_BACKGROUND_WAIT[:18], 'sleep 3', *_BACKGROUND_WAIT[18:]),
             id='background-wait',
         ),
         # a tool call seen only on its assistant frame (no partial messages)

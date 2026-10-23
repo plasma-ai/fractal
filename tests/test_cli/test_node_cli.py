@@ -1246,7 +1246,7 @@ def test_merge_lands_a_paused_node_under_its_message(tmp_path: pathlib.Path) -> 
     assert 'Squash-merged main.task into main' in result.stdout, result.stdout
     assert _git(root, 'log', '-1', '--format=%B').stdout.strip() == message
     assert (root / 'feature.txt').read_text(encoding='utf-8') == 'the work\n'
-    assert Node(task).status() == 'paused'
+    assert _run(task, 'node', 'status').stdout.strip() == 'paused'
     assert (task / 'README.md').read_text(encoding='utf-8') == 'frozen edit\n'
     assert (task / 'scratch.txt').read_text(encoding='utf-8') == 'frozen scratch\n'
     status = _git(task, 'status', '--porcelain').stdout.splitlines()
