@@ -2542,7 +2542,9 @@ def test_scoped_child_baseline_commits_init_gitattributes(
     sweep init's own artifact, like the user-init commit does -- over a base
     with no file, and over one whose own lines the tool appends to, compared
     byte for byte: a stripped read of HEAD's copy would lose a leading blank
-    line or trailing whitespace and miss init's edit.
+    line or trailing whitespace and miss init's edit. The memory wiki's own
+    ``.gitattributes``, the page attribute the wiki tool writes in its root,
+    commits with the node's seed.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     if base is not None:
@@ -2576,6 +2578,12 @@ def test_scoped_child_baseline_commits_init_gitattributes(
     assert committed.startswith(base or ''), committed
     lines = [line for line in committed.splitlines() if line]
     assert lines[-2:] == ['# Wiki index merge driver', '**/_index.md merge=wiki']
+    # the memory wiki's page attribute is committed with the seed
+    attributes = node.node_dir / 'memory' / '.gitattributes'
+    relpath = attributes.relative_to(project_dir).as_posix()
+    result = _git(project_dir, 'show', f'HEAD:{relpath}')
+    committed = result.stdout
+    assert '*.md merge=wiki' in committed.splitlines()
 
 
 @pytest.mark.parametrize(

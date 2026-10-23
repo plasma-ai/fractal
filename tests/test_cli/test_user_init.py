@@ -342,9 +342,12 @@ def test_init_warns_about_a_missing_wiki_merge_driver_line(
 def test_commit_init_sweeps_the_gitattributes_edit(tmp_path: pathlib.Path) -> None:
     """``commit --init`` leaves a clean tree, ``.gitattributes`` included.
 
-    ``wiki init`` writes the ``**/_index.md merge=wiki`` attribute and leaves
-    committing it to the caller. The committed-line pin is exact so a future
-    driver rename in the wiki package fails here loudly.
+    ``wiki init`` writes the ``**/_index.md merge=wiki`` attribute in the
+    worktree-root ``.gitattributes`` and the ``*.md merge=wiki`` attribute
+    in the wiki root's own, and leaves committing both to the caller: the
+    root file rides as init's own edit, the wiki root's with the wiki
+    folder. The committed-line pins are exact so a future driver rename in
+    the wiki package fails here loudly.
     """
     repo = _init_repo(tmp_path / 'repo')
     assert _run(repo, 'init').returncode == 0
@@ -357,6 +360,8 @@ def test_commit_init_sweeps_the_gitattributes_edit(tmp_path: pathlib.Path) -> No
     assert _git(repo, 'status', '--porcelain').stdout.strip() == ''
     committed = _git(repo, 'show', 'HEAD:.gitattributes').stdout
     assert '**/_index.md merge=wiki' in committed.splitlines()
+    committed = _git(repo, 'show', 'HEAD:wiki/.gitattributes').stdout
+    assert '*.md merge=wiki' in committed.splitlines()
 
 
 def test_commit_init_never_sweeps_user_gitattributes_edits(
