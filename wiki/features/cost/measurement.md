@@ -242,6 +242,12 @@ the rest, and a reply holding tokens at an unpriced model marks the step
 The parser prices each reply once, at its first frame: it keeps every message id
 it priced, since parallel sub-agents interleave their replies' frames on the
 stream, so a reply's later frames never price again whatever lands between them.
+Each frame prices at the model it names, since a sub-agent runs its own (a
+cheaper one priced at the parent's rates would lift the estimate above the
+transcripts' figure, and the settle keeps the higher); a frame naming none
+prices at the top-level model, and so does a synthetic reply's (`<synthetic>`,
+Claude Code's stand-in for an API error), whose usage of zeros books a known
+`$0`.
 
 For a launch whose stream did not end final, the sum lands as a `final=False`
 figure when it exceeds the recorded one -- both undercount a killed launch, so
