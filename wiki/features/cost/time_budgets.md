@@ -102,8 +102,10 @@ The loop records its own `pause` event as it parks, at a pause checkpoint, at a
 boot the pause latch parks, or at a resume boot whose preflight fails; the walk
 tells these from the pause verb's request by their reason (`parked`,
 `via pause latch (...)`, `resume preflight failed: ...`), which the loop writes
-from shared constants. A resume that withdraws a pending pause before any park
-therefore credits nothing.
+from shared constants. Both pause verbs refuse an operator reason that uses that
+text, a prefix even without its trailing space (a fanned-out reason gains a
+`(via pause of ...)` suffix), so a request row is never read as a park. A resume
+that withdraws a pending pause before any park therefore credits nothing.
 
 Edge semantics follow the event log's meaning: a failed resume never relaunched
 the loop, so only a completed resume closes a span; duplicate parks collapse
