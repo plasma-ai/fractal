@@ -87,6 +87,7 @@ __all__ = [
     'test_a_failed_active_stamp_names_the_status_the_node_keeps',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
+    'test_continue_cleanup_discards_staged_project_changes',
     'test_stream_fault_attributes_to_the_stream_side',
     'test_agent_borne_stream_error_keeps_the_exit_code',
     'test_a_dead_stream_reaps_the_tree_and_spares_the_index_lock',
@@ -1916,8 +1917,7 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
     loop._clean_worktree()
     assert _git('rev-parse', 'HEAD') == head
     # operator git surgery commits cleanly: a staged rename and a staged
-    # deletion are already fully staged, so the cleanup must not re-name
-    # their gone paths to the add
+    # deletion ride the operator-edit commit, gone paths and all
     _git('mv', f'{node.node_dir / "note.md"}', f'{node.node_dir / "moved.md"}')
     _git('rm', '-q', f'{node.node_dir / "config.json"}')
     loop._clean_worktree()
@@ -1927,6 +1927,97 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
     # the staged deletion committed: config.json's row is gone from the
     # index (nothing on disk to back up, so the config restore skips too)
     assert 'config.json' not in tracked
+
+
+@pytest.mark.parametrize(
+    argnames=('wrote', 'staging', 'carried'),
+    argvalues=[
+        # an edit to a tracked project file
+        pytest.param('README.md', ['add', 'README.md'], [], id='modified'),
+        # a new project file
+        pytest.param('added.md', ['add', 'added.md'], [], id='added'),
+        # a new project file the project ignores, force-added
+        pytest.param(
+            '.venv/added.py',
+            ['add', '-f', '.venv/added.py'],
+            [],
+            id='forced',
+        ),
+        # a deleted project file
+        pytest.param(None, ['rm', '-q', 'README.md'], [], id='deleted'),
+        # a rename inside the project
+        pytest.param(None, ['mv', 'README.md', 'moved.md'], [], id='renamed'),
+        # a rename into the node folder: its node-folder side is an operator
+        # edit, its project side is not
+        pytest.param(
+            None,
+            ['mv', 'README.md', '{node}/moved.md'],
+            ['{node}/moved.md'],
+            id='moved_in',
+        ),
+        # a rename out of the node folder, split the same way
+        pytest.param(
+            None,
+            ['mv', '{node}/NODE.md', 'moved.md'],
+            ['{node}/NODE.md'],
+            id='moved_out',
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    argnames='steered',
+    argvalues=[
+        pytest.param(False, id='unsteered'),
+        pytest.param(True, id='steered'),
+    ],
+)
+def test_continue_cleanup_discards_staged_project_changes(
+    node_with_db: Node,
+    wrote: Optional[str],
+    staging: list[str],
+    carried: list[str],
+    steered: bool,
+) -> None:
+    """The continue cleanup commits node-folder edits alone and discards the rest.
+
+    A continued node starts from its last committed state plus the
+    operator's node-folder edits, so a project change the operator staged is
+    discarded like an unstaged one and never rides the operator-edit commit,
+    whose files are the node folder's alone. A staged rename across the node
+    folder's edge splits the same way: its node-folder side is committed and
+    its project side discarded.
+    """
+    node = node_with_db
+    repo = node.worktree
+    prefix = node.node_dir.relative_to(repo).as_posix()
+    # the node folder committed, as an initialized node's is
+    (node.node_dir / 'NODE.md').write_text('# Charter\n', encoding='utf-8')
+    _git(repo, 'add', prefix)
+    _git(repo, 'commit', '-q', '-m', 'seed')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    # the operator's staged project change, and their steering note
+    if wrote is not None:
+        path = repo / wrote
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('staged\n', encoding='utf-8')
+    _git(repo, *[arg.format(node=prefix) for arg in staging])
+    committed = [path.format(node=prefix) for path in carried]
+    if steered:
+        (node.node_dir / 'note.md').write_text('steer\n', encoding='utf-8')
+        committed.append(f'{prefix}/note.md')
+    MockLoop(node)._clean_worktree()
+    # nothing the operator left, staged or not, outlives the clean
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+    assert status == ''
+    assert (repo / 'README.md').read_text(encoding='utf-8') == '# test\n'
+    # the operator-edit commit carries the node folder's edits alone, and
+    # without any there is no commit
+    if not committed:
+        assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+        return
+    assert _git(repo, 'rev-parse', 'HEAD~').stdout == head
+    cmd = ['diff-tree', '-r', '--name-only', '--no-commit-id', 'HEAD']
+    assert sorted(_git(repo, *cmd).stdout.split()) == sorted(committed)
 
 
 def test_stream_fault_attributes_to_the_stream_side(
@@ -8329,6 +8420,10 @@ def test_continue_leaves_a_pending_merge_for_the_agent(
     assert _git(repo, 'rev-parse', 'HEAD').stdout == head
     merge_head = _git(repo, 'rev-parse', '--git-path', 'MERGE_HEAD').stdout
     assert (repo / merge_head.strip()).is_file()
+    # nothing is unstaged or removed either
+    staged = _git(repo, 'diff', '--cached', '--name-only').stdout
+    assert staged.split() == ['shared.txt']
+    assert (node.node_dir / 'note.md').read_text(encoding='utf-8') == 'steer\n'
     assert 'skipped the operator-edit commit and the clean' in capsys.readouterr().out
     assert '## Git Pending Mode' in loop.prompts[0]
     assert 'a merge in progress (MERGE_HEAD)' in loop.prompts[0]
