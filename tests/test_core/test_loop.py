@@ -3279,30 +3279,39 @@ def test_streamed_background_spend_is_booked_once(
 
 
 @pytest.mark.parametrize(
-    argnames='record',
+    argnames=('record', 'streamed'),
     argvalues=[
         # claude's record never reached disk
-        pytest.param('no transcript', id='no-transcript'),
+        pytest.param('no transcript', True, id='no-transcript'),
         # a reply's output count is wire noise
-        pytest.param('malformed entry', id='malformed-entry'),
+        pytest.param('malformed entry', True, id='malformed-entry'),
+        # no record, and the stream flushed no estimate either
+        pytest.param('no transcript', False, id='no-transcript-no-estimate'),
     ],
 )
 def test_unreadable_record_marks_the_killed_step(
     loop_node: Node,
     scripted_claude: Callable[..., ScriptedClaude],
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
     record: str,
+    streamed: bool,
 ) -> None:
     """A killed launch whose record the settle cannot read whole is partly unpriced.
 
     With no transcript, the step keeps the stream's estimate, which leaves
     out whatever the record would have added. A count that is not a
     number prices as nothing rather than failing the settle. Either way
-    the row says its figure is partial.
+    the row says its figure is partial; with no estimate either, the row
+    holds no figure and is unpriced. The pane's warning names the row's
+    marker.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
     first = {'input_tokens': 100, 'output_tokens': 1}
-    stalled = _claude_script(_INIT, _assistant_frame('msg_a', first), 'exec sleep 30')
+    frames: list[Any] = [_INIT]
+    if streamed:
+        frames.append(_assistant_frame('msg_a', first))
+    stalled = _claude_script(*frames, 'exec sleep 30')
     finished = _claude_script(_INIT, _RESULT)
     transcripts: list[Optional[list[dict[str, Any]]]] = [None]
     if record == 'malformed entry':
@@ -3313,12 +3322,21 @@ def test_unreadable_record_marks_the_killed_step(
         transcripts=transcripts,
     )
     ScriptedLoop(loop_node, agent).run()
+    marker = 'partly unpriced' if streamed else 'unpriced'
     assert _step_rows(loop_node)[0] == (
-        'PLAN/stopped/steered: no action for 1s; partly unpriced'
+        f'PLAN/stopped/steered: no action for 1s; {marker}'
     )
     rows = loop_node.db.read('steps', where={'node': loop_node.branch})
     killed = min(rows, key=lambda row: row['step_id'])
-    assert killed['cost'] == pytest.approx(_price(first))
+    if streamed:
+        assert killed['cost'] == pytest.approx(_price(first))
+    else:
+        assert killed['cost'] is None
+    err = capsys.readouterr().err
+    assert (
+        "Warning: part of the launch's spend is missing from its record; its"
+        f' step books the spend recorded ({marker})'
+    ) in err
 
 
 @pytest.mark.parametrize(
@@ -3947,7 +3965,8 @@ def test_unsettled_result_figure_books_the_launch_record_instead(
     whole or less the total: the step books what its own transcript window
     prices, as a killed launch does, marked partly unpriced. A window that
     prices nothing leaves the completed step's cost unknown, marked
-    unpriced and counted as such.
+    unpriced and counted as such. The pane's warning names the row's
+    marker.
     """
     monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
     session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
@@ -3982,7 +4001,11 @@ def test_unsettled_result_figure_books_the_launch_record_instead(
     # only the first launch's result figure ever reached the ledger
     assert [cost for cost, final in agent.flushed if final] == [_SAVED_TOTALS[0]]
     err = capsys.readouterr().err
-    assert "Warning: the launch's result figure could not be settled" in err
+    assert (
+        "Warning: the launch's result figure could not be settled against its"
+        " session's earlier spend; its step books the spend recorded"
+        f' ({marker})'
+    ) in err
 
 
 def test_failed_codex_attempts_count_toward_the_cap(

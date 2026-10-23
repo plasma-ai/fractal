@@ -86,12 +86,13 @@ class ClaudeParser(StreamParser):
     def __init__(self: ClaudeParser, *, model: Optional[str] = None) -> None:
         """Initialize ``ClaudeParser``.
 
-        Track the last-priced message id to skip per-block repeats.
+        Track the priced message ids to skip a reply's repeated frames.
         """
         super().__init__(model=model)
         # claude emits one assistant frame per content block, each repeating
-        # the message-level usage, so a message id is priced only once
-        self._priced_id: Optional[str] = None
+        # the message-level usage, and parallel sub-agents interleave their
+        # frames, so each message id is priced only once
+        self._priced_ids: set[str] = set()
         # the newest top-level reply, the content block types across its
         # frames, and whether its thinking cap was reported -- the cap's two
         # signals (the API's own stop and claude's continuation) report once
@@ -287,8 +288,9 @@ class ClaudeParser(StreamParser):
             # pricing its frames here too would count it twice
             if self.final and not top_level:
                 usage = None
-            if usage and (message_id is None or message_id != self._priced_id):
-                self._priced_id = message_id
+            if usage and (message_id is None or message_id not in self._priced_ids):
+                if message_id is not None:
+                    self._priced_ids.add(message_id)
                 cost = self._message_cost(usage)
                 if cost is not None:
                     self.cost = (self.cost or 0.0) + cost
@@ -688,7 +690,8 @@ class ClaudeAgent(Agent):
         holds a count the pricing cannot read, a reply holding tokens at a
         model with no price, and a reply whose spend runs past the price
         table's rates (a web search's fee, the ``us`` geography's premium,
-        or a prompt above the model's long-prompt threshold).
+        fast mode's multiple, or a prompt above the model's long-prompt
+        threshold).
 
         With ``after``, the result frame's figure stands and only the
         replies completing after it price: claude counts a reply's cost
@@ -1131,9 +1134,11 @@ def _usage_cost(
     (``server_tool_use.web_search_requests``) bills a fee the price table
     does not carry, so a reply that searched is never whole. Neither is one
     whose spend runs past the table's rates: a reply served in the ``us``
-    inference geography, billed at a premium, or one whose prompt is above
-    a long-prompt threshold the model's entry names, billed at higher rates
-    (the ``_above_<N>k_tokens`` keys, not priced here).
+    inference geography, billed at a premium, one served in fast mode
+    (``speed: "fast"``), billed at a multiple of the model's rates, or one
+    whose prompt is above a long-prompt threshold the model's entry names,
+    billed at higher rates (the ``_above_<N>k_tokens`` keys, not priced
+    here).
 
     Returns:
         The cost (``None`` for an unknown or unpriced model), and whether
@@ -1178,6 +1183,10 @@ def _usage_cost(
     # claude bills a reply served in the us inference geography at a premium
     # over its token cost, which the price table does not carry
     if usage.get('inference_geo') == 'us':
+        whole = False
+    # claude bills a reply served in fast mode at a multiple of its model's
+    # rates, which the price table does not carry either
+    if usage.get('speed') == 'fast':
         whole = False
     # look up per-token rates (missing cache rates fall back to the input rate);
     # with none, every count is unpriced, though a usage of zeros (a synthetic
