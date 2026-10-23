@@ -192,23 +192,30 @@ def test_list_judges_the_boot_window_with_one_tmux_listing(
     never looks, so its rows read ``starting`` as unknown, never as false.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
-    # the boot window: .status still 'idle', the tmux session already live
-    child.status_set('idle')
+    # two rows in the boot window: .status still 'idle', the tmux sessions
+    # already live
+    for node in (parent, child):
+        node.status_set('idle')
     calls: list[Optional[str]] = []
 
     def probe(socket: Optional[str] = None) -> frozenset[str]:
         calls.append(socket)
-        return frozenset({child.tmux_session})
+        return frozenset({parent.tmux_session, child.tmux_session})
 
     monkeypatch.setattr('fractal.util.tmux.probe', probe)
-    rows = {row['node']: row for row in parent.list(decorated=True)}
-    row = rows[child.branch]
-    assert (row['status'], row['detail'], row['starting']) == ('idle', 'starting', True)
+    rows = {row['node']: row for row in Node(git_repo).list(decorated=True)}
+    for node in (parent, child):
+        row = rows[node.branch]
+        assert (row['status'], row['detail'], row['starting']) == (
+            'idle',
+            'starting',
+            True,
+        )
     assert len(calls) == 1, calls
     # an undecorated listing never looks
     calls.clear()
-    rows = {row['node']: row for row in parent.list()}
-    assert rows[child.branch]['starting'] is None
+    rows = {row['node']: row for row in Node(git_repo).list()}
+    assert [rows[node.branch]['starting'] for node in (parent, child)] == [None, None]
     assert calls == []
 
 

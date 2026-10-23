@@ -399,7 +399,7 @@ list`` never counts such a row toward ``PAUSED: billing``. Paused and
 budget-skipped steps bought no launch and leave the streak untouched.
 
 While the breaker is armed, every launch — the SYNC and the work step alike
-— is held behind a backoff that starts at 60 seconds and doubles per further
+— is held once behind a backoff that starts at 60 seconds and doubles per further
 failure to a one-hour cap, announced on the pane as ``=== PAUSED: billing —
 N instant zero-cost failure(s); probing again in Ns ===``. A failed step's
 retry under the breaker waits that clock instead of ``step_retry_backoff``

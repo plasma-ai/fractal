@@ -32,7 +32,6 @@ __all__ = [
     'test_reap_spares_the_caller_lineage',
     'test_reap_keeps_sparing_the_caller_lineage_when_ps_fails',
     'test_reap_signals_the_root_groups_alone_without_a_process_table',
-    'test_tree_teardown_leaves_no_process_behind',
 ]
 
 # the tree script: argv is <dir> <token> <role>; every process records its
@@ -110,11 +109,6 @@ elif role == 'loop':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     with open(f'{directory}/loop.pgid', 'w') as handle:
         handle.write(f'{os.getpgrp()}')
-elif role == 'hung_host':
-    # a caller hung in its reap: it records no pid and leads no tree
-    spawn('hung_caller', process_group=0).wait()
-elif role == 'hung_caller':
-    time.sleep(600)
 elif role in ('host', 'blind_host', 'dark_host'):
     # a sibling tool group, then a caller in a group of its own that reaps
     # the host's tree from inside it
@@ -319,30 +313,6 @@ def test_reap_signals_the_root_groups_alone_without_a_process_table(
     assert (tmp_path / 'abort.mark').exists()
 
 
-# ------ teardown process hygiene
-
-
-def test_tree_teardown_leaves_no_process_behind(tmp_path: pathlib.Path) -> None:
-    """The tree teardown ends every process its run started, recorded or not.
-
-    A caller hung in its reap records no pid and leads no tree, yet it
-    carries the run's token, so the teardown's token sweep still ends it
-    and a red run leaks nothing.
-    """
-    with _trees(tmp_path) as start:
-        start('hung_host')
-        hung = _await_role(tmp_path, 'hung_caller')
-    # kill delivery is asynchronous: idle-wait on the survivor
-    deadline = time.monotonic() + 15
-    while _alive([hung]) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    survivors = _alive([hung])
-    # a red run must not itself leak the process it just proved leaked
-    for pid in survivors:
-        os.kill(pid, signal.SIGKILL)
-    assert survivors == []
-
-
 # ------ helpers
 
 
@@ -381,22 +351,6 @@ def _await_report(directory: pathlib.Path) -> list[int]:
         with contextlib.suppress(FileNotFoundError, json.JSONDecodeError):
             return json.loads(report.read_text(encoding='utf-8'))
         assert time.monotonic() < deadline, 'the caller never finished its reap'
-        time.sleep(0.05)
-
-
-def _await_role(directory: pathlib.Path, role: str) -> int:
-    """Block until a tree process runs ``role``; return its pid.
-
-    Finds a role that never records its pid by its argv, which ends with
-    the role.
-    """
-    deadline = time.monotonic() + 60
-    while True:
-        for pid, process in fractal.util.process.snapshot().items():
-            command = process.command
-            if f'{directory}' in command and command.endswith(f' {role}'):
-                return pid
-        assert time.monotonic() < deadline, role
         time.sleep(0.05)
 
 

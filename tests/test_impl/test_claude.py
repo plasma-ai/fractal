@@ -75,6 +75,7 @@ __all__ = [
     'test_settle_reads_workflow_sub_agent_transcripts',
     'test_parallel_sub_agents_price_each_reply_once',
     'test_sub_agent_frames_price_at_their_own_model',
+    'test_settle_prices_a_reply_in_two_transcripts_once_at_its_latest_line',
     'test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks',
     'test_settle_marks_a_record_missing_part_of_a_reply',
     'test_settle_marks_an_entry_it_cannot_read_whole',
@@ -1994,6 +1995,45 @@ def test_sub_agent_frames_price_at_their_own_model(
     assert backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED) is False
     row = node.db.read('steps', where={'step_id': step_id})[0]
     assert row['cost'] == pytest.approx(settled)
+
+
+@pytest.mark.parametrize(
+    argnames='later',
+    argvalues=[
+        # the later copy in a sub-agent's transcript, read after the session's
+        pytest.param('sub-agent', id='later-in-sub-agent'),
+        # the later copy in the session's transcript, read first
+        pytest.param('session', id='later-in-session'),
+    ],
+)
+def test_settle_prices_a_reply_in_two_transcripts_once_at_its_latest_line(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    later: str,
+) -> None:
+    """A reply id written to two transcripts prices once, at its latest line.
+
+    The latest line holds the reply's final usage, whichever file it sits
+    in and whichever file the settle reads last, so the earlier copy
+    neither adds to it nor stands in for it.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _PRICING)
+    node = node_with_db
+    # the reply's earlier copy at its first usage, its later one at its final
+    early = _transcript_line('msg_main', _USAGE_SECOND)
+    late = _transcript_line('msg_main', _USAGE_FIRST, stamp=_LATE)
+    own, side = (early, late) if later == 'sub-agent' else (late, early)
+    backend, step_id = _settling(node, tmp_path, monkeypatch, own)
+    session = node.db.read('steps', where={'step_id': step_id})[0]['session']
+    # a sub-agent's transcript holds the other copy
+    transcript = pathlib.Path(backend.transcript(session)['path'])
+    subagents = transcript.with_suffix('') / 'subagents'
+    subagents.mkdir(parents=True)
+    (subagents / 'agent-a.jsonl').write_text(side, encoding='utf-8')
+    backend.settle_cost(step_id, started=_OPENED, ended=_CLOSED)
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['cost'] == pytest.approx(_USAGE_FIRST_COST)
 
 
 def test_transcript_cost_keeps_a_record_whole_across_unicode_line_breaks(

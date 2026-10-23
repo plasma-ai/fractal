@@ -203,6 +203,7 @@ __all__ = [
     'test_stop_mid_step_lets_the_seat_complete',
     'test_billing_failures_back_off_exponentially_and_a_success_clears',
     'test_billing_gate_holds_the_sync_launch_and_counts_it',
+    'test_billing_gate_holds_a_sync_less_step_once',
     'test_interrupted_billing_gate_books_the_consumed_steps',
     'test_provider_unavailable_retries_back_off_exponentially_to_the_cap',
     'test_a_success_resets_the_provider_unavailable_backoff',
@@ -245,6 +246,7 @@ __all__ = [
     'test_resume_preflight_abort_recredits_the_reparked_wait',
     'test_resume_adopt_with_no_open_run_records_exited',
     'test_resume_anchors_run_deadline_on_credited_remaining',
+    'test_resume_ended_before_reentry_closes_the_adopted_iteration',
     'test_interval_defaults_iter_timeout_but_honors_a_tighter_one',
     'test_stop_during_the_inter_iteration_sleep_ends_the_run',
 ]
@@ -378,6 +380,27 @@ _TOOL_FRAME = {
         'role': 'assistant',
         'content': [{'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash', 'input': {}}],
         'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+# a second call of the same reply, run in parallel with the first, and its result
+_SECOND_TOOL_FRAME = {
+    'type': 'assistant',
+    'message': {
+        'id': 'msg_1',
+        'role': 'assistant',
+        'content': [{'type': 'tool_use', 'id': 'toolu_2', 'name': 'Bash', 'input': {}}],
+        'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_SECOND_TOOL_RESULT = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_2', 'content': 'ok'}],
     },
     'parent_tool_use_id': None,
     'session_id': 'SID',
@@ -2919,6 +2942,20 @@ def test_a_capped_or_idle_sync_runs_to_its_result(
         pytest.param(
             _claude_script(_INIT, _TOOL_FRAME, 'sleep 3', _TOOL_RESULT, _RESULT),
             id='assistant-frame-tool',
+        ),
+        # one reply's parallel calls: the first result lands while the
+        # second tool still runs
+        pytest.param(
+            _claude_script(
+                _INIT,
+                _TOOL_FRAME,
+                _SECOND_TOOL_FRAME,
+                _TOOL_RESULT,
+                'sleep 3',
+                _SECOND_TOOL_RESULT,
+                _RESULT,
+            ),
+            id='parallel-calls',
         ),
         # an API retry's backoff is no time of the agent's
         pytest.param(
@@ -6472,14 +6509,15 @@ def test_failed_drop_redispatch_keeps_the_failure(
 def test_spent_deadline_abandons_the_drop_redispatch(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A drop past the iteration deadline fails without a re-dispatch.
 
     The re-dispatch's own launch pre-check would only convert the
     completed work into a timed-out failure, so a spent deadline buys no
-    second launch -- but the pin is still law: the unresolved drop books
-    the step (and iteration) failed with the drop named, never a clean
-    completion off wrong-model output.
+    second launch, nor the backoff before one -- but the pin is still
+    law: the unresolved drop books the step (and iteration) failed with
+    the drop named, never a clean completion off wrong-model output.
     """
     monkeypatch.setenv('_NODE', '')
     _seed_steps(loop_node, ['01-PLAN.md'])
@@ -6505,8 +6543,9 @@ def test_spent_deadline_abandons_the_drop_redispatch(
 
     loop = OverrunningLoop(loop_node, serves=['dropped-model'])
     assert loop.run() == 0
-    # the spent deadline bought no re-dispatch
+    # the spent deadline bought no re-dispatch, nor the backoff before one
     assert loop.launched == ['step 1 of 1 (PLAN)']
+    assert 'retrying after model drop' not in capsys.readouterr().out
     row = loop_node.db.read('steps', where={'step_name': 'PLAN'})[0]
     assert (row['status'], row['metadata']) == (
         'completed',
@@ -7372,6 +7411,37 @@ def test_billing_gate_holds_the_sync_launch_and_counts_it(
     _, third = out.split('=== Iteration 3 of 3', 1)
     assert third.index('PAUSED: billing') < third.index('SYNC (before PLAN)')
     assert len(loop.launched) == 6
+
+
+def test_billing_gate_holds_a_sync_less_step_once(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """With no SYNC, the armed breaker holds the step's launch once.
+
+    The gate re-reads the breaker after the before-step SYNC, since that
+    SYNC is a launch that may have just armed or extended it. With no SYNC
+    the breaker is the one the hold ahead of it already waited out, so a
+    second hold would only double the wait before the probe.
+    """
+    monkeypatch.setenv('_NODE', '')
+    sleeps: list[float] = []
+    monkeypatch.setattr('fractal.core.loop.time.sleep', sleeps.append)
+    monkeypatch.setattr(loop_module, '_BILLING_BACKOFF_BASE_SECONDS', 3)
+    node = loop_node
+    _seed_steps(node, ['01-PLAN.md'])
+    # retries off: three iterations of one billing-shaped failure each arm
+    # the breaker, so iteration 4 opens at the gate's wait
+    _configure(node, max_iters=4, step_retries=0)
+    loop = MockLoop(node, results=[StepResult(status='failed', exit_code=1)] * 3)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    # one hold of the base wait, then the probe launch clears the breaker
+    assert out.count('PAUSED: billing') == 1
+    assert sleeps == [1] * 3
+    assert '=== billing breaker cleared (a call succeeded) ===' in out
+    assert len(loop.launched) == 4
 
 
 def test_interrupted_billing_gate_books_the_consumed_steps(
@@ -9231,6 +9301,80 @@ def test_resume_anchors_run_deadline_on_credited_remaining(
     # 600 - (300 elapsed - 180 credit) = 480 remaining, credited -- not the
     # full 600 (re-armed) nor 300 (uncredited)
     assert 465 <= loop._run_end_epoch - before <= 485
+
+
+@pytest.mark.parametrize(
+    argnames=('retune', 'closed', 'reason'),
+    argvalues=[
+        # the run's wall clock ran out while the node was parked
+        pytest.param(
+            {'timeout': '10m'},
+            ('failed', 1, 'timed out'),
+            'Timed out at iteration {run_id}.2 ',
+            id='run-timeout',
+        ),
+        # max_iters was lowered below the parked iteration
+        pytest.param(
+            {'max_iters': 1},
+            ('stopped', 0, ''),
+            'Reached max iterations (1)',
+            id='max-iters',
+        ),
+    ],
+)
+def test_resume_ended_before_reentry_closes_the_adopted_iteration(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    retune: dict[str, Any],
+    closed: tuple[str, int, str],
+    reason: str,
+) -> None:
+    """A resume whose run ends at the loop top closes the iteration it adopted.
+
+    Pause parks with the iteration row open for the resume to re-enter. A
+    run deadline spent while parked, or ``max_iters`` lowered below the
+    parked iteration, ends the resumed run before that re-entry -- so the
+    run's end closes the adopted iteration too, instead of leaving it
+    active until the next run start heals it as a crash, and the exit
+    reason names that iteration.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, max_iters=3)
+
+    class _Parking(MockLoop):
+        """Park in iteration 2 after its first step, as a pause does."""
+
+        def _launch(
+            self: _Parking, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            if len(self.launched) == 2:
+                self.node.record.signal_set('pause', 'operator')
+            return super()._launch(step, prompt, **kwargs)
+
+    parked = _Parking(node)
+    assert parked.run() == 0
+    assert node.status() == 'paused'
+    run_id = parked._run_id
+    [adopted] = node.db.read('iters', where={'run_id': run_id, 'ended_at': None})
+    assert adopted['iter'] == 2
+    # the parked run is old, which spends a configured timeout; the retune
+    # lands while the node is parked
+    _age_run(node, run_id, 700.0)
+    _configure(node, **retune)
+
+    resumed = MockLoop(node, resume=True)
+    assert resumed.run() == 0
+    # the run ended at the loop top: nothing re-entered the iteration
+    assert resumed.launched == []
+    [iteration] = node.db.read('iters', where={'iter_id': adopted['iter_id']})
+    assert iteration['ended_at'] is not None
+    assert (iteration['status'], iteration['exit_code'], iteration['metadata']) == (
+        closed
+    )
+    [run] = node.db.read('runs', where={'run_id': run_id})
+    assert run['ended_at'] is not None
+    assert run['metadata'].startswith(reason.format(run_id=run_id))
 
 
 def test_interval_defaults_iter_timeout_but_honors_a_tighter_one(

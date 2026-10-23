@@ -22,11 +22,12 @@ iteration), and while the target worktree has uncommitted changes. Merges are
 serialized per repository: `fractal node merge` holds a repo-wide merge lock
 while the script runs, so two sibling merges into one target queue instead of
 interleaving their index writes. The merge re-reads the node's status once it
-holds the lock and refuses a node that changed status while it waited. A merge
-can rewrite the worktree of any node that is not active, so every loop boot
-(start, continue, or resume) takes the same lock for its continue clean-up and
-its `active` stamp, and says so on its output before it waits: no boot writes to
-the worktree or goes live while a merge runs.
+holds the lock and refuses a node that changed status while it waited, and
+checks the target again, refusing one that went active or paused meanwhile. A
+merge can rewrite the worktree of any node that is not active, so every loop
+boot (start, continue, or resume) takes the same lock for its continue clean-up
+and its `active` stamp, and says so on its output before it waits: no boot
+writes to the worktree or goes live while a merge runs.
 
 ## Paused nodes
 

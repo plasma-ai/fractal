@@ -505,7 +505,11 @@ resume is credited back to the run and iteration deadlines, so parking a node
 does not burn its timeouts. The span starts at the park, not at the pause
 request: a step that works on past the request (an agent pausing its own node
 finishes its step first) is charged as working time, and a pause withdrawn
-before the loop parks credits nothing.
+before the loop parks credits nothing. A resumed run that ends before
+re-entering the parked iteration — its run deadline ran out, or ``max_iters``
+was lowered below that iteration, while it was parked — closes the iteration
+as the run ends: ``failed`` with ``timed out`` for the deadline, ``stopped``
+for the cap.
 
 If the resume races a loop that is still parking, the relaunch refuses with
 "the loop is still running or parking" and tells you to retry once it exits —

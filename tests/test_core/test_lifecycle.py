@@ -14,6 +14,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import NoReturn, Optional
@@ -22,9 +23,23 @@ import pytest
 
 import fractal.core.node
 import fractal.core.worktree
-from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, LOCK_FILE, PGID_FILE
+from fractal.constants import (
+    HEADLESS_FILE,
+    HEADLESS_LOG,
+    LOCK_FILE,
+    MERGE_LOCK_FILE,
+    PGID_FILE,
+    WORKTREES_FOLDER,
+)
 from fractal.core.node import Node
-from tests._helpers import _commit_template, _files, _git, _stub_run_script
+from tests._helpers import (
+    _LOCK_HOLDER,
+    _await_ready,
+    _commit_template,
+    _files,
+    _git,
+    _stub_run_script,
+)
 
 from .conftest import (
     _active_run,
@@ -60,6 +75,7 @@ __all__ = [
     'test_start_continue_re_arms_after_drained_run',
     'test_start_continue_refuses_after_budget_end',
     'test_start_continue_rolls_back_retune_on_refusal_or_failed_launch',
+    'test_start_continue_rolls_back_retune_on_a_refused_launch_config',
     'test_start_continue_max_cost_retunes_only_a_default_reserve',
     'test_start_without_max_cost_warns_and_runs',
     'test_start_continue_reconciles_crashed_active',
@@ -115,6 +131,7 @@ __all__ = [
     'test_merge_refuses_when_parent_worktree_is_dirty',
     'test_merge_ignore_scope_lands_an_out_of_scope_squash',
     'test_merge_refuses_settled_child_into_a_running_target',
+    'test_merge_refuses_a_target_that_went_live_while_it_waited',
     'test_merge_event_survives_child_delete',
     'test_meta_node_scope_is_spelled_from_its_own_project',
     'test_meta_init_refuses_a_target_project_with_whitespace',
@@ -885,6 +902,46 @@ def test_start_continue_rolls_back_retune_on_refusal_or_failed_launch(
     monkeypatch.setattr(child, '_run_script', boom)
     with pytest.raises(RuntimeError, match='boom'):
         child.start(continue_run=True, clean=True, max_cost=0.5)
+    assert child.config.get('max_cost') is None
+    assert child.db.read('nodes', where={'node': child.branch})[0]['max_cost'] is None
+    assert child.status() == 'exited'
+
+
+@pytest.mark.parametrize(
+    argnames=('edit', 'refusal'),
+    argvalues=[
+        # a hand-edited duration with no unit, which the loop cannot parse
+        pytest.param({'timeout': '10'}, 'timeout must be a duration', id='config'),
+        # a hand-edited agent the registry does not know
+        pytest.param({'agent': 'cluade'}, "Unsupported agent: 'cluade'", id='agent'),
+    ],
+)
+def test_start_continue_rolls_back_retune_on_a_refused_launch_config(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: dict[str, str],
+    refusal: str,
+) -> None:
+    """A continue refused over its launch config never keeps a ``--max-cost`` retune.
+
+    Start re-checks the config and the agent the loop reads, since the
+    documented steering path edits ``config.json`` by hand. Those checks
+    read the retuned cap, so a refusal there rolls the retune back like
+    the re-arm gate's: the old cap stays in the child's config and
+    registry row, and nothing launches.
+    """
+    _, child = _spawn_parent_child(git_repo, monkeypatch)
+    # land the child's run on its budget so the continue requires --max-cost
+    run_id = _active_run(child)
+    _record_step_cost(child, run_id=run_id, cost=0.20)
+    child.record.run_end(run_id=run_id, status='exited', exit_code=0)
+    child.status_set('exited')
+    for key, value in edit.items():
+        child.config.set(key, value)
+    run_scripts = _stub_run_script(monkeypatch, child)
+    with pytest.raises(ValueError, match=refusal):
+        child.start(continue_run=True, clean=True, max_cost=0.5)
+    assert run_scripts == []
     assert child.config.get('max_cost') is None
     assert child.db.read('nodes', where={'node': child.branch})[0]['max_cost'] is None
     assert child.status() == 'exited'
@@ -2395,6 +2452,85 @@ def test_merge_refuses_settled_child_into_a_running_target(
     output, _ = child.merge()
     assert 'Squash-merged' in output
     assert (parent_wt / 'work.txt').is_file()
+
+
+@pytest.mark.parametrize(
+    argnames=('status', 'refusal'),
+    argvalues=[
+        pytest.param(
+            'active',
+            'Cannot merge into active target main.parent. Stop or kill it first.',
+            id='active',
+        ),
+        pytest.param(
+            'paused',
+            'Cannot merge into paused target main.parent. Resume or kill it first.',
+            id='paused',
+        ),
+    ],
+)
+def test_merge_refuses_a_target_that_went_live_while_it_waited(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    status: str,
+    refusal: str,
+) -> None:
+    """A target that leaves its settled status while the merge waits refuses it.
+
+    The merge checks its target before it queues on the repo's merge lock,
+    and a re-armed target's boot takes that same lock for its ``active``
+    stamp, so the target can go live while the merge waits. Once the merge
+    holds the lock it reads the target again: one that went active or
+    paused refuses the merge, its worktree untouched.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    parent_wt = git_repo / '.worktrees' / 'main.parent'
+    child_wt = git_repo / '.worktrees' / 'main.parent.kid'
+    # the child settles with committed work, and so does the target
+    (child_wt / 'work.txt').write_text('child work\n', encoding='utf-8')
+    _git(child_wt, 'add', 'work.txt')
+    _git(child_wt, 'commit', '-m', 'child work')
+    child.status_set('completed')
+    parent.status_set('stopped')
+    lock_file = git_repo / WORKTREES_FOLDER / MERGE_LOCK_FILE
+    ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
+    holder = subprocess.Popen(
+        [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
+    )
+    errors: list[Exception] = []
+
+    def _merge() -> None:
+        try:
+            child.merge()
+        except Exception as error:
+            errors.append(error)
+
+    merger = threading.Thread(target=_merge)
+    try:
+        _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
+        merger.start()
+        # the merge read the target settled and now waits behind the held lock
+        merger.join(timeout=3)
+        assert merger.is_alive()
+        # the target leaves its settled status, then the holder dies and
+        # releases the lock
+        parent.status_set(status)
+        holder.kill()
+        holder.wait(timeout=5)
+        merger.join(timeout=60)
+        assert not merger.is_alive()
+    finally:
+        # the holder is a single leaf process, so a pid kill reaps it fully
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
+        if merger.is_alive():
+            merger.join(timeout=60)
+
+    assert [f'{error}' for error in errors] == [refusal]
+    # the refusal never touched the target's worktree
+    assert not (parent_wt / 'work.txt').exists()
 
 
 def test_merge_event_survives_child_delete(git_repo: pathlib.Path) -> None:
