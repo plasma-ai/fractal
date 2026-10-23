@@ -52,7 +52,9 @@ def record():
 
 
 def wait_for(name):
-    while not os.path.exists(f'{directory}/{name}.pid'):
+    # a pid file exists before its pid is written, so wait for the pid
+    path = f'{directory}/{name}.pid'
+    while not os.path.exists(path) or not os.path.getsize(path):
         time.sleep(0.05)
 
 
@@ -261,12 +263,7 @@ def test_reap_spares_the_caller_lineage(
     """
     host = tree('host')
     pids = _await_pids(tmp_path, ['host', 'sibling'])
-    report = tmp_path / 'caller.json'
-    deadline = time.monotonic() + 60
-    while not report.exists() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    assert report.exists(), 'the caller never finished its reap'
-    assert json.loads(report.read_text(encoding='utf-8')) == []
+    assert _await_report(tmp_path) == []
     host_pid, sibling_pid = pids
     assert _alive([sibling_pid]) == []
     assert _alive([host_pid]) == [host_pid]
@@ -310,12 +307,7 @@ def test_reap_signals_the_root_groups_alone_without_a_process_table(
     """
     host = tree('dark_host')
     (sibling,) = _await_pids(tmp_path, ['sibling'])
-    report = tmp_path / 'caller.json'
-    deadline = time.monotonic() + 60
-    while not report.exists() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    assert report.exists(), 'the caller never finished its reap'
-    assert json.loads(report.read_text(encoding='utf-8')) == []
+    assert _await_report(tmp_path) == []
     assert host.wait(timeout=60) == -signal.SIGTERM
     assert _alive([sibling]) == [sibling]
     assert (tmp_path / 'abort.mark').exists()
@@ -325,13 +317,41 @@ def test_reap_signals_the_root_groups_alone_without_a_process_table(
 
 
 def _await_pids(directory: pathlib.Path, roles: list[str]) -> list[int]:
-    """Block until each role has recorded its pid; return the pids in order."""
+    """Block until each role has recorded its pid; return the pids in order.
+
+    A process creates its pid file before it writes the pid, so a file that
+    exists can still be empty: each is read until its pid parses, and the
+    wait fails naming every file whose pid never did.
+    """
     deadline = time.monotonic() + 60
-    paths = [directory / f'{role}.pid' for role in roles]
-    while not all(path.exists() for path in paths):
-        assert time.monotonic() < deadline, [path.name for path in paths]
+    pids: dict[str, int] = {}
+    while True:
+        for role in roles:
+            if role in pids:
+                continue
+            path = directory / f'{role}.pid'
+            with contextlib.suppress(FileNotFoundError, ValueError):
+                pids[role] = int(path.read_text(encoding='utf-8'))
+        missing = [f'{role}.pid' for role in roles if role not in pids]
+        if not missing:
+            return [pids[role] for role in roles]
+        assert time.monotonic() < deadline, f'no pid ever written to {missing}'
         time.sleep(0.05)
-    return [int(path.read_text(encoding='utf-8')) for path in paths]
+
+
+def _await_report(directory: pathlib.Path) -> list[int]:
+    """Block until the caller has written its reap report; return its survivors.
+
+    The caller creates the report before it writes it, so the file is read
+    until its JSON parses, and the wait fails if it never does.
+    """
+    report = directory / 'caller.json'
+    deadline = time.monotonic() + 60
+    while True:
+        with contextlib.suppress(FileNotFoundError, json.JSONDecodeError):
+            return json.loads(report.read_text(encoding='utf-8'))
+        assert time.monotonic() < deadline, 'the caller never finished its reap'
+        time.sleep(0.05)
 
 
 @contextlib.contextmanager

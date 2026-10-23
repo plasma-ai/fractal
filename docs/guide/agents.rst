@@ -474,6 +474,9 @@ transcript layout, capability attributes — registered by name in the
 application registers in process with `fractal.core.agent.register`; a
 tree can also carry an ``agents.py`` hook file in its root node's data
 directory, whose exported `fractal.core.agent.Agent` subclasses register
-by their ``name`` in every fractal process that touches the tree. The
-base-class contract is documented in the API reference under
-:doc:`/api`.
+by their ``name`` in every fractal process that touches the tree. A hook
+file that fails to load fails every agent lookup in the tree, naming the
+file: ``node start`` and ``resume`` refuse before they change anything,
+and a loop that meets it at boot aborts on record, as for a bad
+``config.json`` value. The base-class contract is documented in the API
+reference under :doc:`/api`.
