@@ -535,9 +535,9 @@ class Config:
             if int(seconds) <= 0:
                 raise ValueError(f'{key} must be at least 1 second.')
             durations[key] = seconds
-        # pacing invariants the loop enforces at construction -- checked here
-        # too so a bad combination is refused at init/start, not deep inside
-        # the tmux pane where it strands the node idle with no run row
+        # pacing invariants the loop enforces at boot -- checked here too so
+        # a bad combination is refused at init/start/resume, not at the boot
+        # after the launch already reported success
         interval = durations.get('interval')
         if interval is not None:
             # interval and sleep are rival pacing keys (fixed cadence vs

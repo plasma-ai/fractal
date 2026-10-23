@@ -700,6 +700,16 @@ may include breaking changes, each listed under a Breaking heading.
   deadlines. A ladder committed after the command's check aborts the boot on
   record: a start or continue ends `exited` with the reason on its run, and a
   resume stays paused for the next resume.
+- `fractal node resume` and `fractal resume` re-validate the `config.json` of
+  every node they would relaunch before they change anything, with the checks
+  and messages `fractal node start` uses, and name the node that fails. A config
+  edited while a node was paused (a malformed duration, a cost cap the launch
+  rules refuse, an unknown or missing agent) killed the resumed loop's boot with
+  nothing recorded, after the resume had closed the node's pause credit span, so
+  the parked time counted against the run's deadlines. A config broken after a
+  start's or resume's check aborts the loop's boot on record: a start or
+  continue ends `exited` with the reason on its run, and a resume stays paused
+  with its paused time still credited.
 
 ## [1.3.0] - 2026-09-17
 
