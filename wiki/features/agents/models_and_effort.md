@@ -151,11 +151,12 @@ which name the setting, the file, the root branch, and the fault:
 - `Node.resume` calls it for every node it would relaunch (each reads its own
   project's copy) before the tree latch lifts, any pause is withdrawn, or any
   resume event closes a pause credit span.
-- `Loop._read_effort_ladders`, the first boot stage inside the
-  `_abort_preflight` guard (ahead of `_preflight`'s probes), covers a commit
-  landing between the command's check and the boot: a start or continue lands
-  `exited` with the reason on a closed run row, and a resume stays paused with
-  its run open and its credit span re-opened.
+- `Loop._read_boot_config`, the first boot stage inside the `_abort_preflight`
+  guard (ahead of `_preflight`'s probes), covers a commit landing between the
+  command's check and the boot: a start or continue lands `exited` with the
+  reason on a closed run row, and a resume stays paused with its run open and
+  its credit span re-opened. The same stage reads the node's run parameters (see
+  [[configuration/config_json#Validation|config_json]]).
 
 ## Preflight
 

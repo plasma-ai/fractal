@@ -109,9 +109,9 @@ iteration deadlines. Resuming a node that is still parking withdraws the pending
 pause instead; if the loop already read the signal it parks anyway, and the next
 resume relaunches it. Resume refuses on a node that is not paused or pausing,
 and refuses under a paused ancestor until that ancestor is resumed first. It
-also refuses when the effort ladder committed on the root branch is invalid for
-any node it would relaunch, checked before the latch lifts or any node is
-touched.
+also refuses when any node it would relaunch has a stored config `start` would
+refuse or an invalid effort ladder committed on the root branch, naming that
+node; the check runs before the latch lifts or any node is touched.
 
 ## retire and unretire
 

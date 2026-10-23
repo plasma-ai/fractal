@@ -350,7 +350,11 @@ left it. A node still parking — ``active`` with a pending pause signal —
 gets its pause withdrawn instead, so the live loop never parks. Resume
 refuses a target that is not paused (and not parking), and a target under a
 still-paused ancestor or the tree-wide latch — resume the latching node
-instead, which relaunches the subtree with it.
+instead, which relaunches the subtree with it. Before it changes anything,
+resume also runs start's config re-validation and effort-ladder check on
+every node it would relaunch, and refuses naming the first node that
+fails, so a ``config.json`` hand-edited while the node was paused fails at
+the command line, not in the relaunched loop.
 
 ``fractal resume [name] [--path <dir>]`` is the tree-wide release: it lifts
 the root latch first (new starts and spawns become legal immediately),

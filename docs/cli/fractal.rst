@@ -419,8 +419,10 @@ pauses withdrawn)``, or ``No paused nodes to resume.``.
    Repository path. Default: ``.``.
 
 Refuses when the tree has no user node, and, before it lifts the latch or
-touches any node, when the effort ladder committed on the root branch is
-invalid for a parked node (see :doc:`/configuration`).
+touches any node, when a parked node's stored config fails the launch
+re-validation ``node start`` runs, or the effort ladder committed on the
+root branch is invalid for it, naming that node (see
+:doc:`/configuration`).
 
 .. code-block:: console
 
