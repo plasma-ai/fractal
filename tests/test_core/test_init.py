@@ -184,13 +184,13 @@ def test_init_creates_node_structure(initialized_node: dict[str, Any]) -> None:
     codex_auth = node_dir / '.codex' / 'auth.json'
     assert codex_auth.is_symlink()
     codex_home = os.environ.get('CODEX_HOME') or os.path.expanduser('~/.codex')
-    assert str(codex_auth.readlink()) == os.path.join(codex_home, 'auth.json')
+    assert codex_auth.readlink() == pathlib.Path(codex_home, 'auth.json').resolve()
 
     # grok credentials follow the same write-through contract
     grok_auth = node_dir / '.grok' / 'auth.json'
     assert grok_auth.is_symlink()
     grok_home = os.environ.get('GROK_HOME') or os.path.expanduser('~/.grok')
-    assert str(grok_auth.readlink()) == os.path.join(grok_home, 'auth.json')
+    assert grok_auth.readlink() == pathlib.Path(grok_home, 'auth.json').resolve()
 
     # branch name is prefixed by the user node (top-level child of the root)
     assert branch == 'main.task'
