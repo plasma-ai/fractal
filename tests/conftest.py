@@ -31,7 +31,9 @@ if any(arg == '--cov' or arg.startswith('--cov=') for arg in sys.argv):
 # missing from the test DB, silently losing them; ITER mislabels commit subjects;
 # FRACTAL_HEADLESS overrides the backend a bare start reads from the node's record;
 # STEP_TIMEOUT_SECONDS hands a test whose STEP_ID names its own active step the
-# live seat's ceiling as that step's limit
+# live seat's ceiling as that step's limit; CODEX_HOME and GROK_HOME (a codex or
+# grok step's own home) and an operator's CLAUDE_CONFIG_DIR move the agent homes
+# the backends read, and the CLI stubs write transcripts into, off the test's HOME
 _LOOP_ENV_VARS = [
     '_NODE',
     'NODE_DIR',
@@ -44,6 +46,9 @@ _LOOP_ENV_VARS = [
     'STEP_TIMEOUT_SECONDS',
     'ITER',
     'FRACTAL_HEADLESS',
+    'CLAUDE_CONFIG_DIR',
+    'CODEX_HOME',
+    'GROK_HOME',
 ]
 
 
@@ -118,6 +123,34 @@ def _isolate_tmux_server() -> Iterator[None]:
         subprocess.run(['tmux', 'kill-server'], capture_output=True)
         monkeypatch.undo()
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@pytest.fixture(scope='session', autouse=True)
+def _isolate_git_config(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Run the session's git on a suite-owned config, never the host's.
+
+    The host's global and system git config reach every git the suite
+    runs, directly or through ``Node``, the CLI, the node scripts, and the
+    loop: a global ignore holding ``.env`` or ``*.log`` silently drops a
+    fixture's file from ``git add``, and ``commit.gpgsign`` fails (or
+    prompts on) every setup commit. ``GIT_CONFIG_GLOBAL`` names a session
+    file in place of ``~/.gitconfig`` and its XDG twin, and
+    ``GIT_CONFIG_NOSYSTEM`` drops the system file. The file carries no
+    commit identity: each test repo sets its own. Set in ``os.environ``, so
+    every subprocess (``_cli_env`` copies it) inherits both.
+    """
+    # git falls back to ~/.config/git/ignore and attributes when no config
+    # names them, so the session file points both at the null device
+    config = tmp_path_factory.mktemp('git_config') / 'gitconfig'
+    config.write_text(
+        f'[core]\n\texcludesFile = {os.devnull}\n\tattributesFile = {os.devnull}\n',
+        encoding='utf-8',
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(config))
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
+    yield
+    monkeypatch.undo()
 
 
 @pytest.fixture(autouse=True)

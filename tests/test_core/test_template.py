@@ -257,6 +257,10 @@ def test_init_hints_at_an_uncommitted_shared_file_only_by_its_exact_name(
     draft = git_repo / 'campaign' / 'DRAFT.md'
     draft.write_text('draft\n', encoding='utf-8')
     (git_repo / 'linked').symlink_to('campaign')
+    # each name must reach a file on disk, which a letter-case variant does only
+    # where the filesystem folds case: with nothing there the hint checks nothing
+    if not (git_repo / name.lstrip('/')).exists():
+        pytest.skip('requires a case-insensitive filesystem')
     include = f"{{% include '{name}' %}}"
     charter = f'## Instructions\n\n{include}\n\n## Completion Requirements\n\nDone.\n'
     files = {'config.json': '{}\n', 'NODE.md': charter}
