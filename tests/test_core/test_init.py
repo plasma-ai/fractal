@@ -13,16 +13,18 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import tomllib
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 import typer
 
 import fractal.core
+from fractal.cli.cmd.config import _config_set
 from fractal.cli.utils import init_node, resolve_init_target, resolve_node
 from fractal.core.node import Node
-from tests._helpers import _commit_template, _git
+from tests._helpers import _commit_template, _files, _git
 
 from .conftest import (
     _make_git_repo,
@@ -35,6 +37,7 @@ __all__ = [
     'test_init_creates_node_structure',
     'test_init_scope_places_node_dir_at_project_root',
     'test_init_sets_the_worktree_commit_identity',
+    'test_init_seeds_wikis_that_accept_dotted_file_names',
     'test_init_populates_skills_and_supports_reset',
     'test_reset_reseeds_scripts',
     'test_reset_clears_stale_registry_caps',
@@ -70,6 +73,7 @@ __all__ = [
     'test_init_template_refuses_a_boundary_path',
     'test_init_template_refuses_credential_named_files',
     'test_init_template_refuses_files_the_seed_would_skip',
+    'test_init_template_refuses_files_the_commit_never_stores',
     'test_init_template_preset_refuses_disallowed_keys',
     'test_init_template_preset_caps_refuse_like_flags',
     'test_init_template_detached_refuses_a_bundled_detached_step',
@@ -80,6 +84,9 @@ __all__ = [
     'test_init_template_fills_slots_from_values_set_and_pin',
     'test_init_template_input_refusals_fire_before_any_worktree',
     'test_init_template_defaults_and_includes_replay',
+    'test_init_template_shared_include_reads_the_template_commit',
+    'test_init_template_shared_include_recurses_and_never_deploys',
+    'test_init_template_shared_include_cycle_reads_each_file_once',
     'test_init_template_validates_rendered_step_settings',
     'test_init_template_docket_anchor_defaults_to_the_fork_commit',
     'test_child_inherits_skills_only_on_request',
@@ -98,6 +105,12 @@ __all__ = [
     'test_init_rejects_incoherent_pacing',
     'test_init_rejects_absolute_or_traversal_scope',
     'test_init_normalizes_scope_before_validating',
+    'test_wiki_setting_is_fixed_at_init_and_inherited',
+    'test_init_rejects_an_invalid_wiki_setting',
+    'test_reinit_adopts_a_wiki_setting_only_on_an_empty_tree',
+    'test_reinit_over_live_nodes_keeps_the_folder_in_effect',
+    'test_baseline_refuses_a_wiki_setting_written_after_init',
+    'test_spawn_refuses_a_wiki_setting_committed_after_init',
     'test_child_inherits_subproject_from_parent',
     'test_init_ignores_cross_repo_ambient_node',
     'test_init_node_default_path_ignores_cross_repo_ambient',
@@ -172,13 +185,13 @@ def test_init_creates_node_structure(initialized_node: dict[str, Any]) -> None:
     codex_auth = node_dir / '.codex' / 'auth.json'
     assert codex_auth.is_symlink()
     codex_home = os.environ.get('CODEX_HOME') or os.path.expanduser('~/.codex')
-    assert str(codex_auth.readlink()) == os.path.join(codex_home, 'auth.json')
+    assert codex_auth.readlink() == pathlib.Path(codex_home, 'auth.json').resolve()
 
     # grok credentials follow the same write-through contract
     grok_auth = node_dir / '.grok' / 'auth.json'
     assert grok_auth.is_symlink()
     grok_home = os.environ.get('GROK_HOME') or os.path.expanduser('~/.grok')
-    assert str(grok_auth.readlink()) == os.path.join(grok_home, 'auth.json')
+    assert grok_auth.readlink() == pathlib.Path(grok_home, 'auth.json').resolve()
 
     # branch name is prefixed by the user node (top-level child of the root)
     assert branch == 'main.task'
@@ -229,6 +242,68 @@ def test_init_sets_the_worktree_commit_identity(git_repo: pathlib.Path) -> None:
     # the main checkout keeps the user's own identity
     author = _git(git_repo, 'log', '-1', '--format=%an')
     assert author.stdout.strip() == 'Test'
+
+
+@pytest.mark.parametrize('extension', ['json', 'txt', 'py'])
+def test_init_seeds_wikis_that_accept_dotted_file_names(
+    tmp_path: pathlib.Path,
+    extension: str,
+) -> None:
+    """Both wikis fractal creates accept a dotted file name under the identifier rule.
+
+    User init creates the project wiki and node init the node's memory, each
+    seeded with the strict ascii/identifier naming policy, which judges a
+    non-markdown file by its whole name. A dotted name is indexed and lints
+    clean, while a name the rule forbids -- a hyphen, a space -- is still
+    refused.
+    """
+    # a repo with no project wiki, so the user init creates one
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-b', 'main')
+    _git(repo, 'config', 'user.email', 'test@test.com')
+    _git(repo, 'config', 'user.name', 'Test')
+    (repo / 'README.md').write_text('# test\n', encoding='utf-8')
+    _git(repo, 'add', '.')
+    _git(repo, 'commit', '-m', 'init')
+    node = Node(repo)
+    node.init(agent='claude', user=True)
+    node.commit('configure', init=True)
+    output = node.init(name='task', agent='claude')
+    project_dir = _parse_project_dir(output)
+    branch = _resolve_branch(project_dir)
+    for wiki_dir in (
+        project_dir / 'wiki',
+        project_dir / '.fractal' / branch / 'memory',
+    ):
+        # a dotted file name is indexed, and the wiki lints clean
+        page = f'controls.{extension}'
+        (wiki_dir / page).write_text('data\n', encoding='utf-8')
+        subprocess.run(
+            ['wiki', 'update', f'--path={wiki_dir}'],
+            capture_output=True,
+            check=True,
+        )
+        lint = subprocess.run(
+            ['wiki', 'lint', f'--path={wiki_dir}'],
+            capture_output=True,
+            text=True,
+        )
+        assert lint.returncode == 0, lint.stdout
+        index = (wiki_dir / '_index.md').read_text(encoding='utf-8')
+        assert f'[[{page}|{page}]]' in index
+        # a hyphen or a space still breaks the identifier rule
+        refused = [f'bad-name.{extension}', f'bad name.{extension}']
+        for name in refused:
+            (wiki_dir / name).write_text('data\n', encoding='utf-8')
+        lint = subprocess.run(
+            ['wiki', 'lint', f'--path={wiki_dir}'],
+            capture_output=True,
+            text=True,
+        )
+        assert lint.returncode != 0
+        for name in refused:
+            assert f"{name}: Invalid page name: fails the 'identifier'" in lint.stdout
 
 
 def test_init_populates_skills_and_supports_reset(git_repo: pathlib.Path) -> None:
@@ -1653,6 +1728,65 @@ def test_init_template_refuses_files_the_seed_would_skip(
     assert not (node_dir / 'README.md').exists()
 
 
+@pytest.mark.parametrize(
+    argnames=('files', 'unstored'),
+    argvalues=[
+        ({'scripts/run': 'echo run\n'}, 'scripts/run'),
+        (
+            {
+                'skills/demo/SKILL.md': '# demo\n',
+                'skills/demo/helper.js': 'export {};\n',
+            },
+            'skills/demo/helper.js',
+        ),
+        (
+            {
+                'scripts/run.sh': 'echo run\n',
+                'skills/demo/SKILL.md': '# demo\n',
+                'skills/demo/helper.py': 'print()\n',
+            },
+            None,
+        ),
+    ],
+    ids=['bare_script', 'skill_helper', 'all_records'],
+)
+def test_init_template_refuses_files_the_commit_never_stores(
+    git_repo: pathlib.Path,
+    files: dict[str, str],
+    unstored: Optional[str],
+) -> None:
+    """A seed file the commit's estate law refuses refuses at init by name.
+
+    The steps, scripts, and skills surfaces deploy into the node's estate,
+    whose commit stores only text records at the law's suffixes -- a
+    suffix-less script or a skill's ``.js`` helper would deploy, work on
+    this disk alone, and be missing from every clone. Each refuses naming
+    the file and the suffixes before any worktree exists. A template whose
+    seed files all carry record suffixes deploys, and the child's baseline
+    commit tracks every one of them.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    path = 'templates/crew'
+    _commit_template(git_repo, path, {'config.json': '{}\n', **files})
+    template = f'{git_repo}/{path}'
+    if unstored is not None:
+        with pytest.raises(
+            ValueError,
+            match=rf'never stores: {re.escape(unstored)} \(.*\.md, .*\.sh,',
+        ):
+            Node(git_repo).init(name='task', template=template)
+        # nothing landed -- no worktree, no registry row
+        assert not (git_repo / '.worktrees' / 'main.task').exists()
+        assert not Node(git_repo).db.exists('nodes', where={'node': 'main.task'})
+    else:
+        Node(git_repo).init(name='task', template=template)
+        worktree = git_repo / '.worktrees' / 'main.task'
+        Node(worktree).commit('baseline', init=True)
+        tracked = _git(worktree, 'ls-files', '.fractal/main.task').stdout.split()
+        for name in files:
+            assert f'.fractal/main.task/{name}' in tracked, tracked
+
+
 def test_init_template_preset_refuses_disallowed_keys(
     git_repo: pathlib.Path,
 ) -> None:
@@ -2219,7 +2353,187 @@ def test_init_template_defaults_and_includes_replay(
         'items': ['first', 'second'],
         'details': {'nested': {'name': 'example'}, 'label': 'report'},
     }
-    assert diff(node_dir=node_dir, repo_dir=git_repo) == ([], [])
+    worktree = git_repo / '.worktrees' / 'main.crew'
+    assert diff(node_dir=node_dir, worktree=worktree, repo_dir=git_repo) == ([], [])
+
+
+def test_init_template_shared_include_reads_the_template_commit(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repo-rooted include renders its shared file at the template's commit.
+
+    A deep spawn whose parent lags the root renders the shared file the
+    fork commit tracks -- never the root branch's newer copy, and never an
+    uncommitted edit on disk -- records its path with the blob id read,
+    and prints the root-differs notice naming it, though the template
+    folder itself is unchanged. A root commit touching neither draws no
+    notice, ``@<root>`` reads the root's committed copy, and a shared file
+    only the parent carries -- absent on the root -- draws no notice.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    _commit_template(git_repo, 'campaign', {'DOCTRINE.md': 'doctrine v1\n'})
+    charter = (
+        '# station\n\n## Instructions\n\n'
+        "{% include '/campaign/DOCTRINE.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {'config.json': '{}\n', 'NODE.md': charter}
+    _commit_template(git_repo, 'templates/station', files)
+    station = f'{git_repo}/templates/station'
+    # a second template, on the root too, includes a file nobody has yet
+    files['NODE.md'] = charter.replace('DOCTRINE.md', 'DRAFT.md')
+    _commit_template(git_repo, 'templates/draft', files)
+    # the parent forks here, then the root moves on with an unrelated file
+    Node(git_repo).init(name='task')
+    fork = _git(git_repo, 'rev-parse', 'main.task').stdout.strip()
+    _commit_template(git_repo, 'notes', {'README.md': 'unrelated\n'})
+    monkeypatch.setenv('_NODE', str(_node_dir(git_repo, 'main.task')))
+    output = Node(git_repo).init(name='quiet', template=station)
+    assert 'Notice: template' not in output
+    # the root then changes the shared file, and the disk carries an edit
+    _commit_template(git_repo, 'campaign', {'DOCTRINE.md': 'doctrine v2\n'})
+    doctrine = git_repo / 'campaign' / 'DOCTRINE.md'
+    doctrine.write_text('doctrine, uncommitted\n', encoding='utf-8')
+    output = Node(git_repo).init(name='loud', template=station)
+    assert (
+        "Notice: template 'templates/station' differs on the root branch"
+        " (differing shared files: 'campaign/DOCTRINE.md'); pass"
+        " --template=templates/station@main to read the root's copy."
+    ) in output
+    loud_dir = _node_dir(git_repo, 'main.task.loud')
+    assert 'doctrine v1\n' in (loud_dir / 'NODE.md').read_text(encoding='utf-8')
+    data = tomllib.loads((loud_dir / '_template.toml').read_text(encoding='utf-8'))
+    blob = _git(git_repo, 'rev-parse', f'{fork}:campaign/DOCTRINE.md').stdout.strip()
+    assert data['commit'] == fork
+    assert data['shared'] == {'campaign/DOCTRINE.md': blob}
+    # @<root> reads the root's committed copy, with no notice
+    output = Node(git_repo).init(name='ref', template=f'{station}@main')
+    ref_dir = _node_dir(git_repo, 'main.task.ref')
+    assert 'doctrine v2\n' in (ref_dir / 'NODE.md').read_text(encoding='utf-8')
+    assert 'Notice: template' not in output
+    # a shared file only the parent commits is absent on the root: no notice
+    worktree = git_repo / '.worktrees' / 'main.task'
+    _commit_template(worktree, 'campaign', {'DRAFT.md': 'draft v1\n'})
+    output = Node(git_repo).init(name='draft', template=f'{git_repo}/templates/draft')
+    draft_dir = _node_dir(git_repo, 'main.task.draft')
+    assert 'draft v1\n' in (draft_dir / 'NODE.md').read_text(encoding='utf-8')
+    assert 'Notice: template' not in output
+
+
+def test_init_template_shared_include_recurses_and_never_deploys(
+    git_repo: pathlib.Path,
+) -> None:
+    """A shared file may include another, and no shared file deploys.
+
+    The charter includes ``/campaign/DOCTRINE.md``, which includes
+    ``/campaign/RULES.md``; one step includes the rules directly, one
+    extends ``/campaign/BASE.md``, and one imports macros from
+    ``/campaign/MACROS.md``. All of them render with the spawn's inputs
+    and land in the record with their blob ids, but none deploys into
+    the node, and none is a selectable output -- an ``--include`` naming
+    one matches nothing. An error inside a shared file names that file
+    and line.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    files = {
+        'DOCTRINE.md': "doctrine\n{% include '/campaign/RULES.md' %}",
+        'RULES.md': 'rules for {{ role }}\n',
+        'BASE.md': '# base\n{% block body %}{% endblock %}\n',
+        'MACROS.md': '{% macro hi(name) %}hi {{ name }}{% endmacro %}',
+    }
+    _commit_template(git_repo, 'campaign', files)
+    charter = (
+        '# station\n\n## Instructions\n\n'
+        "{% include '/campaign/DOCTRINE.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+        'steps/01-GO.md': "# go\n{% include '/campaign/RULES.md' %}",
+        'steps/02-BASE.md': (
+            "{% extends '/campaign/BASE.md' %}{% block body %}x{% endblock %}"
+        ),
+        'steps/03-MACRO.md': (
+            "# macro\n{% import '/campaign/MACROS.md' as m %}{{ m.hi('y') }}\n"
+        ),
+    }
+    sha = _commit_template(git_repo, 'templates/station', files)
+    station = f'{git_repo}/templates/station'
+    # a missing input inside a shared file names the file by its repo path
+    with pytest.raises(
+        ValueError,
+        match=r"Template file campaign/RULES\.md:1: 'role' is undefined",
+    ) as refused:
+        Node(git_repo).init(name='task', template=station)
+    assert 'templates/station//' not in str(refused.value)
+    # a shared file is source, never a selectable output
+    with pytest.raises(
+        ValueError,
+        match=r"matches nothing in the template: '/campaign/RULES\.md'",
+    ):
+        Node(git_repo).init(
+            name='task',
+            template=station,
+            include=['/campaign/RULES.md'],
+            sets=['role="scout"'],
+        )
+    Node(git_repo).init(name='task', template=station, sets=['role="scout"'])
+    node_dir = _node_dir(git_repo, 'main.task')
+    charter = (node_dir / 'NODE.md').read_text(encoding='utf-8')
+    assert 'doctrine\nrules for scout\n' in charter
+    steps = {
+        name: (node_dir / 'steps' / name).read_text(encoding='utf-8')
+        for name in ('01-GO.md', '02-BASE.md', '03-MACRO.md')
+    }
+    assert steps == {
+        '01-GO.md': '# go\nrules for scout\n',
+        '02-BASE.md': '# base\nx\n',
+        '03-MACRO.md': '# macro\nhi y\n',
+    }
+    data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+    shared = ('DOCTRINE.md', 'RULES.md', 'BASE.md', 'MACROS.md')
+    relpaths = [f'campaign/{name}' for name in shared]
+    assert data['shared'] == {
+        relpath: _git(git_repo, 'rev-parse', f'{sha}:{relpath}').stdout.strip()
+        for relpath in relpaths
+    }
+    # no shared file reaches the node data directory
+    deployed = {entry.name for entry in node_dir.rglob('*')}
+    assert not deployed & {'campaign', *shared}
+
+
+def test_init_template_shared_include_cycle_reads_each_file_once(
+    git_repo: pathlib.Path,
+) -> None:
+    """Shared files that include each other read once each, and the seed ends.
+
+    ``A.md`` includes ``B.md`` behind a branch the spawn's inputs leave
+    off, and ``B.md`` includes ``A.md`` back: the snapshot follows both
+    names whatever the branch, reads each file once, and the charter
+    renders the branch the inputs take.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    files = {
+        'A.md': "A{% if deep %}{% include '/campaign/B.md' %}{% endif %}",
+        'B.md': "{% include '/campaign/A.md' %}",
+    }
+    _commit_template(git_repo, 'campaign', files)
+    charter = (
+        '# station\n\n## Instructions\n\n'
+        "{% include '/campaign/A.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {'config.json': '{}\n', 'NODE.md': charter}
+    _commit_template(git_repo, 'templates/station', files)
+    station = f'{git_repo}/templates/station'
+    Node(git_repo).init(name='task', template=station, sets=['deep=false'])
+    node_dir = _node_dir(git_repo, 'main.task')
+    charter = (node_dir / 'NODE.md').read_text(encoding='utf-8')
+    assert '## Instructions\n\nA\n## Completion' in charter
+    data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+    assert set(data['shared']) == {'campaign/A.md', 'campaign/B.md'}
 
 
 def test_init_template_validates_rendered_step_settings(
@@ -2484,8 +2798,13 @@ def test_init_refuses_quoted_agent_command(git_repo: pathlib.Path) -> None:
 # ------ preconditions
 
 
-def test_init_requires_project_wiki(tmp_path: pathlib.Path) -> None:
-    """Init errors if the base branch has no project wiki."""
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_init_requires_project_wiki(tmp_path: pathlib.Path, wiki: str) -> None:
+    """Init errors if the base branch has no project wiki at its configured folder.
+
+    A project naming ``docs`` as its shared wiki needs ``docs/_index.md``
+    committed; a committed ``wiki/`` does not satisfy it.
+    """
     repo = tmp_path / 'repo'
     repo.mkdir()
     _git(repo, 'init', '-b', 'main')
@@ -2499,11 +2818,20 @@ def test_init_requires_project_wiki(tmp_path: pathlib.Path) -> None:
         '.venv\n.worktrees/\n.db\n.db-*\n.status\n',
         encoding='utf-8',
     )
+    # a non-default folder is named by the committed settings file, and the
+    # default folder is committed beside it
+    if wiki != 'wiki':
+        settings = repo / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}), encoding='utf-8')
+        index = repo / 'wiki' / '_index.md'
+        index.parent.mkdir()
+        index.write_text('---\nname: wiki\n---\n# wiki\n\n***\n', encoding='utf-8')
     _git(repo, 'add', '.')
     _git(repo, 'commit', '-m', 'init')
     node = Node(repo)
     node.init(agent='claude', user=True)
-    with pytest.raises(RuntimeError, match='project wiki'):
+    with pytest.raises(RuntimeError, match=f'no project wiki at {wiki}/_index.md'):
         node.init(name='bad')
 
 
@@ -2659,8 +2987,7 @@ def test_init_rejects_incoherent_pacing(
     The interval/sleep mutex and the iter-timeout-within-interval cap are
     launch invariants the loop depends on, so the launch validator rejects
     a violating combination at the init boundary with a clear message --
-    not at loop construction, where the failure would strand the node
-    ``idle`` inside the tmux pane with no run row.
+    not at the loop's boot, after a launch that already reported success.
     """
     node = Node(git_repo)
     node.init(agent='claude', user=True)
@@ -2705,6 +3032,268 @@ def test_init_normalizes_scope_before_validating(git_repo: pathlib.Path) -> None
     # a traversal root hiding inside a space form cannot bypass validation
     with pytest.raises(ValueError, match='repo-relative subdirectory'):
         node.init(name='sneaky', scope=['roots/a ../escape'])
+
+
+# ------ project wiki folder
+
+
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_wiki_setting_is_fixed_at_init_and_inherited(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wiki: str,
+) -> None:
+    """User init fixes the project's wiki folder; every descendant inherits it.
+
+    The project names its shared wiki in ``.fractal/.settings.json``: user
+    init reads the file once, creates the wiki there, and the baseline
+    commits both. Children and grandchildren carry the folder in their
+    config, a node's own copy of the file is never re-read, and the key can
+    never be set afterwards. With no setting, no config records the key.
+    An effort ladder beside the folder is the loop's to read, never init's.
+    """
+    # the project names its folder, beside an effort ladder, in a settings
+    # file the baseline commits
+    if wiki != 'wiki':
+        settings = git_repo / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        ladder = {'levels': ['high', 'max'], 'floor': 'high'}
+        content = {'wiki': wiki, 'effort_ladder': {'claude': ladder}}
+        settings.write_text(json.dumps(content), encoding='utf-8')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    assert (git_repo / wiki / '_index.md').is_file()
+    user.commit('configure', init=True)
+    result = _git(git_repo, 'ls-files', wiki, '.fractal')
+    tracked = result.stdout.split()
+    assert f'{wiki}/_index.md' in tracked
+    assert ('.fractal/.settings.json' in tracked) is (wiki != 'wiki')
+    # a child, whose own copy of the file then names another folder, spawns
+    # a grandchild
+    user.init(name='kid')
+    kid = Node(git_repo / '.worktrees' / 'main.kid')
+    settings = kid.worktree / '.fractal' / '.settings.json'
+    settings.write_text(json.dumps({'wiki': 'elsewhere'}), encoding='utf-8')
+    monkeypatch.setenv('_NODE', f'{kid.node_dir}')
+    Node(git_repo).init(name='grandkid')
+    monkeypatch.delenv('_NODE')
+    grandkid = Node(git_repo / '.worktrees' / 'main.kid.grandkid')
+    # every depth carries the user's folder; the default records nothing
+    for node in (user, kid, grandkid):
+        stored = node.config.load()
+        assert stored.get('wiki') == (None if wiki == 'wiki' else wiki)
+        assert node.wiki_prefix == wiki
+    # the operator surface refuses the key outright
+    with pytest.raises(typer.BadParameter, match='fixed at init'):
+        _config_set(['wiki=elsewhere'], f'{kid.worktree}')
+    assert kid.wiki_prefix == wiki
+
+
+@pytest.mark.parametrize(
+    argnames=('content', 'match'),
+    argvalues=[
+        pytest.param('{"wiki": ""}', 'non-empty', id='empty'),
+        pytest.param('{"wiki": 42}', 'non-empty', id='number'),
+        pytest.param('{"wiki": null}', 'non-empty', id='null'),
+        pytest.param('{"wiki": "/abs"}', 'project-relative', id='absolute'),
+        pytest.param('{"wiki": "../out"}', 'project-relative', id='parent'),
+        pytest.param('{"wiki": "a/../b"}', 'project-relative', id='inner-parent'),
+        pytest.param('{"wiki": "."}', 'must name a subdirectory', id='project'),
+        pytest.param('{"wiki": "./docs"}', 'canonical', id='dot-slash'),
+        pytest.param('{"wiki": "docs/"}', 'canonical', id='trailing-slash'),
+        pytest.param('{"wiki": "a//b"}', 'canonical', id='double-slash'),
+        pytest.param('{"wiki": ".fractal"}', 'machinery', id='fractal'),
+        pytest.param('{"wiki": "x/.worktrees"}', 'machinery', id='worktrees'),
+        pytest.param('{"wiki": ".GIT"}', 'machinery', id='git-casefolded'),
+        pytest.param('{"wiki": "null"}', 'clearing the key', id='named-null'),
+        pytest.param('{"wiki": "docs", "wikis": "x"}', 'unknown keys', id='typo'),
+        pytest.param(
+            '{"wiki": "docs", "effort_ladder": {"claude": {"levels": ["high"],'
+            ' "floor": "max"}}}',
+            'one of its levels',
+            id='effort-ladder',
+        ),
+        pytest.param('{"wiki": "docs"', 'not valid JSON', id='bad-json'),
+        pytest.param('["docs"]', 'JSON object', id='not-an-object'),
+    ],
+)
+def test_init_rejects_an_invalid_wiki_setting(
+    git_repo: pathlib.Path,
+    content: str,
+    match: str,
+) -> None:
+    """A bad settings file fails user init loudly, naming it, before any write.
+
+    The folder is committable regardless of scope, so it must be a
+    canonical project subdirectory clear of fractal's machinery; a
+    misspelled key or an unreadable file fails rather than reading as the
+    default.
+    """
+    settings = git_repo / '.fractal' / '.settings.json'
+    settings.parent.mkdir()
+    settings.write_text(content, encoding='utf-8')
+    with pytest.raises(ValueError, match=match) as excinfo:
+        Node(git_repo).init(agent='claude', user=True)
+    assert f'{settings}' in str(excinfo.value)
+    # nothing landed: no user node data, no project cache
+    assert not (git_repo / '.fractal' / 'main').exists()
+    assert not (git_repo / '.worktrees').exists()
+
+
+@pytest.mark.parametrize(
+    argnames=('before', 'after'),
+    argvalues=[
+        pytest.param(None, 'docs', id='to-docs'),
+        pytest.param('docs', None, id='to-default'),
+    ],
+)
+def test_reinit_adopts_a_wiki_setting_only_on_an_empty_tree(
+    git_repo: pathlib.Path,
+    before: Optional[str],
+    after: Optional[str],
+) -> None:
+    """A changed setting reaches a running tree only through reset and re-init.
+
+    The folder is fixed when the tree is created, so a project that renames
+    its shared wiki later cannot mix the two folders inside one tree: a
+    re-init over live nodes refuses, naming the reset, and once the tree has
+    no nodes the re-init records the new folder for every later spawn while
+    the tree's history survives. Whatever stays at the old folder -- the
+    ordinary content a rename leaves behind -- is never touched, and
+    dropping the setting returns the tree to ``wiki/`` with no key recorded.
+    """
+    settings = git_repo / '.fractal' / '.settings.json'
+    if before is not None:
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': before}), encoding='utf-8')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    user.commit('configure', init=True)
+    user.init(name='kid')
+    # the project moves its shared wiki: a rename leaves ordinary content at
+    # the old folder, and dropping the setting returns to the default
+    if after is not None:
+        _git(git_repo, 'mv', 'wiki', after)
+        (git_repo / 'wiki').mkdir()
+        (git_repo / 'wiki' / 'theorem.md').write_text('# theorem\n', encoding='utf-8')
+        settings.write_text(json.dumps({'wiki': after}), encoding='utf-8')
+        _git(git_repo, 'add', '-f', 'wiki', '.fractal/.settings.json')
+    else:
+        _git(git_repo, 'rm', '-q', '.fractal/.settings.json')
+    _git(git_repo, 'commit', '-m', 'move the project wiki')
+    old, new = before or 'wiki', after or 'wiki'
+    # live nodes keep the recorded folder; the refusal names the remedy
+    with pytest.raises(ValueError, match='fractal reset main'):
+        user.init(agent='claude', user=True)
+    assert user.wiki_prefix == old
+    # an empty tree adopts the new folder, keeping its history and the old
+    # folder's bytes
+    Node.reset(git_repo, name='main')
+    content = _files(git_repo / old)
+    output = user.init(agent='claude', user=True)
+    assert f'Adopted the project wiki folder {new!r}' in output
+    assert _files(git_repo / old) == content
+    assert user.config.load().get('wiki') == after
+    assert user.db.read('events', where={'node': 'main.kid'})
+    user.init(name='kid')
+    kid = Node(git_repo / '.worktrees' / 'main.kid')
+    assert kid.wiki_prefix == new
+
+
+@pytest.mark.parametrize(
+    argnames=('before', 'after'),
+    argvalues=[
+        pytest.param(None, 'wiki', id='named'),
+        pytest.param('wiki', None, id='dropped'),
+    ],
+)
+def test_reinit_over_live_nodes_keeps_the_folder_in_effect(
+    git_repo: pathlib.Path,
+    before: Optional[str],
+    after: Optional[str],
+) -> None:
+    """A setting naming the folder already in effect is no change.
+
+    An absent setting means ``wiki``, so naming it explicitly, or dropping
+    a file that named it, leaves the tree's folder where it is: a re-init
+    over live nodes proceeds -- updating the stored agent -- instead of
+    demanding a reset that would tear the tree down for nothing.
+    """
+    settings = git_repo / '.fractal' / '.settings.json'
+    settings.parent.mkdir()
+    if before is not None:
+        settings.write_text(json.dumps({'wiki': before}), encoding='utf-8')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    user.commit('configure', init=True)
+    user.init(name='kid')
+    if after is not None:
+        settings.write_text(json.dumps({'wiki': after}), encoding='utf-8')
+    else:
+        settings.unlink()
+    output = user.init(agent='codex', user=True)
+    assert 'Adopted' not in output
+    assert user.config.get('agent') == 'codex'
+    assert user.wiki_prefix == 'wiki'
+
+
+def test_baseline_refuses_a_wiki_setting_written_after_init(
+    git_repo: pathlib.Path,
+) -> None:
+    """The baseline never commits a setting that contradicts the recorded folder.
+
+    Every spawn reads the setting from the committed root branch, so a file
+    written after ``fractal init`` -- naming ``docs`` while the tree
+    recorded ``wiki`` -- refuses the baseline, which then commits nothing;
+    re-running init adopts the file and the baseline lands it.
+    """
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    settings = git_repo / '.fractal' / '.settings.json'
+    settings.write_text(json.dumps({'wiki': 'docs'}), encoding='utf-8')
+    with pytest.raises(ValueError, match='re-run `fractal init`'):
+        user.commit('configure', init=True)
+    result = _git(git_repo, 'ls-files', '.fractal', 'docs')
+    assert result.stdout == ''
+    # init adopts the file, and the baseline commits it beside the new wiki
+    output = user.init(agent='claude', user=True)
+    assert "Adopted the project wiki folder 'docs'" in output
+    user.commit('configure', init=True)
+    result = _git(git_repo, 'ls-files', '.fractal', 'docs/_index.md')
+    assert result.stdout.split() == ['.fractal/.settings.json', 'docs/_index.md']
+
+
+@pytest.mark.parametrize('recorded', [None, 'docs'], ids=['default', 'docs'])
+def test_spawn_refuses_a_wiki_setting_committed_after_init(
+    git_repo: pathlib.Path,
+    recorded: Optional[str],
+) -> None:
+    """A spawn refuses when the root branch's setting contradicts the tree's.
+
+    The tree enforces the folder init recorded. A settings file committed on
+    the root branch afterwards -- naming ``docs`` on a ``wiki`` tree, or
+    dropped from a ``docs`` tree -- would otherwise leave every new node
+    exempting a folder that is now ordinary content, so the spawn refuses,
+    naming the remedy, before anything is created.
+    """
+    settings = git_repo / '.fractal' / '.settings.json'
+    if recorded is not None:
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': recorded}), encoding='utf-8')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    user.commit('configure', init=True)
+    # the root branch changes the setting under the tree
+    if recorded is None:
+        settings.write_text(json.dumps({'wiki': 'docs'}), encoding='utf-8')
+        _git(git_repo, 'add', '-f', '.fractal/.settings.json')
+    else:
+        _git(git_repo, 'rm', '-q', '.fractal/.settings.json')
+    _git(git_repo, 'commit', '-m', 'change the project wiki setting')
+    with pytest.raises(ValueError, match='fractal reset main'):
+        user.init(name='task', scope=['src'])
+    assert not (git_repo / '.worktrees' / 'main.task').exists()
+    assert not user.db.exists('nodes', where={'node': 'main.task'})
 
 
 # ------ sub-projects and ambient resolution

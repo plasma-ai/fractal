@@ -81,12 +81,22 @@ Requirements* sections, then launch with ``fractal node start``.
 
 With a template, supply required inputs before init. Reusable prose and Jinja
 expressions live in ``NODE.md``, steps, or source-only fragments such as
-``_partials/foundations.md``. Jinja includes read only the same committed
-template bundle. Its optional ``_template.toml`` holds literal ``[values]``
-defaults, while the node's generated file records the complete resolved inputs
-and source commit. TOML is parsed as data, without rendering, and metadata is
-not a standalone output. An explicit Jinja include treats any named bundle
-file as source.
+``_partials/foundations.md``. Jinja includes read the same committed template
+bundle; a name with a leading ``/``, such as
+``{% include '/campaign/stations/DOCTRINE.md' %}``, names a shared file by its
+repo-relative path instead, read at the same commit. Shared names must be
+literal, and a shared file may include another. A symlink, a folder, a
+submodule, a credential-named file, a ``..`` step, a ``.git``, ``.fractal``, or
+``.worktrees`` component, and a path the commit does not track all refuse
+before any worktree exists, naming the source that holds the include. A shared
+file renders only inside the output that includes it and never deploys into the
+node; ``node reseed`` never rewrites ``NODE.md``, so a changed shared file
+reaches an existing charter only through a hand edit (``node diff`` prints the
+delta). The template's optional ``_template.toml`` holds literal ``[values]``
+defaults, while the node's generated file records the complete resolved inputs,
+the source commit, and each shared file's blob id. TOML is parsed as data,
+without rendering, and metadata is not a standalone output. An explicit Jinja
+include treats any named bundle file as source.
 
 Jinja supports includes, imports, macros, inheritance, branches, loops, and raw
 blocks. Source line endings normalize to LF, trailing newlines are retained,
@@ -156,10 +166,15 @@ node at ``--path``.
        the preset; the preset beats an inherited value). Every template
        refusal — an untracked folder, a symlink, a credential-named file
        anywhere in the folder, a file a seed surface would silently skip,
-       a broken ``steps/`` contract, missing required Jinja inputs, a
-       truncated charter — fires before any worktree exists. One notice
+       a ``steps/``, ``scripts/``, or ``skills/`` file the commit never
+       stores (only non-hidden text records at the estate content law's
+       suffixes commit, so a suffix-less script or a skill's ``.js``
+       helper refuses by name), a broken ``steps/`` contract, missing
+       required Jinja inputs, a truncated charter — fires before any
+       worktree exists. One notice
        appended to the init output names the ``@<ref>`` form when the
-       root branch holds a different copy of the folder.
+       root branch holds a different copy of the folder or of a shared file
+       it includes, naming each shared file that differs.
    * - ``--include <path>``
      - whole template
      - Deploy only these template-relative output paths (repeatable; a
@@ -181,9 +196,13 @@ node at ``--path``.
      - none
      - TOML inputs for seed-time Jinja rendering, overriding the template's
        optional ``_template.toml`` ``[values]`` defaults. The external file
-       names inputs at its top level, without a ``[values]`` wrapper;
-       strings, booleans, numbers, lists, tables, and date/time values keep
-       their types. Requires ``--template``; the node's generated
+       names inputs at its top level, or under a ``[values]`` table — the
+       shape a node's generated ``_template.toml`` records, so one node's
+       record can seed another (its ``path``, ``commit``, ``include``,
+       ``exclude``, and ``shared`` keys beside the table are ignored); a
+       ``[values]`` table beside any other top-level key refuses, naming the
+       keys. Strings, booleans, numbers, lists, tables, and date/time values
+       keep their types. Requires ``--template``; the node's generated
        ``_template.toml`` records the complete resolved map. Missing inputs
        used by selected outputs refuse before creation. Values remain literal
        data, and prompt-time ``$VAR`` text passes through untouched.
@@ -271,7 +290,9 @@ node at ``--path``.
    * - ``--reserve-budget <usd|N%>``
      - ``10%`` of ``--max-cost``
      - Budget reserved for cleanup, as USD or a percentage of ``--max-cost``;
-       only meaningful with ``--max-cost`` and must stay below 99% of it.
+       only meaningful with ``--max-cost`` and must stay below 99% of it. A
+       value given here keeps its figure when the cap later changes; the
+       default retunes with the cap.
    * - ``--sync`` / ``--no-sync``
      - enabled
      - Run sync mode (the radio check-in) before each step.
@@ -333,7 +354,9 @@ launch time.
    Re-arm a settled node (``completed``, ``stopped``, ``exited``, or
    ``killed``) for further iterations. The launch restores the worktree; a
    dirty worktree refuses and lists the uncommitted project files that would
-   be discarded.
+   be discarded. A worktree holding a git operation in progress (a merge,
+   rebase, ``index.lock``, ...) is left as found, and the first step's prompt
+   names the operation.
 
 ``--clean``
    With ``--continue``: acknowledge discarding uncommitted project files
@@ -350,9 +373,11 @@ launch time.
 
 ``--max-cost <usd>``
    With ``--continue``: retune the cost cap before relaunch, echoed
-   ``max_cost: old -> new``. **Required** when the last run ended on its cost
-   budget — runs are isolated and each launch arms the cap anew, so a
-   budget-ended run refuses a bare ``--continue``.
+   ``max_cost: old -> new``, re-deriving a default reserve as ``node update``
+   does. **Required** when the last run ended on its cost budget — runs are
+   isolated and each launch arms the cap anew, so a budget-ended run refuses
+   a bare ``--continue``. A continue that refuses or fails to launch keeps
+   the old cap.
 
 ``--headless`` / ``--tmux``
    Select the runtime backend: ``--headless`` runs the loop in a detached
@@ -373,10 +398,16 @@ A fresh start requires status exactly ``idle``. Starting refuses on: the user
 node; a ``retired`` node (unretire first); a ``paused`` node (resume first); a
 paused ancestor or tree-wide pause latch; a foreign tmux session already
 holding the node's session name; a node whose recorded process group is
-still alive (identity-verified, so a recycled group id never blocks); and a
-stored config the launch re-validation rejects. Continuing from ``killed``
-surfaces the recorded kill attribution as a notice. An uncapped start is
-allowed but warns loudly.
+still alive (identity-verified, so a recycled group id never blocks); a
+stored config the launch re-validation rejects; and an invalid effort ladder
+committed on the tree's root branch (see :doc:`/configuration`). Continuing
+from ``killed`` surfaces the recorded kill attribution as a notice. An
+uncapped start is allowed but warns loudly.
+
+A merge can rewrite the worktree of any node that is not ``active``, so every
+loop launch — a start, a continue, or a resume — waits for a merge in progress
+anywhere in the repository before the continue's worktree restore and before
+it goes ``active``, saying so on its output before each wait.
 
 .. code-block:: console
 
@@ -450,14 +481,23 @@ in-flight agent invocation is aborted, and the loops park with status
 tmux session — that is its normal state, not a crash. While a node (or the
 whole tree, via ``fractal pause``) is paused, spawning and starting refuse
 anywhere beneath it; the only legal verbs on a paused node are ``resume``,
-``kill``, and ``chat``.
+``kill``, ``chat``, and ``merge`` (committed work only; the node stays
+paused). The loop reserves ``parked``, and any reason starting with
+``via pause latch`` or ``resume preflight failed:``, for the pause events it
+records as it parks, so ``pause`` refuses such a ``--reason`` before anything
+is written.
 
 ``resume`` relaunches the parked subtree leaf-first. Each loop adopts its open
 run — same budgets and iteration count, the interrupted step re-entered
 (resuming the recorded agent session when one exists) — and run and iteration
 deadlines are credited for the paused span. A node still parking gets its
-pending pause withdrawn instead. Resuming refuses when the node is not paused
-or when an ancestor is still paused.
+pending pause withdrawn instead. Resuming refuses when the node is not paused,
+when an ancestor is still paused, or when a node it would relaunch has a
+stored config the launch re-validation rejects or an invalid effort ladder
+committed on the tree's root branch; those refusals name the node and land
+before any node is touched. ``resume`` returns once the loops are
+relaunched; a relaunched loop waits for a merge in progress before it goes
+``active``, as every launch does (see ``start``).
 
 .. code-block:: console
 
@@ -492,6 +532,20 @@ row, and is surfaced as a notice on a later ``start --continue``.
 
    $ fractal node kill parser --reason "runaway loop"
 
+``pause`` (with a step in flight) and ``kill`` (with a recorded process group)
+also sweep the node's worktree: each process working there outside the reaped
+tree, other than a node's loop, is named on stderr (``Warning: pid <pid> works
+in the worktree of <branch> outside the reaped tree (left running):
+<command>``) and never signaled. The sweep is the only place a leftover job
+comes to light. A step that ends normally ends no process, so any background
+job outlives its step unless the agent ends it, and a job a finished step left
+behind is outside every later reap. The reaps that cut a step short — a step
+deadline, the no-progress watchdog, a stream failure, the crash heal — land
+while the step still runs, and they miss an orphan outside the agent's
+session: a process that left the session and lost its parent, such as a
+double-forked daemon or a job backgrounded under a ``setsid`` shell that has
+since exited. No other command names such a job; end it by hand.
+
 Integration and teardown
 ------------------------
 
@@ -501,19 +555,21 @@ Integration and teardown
 .. code-block:: console
 
    $ fractal node merge [NODE] [--continue] [--ignore-scope]
-         [--validate <script>] [--delete] [--force|-f]
+         [--validate <script>] [--message <text>] [--delete] [--force|-f]
 
 Squash-merge the node's branch into its merge target — the configured
 ``base`` when set, else the dotted parent. One squash commit lands on the
 target; the node's full history stays on its own branch. Merging refuses on
-the user node, when the node itself is ``active`` or ``paused``, and when the
-*target* is ``active`` or ``paused`` (except from inside the target's own
-loop, its normal child-merge path). Non-fatal warnings ride stderr.
+the user node, when the node itself is ``active``, and when the *target* is
+``active`` or ``paused`` (except from inside the target's own loop, its
+normal child-merge path). A ``paused`` node merges its committed work and
+stays paused (see :doc:`/guide/lifecycle`). Non-fatal warnings ride stderr.
 
 Before committing, the merge holds the squash to the node's commit scope: the
 staged paths outside ``.fractal/`` are judged by the node's ``scope`` roots
-and its project ``wiki/``, with the worktree-root ``.gitattributes`` admitted
-only as init's own ``**/_index.md merge=wiki`` edit (a repo-root node without
+and its project wiki (``wiki/`` unless the project's settings file names
+another folder), with the worktree-root ``.gitattributes`` admitted
+only as init's own ``merge=wiki`` edit (a repo-root node without
 a scope is unrestricted; a sub-project node without one is bounded to its
 project directory) — the same law ``fractal commit`` applies — and a path
 outside them refuses the merge. The refusal names the paths and both
@@ -526,7 +582,12 @@ place, and its remedies differ: re-run with ``--continue --ignore-scope``, or
 widen the scope (config set, then commit) and redo the squash (``git -C
 <target worktree> reset --hard HEAD && git -C <target worktree> merge
 --squash <branch>``), because the widening commit is a node commit made after
-the hand squash, which makes ``--continue`` refuse.
+the hand squash, which makes ``--continue`` refuse. Before it judges any path,
+the check refuses a node whose recorded project-wiki folder is not the one its
+spawn gave it (a hand edit of its ``config.json``), naming both folders; a node
+in another sub-project than its parent is held to its project's setting as
+committed on the root branch now, so a setting changed since its spawn refuses
+too, naming the setting (see :doc:`/configuration`).
 
 Nothing under any ``.fractal/`` directory on the target changes except a
 scope root of the merging node that is, or lies under, a ``.fractal/``
@@ -649,7 +710,10 @@ overwrites it.
    Merge out-of-scope changes instead of refusing — paths outside the node's
    scope roots and its project wiki (``.fractal/`` paths are never judged; the
    worktree-root ``.gitattributes`` is admitted only as init's own
-   ``merge=wiki`` edit).
+   ``merge=wiki`` edit). The index refresh that follows the squash still
+   regenerates the project wiki the node's spawn gave it, under the node's
+   own project in the target checkout, so a hand-edited ``config.json``
+   steers neither the exemption nor the refresh.
 
 ``--validate <script>``
    Run a repository gate on the destination before the squash commit. Bash
@@ -663,6 +727,11 @@ overwrites it.
    merge (``Nothing to merge``) skips it. An absolute path, a ``..``
    component, a symlink script, or a path escaping the target worktree is
    refused.
+
+``--message <text>``
+   Commit the squash with ``<text>`` instead of the default
+   ``merge <branch>``, verbatim, so a descriptive message needs no amend (an
+   amended squash orphans the merge-base advance recorded against it).
 
 ``--delete``
    Delete the node (worktree, branch, and whole subtree) after a successful
@@ -753,12 +822,15 @@ Inspection
 
    $ fractal node status [NODE]
 
-Print the node's current status, possibly decorated: ``active (pausing)``,
-``active (stopping)``, or ``active (finishing)`` when a signal is pending,
-and ``exited (<reason>)`` when the latest run recorded why it ended. The read
-is self-reconciling — a crashed node, ``active`` on record with its loop
-runtime (the tmux session, or a headless or bare loop's recorded process
-group) provably gone, is healed to ``exited`` first.
+Print the node's current status, possibly decorated: ``idle (starting)``
+between ``start`` and the loop's ``active`` stamp after preflight, while the
+loop runtime is already live; ``active (pausing)``, ``active (stopping)``, or
+``active (finishing)`` when a signal is pending; and ``exited (<reason>)``
+when the latest run recorded why it ended. The status itself stays ``idle``
+through that boot window. The read is self-reconciling — a crashed node,
+``active`` on record with its loop runtime (the tmux session, or a headless or
+bare loop's recorded process group) provably gone, is healed to ``exited``
+first.
 
 .. code-block:: console
 
@@ -779,11 +851,23 @@ each file is compared against the node's live copy: ``NODE.md``, ``steps/``,
 ``scripts/``, ``skills/``, and — for each ``agents/<agent>/`` file — the
 live ``.<agent>/`` copy, all in the node's data directory. A live symlink
 and a file the template does not carry are never judged; a template file the
-node lacks is drift. Literal braces are valid output and are compared like any
+node lacks is drift. Codex trusts the project it runs in by appending a
+``[projects."<path>"]`` stanza with ``trust_level = "trusted"`` to
+``.codex/config.toml``, keyed to the repository's main worktree. The trust
+stanza for this repository at the end of that file, keyed to the main worktree
+or to the node's own worktree (compared as resolved paths), is never judged, so
+any other change there diffs without it. A stanza trusting any other path is
+drift, since trust enables project-local settings, as is a projects table
+carrying more than the trusted level. Literal braces are valid output and are
+compared like any
 other text. Source defaults are not merged again; deleting a required recorded
-input causes a rendering refusal. The recorded commit resolves as long as it
-is reachable, so a template folder
-moved or deleted later still diffs at the commit that seeded the node.
+input causes a rendering refusal. A recorded folder that init and reseed would
+refuse for a file the seed would skip or the commit never stores refuses here
+too, naming the file, rather than reporting it as missing from the node. The
+recorded commit resolves as long as it is reachable, so a template folder
+moved or deleted later still diffs at the commit that seeded the node. The
+shared files the folder includes re-read at that commit too, so a hand edit to
+an included part of ``NODE.md`` is drift.
 
 Drift prints one unified diff per file (``template/<file>`` against
 ``node/<file>``); a recorded listing entry the template no longer carries
@@ -807,12 +891,13 @@ output.
 List a node's **descendants** — the listing never includes the target's own
 row (use ``status`` for that). Columns, in order: ``status``, ``detail``,
 ``node``, ``title``, ``max_cost``, ``spend``, ``max_depth``, ``max_children``,
-``max_descendants``, ``last``, ``end_reason``.
+``max_descendants``, ``last``, ``end_reason``, ``starting``.
 
 ``status`` is always the bare lifecycle word; every qualifier rides
-``detail``, which composes (``;``-joined) any of: a pending signal
-(``pausing``/``stopping``/``finishing``), an ``exited`` run's recorded end
-reason, ``run exhausted: <reason>`` on a ``completed`` run that ended on its
+``detail``, which composes (``;``-joined) any of: ``starting`` for a node in
+its boot window (a live loop runtime, ``active`` not yet stamped), a pending
+signal (``pausing``/``stopping``/``finishing``), an ``exited`` run's recorded
+end reason, ``run exhausted: <reason>`` on a ``completed`` run that ended on its
 iteration cap and ``final iteration failed`` on a drained finish whose last
 iteration died (a clean drained finish stays bare), ``orphaned`` for a
 registered node whose worktree is gone, ``model drop`` for an unresolved
@@ -821,14 +906,23 @@ with no recorded row, and ``PAUSED: billing`` while the newest launches carry
 the dead-credits signature. ``end_reason`` is ``detail``'s typed counterpart,
 a closed vocabulary naming a settled row's landing: ``goal_met``,
 ``run_exhausted``, or ``final_iteration_failed`` on a ``completed`` row;
-``cost_budget``, ``timeout``, ``setup_abort``, ``final_iteration_failed``, or
-``other`` (recorded but unmapped) on an ``exited`` row; null when no reason is
-recorded (e.g. a reconcile-healed crash) and on every other status. ``spend``
+``cost_budget``, ``timeout``, ``setup_abort``, ``crashed`` (a dead loop's rows
+closed by the crash heal, whose ``detail`` reads ``crashed: loop runtime gone,
+healed by reconcile``), ``final_iteration_failed``, or ``other`` (recorded but
+unmapped) on an ``exited`` row; null when no reason is recorded (a run that
+never landed) and on every other status. ``starting`` is on every row: true
+only in the boot window, where the row's ``status`` stays ``idle`` (``active``
+under ``--live``) and ``detail`` reads ``starting``; false otherwise; and null
+(unknown) when the listing could not look — tmux gave no answer and the node
+records no runtime of its own — so null never means "not starting". One tmux
+listing judges every row. ``spend``
 is the current run's subtree cost at the scope ``max_cost`` is enforced at,
 blank for a node that has never run. Blank limit columns mean unlimited.
 ``last`` is the age of each node's newest activity, with a ``!`` suffix
-flagging an active node quiet past ``max(step_timeout, 5m)``. On a TTY,
-statuses render bracketed (``[active]``); machine output stays unbracketed.
+flagging an active node quiet past ``max(step limit, 5m)``, the step limit
+being its active step's ``timeout:`` frontmatter, else ``step_timeout``. On a
+TTY, statuses render bracketed (``[active]``); machine output stays
+unbracketed.
 
 ``--all``
    Include retired nodes.
@@ -849,7 +943,8 @@ statuses render bracketed (``[active]``); machine output stays unbracketed.
 ``--live``
    Trust each child's real state: relabel a crashed active node — its loop
    runtime (the tmux session, or a headless or bare loop's recorded process
-   group) provably gone — as ``exited``, a booting idle node as ``active``,
+   group) provably gone — as ``exited``, a booting idle node as ``active``
+   with a ``starting`` detail (so a finishing ancestor's drain waits for it),
    and drop nodes whose worktree is gone. This view is read-only; the plain
    listing instead persists the crash heal and flags worktree-less rows as
    ``orphan`` (or ``<status> (orphaned)`` when settled).
@@ -882,11 +977,16 @@ statuses render bracketed (``[active]``); machine output stays unbracketed.
 Show the node's lifecycle activity, most recent first. Columns (bind by
 header name, not position): ``timestamp``, ``node``, ``event_id``,
 ``step_id``, ``iter_id``, ``run_id``, ``event``, ``actor``, ``step_name``,
-``step``, ``iter``, ``status``, ``exit_code``, ``metadata``, ``duration``,
-``cost``. The ``cost`` column is the row's own-node step cost only — subtree
-spend, children included, is ``fractal node cost spent``. ``--limit <n>``
-bounds the rows returned; ``--json`` emits a JSON array of row objects
-(mutually exclusive with ``--csv``).
+``step``, ``iter``, ``agent``, ``model``, ``effort``, ``status``,
+``exit_code``, ``metadata``, ``duration``, ``cost``. ``agent``, ``model``, and
+``effort`` are a step's own — the agent that ran it and the model that served
+it, as its stream named them, and the effort its launch was handed — and are
+blank on run and iteration rows and on events recorded outside a step; an
+event recorded during a step carries its step's. The ``cost`` column is the
+row's own-node step cost only — subtree spend, children included, is
+``fractal node cost spent``. ``--limit <n>`` bounds the rows returned;
+``--json`` emits a JSON array of row objects (mutually exclusive with
+``--csv``).
 
 .. code-block:: console
 
@@ -1016,7 +1116,8 @@ worktree — a node may not edit its own seed.
    in ``_template.toml``, and the node reseeds from it — memory and config
    stay intact, so a moved template is followed with one command. One notice
    names the ``@<root>`` form when the root branch holds a different copy of
-   the folder (a plain or ``--ref`` reseed stays silent).
+   the folder or of a shared file it includes (a plain or ``--ref`` reseed
+   stays silent).
 
 ``--force`` / ``-f``
    Reseed even while the node is active or paused.
@@ -1048,10 +1149,14 @@ The options mirror their ``node init`` counterparts: ``--title``,
 ``--max-cost``, ``--max-iter-cost``, ``--max-step-cost``,
 ``--reserve-budget`` (USD or ``N%`` of the effective max-cost),
 ``--step-timeout``, ``--max-depth``, ``--max-children``, and
-``--max-descendants``. When ``--max-cost`` changes and the reserve was left
-at its default, the 10% reserve is re-derived against the new cap. The user
-node cannot be updated (set its config with ``node config set`` from the root
-worktree instead), and the target's parent worktree must exist.
+``--max-descendants``. When ``--max-cost`` changes without
+``--reserve-budget`` and the reserve is init's default, still 10% of the old
+cap, it is re-derived against the new cap; a reserve set by flag, template
+preset, or ``config set`` keeps its figure, even at exactly 10%. A
+``--reserve-budget`` here records the reserve as explicit, echoed
+``reserve_mode: default -> explicit``. The user node cannot be updated (set
+its config with ``node config set`` from the root worktree instead), and the
+target's parent worktree must exist.
 
 .. code-block:: console
 
@@ -1073,11 +1178,19 @@ Time budgets: ``fractal node time``
 Print the seconds left before the next timeout fires, e.g. ``600s``. By
 default the soonest of the configured run, iteration, and step deadlines
 answers; ``--scope`` narrows to one: ``run`` reads ``timeout``, ``iter``
-reads ``iter_timeout`` (falling back to ``interval``), ``step`` reads
-``step_timeout``. Paused spans are credited back to run and iteration
-deadlines. Two non-numeric answers are distinct: ``no limit`` means no
-timeout is configured for the queried scope; ``not running`` means a limit
-exists but no run, iteration, or step is currently active.
+reads ``iter_timeout`` (falling back to ``interval``), ``step`` reads the
+active step's ``timeout:`` frontmatter, else ``step_timeout`` — the ceiling
+the loop enforces for that step, which its launch records on the step row.
+The loop reads step files only once per iteration, so an edit made
+mid-iteration shows here from the step's next launch, when the loop enforces
+it; the node's own seat reads the same ceiling from ``$STEP_TIMEOUT_SECONDS``.
+A steered step counts down from its stuck launch, as the loop's
+deadline does. Paused spans are credited back to run and iteration deadlines,
+each from the moment the loop parks (not the pause request) to the resume.
+Two non-numeric answers are distinct: ``no limit`` means no timeout is
+configured for the queried scope; ``not running`` means a limit exists but no
+run, iteration, or step is currently active. An idle node has no current step,
+so a ``timeout:`` line in any step file counts as a step limit there.
 
 .. code-block:: console
 
@@ -1089,7 +1202,10 @@ Cost budgets: ``fractal node cost``
 
 Budgets and spend are **per-run**: each launch arms ``max_cost`` anew, and all
 three commands default to the current run (scope to a prior run with
-``--run <id>``). Amounts print as ``$X.XXXX``. A deleted node still resolves
+``--run <id>``). ``--run``, ``--iter``, and ``--step`` must name the target's
+own run, iteration, or step: another node's is refused naming its owner, and
+an id no row carries is refused as unrecorded. Amounts print as ``$X.XXXX``.
+A deleted node still resolves
 through the tree's shared history: ``spent`` and ``breakdown`` answer from its
 latest recorded run, while ``remaining`` always prints ``no budget`` (caps die
 with the node).
@@ -1121,7 +1237,9 @@ Print the total recorded cost, children included; ``--max-depth 0`` restricts
 to this node only. ``--run``, ``--iter``, and ``--step`` scope the reading to
 one run, iteration, or step. Prints ``untracked`` when the scope ran only
 cost-untracked steps; when ended steps carry no recorded cost, a stderr
-disclosure notes how many unpriced steps were excluded.
+disclosure notes how many unpriced steps were excluded, and another notes
+how many steps count only their recorded spend because the record leaves
+part of their spend out (a reply cut off, or a result figure refused).
 
 ``cost breakdown``
 ~~~~~~~~~~~~~~~~~~
@@ -1134,7 +1252,9 @@ Print a per-node table — columns ``node``, ``max_cost``, ``spent`` — for the
 current run (or ``--run <id>``). The target's own row leads, followed by each
 in-subtree descendant; descendants whose registry rows are gone but whose
 spend is still recorded append as ``<branch> (deleted)`` rows, so the rows
-always sum to ``cost spent``.
+always sum to ``cost spent``. The same two stderr disclosures as ``cost spent``
+follow the table: how many unpriced steps were excluded, and how many steps
+count only their recorded spend.
 
 .. code-block:: console
 
@@ -1184,9 +1304,14 @@ written; ``init``'s additional flag checks (the agent registry, provider
 support, the base worktree) do not run here. Multi-key sets are checked
 upfront, so no earlier key lands when a later one is rejected.
 
-A *change* to the init-fixed keys ``root``, ``user``, and ``project`` always
-refuses: ``<key> is fixed at init and cannot be set.`` (Re-setting the
-currently stored value is accepted as a no-op.)
+A ``reserve_budget`` write records the reserve as explicit, so no later cap
+change retunes it, and clearing the reserve clears its mode; the derived
+``reserve_mode`` is echoed when it changes. ``reserve_mode`` itself refuses:
+it records how the reserve was set.
+
+A *change* to the init-fixed keys ``root``, ``user``, ``project``, and
+``wiki`` always refuses: ``<key> is fixed at init and cannot be set.``
+(Re-setting the currently stored value is accepted as a no-op.)
 
 .. code-block:: console
 

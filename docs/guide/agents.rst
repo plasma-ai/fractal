@@ -166,11 +166,37 @@ authenticated. ``claude`` runs on the user's own config home
 (``~/.claude``, or ``$CLAUDE_CONFIG_DIR``) — fractal never touches its
 auth or session storage. The node's ``settings.json`` rides the
 ``--settings`` flag and outranks worktree and user settings, so per-node
-permissions, model, and environment live there. ``claude`` reports its own
-USD spend per invocation, and it is the only backend that enforces the
-per-step budget cap in-flight (the loop passes ``--max-budget-usd``; a
-budget stop is a clean stop, not a failure). Supports the ``openrouter``
-route.
+permissions, model, and environment live there. Each launch passes the
+file composed with a ``claudeMdExcludes`` list and leaves the file itself as
+written: Claude Code loads the instruction files (``CLAUDE.md``,
+``CLAUDE.local.md``, ``.claude/CLAUDE.md``, ``.claude/rules/``, and
+``AGENTS.md``) of every directory above its working directory and the
+user's own ``CLAUDE.md`` and rules in its config home, and the list excludes
+each of them. A node's session reads only its worktree's own instruction
+files, never the main checkout's, a parent directory's, or the user's; a
+node with no ``settings.json`` of its own passes the excludes alone. Claude
+Code cannot exclude an organization's managed ``CLAUDE.md``, which still
+loads.
+
+By default each launch also passes ``--setting-sources project,local`` and
+``--strict-mcp-config``, so a node's session loads the worktree's project
+and local settings and the node's own, and no MCP server. The user's own
+settings (``~/.claude/settings.json``: permissions, hooks, plugins, model
+and effort defaults), user skills, MCP servers, claude.ai connectors, and a
+project's ``.mcp.json`` servers stay out, and a node runs the same on any
+host. The model and effort defaults fractal records for a step read the
+same sources. A host whose nodes need the user's configuration (an
+``apiKeyHelper`` or a provider ``env`` in the user's settings, say) sets
+the ``user_settings`` config key, which drops both flags (see
+:doc:`/configuration`), or moves what nodes need into the station's
+``agents/claude/settings.json``.
+
+``claude`` reports its own USD spend; on a resumed session the figure
+counts on from the total Claude Code saved for the session, which fractal
+takes off, so each step books its own spend. It is the only backend that
+enforces the per-step budget cap in-flight (the loop passes
+``--max-budget-usd``; a budget stop is a clean stop, not a failure).
+Supports the ``openrouter`` route.
 
 codex
 ~~~~~
@@ -184,15 +210,24 @@ Cost is token-priced from the pricing cache: spend is priced at the served
 model the session log names, and a cost cap requires a configured model with
 a pricing entry. Token counts come from the session log under the node's
 ``.codex`` home, read once the process exits, so a resumed thread's step
-records its own tokens; a log that cannot be bound to the step's process, a
-turn that spawned or drove sub-agent threads (their usage is unpriced), or a
-log from ``codex`` older than 0.153, which carries no per-response usage,
-records no cost and logs the reason. ``codex`` sessions (threads) cannot be
-forked — resume them in place instead. When an explicit model is
-configured, ``fractal node start`` runs a bounded probe invocation before
-the run, because some accounts reject models the pricing table can price — a
-rejection relays ``codex``'s own diagnostic. Supports the ``openrouter``
-route.
+records its own tokens, and a sub-agent thread the turn spawns or drives is
+summed from its own log at its own served model, so the step's cost includes
+its children's spend while the step's model stays the parent's; a log that
+cannot be bound to the step's process, a child log the window cannot bind to
+the turn, or a log from ``codex`` older than 0.153, which carries no
+per-response usage, records no cost and logs the reason. A step ``codex``
+ends non-zero — a request refused because the model is at capacity, a
+crash, or a kill — is priced from the same logs by their cumulative token
+counters: the thread counter's growth since the launch, plus each sub-agent
+log's, at their own served models, so a failed attempt counts toward the
+node's spend and its cost caps. A refused request is not billed; a request
+still in flight when ``codex`` died is in no counter, so the step books what
+was recorded, marked partly unpriced, or no cost when nothing was.
+``codex`` sessions (threads) cannot be forked — resume them in place
+instead. When an explicit model is configured, ``fractal node start`` runs a
+bounded probe invocation before the run, because some accounts reject models
+the pricing table can price — a rejection relays ``codex``'s own diagnostic.
+Supports the ``openrouter`` route.
 
 grok
 ~~~~
@@ -203,7 +238,8 @@ global home (``~/.grok``, or ``$GROK_HOME`` when set in the launching
 environment); an ``XAI_API_KEY`` in the environment is picked up as well.
 ``grok`` reports its spend on the stream's final frame — trusted as-is,
 since subscription/pool models have no pricing-table entry — with token
-pricing only as a fallback. ``grok`` reports no tool activity on its
+pricing only as a fallback, so a run with a ``grok`` step refreshes a price
+table older than a day at run start. ``grok`` reports no tool activity on its
 stream and suppresses reasoning output, so a quiet pane during a ``grok``
 step is normal.
 
@@ -258,11 +294,21 @@ Preflight
 Before its first iteration, a run fails fast when the node cannot
 possibly work:
 
+- under a cost cap, every token-priced step's effective model must be in
+  the price table (the first gap names its step);
 - the agent binary must be on ``PATH``;
 - an ``openrouter``-routed node must have ``OPENROUTER_API_KEY`` set;
-- ``codex`` with an explicit model runs its acceptance probe;
+- ``codex`` with an explicit model runs its acceptance probe, and a probe
+  that passes is logged with its token usage and the figure the model's
+  rates put on it (``=== Preflight: codex probe passed ... ===``) and booked
+  as a ``preflight`` event carrying the same line, so ``node activity``
+  keeps it — paid inference that lands on no step row and, events carrying
+  no cost, counts toward no cap;
 - a run whose agent prices from tokens needs the pricing cache — a stale
-  cache warns and is used, a missing cache that cannot be fetched aborts.
+  cache warns and is used, a missing cache that cannot be fetched aborts;
+- a run with a native ``claude`` step refreshes a pricing cache older than
+  a day, since a launch that ends without its own cost figure is priced
+  from it — a failed fetch only warns, and the run goes on.
 
 A failed preflight on a fresh or continued start records the run as
 ``exited`` with the reason. On ``fractal node resume`` the paused run is
@@ -278,7 +324,10 @@ probe, and a resume boot records no ``pause`` event over it.
 The ``codex`` probe leads its own process group, recorded in the node's
 ``.step_pgid`` for the probe's lifetime so ``kill`` reaps it by the same
 handle as a step; a probe that does not answer within the preflight
-timeout is cancelled — TERM, a short grace, then KILL on the whole group.
+timeout is cancelled — TERM, a short grace, then KILL on the probe's whole
+process tree. The probe is a paid invocation — one short turn at the
+configured model — and its spend stays off the ledger: it lands in no step
+row, so the run's recorded spend and every cost cap leave it out.
 
 Costs
 -----
@@ -286,8 +335,29 @@ Costs
 Every step row carries the spend the backend reported. Cost-reporting
 backends flush each figure as it arrives — a killed or timed-out step
 keeps the last figure recorded — while ``codex`` prices the whole
-invocation once its process exits cleanly, so an interrupted ``codex``
-step records no cost. Read spend with the cost commands (full surfaces in
+invocation once its process exits: a clean exit from the per-response usage
+in its session log, and a failed or killed step from the growth of the log's
+token counters. A ``claude`` step that ends without its result frame
+is priced again from Claude Code's own session transcript and the
+transcripts it keeps for the session's sub-agents, a workflow's included:
+each reply written during the launch counts at its final token usage and
+its own model, and the sum replaces the streamed figure when it is higher.
+A reply the loop ends at the output cap counts at the usage the stream
+recorded for it, since the kill can beat Claude Code's own write. A
+``claude`` step whose result frame did name its cost is checked the same
+way for spend after it: the replies Claude Code's background sub-agents
+complete after the result are added to the result's figure. The figure is
+priced from recorded usage rather than Claude's own bill, with one-hour
+cache writes at their own rate; with no readable transcript the step
+keeps the streamed figure (or none) and the agent logs why. A ``claude``
+launch that resumes a session (a continuous step, a steer, a SYNC) gets a
+result figure that counts on from the session's earlier spend: Claude Code
+saves the session's running total to its transcript as each launch exits
+and restores it on resume. Before the launch spawns, fractal reads the
+latest saved total and books the result less it. When the session's
+transcript cannot be found, the total cannot be read, or it is above the
+figure, the figure is refused and the step is priced from its transcript
+as a killed step is. Read spend with the cost commands (full surfaces in
 :doc:`/cli/node`):
 
 .. code-block:: console
@@ -304,8 +374,36 @@ From the user's point of view:
   a session on its row but no figure flushed is marked ``unpriced`` in
   its row metadata; a figure that flushes later strips the marker. A step
   that completed with no reported figure stores no cost and carries no
-  marker. ``cost spent`` and ``cost breakdown`` disclose on stderr how
-  many ended steps carry no recorded cost, marked or not.
+  marker, unless its record is known to leave spend out (its result figure
+  refused, say), which marks it ``unpriced`` too. ``cost spent`` and
+  ``cost breakdown`` disclose on stderr how many ended steps carry no
+  recorded cost, marked or not.
+- **A step missing part of a reply's spend is partly unpriced.** When a
+  ``claude`` launch dies with a reply in flight, or a sub-agent's last
+  line was written before its reply completed, the record leaves part of
+  a reply's spend out: the step books what was recorded, with no
+  estimate for the missing part, its row's metadata gains
+  ``; partly unpriced``, and the loop prints a ``Warning:`` line. A
+  resumed ``claude`` step whose result figure was refused is marked the
+  same way, since its transcript's figure stands in for the result's. So
+  is a ``claude`` step whose stream showed a sub-agent still running
+  after the result when none of that later spend could be priced (its
+  transcript missing or unreadable, or its model unpriced). So is a
+  ``claude`` step whose record holds a reply on a model with no price:
+  that reply drops out of the figure, and the other replies still count.
+  So is a ``claude`` step with a reply that searched the web: the step
+  books the reply's tokens, but not the per-search fee. So is a
+  ``claude`` step with a reply billed above its model's listed rates,
+  since the step books it at the listed rates: a reply served in the ``us``
+  inference geography, one served in fast mode, or one whose prompt is
+  above a long-prompt threshold the price table names for its model.
+  ``cost spent`` and ``cost breakdown`` disclose how many such steps
+  their sums count at recorded spend. A launch killed while a tool runs,
+  or a workflow sub-agent ending on its structured output, is whole;
+  past a result frame only what follows the result counts. A ``codex``
+  step that ends non-zero is marked the same way when its session log, or
+  a sub-agent's, ends on a request in flight; a request refused at
+  capacity is not billed and leaves the step whole.
 - **The figure's source varies by backend.** ``claude`` (native),
   ``grok``, ``opencode``, and ``omp`` report their own spend on the
   stream; ``codex`` — and ``claude`` behind ``openrouter`` — are priced
@@ -319,7 +417,8 @@ From the user's point of view:
   are covered in :doc:`/guide/loop`.
 - **A cost cap requires trackable spend.** On a token-priced or routed
   agent the model must be set and present in the pricing table, or the
-  step fails at launch with a specific error.
+  run aborts at preflight naming the step; a step file edited mid-run to
+  such a model fails at launch with a specific error.
 
 Sessions and transcripts
 ------------------------
@@ -358,6 +457,10 @@ By default the chat runs a fresh session. Options:
 The resulting session id is echoed to stderr as ``session: <id>``, so the
 thread can be continued with ``--session <id> --resume``. A chat records
 nothing in the database — it never disturbs the node's rows or budgets.
+The reply's closing line shows the turn's own cost: a resumed or forked
+``claude`` session's result figure counts on from the total Claude Code
+saved for the session, which the chat takes off as the loop does (``$?``
+when that total cannot be read).
 Because ``codex`` cannot fork, ``--current`` and the forking
 ``--session`` form fail on ``codex`` nodes; continue a ``codex`` thread
 with ``--session <id> --resume``.
@@ -397,6 +500,9 @@ transcript layout, capability attributes — registered by name in the
 application registers in process with `fractal.core.agent.register`; a
 tree can also carry an ``agents.py`` hook file in its root node's data
 directory, whose exported `fractal.core.agent.Agent` subclasses register
-by their ``name`` in every fractal process that touches the tree. The
-base-class contract is documented in the API reference under
-:doc:`/api`.
+by their ``name`` in every fractal process that touches the tree. A hook
+file that fails to load fails every agent lookup in the tree, naming the
+file: ``node start`` and ``resume`` refuse before they change anything,
+and a loop that meets it at boot aborts on record, as for a bad
+``config.json`` value. The base-class contract is documented in the API
+reference under :doc:`/api`.

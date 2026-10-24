@@ -33,6 +33,10 @@ Run `fractal node --help` and `fractal node <command> --help` for the CLI.
 | `$MAX_CHILDREN`    | Maximum direct children of this node. `-1` unlimited, `0` leaf.             |
 | `$MAX_DESCENDANTS` | Maximum total descendants in this node's subtree. `-1` unlimited, `0` leaf. |
 
+`-1` is how an unset cap displays; no setter accepts it. Leave a child uncapped
+by omitting the flag at init, or lift a cap with
+`fractal node config set <key>=null --path=<child worktree>`.
+
 - **Width (`--max-children`).** Caps **direct** children only (not
   grandchildren). Enforced locally on the spawning node. A child may set a
   larger `--max-children` than its parent.
@@ -58,9 +62,13 @@ refuses `node start --continue` without an explicit new `--max-cost`) is
 strongly recommended for every child -- without one the child launches uncapped,
 with a loud warning at start and bounded only by `--max-iters`/`--timeout`; a
 non-positive `--max-cost` is rejected. Set it at init (`--max-cost`, \<= your
-remaining when `$COST_BUDGET` is finite) and optionally `--max-iter-cost`.
-Allocate conservatively; you may over-allocate across children optimistically,
-but monitor (`fractal node cost spent`, `fractal node cost breakdown`) and kill
+remaining when `$COST_BUDGET` is finite) and optionally `--max-iter-cost`. The
+default reserve (10% of `--max-cost`) follows the cap when
+`node update --max-cost` or `node start --continue --max-cost` changes it; an
+explicit reserve (`--reserve-budget`, a template preset, or `config set`) keeps
+its figure, so pass `--reserve-budget` again to change it with the cap. Allocate
+conservatively; you may over-allocate across children optimistically, but
+monitor (`fractal node cost spent`, `fractal node cost breakdown`) and kill
 over-spenders. Caps are **soft** -- a child is not *hard*-stopped when it nears
 `--max-cost`; once it drains into the reserve it gets cleanup guidance to wind
 down the remainder of the current iteration cheaply, then the loop ends its run
@@ -186,16 +194,19 @@ pool a cheaper token rate buys more steps, not a lower bill.
    `true`/`false`; rendered step settings are checked before init.
 
    Jinja renders once: values containing `{{...}}` stay literal, and `$VAR`
-   remains for runtime rendering. Includes read only the same committed template
-   bundle. `--include`/`--exclude` select deployment outputs; excluded files
-   remain available as include source, and `_partials/` or README files cannot
-   be selected as outputs. The child's generated `_template.toml` records the
-   complete inputs and source commit. Edit the rendered charter directly to
-   steer it; changing the record is not a live update. `node diff` and bare
-   `node reseed` replay recorded values, while an explicit `--ref` or
-   `--template` refresh adds defaults only for missing keys. Reseed refreshes
-   steps, scripts, skills, and agent settings while preserving `NODE.md`,
-   config, and memory, so charter drift can remain.
+   remains for runtime rendering. Includes read the same committed template
+   bundle; a literal name with a leading `/`
+   (`{% include '/campaign/DOCTRINE.md' %}`) reads a shared file from the repo
+   root at the template's commit, and a shared file never deploys.
+   `--include`/`--exclude` select deployment outputs; excluded files remain
+   available as include source, and `_partials/` or README files cannot be
+   selected as outputs. The child's generated `_template.toml` records the
+   complete inputs, the source commit, and each shared file's blob id. Edit the
+   rendered charter directly to steer it; changing the record is not a live
+   update. `node diff` and bare `node reseed` replay recorded values, while an
+   explicit `--ref` or `--template` refresh adds defaults only for missing keys.
+   Reseed refreshes steps, scripts, skills, and agent settings while preserving
+   `NODE.md`, config, and memory, so charter drift can remain.
 
    For a well-specified single-mission leaf, consider the **leaf step set**:
    trim the child to PLAN + EXECUTE + COMMIT. A leaner leaf uses a leaner
@@ -226,12 +237,15 @@ pool a cheaper token rate buys more steps, not a lower bill.
    fractal commit "configure <name>" --init
    ```
 
-   Material you copy into a child's tree passes through the repo's commit hooks
-   (if any) at this init commit (CRLF->LF, formatter reflow) -- so a byte-frozen
-   store and its delivered copies diverge *by construction* on the first hooked
-   commit; do not read that divergence as tamper. If you freeze reference bytes
-   for audit, freeze the post-hook form (commit once, then re-pin) or compare
-   normalized (line endings/whitespace) rather than raw.
+   The init commit carries the seed alone (and init's `.gitattributes` edit) and
+   refuses anything else. Commit material you copy into a child's tree with an
+   ordinary `fractal commit "add <material>"` from its worktree, which runs the
+   lint. That commit passes the material through the repo's commit hooks (if
+   any) (CRLF->LF, formatter reflow) -- so a byte-frozen store and its delivered
+   copies diverge *by construction* on the first hooked commit; do not read that
+   divergence as tamper. If you freeze reference bytes for audit, freeze the
+   post-hook form (commit once, then re-pin) or compare normalized (line
+   endings/whitespace) rather than raw.
 
 4. **Launch:**
 
@@ -239,16 +253,20 @@ pool a cheaper token rate buys more steps, not a lower bill.
    fractal node start <branch>
    ```
 
-   `start` takes no config arguments -- all run parameters come from
-   `config.json` (set at init; adjust a value with
+   Run parameters come from `config.json` (set at init; adjust a value with
    `fractal node config set <key>=<value>`, read one with
    `fractal node config get <key>`, or edit the file directly). A configured
    `max_cost` must be positive; a missing `max_cost` launches uncapped with a
-   loud warning. Add `--continue` only to continue a stopped/exited child. A
-   parent running with `FRACTAL_HEADLESS=true` automatically launches the child
-   in a detached process group, so the command returns immediately and the tree
-   does not require tmux. Use `--tmux` only to override that inherited backend
-   for this child. A headless child has no tmux session:
+   loud warning. Add `--continue` only to continue a stopped/exited child. With
+   `--continue`, `--max-cost=<usd>` re-arms the cost cap for the new run, and a
+   child whose last run ended on its budget refuses a `--continue` without it;
+   it is the one run parameter `start` takes. Iterations re-arm from
+   `config.json` -- each run counts from 1 -- so set `max_iters` with
+   `fractal node config set` before the `--continue`; `start` takes no
+   `--max-iters`. A parent running with `FRACTAL_HEADLESS=true` automatically
+   launches the child in a detached process group, so the command returns
+   immediately and the tree does not require tmux. Use `--tmux` only to override
+   that inherited backend for this child. A headless child has no tmux session:
    `fractal node attach <branch>` refuses and names its log, so follow its
    output with `tail -f <child_node_dir>/headless.log` instead (the log appends
    across launches). A `--continue` follows the same rule -- your seat's
@@ -314,10 +332,12 @@ direct decomposition.
   domain-specific capabilities beyond the defaults.
 
 The seed lives in the node data directory (`.fractal/`), which is **tracked by
-git** and captured by your `fractal commit --init`; the same goes for the
-project wiki (`wiki/`). Neither belongs in `.gitignore`. Fractal ignores its own
-runtime artifacts (worktrees, the central database, status, agent logs) via the
-repo-local `.git/info/exclude`, which it writes automatically.
+git** and captured by the child's `fractal commit --init`. Project-wiki edits
+(`wiki/` unless `.fractal/.settings.json` names another folder) take an ordinary
+`fractal commit`, since a child's baseline refuses them. Neither belongs in
+`.gitignore`. Fractal ignores its own runtime artifacts (worktrees, the central
+database, status, agent logs) via the repo-local `.git/info/exclude`, which it
+writes automatically.
 
 ### Meta nodes
 
@@ -360,10 +380,10 @@ seed; once done, merge it and launch the target.
   `fractal node resume <branch>` relaunches it exactly there -- same budgets,
   same iteration count. A paused child still holds its spawn slot and blocks
   your finish-drain, so resume or kill it before finishing. Only `resume`,
-  `kill`, and `chat` act on a paused node; `start --continue` is for
-  stopped/exited nodes (fresh run, restored worktree -- uncommitted project
-  files need `--clean`, and a budget-ended run needs an explicit `--max-cost`),
-  never for paused ones.
+  `kill`, `chat`, and `merge` (committed work only; the child stays paused) act
+  on a paused node; `start --continue` is for stopped/exited nodes (fresh run,
+  restored worktree -- uncommitted project files need `--clean`, and a
+  budget-ended run needs an explicit `--max-cost`), never for paused ones.
 - **Clean up:** `fractal node merge <branch>`. The merge judges the squash's
   paths outside `.fractal/` by the child's scope roots and its project wiki (the
   root `.gitattributes` passes only as init's own `merge=wiki` edit; an unscoped

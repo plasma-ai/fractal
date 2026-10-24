@@ -22,8 +22,8 @@ append-only log.
 Run `wiki --help` and `wiki <command> --help` for the CLI (init, update, lint,
 map, search, read). Always pass `--path` (`$WIKI_DIR` or `$MEMORY_DIR`) -- a
 bare command resolves the enclosing wiki by walking up, else `{cwd}/wiki`, which
-from the node's cwd is the project wiki at best and never memory, so an omitted
-`--path` silently targets the wrong wiki or errors. Run
+from the node's cwd need not be the project wiki (`$WIKI_DIR`) and is never
+memory, so an omitted `--path` silently targets the wrong wiki or errors. Run
 `wiki update --path=<dir>` after adding, moving, or deleting pages;
 `wiki lint --path=<dir>` validates structure.
 
@@ -31,7 +31,8 @@ from the node's cwd is the project wiki at best and never memory, so an omitted
 
 Name pages and folders in ascii snake_case (`command_core`, not `command-core`)
 -- both wikis enforce identifier-safe names (the project wiki's mirror the
-source modules they document), so `wiki lint` rejects hyphens and spaces.
+source modules they document), so `wiki lint` rejects hyphens and spaces. The
+rule allows `.`, so a non-markdown file keeps its extension (`controls.json`).
 
 `wiki update` regenerates derived state: each page's entry line in `_index.md`
 (name and description) is pulled from the page's own frontmatter, so fix a
@@ -67,11 +68,12 @@ for a page that has since merged).
 Wikilinks also stay inside the wiki you are writing in. A `[[...]]` link targets
 another page in the same wiki; anything outside it -- source files, configs, or
 the other knowledge base (project wiki vs. memory) -- is referenced in plain
-text or backticks, never linked; `wiki lint` notes a wikilink that points
-outside the wiki. Write in-wiki links prefix-free, from the wiki root
-(`[[overview]]`, `[[core/overview]]`), never `[[./overview]]` or
-`[[../overview]]` -- a `./` or `../` target reads from the page's folder and
-marks a link that leaves the wiki, so lint reports one that lands inside it.
+text or backticks, never linked; `wiki lint` fails a wikilink that points
+outside the wiki (the `outside_link` issue). Write in-wiki links prefix-free,
+from the wiki root (`[[overview]]`, `[[core/overview]]`), never `[[./overview]]`
+or `[[../overview]]` -- every target is read from the wiki root, and a `./` or
+`../` target marks a link that leaves the wiki, so lint fails one that lands
+inside it.
 
 ## Structure
 

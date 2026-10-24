@@ -57,27 +57,59 @@ and the radio, but runs no loop of its own (see
 - the data directory ``<project>/.fractal/<branch>/`` with ``config.json``
   (marked ``user: true``), the central database, and the radio's default
   channels;
-- the project wiki at ``<project>/wiki/`` when absent;
+- the project wiki at ``<project>/wiki/`` when absent (or at the folder the
+  project's settings file names — see below);
 - fractal's block in the repo-local ``.git/info/exclude`` (worktrees,
   databases, status markers, agent logs), and a ``.gitignore`` of ``*``
   inside the seed directory itself, so ``.fractal/<branch>/`` is
   git-ignored by default (``fractal track`` removes that file to opt in).
 
-An existing project wiki (a ``wiki/`` carrying ``_index.md``) is adopted as
-is — init rewrites nothing in it. It warns when ``wiki/_index.md`` carries no
-frontmatter stamps (run ``wiki update --path=wiki`` and commit the result
-before initializing nodes) and when ``.gitattributes`` lacks the
-``**/_index.md merge=wiki`` line (append it and commit), since sibling nodes
-otherwise conflict on the index when they merge.
+An existing project wiki (``wiki/``, or the folder the project's settings
+file names, carrying ``_index.md``) is adopted as is — init rewrites nothing
+in it. It warns when that ``_index.md`` carries no frontmatter stamps (run
+``wiki update --path=<folder>`` and commit the result before initializing
+nodes), since sibling nodes otherwise conflict on the index when they merge.
+It also warns when the repo-root ``.gitattributes`` lacks the
+``**/_index.md merge=wiki`` line or the wiki's own ``.gitattributes`` (such as
+``wiki/.gitattributes``) lacks the ``*.md merge=wiki`` line, naming each missing
+line and its file to append and commit, since git reads them from the target's
+own tree and wiki pages that diverge on both sides otherwise conflict when they
+merge.
+
+The shared project wiki is the one folder every node may commit to
+regardless of its scope. It is ``wiki/`` unless the project's committed
+``<project>/.fractal/.settings.json`` names another folder, relative to the
+project:
+
+.. code-block:: json
+
+   {"wiki": "docs"}
+
+The file accepts two keys: ``wiki``, and ``effort_ladder``, which the loop
+reads (see :doc:`/configuration`). Init reads the file once, before writing
+anything, records the folder in the user node's ``config.json``, and every
+node of the tree inherits it (see :doc:`/configuration`). A bad file —
+invalid JSON, an unknown key, a folder that is absolute, ``.``, ``null``,
+carries a ``..``, ``.fractal``, ``.worktrees``, or ``.git`` component, or is
+not written canonically, or a malformed ``effort_ladder`` — refuses init,
+naming the file.
+With no file, the folder is ``wiki/`` and nothing new is recorded.
 
 The command ends by printing the required next step: the baseline commit
-(``fractal commit "<message>" --init``). Node worktrees can only branch
-from a committed tree.
+(``fractal commit "<message>" --init``), which also commits the settings
+file when there is one. Node worktrees can only branch from a committed
+tree. The baseline refuses a settings file that names another folder than
+the one init recorded (re-run init to adopt it), and every spawn checks the
+setting committed on the root branch the same way, so the committed file and
+the tree's folder always agree.
 
 Re-running on an initialized tree is idempotent — it never clobbers
 existing data. A re-run repairs a partial prior init (a stranded database,
 radio, or missing wiki) and updates the stored agent and provider defaults
-when the flags are given.
+when the flags are given. A re-run adopts a changed project-wiki setting
+only while the tree has no nodes: run ``fractal reset <root>`` first, then
+re-run init and commit the baseline. Over live nodes it refuses, so one
+tree never mixes two wiki folders.
 
 ``PATH``
    Repository root or monorepo sub-project folder. Default: ``.``.
@@ -109,15 +141,21 @@ Refuses when:
   (run ``fractal init`` from the main checkout);
 - the branch is already mapped to a different project — one branch maps to
   a single project;
-- ``<project>/wiki/`` exists, is not empty, and is not a project wiki (it
-  carries no ``.wiki/`` marker): adopting it would rewrite its files in place.
-  Move the directory aside and re-run init, or convert it first with
-  ``wiki init --path=wiki``; the refusal lands after the data directory is
+- the project's ``.fractal/.settings.json`` is invalid: not valid JSON, an
+  unknown key, a ``wiki`` folder that is absolute, ``.``, ``null``, carries a
+  ``..``, ``.fractal``, ``.worktrees``, or ``.git`` component, or is not
+  canonical, or a malformed ``effort_ladder``;
+- the project wiki folder (``<project>/wiki/``, or the folder the settings
+  file names) exists, is not empty, and is not a project wiki (it carries no
+  ``.wiki/`` marker): adopting it would rewrite its files in place. Move the
+  directory aside and re-run init, or convert it first with
+  ``wiki init --path=<folder>``; the refusal lands after the data directory is
   written, and the re-run completes the partial init;
 - the command runs from a draining seat (an agent invocation of a
-  ``fractal node start --continue --drain`` run, or any process in its
-  process group — see ``--drain`` in :doc:`/cli/node`): a drain forbids
-  every spawn, a whole new tree included;
+  ``fractal node start --continue --drain`` run, or any process it starts,
+  detected by the ``_DRAIN`` export, the run's durable ``drain`` signal, or
+  descent from the seat's recorded agent invocation — see ``--drain`` in
+  :doc:`/cli/node`): a drain forbids every spawn, a whole new tree included;
 - another live fractal on the machine shares this repository's directory
   basename: tmux session names carry the basename, so two fractals under
   one basename would collide. Rename one repository directory.
@@ -211,7 +249,29 @@ On a **user node** only the ``--init`` baseline is accepted. The baseline
 commits fractal's own artifacts — the project wiki, plus the seed directory
 when the tree is tracked — using an explicit pathspec, so any other staged
 work is never swept in, and it does not push. Its subject is
-``<branch>: init (<message>)``.
+``<branch>: init (<message>)``. A tracked seed directory stages by the rules
+a child's node directory commits by: its records commit, a record held out
+only by a machine-local ignore rule is force-added and named, and the
+runtime files fractal's exclude block holds (``tmp/``, an agent's ``.err``
+capture, ``.session``, ``setup.log``, ``__pycache__/``) stay out.
+
+Every commit, ``--init`` and a user node's baseline included, appends its
+full report to ``tmp/commit.log`` in the node directory before printing it,
+so the report survives a caller whose output is lost — a shell redirect
+whose session ended while the commit went on to land. The report is what the
+command prints: the warnings, the held-out counts, git's commit output, the
+push notice, and, when the commit fails (a failed retry included), a failing
+hook's output in its error. A passing hook's output goes to git's stderr,
+which the report does not keep. Each entry opens with a banner stamped with
+the UTC time: ``=== Commit at <time> (<sha>) ===`` names the commit HEAD
+moved to, and ``(no commit)`` marks a run that committed nothing. A failed
+run's entry holds its ``Error:`` text in place of the report, and its
+banner reads ``(failed)``, or the sha when the commit landed before the
+failure (a failed push). ``--check`` logs nothing. The log is git-ignored
+scratch, so it is never committed, survives
+``node start --continue --clean``, and appends without a size bound. A
+failed write prints one ``Warning:`` line on stderr and never fails the
+commit.
 
 ``MESSAGE``
    Short description appended to the commit message. Required unless
@@ -220,7 +280,9 @@ work is never swept in, and it does not push. Its subject is
 ``--init``
    Baseline commit labeled ``init`` instead of ``iteration <run>.<iter>``.
    Skips the wiki index refresh and lint. The only commit form a user node
-   accepts. Default: off.
+   accepts. On a child node it carries only the node's seed and init's
+   ``.gitattributes`` edit; anything else, copied project material
+   included, takes an ordinary ``fractal commit``. Default: off.
 
 ``--check``
    Exit ``1`` if uncommitted changes exist instead of committing: the
@@ -246,6 +308,10 @@ Refuses when:
 - ``MESSAGE`` is missing and ``--check`` is not set;
 - the command runs on a user node without ``--init``
   (``Cannot commit from a user node (only --init is supported).``);
+- ``--init`` on a child node finds a change outside the node's seed and
+  init's ``.gitattributes`` edit (``The --init baseline commits only the
+  node seed (<seed>) and skips the lint; commit these with an ordinary
+  fractal commit``), naming each path before anything is staged;
 - changes fall outside the node's configured ``scope`` and neither
   ``--ignore-scope`` nor ``--force`` is set;
 - ``lint.sh`` fails;
@@ -316,7 +382,10 @@ resume).`` when nothing is running — the latch still lands.
 
 ``--reason``
    Optional reason, recorded on the pause events and appended to the
-   confirmation. Default: none.
+   confirmation. The loop reserves ``parked``, and any reason starting with
+   ``via pause latch`` or ``resume preflight failed:``, for the pause events
+   it records as it parks, so such a reason is refused before anything is
+   written. Default: none.
 
 ``--path``
    Repository path. Default: ``.``.
@@ -352,7 +421,11 @@ pauses withdrawn)``, or ``No paused nodes to resume.``.
 ``--path``
    Repository path. Default: ``.``.
 
-Refuses when the tree has no user node.
+Refuses when the tree has no user node, and, before it lifts the latch or
+touches any node, when a parked node's stored config fails the launch
+re-validation ``node start`` runs, or the effort ladder committed on the
+root branch is invalid for it, naming that node (see
+:doc:`/configuration`).
 
 .. code-block:: console
 

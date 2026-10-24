@@ -63,6 +63,12 @@ echo "$N" > "$CAPTURE_DIR/counter"
 printf '%s' "$PROMPT" > "$CAPTURE_DIR/prompt_$N.txt"
 
 [[ -n "$SID" ]] || SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+# open the session's transcript where real claude keeps it, keyed by the cwd
+# with every non-alphanumeric character dashed
+SLUG=$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')
+TRANSCRIPTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$SLUG"
+mkdir -p "$TRANSCRIPTS"
+touch "$TRANSCRIPTS/$SID.jsonl"
 printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
 printf '{"type":"result","session_id":"%s","total_cost_usd":%s,"num_turns":1,"duration_ms":1}\\n' \\
     "$SID" "$STUB_COST"

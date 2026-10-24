@@ -40,7 +40,15 @@ merge below); a failed worktree update rolls the worktree back before skipping.
 A git read that fails during the advance (the node's worktree stops answering)
 skips it with a warning rather than failing the landed merge, and an edit to a
 tracked file the commit law's excludes hide (a force-added lock or status file)
-counts as dirt, so the update never overwrites it.
+counts as dirt, so the update never overwrites it. The merge reads the node's
+tip once, before the squash, and the squash, its checks, and the advance all
+take that commit: a commit the node makes during the merge skips the advance
+(`<node> moved during the merge`), which would otherwise revert it.
+
+A paused node's advance is never skipped: its dirt is the frozen step resume
+continues from, so the advance carries it the way `git checkout` moves a branch,
+and a move that cannot carry it refuses the whole merge instead (see
+[[user_flow/finishing/merge_guards]]).
 
 ## A resolution lands on the node
 
@@ -94,8 +102,8 @@ The steps: `git checkout <base> -- . ':(exclude,glob)**/.fractal/**'`, `git rm`
 any path
 `git diff --name-only <base> -- . ':(exclude,glob)**/.fractal/**' ':(exclude).gitattributes'`
 still lists, then, if `.gitattributes` lacks `**/_index.md merge=wiki`, append
-init's two lines (`# Wiki index merge driver`, `**/_index.md merge=wiki`), and
-commit; then, before the base moves again, run
+the wiki tool's index lines (`# Wiki index merge driver`,
+`**/_index.md merge=wiki`), and commit; then, before the base moves again, run
 `git -C <node worktree> merge -s ours --no-edit <base>` — the node's tree
 already equals the base's, so recording the base's tip as a parent gives a
 correct merge-base with correct content. The step records that tip only when the

@@ -19,7 +19,8 @@ orients its level and lists its children, and topics without children are
 standalone leaf `.md` pages. Fractal's project wikis name pages in ascii
 snake_case — the strict ascii/identifier naming policy seeded at `wiki init`
 rejects hyphens and spaces, so page names can mirror the source modules they
-document.
+document. The policy allows `.`: the rule judges a non-markdown file by its
+whole name, so the allowance lets its extension pass (`controls.json`).
 
 ## Frontmatter
 
@@ -48,15 +49,16 @@ hand-editing the index.
 
 `[[...]]` links target pages in the *same* wiki only. Anything outside it —
 source files, configs, or the other knowledge store — is referenced in plain
-text or backticks; `wiki lint` notes a wikilink that points outside the wiki.
-In-wiki links are written prefix-free from the wiki root, never with a `./` or
-`../` prefix, which reads from the page's folder and marks a link that leaves
-the wiki. Link only to pages that already exist: a forward link to a page a
-sibling branch has not yet merged is a stale-link note until the merge lands.
-Label a sibling-branch index link with the bare branch name
-(`[[features/chat/_index|chat]]`) and a link that crosses top-level branches
-with the trailing-slash path (`[[features/radio/_index|features/radio/]]`),
-keeping labels short enough to survive the formatter's wrap.
+text or backticks; `wiki lint` fails a wikilink that points outside the wiki
+(the `outside_link` issue). In-wiki links are written prefix-free from the wiki
+root, never with a `./` or `../` prefix: every target is read from the wiki
+root, and a `./` or `../` prefix marks a link that leaves the wiki. Link only to
+pages that already exist: a forward link to a page a sibling branch has not yet
+merged is a stale-link note until the merge lands. Label a sibling-branch index
+link with the bare branch name (`[[features/chat/_index|chat]]`) and a link that
+crosses top-level branches with the trailing-slash path
+(`[[features/radio/_index|features/radio/]]`), keeping labels short enough to
+survive the formatter's wrap.
 
 ## Authoring pitfalls
 

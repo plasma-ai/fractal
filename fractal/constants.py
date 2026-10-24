@@ -6,9 +6,13 @@ FRACTAL_FOLDER = '.fractal'
 WORKTREES_FOLDER = '.worktrees'
 #: immutable project-layout cache under the worktrees directory
 PROJECT_FOLDER = '.project'
+#: default shared project-wiki folder, relative to the project path
+WIKI_FOLDER = 'wiki'
 
 #: per-node configuration file in the node's data directory
 CONFIG_FILE = 'config.json'
+#: tracked project settings file in the project's fractal data directory
+SETTINGS_FILE = '.settings.json'
 #: central SQLite database file in the root node's data directory
 DB_FILE = '.db'
 #: lock filename, standalone or as a suffix, serializing concurrent access
@@ -40,6 +44,21 @@ STATUS_FILE = '.status'
 #: process group id of the running step
 STEP_PGID_FILE = '.step_pgid'
 
+#: run-row reason the crash heal stamps on a dead loop's rows
+CRASH_REASON = 'crashed: loop runtime gone, healed by reconcile'
+#: step-row reason prefix of a stuck launch its steer closed
+STEER_REASON_PREFIX = 'steered: '
+#: step-row reason prefix of a failed launch its agent named a provider outage
+UNAVAILABLE_REASON_PREFIX = 'provider unavailable: '
+#: step-row reason prefix of a failed step the loop refused before its launch
+UNLAUNCHED_REASON_PREFIX = 'not launched: '
+#: pause-event reason of the loop's park at a pause checkpoint
+PARK_REASON = 'parked'
+#: pause-event reason prefix of a boot the pause latch parks
+LATCH_PARK_REASON_PREFIX = 'via pause latch '
+#: pause-event reason prefix of a resume boot its failed preflight re-parks
+PREFLIGHT_PARK_REASON_PREFIX = 'resume preflight failed: '
+
 #: lifecycle status set shared by the node status file and the record rows
 STATUSES = (
     'active',
@@ -63,6 +82,7 @@ EVENTS = (
     'delete',
     'orphan',
     'model_drop',
+    'preflight',
     'start',
     'finish',
     'finish_cancel',

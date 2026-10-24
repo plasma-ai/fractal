@@ -77,6 +77,13 @@ The test suite uses `pytest` with `--doctest-modules` enabled. Integration tests
 create real git repos and worktrees — session-scoped to avoid repeated
 `fractal node init` overhead.
 
+- **No edits to the tree while its tests run.** A session guard digests the
+  package's seed trees (`_assets/`, `_node/`, `_scripts/`, `skills/`) before and
+  after the run and fails on any drift, naming each added, removed, and changed
+  path. It cannot tell a test writing through a package path from an edit made
+  mid-run, so an edit during the run fails the suite as if a test had made it —
+  wait for the run to end.
+
 ## Consistency
 
 The single most important pattern in this codebase is the pattern of **adhering
@@ -205,6 +212,26 @@ easiest to try.
   chose the wrong approach. Find the cause or revisit the choice instead of
   adding a workaround. If a stopgap is necessary, state the problem it covers,
   its limits, and when it can be removed.
+
+## Documentation Hygiene
+
+Comments and docs describe the current state; git records how it got there.
+Change-log notes pile up as junk: each is true only of a moment, and readers
+must sort through them to find what is current.
+
+- **Correct in place.** When text is wrong or out of date, rewrite it to state
+  the current fact. Do not record what it used to say, when it changed, or who
+  changed it ("updated on DATE", "previously did X", "corrected from Y", "no
+  longer does Z"). Clean up change-log notes in and around text you are editing,
+  and mention any you see elsewhere.
+- **Explain changes in git.** The reason for a change belongs in its commit
+  message or PR description, not in a comment beside the changed text. Files
+  whose job is to record changes, such as release notes, are the exception.
+- **Dates only when git cannot supply them.** A date belongs in a tracked file
+  only when it is genuinely needed and git cannot supply it (e.g. when the text
+  reports a changing source and the reading date is needed to interpret it, or
+  when an outside event happened). The date a file was edited is git's to
+  record.
 
 ## Communication
 
@@ -451,7 +478,8 @@ See `pyproject.toml` for formatter/linter config.
   execution: the loop exits (no tmux session is the normal parked state — never
   crash-healed), the run row (and any still-open iteration) stays open for
   `resume` to adopt, the node holds its spawn slot and blocks ancestor
-  finish-drains, and only `resume`/`kill`/`chat` are legal on it; a user-node
+  finish-drains, and only `resume`/`kill`/`chat`/`merge` are legal on it
+  (`merge` lands committed work only; the node stays paused); a user-node
   (tree-wide) pause also latches the root (a `.paused` marker beside the central
   DB), so even depth-1 spawns and starts refuse until the tree-wide resume. Exit
   codes are binary, derived from outcome; rows carry start/end instants
@@ -487,10 +515,10 @@ See `pyproject.toml` for formatter/linter config.
   frozen work), while `delete` — agent-reachable — refuses over them.
 - **Project-files surface:** `node.files` (the `Files` facade in
   `core/files.py`) exposes a node's work product to consumers: git-tracked files
-  including `wiki/` and `.fractal/` (consumers filter or collapse machinery;
-  only `.git`/`.worktrees` components are structurally unreachable, matched
-  casefolded). A `since` listing is the node's own contribution — files its own
-  first-parent, no-merge commits touched (merged-in content never lists;
+  including the project wiki and `.fractal/` (consumers filter or collapse
+  machinery; only `.git`/`.worktrees` components are structurally unreachable,
+  matched casefolded). A `since` listing is the node's own contribution — files
+  its own first-parent, no-merge commits touched (merged-in content never lists;
   per-worktree `user.name` identity backs future author attribution) with net
   diff counts — and `Files.history` is the same walk per file. Anchors
   (`base`/`commit`/`iteration`/`run`) resolve from the node's own record — init

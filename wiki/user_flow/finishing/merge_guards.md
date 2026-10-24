@@ -15,13 +15,69 @@ updated: 2026-08-29T11:30:50Z
 
 ***
 
-Merge refuses while the node is active or paused, while the target node is
-active or paused (a running target's worktree must not be mutated under it —
-except by the target's own loop, which merges its settled children as part of
-its normal iteration), and while the target worktree has uncommitted changes.
-Merges are serialized per repository: `fractal node merge` holds a repo-wide
-merge lock while the script runs, so two sibling merges into one target queue
-instead of interleaving their index writes.
+Merge refuses while the node is active, while the target node is active or
+paused (a running target's worktree must not be mutated under it — except by the
+target's own loop, which merges its settled children as part of its normal
+iteration), and while the target worktree has uncommitted changes. Merges are
+serialized per repository: `fractal node merge` holds a repo-wide merge lock
+while the script runs, so two sibling merges into one target queue instead of
+interleaving their index writes. The merge re-reads the node's status once it
+holds the lock and refuses a node that changed status while it waited, and
+checks the target again, refusing one that went active or paused meanwhile. A
+merge can rewrite the worktree of any node that is not active, so every loop
+boot (start, continue, or resume) takes the same lock for its continue clean-up
+and its `active` stamp, and says so on its output before it waits: no boot
+writes to the worktree or goes live while a merge runs.
+
+## Paused nodes
+
+A paused node merges without leaving `paused`: it runs no loop and no agent, and
+its run, iteration, and step rows stay open for `fractal node resume` to adopt.
+A resumed loop waits for a running merge before it goes `active`, as every boot
+does, so the merge never carries the worktree under a starting agent; a merge
+that waited while the node left `paused` refuses, and a commit the node gains
+during the merge anyway (a hand commit) refuses the merge
+(`<node> moved during the merge`), since the advance would revert it.
+
+Only committed work lands. A frozen step that stopped inside a git operation — a
+merge, squash merge, cherry-pick, or revert stopped on a conflict, a rebase
+stopped part-way, or the `index.lock` of a git command still running or killed —
+refuses the merge before anything changes, naming the operation and its marker:
+resume the node and let it finish or abort the operation, or finish or abort it
+by hand in the worktree, then merge again (remove a stale `index.lock` only once
+no git process runs there).
+
+`Node.merge` passes `merge.sh --carry-dirty`, and the merge-base advance then
+carries the frozen step's uncommitted state the way `git checkout` moves a
+branch instead of skipping on a dirty worktree (a skipped advance would make the
+next landing re-diff from the fork point). Before the target commits, the
+advance tree is built from the staged target tree, and a dry-run two-tree
+`read-tree` against a copy of the node's index plus the untracked-and-ignored
+clobber guard judge the move: an advance that would touch a dirty or staged path
+(a path staged at exactly the content the advance brings included, which the
+advance would absorb) or write over an untracked or ignored file refuses the
+whole merge, restoring the target and naming the paths. After the commit a
+two-tree `read-tree -m -u` moves the node's index and worktree, keeping its
+local changes, and a compare-and-swap `update-ref` moves its branch; any failure
+or interrupt before the branch moves reverses the `read-tree`, returns every
+path the forward update wrote to the node's old commit (an update cut short
+leaves some of them written, which the reverse `read-tree` keeps), moves the
+target back to its pre-merge HEAD, and closes the merge event `failed` — a fresh
+merge's target is reset whole, while a `--continue` keeps the operator's
+resolution staged and its squash message in place, so it can be re-run. The
+rollback is judged by both sides' state, and when it falls short the error names
+the paths still changed and the `git -C <target worktree> reset` to run. Nothing
+locks the paused worktree against a chat or a hand edit, so a path the advance
+changes can be written after the check, which is the likeliest reason the
+forward update fails; the rollback therefore judges each such path, index entry
+and disk alike, by content: one holding the old commit's version stays, one
+holding the advance's is the update's own write and goes back, and one holding
+anything else is left as found and named in the error
+(`left as found in <node>'s worktree, since something else wrote them during the merge`).
+An interrupt once the branch has moved finishes the merge instead: the move
+comes only after the worktree update succeeded, so the carry has landed whole. A
+`--message` sets the squash commit's text, so a descriptive message never needs
+an amend that would orphan the advance.
 
 ## Untracked files on the target
 
@@ -65,10 +121,14 @@ merge-base advances, the event closes as completed, and the command prints
 during the advance finishes the node's worktree update or rolls it back, and
 warns only when an advance was underway; one during a no-op merge's bookkeeping
 prints that arm's own summary (`Nothing to merge: ...`) with no advance warning.
-An interrupted `--continue` leaves the staged squash in place to re-run, unless
-its commit had already landed — then it is finished the same way. Every
-"restored" verdict is judged by the target's state — clean and out of the squash
-— not by git's exit code; when the target is not restored, the error names the
+A paused node is the exception: its carried advance is part of the merge, so an
+interrupt during it rolls the whole merge back (see [[#Paused nodes]]), closes
+the event `failed`, and exits 1. An interrupted `--continue` leaves the staged
+squash in place to re-run, unless its commit had already landed — then it is
+finished the same way, or, for a paused node whose carried advance was cut
+short, rolled back with the resolution still staged. Every "restored" verdict is
+judged by the target's state — clean and out of the squash — not by git's exit
+code; when the target is not restored, the error names the
 `git -C <target worktree> reset --hard HEAD` to run before merging again.
 
 ## Footprint
@@ -76,14 +136,14 @@ its commit had already landed — then it is finished the same way. Every
 Before committing, the merge judges the staged paths outside `.fractal/` (the
 restore has already settled those) by the node's commit boundaries — its scope
 roots and its project wiki, plus the worktree-root `.gitattributes` only when it
-is init's own `**/_index.md merge=wiki` edit (a repo-root node with no scope is
-unrestricted; a sub-project node with no scope is bounded to its project
-directory) — the same law `fractal commit` applies, and refuses when any path
-falls outside them. The refusal names the paths and both remedies: widen the
-scope with `fractal node config set scope=<dirs> --path=<node worktree>` and
-commit it with `fractal commit "widen scope" --path=<node worktree>` (an
-uncommitted config change makes the rerun skip the merge-base advance), or rerun
-with `fractal node merge --ignore-scope`, which lands the paths. A fresh merge
+is init's own `merge=wiki` edit (a repo-root node with no scope is unrestricted;
+a sub-project node with no scope is bounded to its project directory) — the same
+law `fractal commit` applies, and refuses when any path falls outside them. The
+refusal names the paths and both remedies: widen the scope with
+`fractal node config set scope=<dirs> --path=<node worktree>` and commit it with
+`fractal commit "widen scope" --path=<node worktree>` (an uncommitted config
+change makes the rerun skip the merge-base advance), or rerun with
+`fractal node merge --ignore-scope`, which lands the paths. A fresh merge
 restores the target on refusal. A `--continue` leaves the staged squash in
 place, and its remedies differ: re-run with `--continue --ignore-scope`, or
 widen the scope (config set, then commit) and redo the squash
@@ -107,13 +167,15 @@ merge — refuses it, naming the redo:
 then runs the merge's own tail — `.fractal/` restore and seed strip, footprint
 check, index refresh, commit, merge-base advance — so a manual resolution never
 hand-rolls those steps or strands seed files in the target working tree. Its
-failure paths leave the staged resolution in place (never `reset --hard`); fix
-and re-run. The hand squash runs without the fresh merge's untracked-file check,
-so a `--continue` cannot prevent the overwrite of a file that exists untracked
-on the target's disk: git's own squash refuses over a plain untracked file but
-writes over an ignored one (git treats it as expendable) — a file the fresh
-merge would have refused over — and the hand squash has already done it, so move
-private files aside before redoing the squash by hand.
+failure paths leave the staged resolution in place (never `reset --hard`; a
+paused node's rollback after the commit moves the target's HEAD back with a soft
+reset and restores the squash message); fix and re-run. The hand squash runs
+without the fresh merge's untracked-file check, so a `--continue` cannot prevent
+the overwrite of a file that exists untracked on the target's disk: git's own
+squash refuses over a plain untracked file but writes over an ignored one (git
+treats it as expendable) — a file the fresh merge would have refused over — and
+the hand squash has already done it, so move private files aside before redoing
+the squash by hand.
 
 ## Destination validation
 

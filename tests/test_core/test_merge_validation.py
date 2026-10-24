@@ -18,6 +18,7 @@ __all__ = [
     'test_merge_validates_the_destination_candidate',
     'test_merge_validation_refusal_restores_fresh_target',
     'test_merge_validation_refusal_preserves_hand_resolution',
+    'test_merge_validation_reads_unstaged_state_by_content',
 ]
 
 
@@ -192,7 +193,7 @@ def test_merge_validation_refusal_preserves_hand_resolution(
         'checks/missing.sh' if failure == 'missing' else 'checks/check merge.sh'
     )
     with pytest.raises(RuntimeError, match=r'[Vv]alidat'):
-        node.merge(continue_merge=True, validation_script=validation_script)
+        node.merge(validation_script=validation_script, continue_merge=True)
 
     assert _git(git_repo, 'rev-parse', 'HEAD').stdout == target_head
     assert _git(node.worktree, 'rev-parse', 'HEAD').stdout == child_head
@@ -213,11 +214,44 @@ def test_merge_validation_refusal_preserves_hand_resolution(
         (git_repo / 'feature.txt').write_text('candidate work\n', encoding='utf-8')
         _git(git_repo, 'add', 'feature.txt')
     permission.touch()
-    node.merge(continue_merge=True, validation_script='checks/check merge.sh')
+    node.merge(validation_script='checks/check merge.sh', continue_merge=True)
     assert _git(git_repo, 'show', 'HEAD:README.md').stdout == 'resolved line\n'
     assert _git(git_repo, 'status', '--porcelain').stdout == ''
     head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
     _git(node.worktree, 'merge-base', '--is-ancestor', head, 'HEAD')
+
+
+@pytest.mark.parametrize(
+    ('script', 'untracked'),
+    [
+        pytest.param('touch README.md\n', False, id='touch-only'),
+        pytest.param('echo scratch > scratch.txt\n', True, id='untracked'),
+    ],
+)
+def test_merge_validation_reads_unstaged_state_by_content(
+    git_repo: pathlib.Path,
+    script: str,
+    untracked: bool,
+) -> None:
+    """The validation's unstaged check counts a tracked edit by content alone.
+
+    After the script runs, the merge lists the paths git status's worktree
+    column reports with submodules counted, as ``git diff --quiet
+    --ignore-submodules=none`` reads the working tree, without the diff's
+    index refresh under ``index.lock``: a tracked file the script only
+    touched (stale stat data, same bytes) reads clean, and an untracked file
+    it wrote never counts, as the diff never lists one, so either way the
+    candidate commits. A real edit refuses it (the ``unstaged-mutation``
+    refusal above).
+    """
+    node = _prepare_candidate(git_repo, script)
+
+    output, _ = node.merge(validation_script='checks/check merge.sh')
+
+    assert 'Squash-merged' in output
+    assert _git(git_repo, 'show', 'HEAD:feature.txt').stdout == 'candidate work\n'
+    expected = '?? scratch.txt\n' if untracked else ''
+    assert _git(git_repo, 'status', '--porcelain').stdout == expected
 
 
 # ------ helpers

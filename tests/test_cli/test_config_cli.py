@@ -32,6 +32,7 @@ __all__ = [
     'test_init_scope_space_form_stores_init_shape',
     'test_node_config_set_cannot_flip_user_flag',
     'test_node_config_set_cannot_promote_a_child_to_a_root',
+    'test_node_config_set_records_its_reserve_as_explicit',
     'test_corrupt_config_errors_naming_the_file',
 ]
 
@@ -120,6 +121,8 @@ def test_set_rejects_mistyped_coerced_values(
         # matches the commit pipeline's prefix check, bricking every scoped commit
         ('scope=/abs/root', 'scope'),
         ('scope=../sibling', 'scope'),
+        # a reserve's mode names one of the two origins the retune reads
+        ('reserve_mode=bogus', 'reserve_mode'),
     ],
 )
 def test_set_rejects_invariant_breaking_values(
@@ -353,6 +356,37 @@ def test_node_config_set_cannot_promote_a_child_to_a_root(task: pathlib.Path) ->
     assert 'user' in (rejected.stdout + rejected.stderr)
     # the child stays a non-user node -- no first write landed
     assert _run(task, 'config', '_get', 'user').stdout.strip() == ''
+
+
+def test_node_config_set_records_its_reserve_as_explicit(task: pathlib.Path) -> None:
+    """``config set reserve_budget=`` records an explicit reserve; the mode is fractal's.
+
+    A reserve the operator writes is their own figure, so it records as
+    explicit (no later cap change retunes it) and the confirmation names the
+    mode change beside it; clearing the reserve clears its mode. The mode
+    itself only records how the reserve was set, so the operator cannot write
+    it. The original config is restored so the shared fixture is left as found.
+    """
+    config_path = task / '.fractal' / 'main.task' / 'config.json'
+    original = config_path.read_text(encoding='utf-8')
+    try:
+        # the operator's reserve records as explicit, confirmed beside it
+        written = _run(
+            task, 'node', 'config', 'set', 'max_cost=4', 'reserve_budget=0.4'
+        )
+        assert written.returncode == 0, written.stdout + written.stderr
+        assert 'reserve_mode: unset -> explicit' in written.stdout
+        # the operator cannot write the mode itself
+        refused = _run(task, 'node', 'config', 'set', 'reserve_mode=default')
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert 'reserve_mode' in (refused.stdout + refused.stderr)
+        assert _run(task, 'config', '_get', 'reserve_mode').stdout.strip() == 'explicit'
+        # clearing the reserve clears its mode with it
+        cleared = _run(task, 'node', 'config', 'set', 'reserve_budget=null')
+        assert cleared.returncode == 0, cleared.stdout + cleared.stderr
+        assert 'reserve_mode: explicit -> unset' in cleared.stdout
+    finally:
+        config_path.write_text(original, encoding='utf-8')
 
 
 def test_corrupt_config_errors_naming_the_file(task: pathlib.Path) -> None:

@@ -13,7 +13,6 @@ import os
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -25,18 +24,25 @@ from typing import Any, Optional
 import fractal.util
 from fractal.constants import (
     CONFIG_FILE,
+    CRASH_REASON,
     DB_FILE,
     FRACTAL_FOLDER,
     HEADLESS_FILE,
     HEADLESS_LOG,
+    LATCH_PARK_REASON_PREFIX,
     LOCK_FILE,
+    PARK_REASON,
     PAUSED_FILE,
     PGID_FILE,
+    PREFLIGHT_PARK_REASON_PREFIX,
     PROJECT_FOLDER,
     SOCKET_FILE,
     STATUS_FILE,
     STATUSES,
     STEP_PGID_FILE,
+    UNAVAILABLE_REASON_PREFIX,
+    UNLAUNCHED_REASON_PREFIX,
+    WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
 from fractal.typing import PathLike
@@ -47,6 +53,7 @@ from .config import (
     RESERVE_PRECISION,
     Config,
     parse_reserve_budget,
+    validate_wiki,
 )
 from .cost import Cost
 from .db import Database
@@ -72,8 +79,8 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # quiet-time floor for the listing's staleness flag: an active loop writes
-# activity at least once per step, so silence past max(step_timeout, 5m)
-# earns the '!' suffix on the rendered age
+# activity at least once per step, so silence past max(step limit, 5m) -- the
+# active step's effective ceiling -- earns the '!' suffix on the rendered age
 _STALE_AGE_FLOOR_SECONDS = 300.0
 
 # the listing's spend column is a steering read, not an invoice, so it
@@ -103,6 +110,14 @@ _CLAIM_RETRY_SECONDS = 2.0
 # sentinel a fan-out _kill returns after refusing over a launch claim in
 # flight, so the sweep re-attempts the descendant instead of skipping it
 _CLAIM_IN_FLIGHT = 'claim in flight'
+
+# TERM-to-KILL grace for the crash heal's reap of a dead loop's recorded
+# groups and their trees
+_ORPHAN_GRACE_SECONDS = 2.0
+
+# pause.sh's outcome for an in-flight agent that runs the pause itself: the
+# reap leaves its whole tree alone, so no abort can be claimed for it
+_PAUSE_KEPT = 'Kept in-flight agent'
 
 # argv shapes a launch pane carries at every exec stage (env/start.sh, then
 # the exec'd loop): a pane command bearing one while naming another worktree
@@ -292,6 +307,24 @@ class Node:
         absent for a repo-root project, which reads as ``'.'``.
         """
         return worktree.project_path(self.repo_dir, self.branch)
+
+    @property
+    def wiki_prefix(self: Node) -> str:
+        """Return the worktree-relative shared project-wiki folder.
+
+        The ``wiki`` config key (fixed at user init from the project's
+        tracked ``.fractal/.settings.json`` and inherited by every
+        descendant) names the folder relative to the project, ``wiki`` when
+        absent. Validated on every read, so a hand-edited value fails the
+        commit and merge scope checks loudly instead of moving the
+        boundary.
+        """
+        wiki = self.config.get('wiki')
+        if wiki is None:
+            wiki = WIKI_FOLDER
+        validate_wiki(wiki, source='wiki')
+        project = self.project_path
+        return wiki if project == '.' else f'{project}/{wiki}'
 
     @property
     def parent(self: Node) -> Optional[Node]:
@@ -542,7 +575,7 @@ class Node:
             for judged, found in zip(snapshot, self._records_snapshot()):
                 if found is not None and found != judged:
                     return
-            self.record.close_open('exited')
+            self.record.close_open('exited', metadata=CRASH_REASON)
             self.status_set('exited')
             self.config.reconcile()
             # the heal is the record's catch -- the settled node keeps no
@@ -583,18 +616,23 @@ class Node:
         reap acts on the caller's ``snapshot`` (the record state its liveness
         verdict judged; taken fresh when none rides in), never a kill-time
         re-read -- a record a relaunch rewrote since names a live loop, which
-        keeps both its group and its record. The reap follows ``kill.sh``'s
-        TERM-grace-KILL cadence and logs an ``orphan`` event naming each
-        reaped pgid. Best-effort: a dead, recycled, or foreign group reads as
-        already gone -- recycled meaning the OS re-issued a dead group's id
-        to an unrelated same-user group, which answers a liveness probe but
-        is younger than its record (:func:`_recorded_group`).
+        keeps both its group and its record. Both judged groups are the
+        roots of one process-tree reap, as in ``kill.sh``: every group the
+        agent's tools started dies with them, other nodes' loop groups are
+        spared, and survivors are named in warnings. Logs an ``orphan`` event
+        naming each reaped pgid. Best-effort: a dead, recycled, or foreign
+        group reads as already gone -- recycled meaning the OS re-issued a
+        dead group's id to an unrelated same-user group, which answers a
+        liveness probe but is younger than its record
+        (:func:`_recorded_group`).
         """
         if snapshot is None:
             snapshot = self._records_snapshot()
-        for name, entry in zip((PGID_FILE, STEP_PGID_FILE), snapshot):
-            pgid_file = self.node_dir / name
+        records = list(zip((PGID_FILE, STEP_PGID_FILE), snapshot))
+        judged: list[int] = []
+        for _, entry in records:
             if entry is None:
+                judged.append(0)
                 continue
             recorded_at, content = entry
             # trust the record only while its group is still alive; a record
@@ -612,16 +650,26 @@ class Node:
             # an unrelated group -- spare any group younger than its record
             if pgid > 0 and _recorded_group(pgid, recorded_at) is not True:
                 pgid = 0
-            # reap the group and audit the reap
+            judged.append(pgid)
+        # reap the judged groups' whole trees in one pass, sparing other
+        # nodes' loops -- the agent's tools run in groups of their own
+        groups = [pgid for pgid in judged if pgid > 0]
+        if groups:
+            lines = fractal.util.process.reap_or_kill(
+                groups,
+                grace=_ORPHAN_GRACE_SECONDS,
+                branch=self.branch,
+                spare=self.loop_records,
+            )
+            for line in lines:
+                self.log(message=line, level=logging.WARNING)
+        for (name, entry), pgid in zip(records, judged):
+            if entry is None:
+                continue
+            recorded_at, content = entry
+            pgid_file = self.node_dir / name
+            # audit the reap
             if pgid > 0:
-                try:
-                    os.killpg(pgid, signal.SIGTERM)
-                    for _ in range(10):
-                        time.sleep(0.2)
-                        os.killpg(pgid, 0)
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
                 event_id = self.record.event_start(
                     'orphan',
                     metadata=f'reaped pgid {pgid}',
@@ -684,9 +732,9 @@ class Node:
         never the last word for a guard. A seat that unsets ``_NODE`` and
         steps into a *sibling* worktree resolves to a real but wrong
         node; one that steps outside every worktree resolves to no actor
-        and would fail open. Each guard closes that from its own side
+        and would fail open. Each guard answers that from its own side
         rather than here: the drain adds process-lineage attribution
-        (:meth:`drain_lineage` -- the recorded agent process group, which
+        (:meth:`drain_lineage` -- descent from the recorded agent, which
         moving cannot rewrite), and the mailbox seal sits on the
         owner-only channel rule, which asks what a caller may read rather
         than who it claims to be.
@@ -740,26 +788,28 @@ class Node:
         the environment and steps into a sibling worktree resolves to a
         real but WRONG node the drain never binds; one that steps outside
         every worktree resolves to no node and fails open. Neither is a
-        lie the seat can tell about its *process group*: the loop spawns
-        each agent invocation as its own group leader and records the id
-        (``.step_pgid``), so every command that seat runs inherits it.
-        Ask the tree which of its open runs drain, then whether this
-        process sits in one of their seats -- attribution by lineage,
-        which no ``env -u`` or ``cd`` rewrites.
+        lie the seat can tell about its *ancestry*: the loop records each
+        agent invocation's pid (``.step_pgid``), and every command that
+        seat runs descends from it, whether the agent CLI starts the
+        command in a process group or a session of its own. Ask the tree
+        which of its open runs drain, then whether one of their recorded
+        agents is this process or an ancestor of it -- attribution by
+        lineage, which no ``env -u`` or ``cd`` rewrites. A command whose
+        parent chain was cut (a double fork, or an intermediate that
+        exited) is reparented out of that ancestry: it still matches while
+        it stays in the agent's session, but under a CLI that starts each
+        command in a session of its own it escapes.
 
         Identity-checked like the reap's (:func:`_recorded_group`), so a
         stale handle naming a recycled id never refuses an unrelated
         caller. Best-effort: an unreadable record or database answers no,
-        leaving the other two drain sources to speak.
+        leaving the other two drain sources to speak, and an unreadable
+        process table leaves the session match alone.
 
         Returns:
             Whether this process is a seat of a draining run in this tree.
 
         """
-        try:
-            pgid = os.getpgid(0)
-        except OSError:
-            return False
         # the tree's open runs carrying a drain signal (the central DB is
         # per-tree, so this is exactly the trees this caller could act on)
         query = (
@@ -771,6 +821,8 @@ class Node:
             rows = self.db.read(query=query)
         except Exception:
             return False
+        # each draining run's recorded agent, dated by its record
+        records: list[tuple[int, float]] = []
         for row in rows:
             worktree_dir = fractal.util.git.find_worktree(
                 repo_dir=self.repo_dir,
@@ -784,9 +836,67 @@ class Node:
                 recorded = int(pgid_file.read_text(encoding='utf-8').strip())
             except (OSError, ValueError):
                 continue
-            if recorded == pgid and _recorded_group(pgid, recorded_at) is True:
+            records.append((recorded, recorded_at))
+        if not records:
+            return False
+        # this process and its ancestors, from one read of the process table
+        lineage: set[int] = set()
+        try:
+            table = fractal.util.process.snapshot()
+        except (OSError, RuntimeError):
+            pass
+        else:
+            lineage.update(fractal.util.process._lineage(os.getpid(), table))
+        # and its session: a command reparented out of the agent's tree
+        # still matches while it stays in the agent's session
+        try:
+            lineage.add(os.getsid(0))
+        except OSError:
+            pass
+        # match a recorded agent in that lineage, identity-checked
+        # so a recycled pid never stands in for it
+        for recorded, recorded_at in records:
+            if recorded in lineage and _recorded_group(recorded, recorded_at) is True:
                 return True
         return False
+
+    def loop_records(self: Node) -> list[pathlib.Path]:
+        """Return the loop group record of every other node in this tree.
+
+        A process-tree reap spares the groups these record: a node this
+        node's agent launches headless stays a child of the agent's tool
+        while its launcher runs (a tmux launch forks the loop from the tmux
+        server, outside the agent's tree), so a walk from the agent would
+        otherwise take a healthy loop at boot. Paths, not ids -- the reap
+        re-reads them before every signal round, catching a record written
+        mid-reap. Pure path arithmetic from each registry row's branch (no
+        git), and never raises: the reap runs on a deadline thread and
+        inside pause, so an unreadable registry answers none and an
+        unreadable entry is skipped.
+
+        Returns:
+            The ``.pgid`` record path of each registered node, this node's
+            own excluded.
+
+        """
+        result: list[pathlib.Path] = []
+        try:
+            repo_dir = self.repo_dir
+            own = self.branch
+            rows = self.db.read(query='SELECT node FROM nodes')
+            for row in rows:
+                branch = row['node']
+                if branch == own:
+                    continue
+                try:
+                    project = worktree.project_path(repo_dir, branch)
+                except OSError:
+                    continue
+                worktree_dir = repo_dir / WORKTREES_FOLDER / branch
+                result.append(node_dir(worktree_dir, project, branch) / PGID_FILE)
+        except Exception:
+            return result
+        return result
 
     @classmethod
     def user_nodes(cls: type[Node], path: PathLike) -> list[Node]:
@@ -919,9 +1029,10 @@ class Node:
     ) -> None:
         """Validate a template charter's fill-sheet before any spend.
 
-        The stale-seed gate: four commissions once shipped with stale pins,
-        stale docket rows, or truncated charters, each costing the node's
-        opening seat plus an adjudication. Checks, all pre-worktree:
+        The stale-seed gate: it refuses a stale pin, a stale docket row, or
+        a truncated charter before a seat spends on it -- at init before the
+        worktree exists, at reseed before any seed file is rewritten.
+        Checks:
 
         - ``--pin`` (when given) resolves to a commit;
         - the charter carries its two authored sections (a truncated seed
@@ -999,6 +1110,38 @@ class Node:
                     f'Docket row does not resolve at {anchor}: {row!r} (stale seed).'
                 )
 
+    def resolve_init_parent(self: Node, path: Optional[PathLike]) -> Node:
+        """Resolve the node a child initialized from this node nests under.
+
+        Args:
+            path: The init's project path; a path under ``.worktrees/``
+                names the parent when no ambient caller does.
+
+        Returns:
+            The calling node, else the existing node of a ``.worktrees/``
+            path, else this node.
+
+        """
+        # prefer the calling node (_NODE) so an agent's child nests under it,
+        # not the repo-root user node; fall back to self for a top-level spawn
+        parent = self.resolve_caller()
+        # only adopt an ambient caller that lives in this repo -- a _NODE pointing
+        # at a different repo would register the child in the wrong DB (split-brain)
+        if parent is not None and parent.repo_dir != self.repo_dir:
+            parent = None
+        # no ambient caller but a path under .worktrees/ (the CLI derives path
+        # from cwd, so this is a manual init from inside a worktree): parent on
+        # that worktree's node rather than the root default
+        if parent is None and path is not None:
+            parts = pathlib.Path(path).parts
+            if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
+                candidate = Node(self.repo_dir / WORKTREES_FOLDER / parts[1])
+                if candidate.exists():
+                    parent = candidate
+        if parent is None or not parent.exists():
+            parent = self
+        return parent
+
     def init(
         self: Node,
         name: Optional[str] = None,
@@ -1073,7 +1216,9 @@ class Node:
                 surface it lacks falls back to the inherit-or-package
                 source. Its ``config.json`` preset fills each unset
                 run-config flag (a flag wins over the preset; the preset
-                beats an inherited value).
+                beats an inherited value). A repo-rooted Jinja include
+                (a leading ``/``) reads a shared file at the same commit,
+                recorded beside the folder.
             include: Template-relative output paths to deploy from the template,
                 dropping everything else; a directory entry covers its
                 subtree. Mutually exclusive with ``exclude`` and recorded
@@ -1120,7 +1265,9 @@ class Node:
             reserve_budget: Budget reserved for cleanup: USD or ``N%`` of
                 the merged ``max_cost`` (default: the default reserve
                 fraction of it); shifts when the node enters reserve mode
-                (not enforced).
+                (not enforced). A flag or preset value records as explicit
+                and keeps its figure when the cap changes; the default
+                retunes with the cap.
             sync: Run sync mode before each step.
             detached: Separate agent invocation per step.
             local: Skip pushing to remote after each commit.
@@ -1146,6 +1293,7 @@ class Node:
             materialize,
             read_defaults,
             read_preset,
+            read_shared,
             read_sources,
             root_notice,
             trim,
@@ -1277,24 +1425,7 @@ class Node:
                 ' The base is the squash-merge target, so it must be'
                 ' checked out in this repository.'
             )
-        # prefer the calling node (_NODE) so an agent's child nests under it,
-        # not the repo-root user node; fall back to self for a top-level spawn
-        parent = self.resolve_caller()
-        # only adopt an ambient caller that lives in this repo -- a _NODE pointing
-        # at a different repo would register the child in the wrong DB (split-brain)
-        if parent is not None and parent.repo_dir != self.repo_dir:
-            parent = None
-        # no ambient caller but a path under .worktrees/ (the CLI derives path
-        # from cwd, so this is a manual init from inside a worktree): parent on
-        # that worktree's node rather than the root default
-        if parent is None and path is not None:
-            parts = pathlib.Path(path).parts
-            if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
-                candidate = Node(self.repo_dir / WORKTREES_FOLDER / parts[1])
-                if candidate.exists():
-                    parent = candidate
-        if parent is None or not parent.exists():
-            parent = self
+        parent = self.resolve_init_parent(path)
         # validate parent node
         if not parent.exists():
             raise FileNotFoundError(
@@ -1305,19 +1436,19 @@ class Node:
         # file per branch, plus a .lock suffix) -- checkable only now
         # that the parent is resolved
         worktree.validate_name(name, parent_branch=parent.branch)
+        # a non-root path names the child's project (default: inherit); a
+        # .worktrees/ path is the cwd-in-a-worktree case -- inherit too
+        child_project = parent.project_path
+        if path is not None and path != '.':
+            parts = pathlib.Path(path).parts
+            if parts[0] != WORKTREES_FOLDER:
+                child_project = path
         # a meta node's scope is the target's seed dir, spelled relative to the
         # child's own project (scope roots resolve against a node's project):
         # bare when the two share a project, prefixed with the target's project
         # from the repo root, and unreachable from any other project
         if meta:
             target_project = worktree.project_path(self.repo_dir, meta)
-            # a non-root path names the child's project (default: inherit); a
-            # .worktrees/ path is the cwd-in-a-worktree case -- inherit too
-            child_project = parent.project_path
-            if path is not None and path != '.':
-                parts = pathlib.Path(path).parts
-                if parts[0] != WORKTREES_FOLDER:
-                    child_project = path
             if child_project == target_project:
                 scope = [f'{FRACTAL_FOLDER}/{meta}']
             elif child_project == '.':
@@ -1340,6 +1471,30 @@ class Node:
         # the child records the tree's root (inherited from the parent) so any
         # node can resolve the central database from its own config
         root = parent.config.get('root')
+        # the shared project-wiki folder follows the spawn rule the merge
+        # re-checks: the parent's value in its own project, else the child's
+        # project's setting as committed on the root branch (never a node's
+        # editable checkout); in the parent's project, a root branch naming
+        # another folder than the tree recorded refuses
+        wiki = _child_wiki(parent, child_project)
+        if child_project == parent.project_path:
+            if wiki is not None:
+                validate_wiki(wiki, source='wiki')
+            committed = worktree.committed_wiki_setting(
+                self.repo_dir,
+                ref=root,
+                project=child_project,
+            )
+            named = committed or WIKI_FOLDER
+            fixed = wiki or WIKI_FOLDER
+            if named != fixed:
+                raise ValueError(
+                    f'The project wiki setting committed on {root!r} names'
+                    f' {named!r}, but the tree recorded {fixed!r}; commit the'
+                    f' recorded setting on {root!r}, or run `fractal reset'
+                    f' {root}` and re-run `fractal init` to adopt the committed'
+                    ' one.'
+                )
         # compose the child branch and probe its pre-existing ref now: the template
         # read below forks from the branch's own tip on a --reset, and the failure
         # rollback must never delete a reused branch's committed history
@@ -1389,6 +1544,15 @@ class Node:
                 )
                 pin = template_values.get('pin')
                 sources = read_sources(bundle)
+                # the shared files the folder includes join the snapshot,
+                # read at the same commit; they never deploy
+                blobs, shared = read_shared(
+                    sources,
+                    worktree=template_worktree,
+                    path=template_path,
+                    commit=template_commit,
+                )
+                sources |= blobs
                 # cut the bundle down to the effective set, so downstream
                 # only sees what the listing keeps -- every check below
                 # judges what actually deploys, so an excluded file can
@@ -1441,8 +1605,9 @@ class Node:
                 # a file the copy loops would silently skip -- a stray
                 # under steps/ or scripts/, a loose skills/ file, an
                 # unknown or loose agents/ entry -- would deploy nothing,
-                # print success, and drift on every later diff, so it
-                # refuses here like a credential
+                # print success, and drift on every later diff, and one
+                # the commit never stores would live on this disk alone,
+                # so each refuses here like a credential
                 vet(bundle)
                 # render from the unmodified source snapshot, including files
                 # the output listing omitted; values are never template source
@@ -1471,6 +1636,7 @@ class Node:
                     root=root,
                     path=template_path,
                     commit=template_commit,
+                    shared=shared,
                 )
                 # record the provenance into the bundle; init.sh places
                 # it with the other bundle surfaces
@@ -1481,6 +1647,7 @@ class Node:
                     values=template_values,
                     include=include,
                     exclude=exclude,
+                    shared=shared,
                 )
                 template_bundle = bundle
             # fill each unset flag from the template's config preset -- the
@@ -1616,6 +1783,10 @@ class Node:
             # already a USD number, typed as config.json holds it
             usable = (type(max_cost) in (int, float)) and (max_cost > 0)
             ceiling_ok = (max_cost is None) or usable
+            # record the reserve's origin: a flag or preset figure is explicit,
+            # while the default fraction materialized here is default -- only
+            # the latter retunes when the cap changes
+            reserve_mode = 'explicit'
             if reserve_budget is None and 'reserve_budget' in template_preset:
                 # a reserve without a ceiling is inert, so the preset obeys
                 # the same requires-max-cost rule the flag does
@@ -1626,6 +1797,8 @@ class Node:
                     )
                 reserve_budget = template_preset['reserve_budget']
             elif ceiling_ok:
+                if reserve_budget is None:
+                    reserve_mode = 'default'
                 reserve_budget = parse_reserve_budget(reserve_budget, max_cost)
             else:
                 # a degenerate or junk-typed ceiling resolves no reserve -- the
@@ -1680,6 +1853,8 @@ class Node:
             args.append(f'--title={title}')
             args.append(f'--parent={parent.branch}')
             args.append(f'--root={root}')
+            if wiki is not None:
+                args.append(f'--wiki={wiki}')
             # a non-root path selects the child's sub-project (default: inherit); a
             # .worktrees/ path is the cwd-in-a-worktree case above -- inherit too
             if path is not None and path != '.':
@@ -1735,6 +1910,7 @@ class Node:
                 args.append(f'--max-step-cost={max_step_cost}')
             if reserve_budget is not None:
                 args.append(f'--reserve-budget={reserve_budget}')
+                args.append(f'--reserve-mode={reserve_mode}')
             if sync is True:
                 args.append('--sync')
             if sync is False:
@@ -2019,6 +2195,10 @@ class Node:
         # ASCII identifier) up front so a bad dir name fails before any partial
         # init is written; it doubles as the wiki name
         wiki_name = worktree.derive_project_name(self.repo_dir)
+        # read the shared project-wiki folder from the project's tracked
+        # settings file up front, for the same reason; absent, the tree uses
+        # the default folder and its config records nothing
+        wiki_folder = worktree.read_wiki_setting(self._root / path)
         # resolve the default agent against the registry up front, for the
         # same reason -- a typo'd name would store fine, every spawn would
         # inherit it, and each start's loop would die on a vanishing tmux
@@ -2032,6 +2212,34 @@ class Node:
         # prior init (config.json written before db/radio/wiki) is repaired
         # on re-run -- db.init and radio.init are both idempotent
         if self.is_user:
+            # the folder is fixed at init (every node inherits it as its scope
+            # exemption), so a changed setting is adopted only while the tree
+            # has no node worktrees -- a live node would keep the old folder;
+            # an absent setting and one naming the default are the same folder
+            recorded = self.config.get('wiki')
+            named = wiki_folder or WIKI_FOLDER
+            fixed = recorded or WIKI_FOLDER
+            adopted = named != fixed
+            if adopted:
+                nodes = [
+                    checkout
+                    for checkout in fractal.util.git.worktree_map(self.repo_dir)
+                    if checkout.startswith(f'{branch}.')
+                ]
+                if nodes:
+                    raise ValueError(
+                        f'The project wiki setting names {named!r}, but the'
+                        f' tree on {branch!r} recorded {fixed!r} and still has'
+                        f' nodes; run `fractal reset {branch}` and re-run init'
+                        ' to adopt it.'
+                    )
+                config = self.config.load()
+                if wiki_folder is None:
+                    config.pop('wiki', None)
+                else:
+                    config['wiki'] = wiki_folder
+                text = json.dumps(config, indent=2)
+                fractal.util.filesystem.write_atomic(self.config.path, text + '\n')
             if agent is not None:
                 self.config.set('agent', agent)
             if provider is not None:
@@ -2046,10 +2254,13 @@ class Node:
                 repo_dir=self.repo_dir,
                 path=path,
                 name=wiki_name,
+                wiki=wiki_folder or WIKI_FOLDER,
             )
             # re-check host hooks for the formatter lanes (informational)
             worktree.verify_hook_formatters(self.repo_dir)
             message = f'User node already initialized on branch {branch!r}.'
+            if adopted:
+                message += f' Adopted the project wiki folder {self.wiki_prefix!r}.'
             if agent is not None:
                 message += f' Updated default agent to {agent}.'
             if provider is not None:
@@ -2101,14 +2312,14 @@ class Node:
             config['agent'] = agent
         if provider is not None:
             config['provider'] = provider
+        if wiki_folder is not None:
+            config['wiki'] = wiki_folder
         config_path = node_dir / CONFIG_FILE
         text = json.dumps(config, indent=2)
         fractal.util.filesystem.write_atomic(config_path, text + '\n')
         # resolve the seed and wiki paths (sub-project nodes nest under <project>/)
-        if path == '.':
-            seed, wiki = FRACTAL_FOLDER, 'wiki'
-        else:
-            seed, wiki = f'{path}/{FRACTAL_FOLDER}', f'{path}/wiki'
+        seed = FRACTAL_FOLDER if path == '.' else f'{path}/{FRACTAL_FOLDER}'
+        wiki = self.wiki_prefix
         # ensure git excludes -- the static block covers the runtime artifacts
         # init creates outside the node dir (.worktrees/ above all)
         worktree.exclude_update(self.repo_dir)
@@ -2121,6 +2332,7 @@ class Node:
             repo_dir=self.repo_dir,
             path=path,
             name=wiki_name,
+            wiki=wiki_folder or WIKI_FOLDER,
         )
         # check host hooks for the formatter lanes (informational)
         worktree.verify_hook_formatters(self.repo_dir)
@@ -2157,7 +2369,8 @@ class Node:
         defaults; defaults supply only new keys on an explicit refresh.
         The listing persists, and the confirmation carries creation's
         root-differs notice when the root branch holds a different copy
-        of the folder (a plain or ``ref`` reseed stays silent).
+        of the folder or of a shared file it includes (a plain or ``ref``
+        reseed stays silent).
 
         Args:
             ref: Committish to read the recorded folder at (default: the
@@ -2188,6 +2401,7 @@ class Node:
             materialize,
             read_defaults,
             read_provenance,
+            read_shared,
             read_sources,
             root_notice,
             trim,
@@ -2280,6 +2494,20 @@ class Node:
                         commit=commit,
                         dest=pathlib.Path(template_tmp),
                     )
+                    defaults = read_defaults(bundle, path=path)
+                    values = record.get('values', {})
+                    if rev is not None:
+                        values = defaults | values
+                    sources = read_sources(bundle)
+                    # the shared files the folder includes join the snapshot,
+                    # read at the same commit; they never deploy
+                    blobs, shared = read_shared(
+                        sources,
+                        worktree=template_worktree,
+                        path=path,
+                        commit=commit,
+                    )
+                    sources |= blobs
                     # a re-point reads a fresh folder choice, so it gets
                     # creation's root-differs notice; a plain or --ref reseed
                     # deliberately re-reads a recorded or named version, silently
@@ -2289,20 +2517,17 @@ class Node:
                             root=self.config.get('root'),
                             path=path,
                             commit=commit,
+                            shared=shared,
                         )
-                    defaults = read_defaults(bundle, path=path)
-                    values = record.get('values', {})
-                    if rev is not None:
-                        values = defaults | values
-                    sources = read_sources(bundle)
                     warnings = trim(
                         bundle,
                         include=record.get('include'),
                         exclude=record.get('exclude'),
                         strict=False,
                     )
-                    # a file the copy loops would silently skip refuses here
-                    # exactly as at init, judging the effective set
+                    # a file the copy loops would silently skip or the commit
+                    # never stores refuses here exactly as at init, judging
+                    # the effective set
                     vet(bundle)
                     fill(
                         bundle,
@@ -2396,6 +2621,7 @@ class Node:
                             values=values,
                             include=record.get('include'),
                             exclude=record.get('exclude'),
+                            shared=shared,
                         )
                     except Exception:
                         self.record.event_end(event_id=event_id, status='failed')
@@ -2416,6 +2642,33 @@ class Node:
         self-ignore file, which no block rewrite can touch.
         """
         worktree.exclude_update(self.repo_dir)
+
+    def _check_launch_config(self: Node) -> None:
+        """Re-validate the stored config the loop's boot reads.
+
+        The documented steering path edits ``config.json`` directly,
+        bypassing the init/update setters' checks, so every verb that
+        launches a loop (``start``, ``resume``) runs this before it
+        changes anything: the launch invariants (:meth:`Config.validate`),
+        then the agent resolved against the registry the way the boot
+        resolves it.
+
+        Raises:
+            ValueError: If the config violates a launch invariant, names
+                no agent, or names one no backend is registered for.
+
+        """
+        from .agent import command_base, resolve
+
+        self.config.validate()
+        # the loop reads this node's own config key, never the ancestor walk
+        # -- the steering path can typo or drop it, and the loop's registry
+        # error would otherwise abort the boot after the launch
+        agent = self.config.get('agent')
+        if not agent:
+            raise ValueError('No agent configured; set --agent at node init.')
+        base_word = command_base(agent)
+        resolve(base_word, root=self.db.path.parent)
 
     def start(
         self: Node,
@@ -2469,7 +2722,7 @@ class Node:
             retune echo, the continue-from-killed countermand).
 
         """
-        from .agent import command_base, resolve
+        from .loop import _effort_ladders
 
         # reject user nodes
         if self.is_user:
@@ -2505,6 +2758,9 @@ class Node:
             raise RuntimeError(
                 f'Cannot start under a paused node ({latched}). Resume it first.'
             )
+        # refuse a bad committed effort ladder before anything changes -- the
+        # loop's boot reads it again and would abort after "Started" printed
+        _effort_ladders(self)
         # launch-time notices (the retune echo, the kill countermand) ride
         # the returned confirmation -- core never prints; the CLI echoes it
         notices: list[str] = []
@@ -2512,6 +2768,21 @@ class Node:
         # paths below roll a persisted retune back through them, so a refused
         # or failed continue never keeps a --max-cost the caller passed
         changes: dict[str, tuple[Any, Any]] = {}
+
+        def _restore() -> None:
+            # restore the priors in both stores (config.json, and the
+            # registry row for its one table-backed key)
+            for key, values in changes.items():
+                prior, _ = values
+                self.config.set(key, prior)
+            if 'max_cost' in changes:
+                prior, _ = changes['max_cost']
+                self.db.update(
+                    data={'max_cost': prior},
+                    table='nodes',
+                    where={'node': self.branch},
+                )
+
         # a budget-ended run (the exited/0 landing) never re-arms silently --
         # continuing spends real money the caller must re-authorize, so a bare
         # continue refuses with the recorded figures, and an explicit new cap
@@ -2557,10 +2828,9 @@ class Node:
                 # line form C-quotes spaces and non-ASCII, defeating the prefix
                 # exemption -- and needs the unstripped run_bytes: strip would
                 # eat the first entry's leading status space, shifting offsets
-                porcelain = fractal.util.git.run_bytes(
-                    ['status', '--porcelain', '-z', '--untracked-files=all'],
-                    cwd=self._root,
-                )
+                cmd = ['--no-optional-locks', 'status', '--porcelain', '-z']
+                cmd += ['--untracked-files=all']
+                porcelain = fractal.util.git.run_bytes(cmd, cwd=self._root)
                 # fail closed: a status failure must not read as a clean tree
                 if porcelain is None:
                     raise RuntimeError('Cannot continue: git status failed.')
@@ -2617,39 +2887,35 @@ class Node:
                     if prior is None:
                         prior = 'unset'
                     notices.append(f'{key}: {prior} -> {value}')
-        # a non-positive ceiling launches straight into a degenerate $0 finish, so
-        # reject it; a missing ceiling means uncapped -- allowed but warned loudly
-        # since spend is then bounded only by --max-iters/--timeout (a token-priced
-        # agent with no model set can only run this way -- a cost cap requires a
-        # model)
-        max_cost = self.config.get('max_cost')
-        if max_cost is not None and max_cost <= 0:
-            raise RuntimeError(
-                'Cannot start with a non-positive max_cost;'
-                ' set a positive cap with `fractal node update --max-cost=<usd>`'
-                ' or unset it to run uncapped.'
-            )
-        if max_cost is None:
-            self.log(
-                message=f'Warning: starting {self.branch} without a cost cap;'
-                ' spend is bounded only by --max-iters/--timeout.',
-                level=logging.WARNING,
-            )
-        # re-validate the rest of the config the loop reads -- the documented
-        # steering path edits config.json directly, bypassing the init/update
-        # setters' checks; a bad duration or cost ordering would otherwise abort
-        # the loop after start prints "Started", wedging the node idle with the
-        # only error on a dying pane or in headless.log
-        self.config.validate()
-        # resolve the stored agent against the registry the way the loop's
-        # boot does (the loop reads this node's own config key, never the
-        # ancestor walk) -- the same steering path can typo or drop it, and
-        # the loop's registry error would land on the same dying pane or log
-        agent = self.config.get('agent')
-        if not agent:
-            raise ValueError('No agent configured; set --agent at node init.')
-        base_word = command_base(agent)
-        resolve(base_word, root=self.db.path.parent)
+        # the launch checks read the retuned config, so a refusal rolls the
+        # retune back as the re-arm gate's does
+        try:
+            # a non-positive ceiling launches straight into a degenerate $0
+            # finish, so reject it; a missing ceiling means uncapped -- allowed
+            # but warned loudly since spend is then bounded only by
+            # --max-iters/--timeout (a token-priced agent with no model set can
+            # only run this way -- a cost cap requires a model)
+            max_cost = self.config.get('max_cost')
+            if max_cost is not None and max_cost <= 0:
+                raise RuntimeError(
+                    'Cannot start with a non-positive max_cost;'
+                    ' set a positive cap with `fractal node update --max-cost=<usd>`'
+                    ' or unset it to run uncapped.'
+                )
+            if max_cost is None:
+                self.log(
+                    message=f'Warning: starting {self.branch} without a cost cap;'
+                    ' spend is bounded only by --max-iters/--timeout.',
+                    level=logging.WARNING,
+                )
+            # re-validate the rest of the config the loop reads -- the documented
+            # steering path edits config.json directly, bypassing the init/update
+            # setters' checks; a bad duration or cost ordering would otherwise abort
+            # the loop's boot after start prints "Started"
+            self._check_launch_config()
+        except Exception:
+            _restore()
+            raise
         # a blind node reads no channels -- sweep any subscriptions that
         # landed between init (which seeds none) and this launch
         if self.config.get('blind'):
@@ -2729,19 +2995,8 @@ class Node:
                         self.status_set(current_status)
                         raise
             except Exception:
-                # a refused gate or failed launch must not keep the retune --
-                # restore the priors in both stores (config.json, and the
-                # registry row for its one table-backed key)
-                for key, values in changes.items():
-                    prior, _ = values
-                    self.config.set(key, prior)
-                if 'max_cost' in changes:
-                    prior, _ = changes['max_cost']
-                    self.db.update(
-                        data={'max_cost': prior},
-                        table='nodes',
-                        where={'node': self.branch},
-                    )
+                # a refused gate or failed launch must not keep the retune
+                _restore()
                 raise
         else:
             # serialize the boot handoff across runtime backends: the loop
@@ -3619,6 +3874,11 @@ class Node:
             if event_id is not None:
                 self.record.event_end(event_id=event_id, status='failed')
             raise
+        # the reap names what it left alive on stderr
+        for line in result.stderr.splitlines():
+            self.log(message=line, level=logging.WARNING)
+        # name any git operation the abort left in progress
+        self._warn_git_in_progress()
         # mark active rows as killed; a loop that landed its own terminal
         # between the signal and the reap keeps it -- the row marking is
         # already fenced, so the status stamp must not overwrite either
@@ -3634,17 +3894,20 @@ class Node:
         """Pause the node and its active descendants (parent-first).
 
         Signals ``pause`` then aborts each node's in-flight agent invocation
-        (``pause.sh`` reaps the recorded step process group), so every loop
+        (``pause.sh`` reaps the in-flight agent's whole process tree and
+        names survivors and other processes in the worktree), so every loop
         reclassifies the abort and parks: it exits with status ``paused``,
         leaving its run and iteration rows open for :meth:`resume` to adopt.
-        Fans out parent-first -- the inverse of every other signal -- so a
-        parent parked before its children can never drain-complete over
-        them, and re-enumerates until the subtree is fully signaled,
-        catching children spawned mid-fan-out (``init``/``start`` refuse
-        new work under the pause latch). On the user (root) node, which has
-        no loop of its own, the fan-out covers the whole tree with no self
-        signal -- the tree-wide brake -- and latches the root first, so
-        even a depth-1 start racing the sweep refuses until resume.
+        An agent that runs the pause itself is never aborted: its step
+        finishes and its loop parks at the next checkpoint. Fans out
+        parent-first -- the inverse of every other signal -- so a parent
+        parked before its children can never drain-complete over them, and
+        re-enumerates until the subtree is fully signaled, catching children
+        spawned mid-fan-out (``init``/``start`` refuse new work under the
+        pause latch). On the user (root) node, which has no loop of its own,
+        the fan-out covers the whole tree with no self signal -- the
+        tree-wide brake -- and latches the root first, so even a depth-1
+        start racing the sweep refuses until resume.
 
         Args:
             reason: Optional reason for pausing.
@@ -3652,7 +3915,29 @@ class Node:
         Returns:
             Confirmation message.
 
+        Raises:
+            ValueError: If ``reason`` uses the text the loop reserves for its
+                own park rows.
+
         """
+        # refuse the loop's park text before anything is written -- the
+        # deadline credit tells a park from a request by its reason; a prefix
+        # counts without its trailing space, since a fanned-out reason gains
+        # a ' (via pause of ...)' suffix
+        if reason:
+            prefixes = (LATCH_PARK_REASON_PREFIX, PREFLIGHT_PARK_REASON_PREFIX)
+            reserved = [
+                prefix.rstrip()
+                for prefix in prefixes
+                if reason.startswith(prefix.rstrip())
+            ]
+            if reason == PARK_REASON:
+                reserved.append(PARK_REASON)
+            if reserved:
+                raise ValueError(
+                    f'--reason must not use the reserved text {reserved[0]!r}'
+                    ' (the loop records its own parks with it).'
+                )
         # a tree-wide pause latches the root before fanning out, so a start
         # or spawn racing the sweep (even at depth 1, where no pausable
         # ancestor exists) refuses instead of slipping in unfrozen
@@ -3663,10 +3948,10 @@ class Node:
         # every active one carries a pause signal -- the re-enumeration
         # catches children spawned mid-fan-out; best-effort per node
         # (mirrors kill), each attempted exactly once
-        paused_count = 0
+        outcomes: list[str] = []
         if not self.is_user:
-            self._pause(reason)
-            paused_count += 1
+            if (outcome := self._pause(reason)) is not None:
+                outcomes.append(outcome)
         attempted = set()
         while True:
             pending = [
@@ -3681,20 +3966,26 @@ class Node:
             for branch, descendant in pending:
                 attempted.add(branch)
                 try:
-                    if descendant._pause(propagated, fan_out=True):
-                        paused_count += 1
+                    outcome = descendant._pause(propagated, fan_out=True)
                 except Exception:
                     self.log(
                         message=f'Warning: failed to pause {descendant._root}',
                         level=logging.WARNING,
                     )
+                    continue
+                if outcome is not None:
+                    outcomes.append(outcome)
         # build confirmation
-        if paused_count == 0:
+        if not outcomes:
             return 'No active nodes to pause (tree latched until resume).'
-        suffix = 's' if paused_count != 1 else ''
+        suffix = 's' if len(outcomes) != 1 else ''
+        # an agent that runs the pause itself is kept to finish its step
+        aborted = 'in-flight agents aborted'
+        if any(outcome.startswith(_PAUSE_KEPT) for outcome in outcomes):
+            aborted = "in-flight agents aborted except the caller's own"
         result = (
-            f'Pause signal sent to {paused_count} node{suffix}'
-            ' (in-flight agents aborted; loops park paused)'
+            f'Pause signal sent to {len(outcomes)} node{suffix}'
+            f' ({aborted}; loops park paused)'
         )
         if reason:
             result += f': {reason}'
@@ -3705,34 +3996,59 @@ class Node:
         reason: Optional[str] = None,
         *,
         fan_out: bool = False,
-    ) -> bool:
+    ) -> Optional[str]:
         """Signal ``pause`` and abort this node's in-flight agent invocation.
 
         The guard re-read and the event/signal writes stay atomic under the
-        ``.worktrees`` flock; ``pause.sh`` runs outside the lock. Reports
-        whether the signal landed, so the sweep's count skips a refused
-        descendant.
+        ``.worktrees`` flock; ``pause.sh`` runs outside the lock. Returns
+        ``pause.sh``'s outcome line, or ``None`` when the signal was
+        refused, so the sweep's count skips a refused descendant and the
+        confirmation can tell an abort from an agent the pause left running
+        because the agent runs the pause itself.
         """
         with worktree.lock(self.repo_dir):
             # re-read under the lock -- a rival verb or the settling loop
             # may have moved this node since the caller enumerated it
             guard = self._signal_guard('pause', 'pause', fan_out=fan_out, locked=True)
             if guard is None:
-                return False
+                return None
             # the signal lands before the abort so the loop reclassifies
             # the killed step as paused, never as a failed step (a failure
             # would force-commit and open a fresh session)
             event_id = self.record.event_start('pause', metadata=reason or '')
             self.record.signal_set('pause', reason or '')
         try:
-            self._run_script('pause.sh', f'{self._root}')
+            result = self._run_script('pause.sh', f'{self._root}')
         except Exception:
             # the signal is durable -- the loop still parks at its next
             # checkpoint -- but the failed abort must surface
             self.record.event_end(event_id=event_id, status='failed')
             raise
+        # the reap names what it left alive on stderr
+        for line in result.stderr.splitlines():
+            self.log(message=line, level=logging.WARNING)
+        # name any git operation the abort left in progress
+        self._warn_git_in_progress()
         self.record.event_end(event_id=event_id, status='completed')
-        return True
+        return result.stdout.strip()
+
+    def _warn_git_in_progress(self: Node) -> None:
+        """Warn of each git operation the worktree has in progress.
+
+        An abort can cut a git command short -- an agent's merge, rebase,
+        or index write -- and the operation stays in the worktree until
+        finished or aborted, where a later merge of this node trips over
+        it; pause and kill name each one after the reap.
+        """
+        # a probe that cannot answer names nothing: kill's row marking follows
+        for _, marker in fractal.util.git.in_progress(self._root, check=False):
+            self.log(
+                message=(
+                    f'Warning: {self._root} has a git operation in progress'
+                    f' ({marker.name}); finish or abort it before merging this node'
+                ),
+                level=logging.WARNING,
+            )
 
     def resume(self: Node) -> str:
         """Resume the node and its paused descendants (leaf-first).
@@ -3752,6 +4068,8 @@ class Node:
             Confirmation message.
 
         """
+        from .loop import _effort_ladders
+
         # a draining seat re-arms nothing (export plus the run's durable
         # drain signal) -- relaunching a parked subtree from inside a
         # wind-down is the one expanding verb the other guards miss
@@ -3759,6 +4077,20 @@ class Node:
             raise RuntimeError(
                 'Cannot resume a node from a draining run (--drain forbids re-arms).'
             )
+        # refuse a bad config or committed effort ladder before anything
+        # changes -- each relaunched loop reads its own config and its
+        # project's ladder at boot and would abort back to paused after the
+        # resume closed its pause credit span; the refusal names the node,
+        # since a tree-wide resume checks many
+        relaunched = [node for _, node in self._live_descendants(status='paused')]
+        if not self.is_user and self.status() == 'paused':
+            relaunched.append(self)
+        for node in relaunched:
+            try:
+                node._check_launch_config()
+                _effort_ladders(node)
+            except ValueError as error:
+                raise ValueError(f'Cannot resume {node.branch}: {error}') from error
         # a tree-wide resume releases the latch first -- new starts and
         # spawns are legal again the moment the release begins, even when
         # nothing is left parked to relaunch
@@ -3786,8 +4118,8 @@ class Node:
                 )
         # a node still parking (active with a pending pause signal) has a live
         # loop that cannot be relaunched -- withdraw its pause instead, so the
-        # loop never parks; the resume event closes the span for the credit
-        # walk, and a loop that already read the signal parks anyway (honest:
+        # loop never parks; the request opened no credit span (only a park
+        # does), and a loop that already read the signal parks anyway (honest:
         # it lands paused for the next resume to relaunch)
         resumed_count = 0
         withdrawn = [
@@ -3840,7 +4172,9 @@ class Node:
         # and the adopted run's cleanup and commits see fresh ignores
         self._git_exclude()
         # the resume event lands before the relaunch so the booting loop's
-        # deadline credit sees the pause..resume span closed
+        # deadline credit sees the pause..resume span closed; a merge in
+        # flight is the booting loop's to wait for, under the merge flock
+        # around its active stamp
         event_id = self.record.event_start('resume')
         try:
             self._run_script('resume.sh', f'{self._root}')
@@ -3908,9 +4242,10 @@ class Node:
     def merge(
         self: Node,
         *,
+        validation_script: Optional[str] = None,
+        message: Optional[str] = None,
         continue_merge: bool = False,
         ignore_scope: bool = False,
-        validation_script: str | None = None,
     ) -> tuple[str, str]:
         """Squash-merge the node's branch into its merge target.
 
@@ -3944,10 +4279,33 @@ class Node:
         merge restores the target; a failed continue preserves the staged
         resolution. A no-op merge does not run the script.
 
+        ``message`` replaces the squash commit's default ``merge <branch>``
+        text verbatim, so a descriptive message never needs an amend (an
+        amended squash orphans the merge-base advance recorded against it).
+
+        A paused node merges without leaving ``paused``: it runs no loop and
+        no agent, and its run, iteration, and step rows stay open for
+        :meth:`resume` to adopt. A booting loop holds the merge lock for its
+        ``--continue`` clean-up and its ``active`` stamp, and the merge
+        re-reads the node's status once it holds that lock, refusing a node
+        that changed status while it waited; a commit the node gains during
+        the merge anyway refuses it, since the advance would revert that
+        commit. Only committed work lands; the advance carries the frozen
+        step's uncommitted state the way ``git checkout`` moves a branch,
+        refusing the whole merge when it would touch a dirty path or an
+        untracked or ignored file, and rolling the target and the node back
+        when anything fails after the commit (a continue keeps its staged
+        resolution). A frozen step stopped inside a git operation -- a merge,
+        squash merge, cherry-pick, revert, or rebase, or a git command still
+        running or killed with its ``index.lock`` held -- refuses the merge
+        before anything changes.
+
         Refuses while the target is active or paused -- the squash, index
         refresh, and recovery ``reset --hard`` all mutate the target
         worktree -- except from inside the target's own loop, which merges
-        its settled children as part of its normal iteration.
+        its settled children as part of its normal iteration. The target is
+        checked again once the merge holds the lock, since a re-armed
+        target's boot also goes ``active`` under it.
 
         Returns:
             Tuple of script output and collected stderr notices (e.g. a
@@ -3963,8 +4321,6 @@ class Node:
         current = self.status()
         if current == 'active':
             raise RuntimeError('Cannot merge an active node. Stop or kill it first.')
-        if current == 'paused':
-            raise RuntimeError('Cannot merge a paused node. Resume or kill it first.')
         # the target must be settled too: merge.sh squashes, refreshes
         # indexes, and commits inside the target worktree, and its failure
         # paths reset --hard -- racing a live target loop would absorb or
@@ -3976,21 +4332,25 @@ class Node:
         # and leave a target that does not resolve to merge.sh's own errors
         target_branch = self._merge_target()
         target_worktree = fractal.util.git.find_worktree(self.repo_dir, target_branch)
-        if target_worktree is not None:
-            target = self.__class__(target_worktree)
-            if not target._is_own_loop():
-                target._reconcile_status()
-                target_status = target.status()
-                if target_status == 'active':
-                    raise RuntimeError(
-                        f'Cannot merge into active target {target_branch}.'
-                        ' Stop or kill it first.'
-                    )
-                if target_status == 'paused':
-                    raise RuntimeError(
-                        f'Cannot merge into paused target {target_branch}.'
-                        ' Resume or kill it first.'
-                    )
+
+        def _check_target() -> None:
+            if target_worktree is not None:
+                target = self.__class__(target_worktree)
+                if not target._is_own_loop():
+                    target._reconcile_status()
+                    target_status = target.status()
+                    if target_status == 'active':
+                        raise RuntimeError(
+                            f'Cannot merge into active target {target_branch}.'
+                            ' Stop or kill it first.'
+                        )
+                    if target_status == 'paused':
+                        raise RuntimeError(
+                            f'Cannot merge into paused target {target_branch}.'
+                            ' Resume or kill it first.'
+                        )
+
+        _check_target()
         # run merge script -- merge.sh resolves the target and logs the
         # merge event on it (it's the single source of truth for the target)
         args = [f'{self._root}']
@@ -4000,18 +4360,140 @@ class Node:
             args.append('--ignore-scope')
         if validation_script is not None:
             args.append(f'--validate={validation_script}')
+        if message is not None:
+            args.append(f'--message={message}')
+        # a paused node's worktree holds its frozen step's uncommitted work,
+        # which the advance must carry rather than skip or reset away
+        if current == 'paused':
+            args.append('--carry-dirty')
         # the target's user-ness from the repo's record: a root checked out in
         # a linked worktree carries no self-ignored seed there to probe
         if any(user.branch == target_branch for user in Node.user_nodes(self.repo_dir)):
             args.append('--user-target')
+        # the folder the index refresh regenerates: the node's own project
+        # wiki under the target checkout, as the node's spawn gave it, so a
+        # hand-edited config.json steers neither the exemption nor the
+        # refresh and a sub-project node's pages are indexed where they
+        # landed (a root checked out in a linked worktree carries no config
+        # for the script to read the folder from)
+        _, wiki = self._spawn_wiki()
+        project = self.project_path
+        prefix = wiki if project == '.' else f'{project}/{wiki}'
+        args.append(f'--target-wiki={prefix}')
         # one squash at a time per repo: two sibling merges racing into the
         # same target interleave their index writes and leave it half-merged
         with worktree.merge_lock(self.repo_dir):
+            # the status the arguments were built from must still hold: a
+            # booting loop holds this lock for its continue clean-up and its
+            # active stamp, so no loop goes live while the script runs
+            if (status := self.status()) != current:
+                raise RuntimeError(
+                    f'Cannot merge: the node went from {current} to {status}'
+                    ' while the merge waited. Merge again.'
+                )
+            # a re-armed target's boot stamps active under this lock too, so
+            # a target that went live while the merge waited refuses here
+            _check_target()
+            # a frozen step can stop inside a git operation, which the carried
+            # advance would move the branch under (git itself refuses to
+            # switch branches mid-merge); a probe that cannot answer raises
+            if current == 'paused':
+                if operations := fractal.util.git.in_progress(self.worktree):
+                    named = ', '.join(
+                        f'{operation} ({marker})' for operation, marker in operations
+                    )
+                    raise RuntimeError(
+                        f'Cannot merge paused node {self.branch}: its worktree has'
+                        f' {named}. Resume the node and let it finish or abort'
+                        ' the operation, or finish or abort it by hand in the'
+                        ' worktree, then merge again; remove a stale index.lock'
+                        ' only once no git process runs there.'
+                    )
             result = self._run_script('merge.sh', *args)
         # success-path warnings ride stderr (e.g. a skipped merge-base
         # advance predicting spurious re-merge diffs) and would vanish with
         # the CompletedProcess -- return them beside the output
         return result.stdout.strip(), result.stderr.strip()
+
+    def check_wiki(self: Node) -> None:
+        """Refuse a recorded project-wiki folder other than the one spawn gave.
+
+        The ``wiki`` key is immutable through the config setters, but a raw
+        edit of ``config.json`` to another valid folder would move the
+        node's scope exemption, and its squash would then land pages under
+        that folder. The merge footprint check calls this first: it
+        recomputes the folder by the rule :meth:`init` applied (the
+        parent's folder in the parent's project, else the child's project's
+        setting committed on the root branch) and refuses a node that
+        records another. An edited parent is caught by its own merge.
+
+        A setting committed on the root branch is read as it stands now, so
+        a node checked against it is also refused when the setting changed
+        after its spawn; that refusal names the setting, since restoring
+        ``config.json`` to the new folder would itself move the exemption.
+
+        Raises:
+            ValueError: If the recorded folder differs, naming both.
+
+        """
+        root = self.config.get('root')
+        parent, expected = self._spawn_wiki()
+        recorded = self.config.get('wiki') or WIKI_FOLDER
+        if recorded == expected:
+            return
+        if parent is not None and parent.project_path == self.project_path:
+            raise ValueError(
+                f'{self.branch} records {recorded!r} as its project wiki folder,'
+                f' but its spawn gives {expected!r}; the folder is fixed at'
+                " init, so restore it in the node's config.json."
+            )
+        raise ValueError(
+            f'{self.branch} records {recorded!r} as its project wiki folder,'
+            f' but the setting committed on {root!r} for project'
+            f' {self.project_path!r} names {expected!r}; the folder is fixed'
+            f' at spawn, so commit {recorded!r} back on {root!r} if the'
+            ' setting changed since, or delete the node and spawn it again'
+            f' to adopt {expected!r}.'
+        )
+
+    def _spawn_wiki(self: Node) -> tuple[Optional[Node], str]:
+        """Return the parent spawn saw and the project-wiki folder it gave.
+
+        The rule :meth:`init` applied, recomputed from the repo's record
+        rather than the node's editable ``config.json``: the parent's
+        folder in the parent's project, else the node's project's setting
+        committed on the root branch. Shared by :meth:`check_wiki` and
+        :meth:`merge`, so the guard and the index refresh read one folder.
+
+        Returns:
+            The parent as spawn resolved it (``None`` when checked out
+            nowhere) and the folder, relative to the node's project.
+
+        Raises:
+            ValueError: If the committed settings file is invalid.
+
+        """
+        root = self.config.get('root')
+        # the tree's user node resolves by the repo's record, not the
+        # checkout: a root checked out in a linked worktree carries no
+        # self-ignored seed there, so its folder would read as the default
+        parent_branch, *_ = self.branch.rsplit('.', 1)
+        if parent_branch == root:
+            parent = Node.resolve_user(self.repo_dir, name=root)
+        else:
+            parent = self.parent
+        if parent is not None:
+            expected = _child_wiki(parent, self.project_path)
+        else:
+            # the parent is checked out nowhere (a --base merge into another
+            # tree's root can leave it so); spawn held the parent's folder to
+            # the setting committed on the root branch, so that one stands in
+            expected = worktree.committed_wiki_setting(
+                self.repo_dir,
+                ref=root,
+                project=self.project_path,
+            )
+        return parent, expected or WIKI_FOLDER
 
     def guard_delete(self: Node) -> None:
         """Guard a subtree teardown: pre-flight its refusals, settle what it can.
@@ -4141,7 +4623,7 @@ class Node:
             return ''
         project = self.project_path
         seed = FRACTAL_FOLDER if project == '.' else f'{project}/{FRACTAL_FOLDER}'
-        wiki = 'wiki' if project == '.' else f'{project}/wiki'
+        wiki = self.wiki_prefix
         # a scope root that is, or lies under, a .fractal dir is work the merge
         # lands (a --meta node's scope is the target's own seed dir), so exclude
         # only the node's own seed and its descendants' instead of the whole
@@ -4165,6 +4647,7 @@ class Node:
             excludes = [f':!{seed}']
         # list the branch's own changes, minus its seed and the wiki's generated state
         cmd = [
+            '--no-optional-locks',
             'diff',
             '--name-only',
             '-z',
@@ -4181,7 +4664,8 @@ class Node:
             return ''
         # only paths still differing on the target would be discarded
         specs = [f':(literal){path}' for path in changed]
-        cmd = ['diff', '--quiet', target, self.branch, '--', *specs]
+        cmd = ['--no-optional-locks', 'diff', '--quiet', target, self.branch]
+        cmd += ['--', *specs]
         if fractal.util.git.run(cmd, cwd=repo_dir, check=False) is not None:
             return ''
         # word for word the line delete.sh prints: the CLI drops the script's
@@ -4563,6 +5047,13 @@ class Node:
             for _, descendant in tree._live_descendants(status='active'):
                 descendant._reconcile_status()
         args = [f'--branch={node.branch}']
+        # the project wiki feeds only the report's "Left in place" line, which
+        # falls back to the default folder: a hand-edited invalid value must
+        # not block the teardown
+        try:
+            args.append(f'--wiki={node.wiki_prefix}')
+        except ValueError:
+            pass
         if name is None:
             args.append('--all')
             # the sweep clears every tree's data dir, so name them here -- the
@@ -4873,7 +5364,8 @@ class Node:
         ``pausing`` / ``stopping`` / ``finishing`` when a pause/stop/finish
         signal is pending on an active node; the recorded end reason when
         the latest run row says why an ``exited`` run ended (the run row is
-        the single source -- a reconcile-healed crash records no reason);
+        the single source -- a crash healed by reconcile names itself
+        there);
         else empty. An unresolved model drop on the newest iteration
         composes a ``model drop`` marker onto whichever qualifier stands
         (any status -- served-model honesty outlives the run). The
@@ -4898,8 +5390,7 @@ class Node:
                 detail = 'finishing'
         if status == 'exited':
             # the latest run row records why the loop ended (budget landing,
-            # timeout, setup abort); a crash healed by reconcile closes its
-            # rows reason-less and keeps the bare status
+            # timeout, setup abort, a crash healed by reconcile)
             rows = self.record.runs(limit=1)
             if rows and rows[0]['status'] == 'exited' and rows[0]['metadata']:
                 detail = rows[0]['metadata']
@@ -4942,15 +5433,16 @@ class Node:
         ``final_iteration_failed`` (a drained finish whose last
         iteration died). ``exited`` rows read ``cost_budget`` --
         exited/0 is the DB-level budget-landing discriminator, every
-        other exited path keeps 1 -- ``timeout``, ``setup_abort``, or
-        ``final_iteration_failed`` (the iteration cap landing on a dead
-        final iteration); any other recorded reason (an unexpected exit,
-        a kill/retire that beat the boot, a failed resume preflight)
-        maps ``other``, so ``None`` keeps meaning nothing recorded (a
-        reconcile-healed crash closes its rows reason-less). Every other
+        other exited path keeps 1 -- ``timeout``, ``setup_abort``,
+        ``crashed`` (a dead loop's rows closed by the heal, at a later
+        read or at the next boot), or ``final_iteration_failed`` (the
+        iteration cap landing on a dead final iteration); any other
+        recorded reason (an unexpected exit, a kill/retire that beat the
+        boot, a failed resume preflight) maps ``other``, so ``None`` keeps
+        meaning nothing recorded (a run that never landed). Every other
         status reads ``None``. Reads the stored status without
         reconciling: a crashed-but-active node's open run carries no
-        reason before the heal and none after it.
+        reason until the heal stamps it.
 
         Returns:
             The token, or ``None`` when no run reason is recorded.
@@ -4972,6 +5464,8 @@ class Node:
                 return 'timeout'
             if reason.startswith('setup failed x'):
                 return 'setup_abort'
+            if reason.startswith('crashed:'):
+                return 'crashed'
             exhausted = reason.startswith('Reached max iterations')
             if exhausted and reason.endswith('final iteration failed'):
                 return 'final_iteration_failed'
@@ -4999,8 +5493,12 @@ class Node:
         (``agent launch failed``) and a wrapper that runs and exits 127,
         the ``command not found`` convention (``agent error (exit 127)``
         -- the step row's own exit code is the binary failure marker, so
-        the reason is where the code survives). Active nodes only: a
-        settled node's trailing failures are history.
+        the reason is where the code survives). A failure the loop judged
+        a provider outage (its reason leads ``provider unavailable: ``)
+        breaks the streak too, as it never arms the loop's breaker, and so
+        does a step the loop refused before its launch (its reason leads
+        ``not launched: ``), which bought no inference to count.
+        Active nodes only: a settled node's trailing failures are history.
         """
         if self.status() != 'active':
             return False
@@ -5019,6 +5517,15 @@ class Node:
             # not billing-shaped -- either recorded reason (retry-marker safe:
             # the marker is a suffix) breaks the streak like a paid failure
             if row['metadata'].startswith(_CANNOT_EXEC_REASONS):
+                return False
+            # a launch the loop judged a provider outage is not billing-shaped
+            # either, however instant and unpriced -- its verdict leads the
+            # reason, so a launch-authored tail can never forge it
+            if row['metadata'].startswith(UNAVAILABLE_REASON_PREFIX):
+                return False
+            # nor is a step the loop refused before its launch, which bought
+            # no inference -- its refusal leads the reason the same way
+            if row['metadata'].startswith(UNLAUNCHED_REASON_PREFIX):
                 return False
             if row['status'] != 'failed' or row['cost'] not in (None, 0.0):
                 return False
@@ -5084,10 +5591,13 @@ class Node:
 
         ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)``
         / ``exited (<reason>)`` -- :meth:`status_detail`'s qualifier in
-        parentheses -- else the bare status. The composed form is for
-        single-node human surfaces; the tabular listing carries the two as
-        separate ``status`` and ``detail`` columns so machine consumers
-        never parse the parentheses back apart.
+        parentheses -- else the bare status, with ``starting`` leading the
+        qualifier of an ``idle`` node whose loop runtime is already live
+        (the boot window before the loop stamps ``active``), as in
+        ``idle (starting)``. The composed form is for single-node human
+        surfaces; the tabular listing carries the two as separate
+        ``status`` and ``detail`` columns so machine consumers never parse
+        the parentheses back apart.
 
         Returns:
             Status string, possibly with a pending-signal or end-reason
@@ -5098,6 +5608,10 @@ class Node:
         # healed one the qualifier was derived from
         detail = self.status_detail()
         status = self.status()
+        # a started node holds 'idle' until its loop stamps 'active' after
+        # preflight, but its runtime is already live -- the boot window
+        if status == 'idle' and self._loop_alive() is True:
+            detail = f'starting; {detail}' if detail else 'starting'
         return f'{status} ({detail})' if detail else status
 
     def status_set(self: Node, status: str) -> None:
@@ -5166,7 +5680,10 @@ class Node:
         token (:meth:`end_reason`), ``None`` when nothing is recorded. The
         ``last`` column renders each
         row's newest activity instant as a compact age, flagged (``12m!``)
-        when an active node has sat quiet past ``max(step_timeout, 5m)``.
+        when an active node has sat quiet past the larger of its step limit
+        (the active step's effective ceiling: its ``timeout:`` line, else
+        ``step_timeout``) and the staleness floor
+        (:data:`_STALE_AGE_FLOOR_SECONDS`).
 
         Args:
             all_nodes: Include retired nodes in output.
@@ -5178,8 +5695,14 @@ class Node:
                 ``.status()``, dropping descendants whose worktree is gone,
                 relabeling a crashed ``active`` node (no live loop runtime)
                 to ``exited``, and a booting ``idle`` node (live runtime,
-                the loop not yet stamped) to ``active`` (the authoritative
-                view). Read-only -- it does not persist the relabel.
+                the loop not yet stamped) to ``active`` with a ``starting``
+                detail (the authoritative view). Read-only -- it does not
+                persist the relabel. Every row carries ``starting``: true
+                only in that boot window, judged by one tmux listing per
+                call (``--live`` and decorated plain listings), and
+                ``None`` (unknown) where the listing does not look -- an
+                undecorated plain listing, or a host tmux gives no answer
+                for a node with no recorded runtime.
             decorated: Record each descendant's status qualifier (a
                 pending signal, an exited run's end reason, a model-drop
                 marker) in its ``detail`` and its typed end token in its
@@ -5224,7 +5747,12 @@ class Node:
                         # started seconds earlier; a sessionless idle node (spawned,
                         # never started) stays idle and never blocks a drain
                     elif current == 'idle' and alive:
-                        row = {**row, 'status': 'active'}
+                        row = {
+                            **row,
+                            'status': 'active',
+                            'detail': 'starting',
+                            'starting': True,
+                        }
                 rows.append(row)
         else:
             rows = self.child_list(max_depth=max_depth)
@@ -5270,29 +5798,53 @@ class Node:
         # truth the registry row's spawn-time values miss; a gone worktree
         # keeps the registry caps (the only surviving source)
         worktrees = fractal.util.git.worktree_map(self.repo_dir)
+        # one tmux listing judges every decorated plain row's boot window
+        sessions = None
+        idle = any(_base_status(row.get('status')) == 'idle' for row in rows)
+        if decorated and not live and idle:
+            sessions = fractal.util.tmux.probe()
         capped = []
         for row in rows:
             worktree_dir = worktrees.get(row['node'])
             node = self.__class__(worktree_dir) if worktree_dir else None
             if node is not None and not node.exists():
                 node = None
-            # render the newest activity instant as the 'last' age; an
-            # active node quiet past max(step_timeout, 5m) is flagged stale
-            # ('12m!'), step_timeout from the child's live config (a gone
-            # worktree falls back to the floor alone)
+            # render the newest activity instant as the 'last' age; an active
+            # node quiet past max(step limit, staleness floor) is flagged
+            # stale ('12m!'), the step limit being the child's active step's
+            # effective ceiling (a gone worktree falls back to the floor alone)
             last = None
             timestamp = recent.get(row['node'])
             if timestamp is not None:
                 age = fractal.util.time.elapsed(timestamp)
                 last = fractal.util.format_age(age)
                 if _base_status(row.get('status')) == 'active':
-                    step_timeout = None
+                    step_limit = None
                     if node is not None:
-                        step_timeout = fractal.util.parse_duration_seconds(
-                            node.config.get('step_timeout') or ''
-                        )
-                    if age > max(step_timeout or 0.0, _STALE_AGE_FLOOR_SECONDS):
+                        step_limit = node.time.limit('step')
+                    if age > max(step_limit or 0.0, _STALE_AGE_FLOOR_SECONDS):
                         last += '!'
+            # a stored-idle node whose loop runtime is already live is in its
+            # boot window (the loop stamps 'active' after preflight); --live
+            # judged its own rows above, and an undecorated listing never looks
+            starting: Optional[bool] = None
+            if live:
+                starting = row.get('starting', False)
+            elif decorated:
+                starting = False
+                if node is not None and _base_status(row.get('status')) == 'idle':
+                    # the one listing settles a tmux loop it names; a recorded
+                    # runtime it cannot judge (headless, bare, or on another
+                    # socket) confirms through the node's own liveness law
+                    listed = (sessions is not None) and (node.tmux_session in sessions)
+                    socket = (node.node_dir / SOCKET_FILE).exists()
+                    group = (node.node_dir / PGID_FILE).exists()
+                    if listed and not node.headless:
+                        starting = True
+                    elif node.headless or socket or group:
+                        starting = node._loop_alive() is True
+                    elif sessions is None:
+                        starting = None
             # a gone worktree keeps its registry caps -- the only surviving
             # source -- and yields no spend: the live config and the ledger
             # are both reached through the node
@@ -5321,6 +5873,7 @@ class Node:
                 **drifted,
                 'spend': spend,
                 'last': last,
+                'starting': starting,
             }
             capped.append(row)
         rows = capped
@@ -5374,6 +5927,9 @@ class Node:
                 detail = node.status_detail()
                 if node.status() == stored:
                     decorated = {**row, 'end_reason': node.end_reason()}
+                    # the listing judged the boot window once for every row
+                    if row.get('starting'):
+                        detail = f'starting; {detail}' if detail else 'starting'
                     if detail:
                         decorated['detail'] = detail
                     return decorated
@@ -5677,6 +6233,7 @@ class Node:
         max_iter_cost: Optional[float] = None,
         max_step_cost: Optional[float] = None,
         reserve_budget: Optional[float] = None,
+        reserve_mode: Optional[str] = None,
         step_timeout: Optional[str] = None,
         max_depth: Optional[int] = None,
         max_children: Optional[int] = None,
@@ -5697,6 +6254,9 @@ class Node:
                 child's ``config.json`` (the ``nodes`` table has no column).
             reserve_budget: New cleanup reserve in USD; lives only in the
                 child's ``config.json`` (the ``nodes`` table has no column).
+            reserve_mode: New origin of the reserve (``default`` or
+                ``explicit``); lives only in the child's ``config.json``
+                (the ``nodes`` table has no column).
             step_timeout: New per-step time budget; lives only in the
                 child's ``config.json`` (the ``nodes`` table has no column).
             max_depth: New maximum nesting depth.
@@ -5710,8 +6270,8 @@ class Node:
             raise RuntimeError(
                 'Cannot update a node from a draining run (--drain forbids re-arms).'
             )
-        # initialize updates -- the iter/step caps, the reserve, and the
-        # step timeout are config-only
+        # initialize updates -- the iter/step caps, the reserve and its mode,
+        # and the step timeout are config-only
         data = {}
         if title is not None:
             data['title'] = title
@@ -5730,6 +6290,8 @@ class Node:
             config_only['max_step_cost'] = max_step_cost
         if reserve_budget is not None:
             config_only['reserve_budget'] = reserve_budget
+        if reserve_mode is not None:
+            config_only['reserve_mode'] = reserve_mode
         if step_timeout is not None:
             config_only['step_timeout'] = step_timeout
         if not data and not config_only:
@@ -5769,12 +6331,12 @@ class Node:
         """Retune a child's configuration, validating the merged result.
 
         The policy half over :meth:`child_update` (which writes the registry
-        row and the child's ``config.json`` together): a default-mode reserve
-        (equal to what init's default fraction materialized for the old cap)
-        retunes to track a new cap instead of going stale; per-iter/step caps
-        are validated against the *effective* cap; the merged config is
-        validated as init would (:meth:`Config.validate`); priors are
-        captured before the write.
+        row and the child's ``config.json`` together): a default reserve
+        (init's default fraction, still at that fraction of the old cap)
+        retunes to track a new cap instead of going stale, while an explicit
+        one keeps its figure; per-iter/step caps are validated against the
+        *effective* cap; the merged config is validated as init would
+        (:meth:`Config.validate`); priors are captured before the write.
 
         Args:
             name: Child node name.
@@ -5792,8 +6354,9 @@ class Node:
 
         Returns:
             ``{key: (old, new)}`` for every PROVIDED key -- ``old == new``
-            included, and an implicitly retuned reserve counts as provided --
-            so a confirmation echo shows every requested write.
+            included, an implicitly retuned reserve counts as provided, and
+            the reserve's mode appears whenever the retune changes it -- so a
+            confirmation echo shows every requested write.
 
         Raises:
             ValueError: On a violated cap invariant (user-facing flag
@@ -5808,29 +6371,46 @@ class Node:
         if child_worktree_dir is None:
             raise self._child_worktree_not_found(branch)
         child_config = self.__class__(child_worktree_dir).config
-        # resolve the reserve before validating; a default-mode reserve (equal
-        # to what init's default fraction materialized for the old cap) retunes
-        # to track a new cap instead of going stale
+        # resolve the reserve and its mode before validating; a default
+        # reserve retunes to track a new cap instead of going stale, while an
+        # explicit one (a flag, a template preset, or config set) keeps its
+        # figure even when that figure equals the default
         old_max_cost = child_config.get('max_cost')
         old_reserve = child_config.get('reserve_budget')
+        old_reserve_mode = child_config.get('reserve_mode')
         effective_max_cost = max_cost if max_cost is not None else old_max_cost
-        if reserve_budget is None and old_reserve is not None:
-            # a degenerate cap skips the retune -- the merged-config validation
-            # below owns that rejection and its wording
-            if max_cost is not None and max_cost > 0 and old_max_cost is not None:
-                # both sides round at RESERVE_PRECISION, matching
-                # parse_reserve_budget's materialization -- an unrounded
-                # product would break the default-detection equality and
-                # persist float noise into config.json and the retune echo
+        reserve_mode = old_reserve_mode
+        if reserve_budget is not None:
+            reserve_mode = 'explicit'
+        elif max_cost is not None and old_reserve is not None:
+            # both sides round at RESERVE_PRECISION, matching
+            # parse_reserve_budget's materialization -- an unrounded
+            # product would break the default-detection equality and
+            # persist float noise into config.json and the retune echo
+            at_default = False
+            if old_max_cost is not None:
                 default_reserve = round(
                     DEFAULT_RESERVE_FRACTION * old_max_cost,
                     RESERVE_PRECISION,
                 )
-                if old_reserve == default_reserve:
-                    reserve_budget = round(
-                        DEFAULT_RESERVE_FRACTION * max_cost,
-                        RESERVE_PRECISION,
-                    )
+                at_default = old_reserve == default_reserve
+            # a figure off the old cap's default is explicit whatever the
+            # record says (a recorded default off it had its reserve or cap
+            # edited without a retune), and a config recording no mode is
+            # judged by the figure alone; the cap change records the reading,
+            # so a later one never re-judges a figure this one leaves at the
+            # new cap's default
+            if not at_default:
+                reserve_mode = 'explicit'
+            elif reserve_mode is None:
+                reserve_mode = 'default'
+            # a degenerate cap skips the retune -- the merged-config validation
+            # below owns that rejection and its wording
+            if reserve_mode == 'default' and max_cost > 0:
+                reserve_budget = round(
+                    DEFAULT_RESERVE_FRACTION * max_cost,
+                    RESERVE_PRECISION,
+                )
         # a per-iter/step cap on an effectively uncapped child mirrors init's
         # rejection -- unenforceable once the per-iter budget drains
         if effective_max_cost is None:
@@ -5859,9 +6439,14 @@ class Node:
             'max_iter_cost': effective_iter_cost,
             'max_step_cost': effective_step_cost,
             'reserve_budget': effective_reserve_budget,
+            'reserve_mode': reserve_mode,
             'step_timeout': effective_step_timeout,
         }
         child_config.validate(merged)
+        # the mode is derived, never requested, so it is written (and echoed)
+        # only when the retune changes it
+        if reserve_mode == old_reserve_mode:
+            reserve_mode = None
         # the confirmation echo needs each provided key's stored value from
         # before the write -- a retuned reserve counts even without its flag
         updates = {
@@ -5874,6 +6459,7 @@ class Node:
             'max_children': max_children,
             'max_descendants': max_descendants,
             'reserve_budget': reserve_budget,
+            'reserve_mode': reserve_mode,
         }
         provided = {key: value for key, value in updates.items() if value is not None}
         priors = {key: child_config.get(key) for key in provided}
@@ -5885,6 +6471,7 @@ class Node:
             max_iter_cost=max_iter_cost,
             max_step_cost=max_step_cost,
             reserve_budget=reserve_budget,
+            reserve_mode=reserve_mode,
             step_timeout=step_timeout,
             max_depth=max_depth,
             max_children=max_children,
@@ -6053,7 +6640,10 @@ class Node:
         """Commit the current iteration's work.
 
         Delegates to the ``core.commit`` pipeline (scope check, lint, stage,
-        commit, and push unless ``local`` is set).
+        commit, and push unless ``local`` is set). Every commit but
+        ``check``, a user node's baseline included, appends its report -- or,
+        on failure, its error -- to ``tmp/commit.log`` in the node directory
+        before returning (:meth:`_commit_logged`).
 
         Args:
             message: Short description appended to the commit message.
@@ -6087,7 +6677,8 @@ class Node:
                 raise ValueError('--init cannot be used with --ignore-scope.')
             if force:
                 raise ValueError('--init cannot be used with --force.')
-            return commit.commit_user_init(self, message)
+            run = functools.partial(commit.commit_user_init, self, message)
+            return self._commit_logged(run)
         # handle mutually exclusive configurations
         if init and ignore_scope:
             raise ValueError('--init cannot be used with --ignore-scope.')
@@ -6111,7 +6702,10 @@ class Node:
         # so an agent/operator commit resolves the iteration from the open
         # iteration row (else 0) and the commit event pins to the
         # active run/iter/step context
-        return commit.commit(
+        if check:
+            return commit.commit(node=self, message=message, check=True)
+        run = functools.partial(
+            commit.commit,
             node=self,
             message=message,
             init=init,
@@ -6119,6 +6713,64 @@ class Node:
             ignore_scope=ignore_scope,
             force=force,
         )
+        return self._commit_logged(run)
+
+    def _commit_logged(self: Node, run: Callable[[], str]) -> str:
+        """Run a commit and append its report to ``tmp/commit.log``.
+
+        Each entry opens with a banner stamped with the UTC time and the sha
+        HEAD moved to, a failed push's landed commit included; when HEAD did
+        not move, ``failed`` if the commit raised and ``no commit`` if not.
+        A failed commit's ``Error:`` text stands in for the report. A failed write warns and never fails the commit.
+
+        Args:
+            run: The commit to run, returning its report.
+
+        Returns:
+            The commit's report.
+
+        Raises:
+            Exception: Whatever ``run`` raises, once its error is logged.
+
+        """
+        # log each report to the node's scratch before the caller prints it --
+        # a caller whose output dies (a shell redirect held by an ended agent
+        # session) loses the warnings and held-out counts while the commit
+        # lands; --check commits nothing, so it never comes through here
+        cmd = ['rev-parse', 'HEAD']
+        head = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
+
+        def _log_report(report: str, *, failed: bool) -> None:
+            # stamp the sha HEAD moved to -- a failed push follows a landed
+            # commit -- else the outcome
+            sha = fractal.util.git.run(cmd, cwd=self.worktree, check=False)
+            if sha != head:
+                stamp = sha
+            elif failed:
+                stamp = 'failed'
+            else:
+                stamp = 'no commit'
+            banner = f'=== Commit at {fractal.util.time.utc_now()} ({stamp}) ==='
+            log = self.node_dir / 'tmp' / 'commit.log'
+            # a lost entry warns and never fails the commit it describes
+            try:
+                log.parent.mkdir(parents=True, exist_ok=True)
+                with log.open('a', encoding='utf-8', errors='replace') as stream:
+                    stream.write(f'{banner}\n{report}\n')
+            except OSError as error:
+                self.log(
+                    message='Warning: writing the commit report to tmp/commit.log'
+                    f' failed ({error})',
+                    level=logging.WARNING,
+                )
+
+        try:
+            output = run()
+        except Exception as error:
+            _log_report(f'Error: {error}', failed=True)
+            raise
+        _log_report(output, failed=False)
+        return output
 
     def _default_agent(self: Node) -> Optional[str]:
         """Return the node's default agent (the base of its ``agent`` command)."""
@@ -6219,6 +6871,20 @@ class Node:
             resume=resume,
             model=model,
         )
+        # a resumed or forked session's result figure can count on from the
+        # session's earlier spend: read what it carries before the turn adds
+        # to it, so the reply shows the turn's own cost, as the loop books it
+        # (an unknown baseline refuses the figure rather than stop the reply)
+        baseline: Optional[float] = 0.0
+        if command.mode != 'fresh':
+            try:
+                baseline = backend.cost_baseline(command.session)
+            except Exception as error:
+                print(
+                    f'Warning: reading the session cost baseline failed ({error})',
+                    file=sys.stderr,
+                )
+                baseline = None
         # spawn the agent and stream with no cost/session writes (no step_id),
         # capturing the resulting session id from the stream
         proc = backend.spawn(command)
@@ -6230,7 +6896,12 @@ class Node:
         # spawns a single process (no start_new_session), so kill the PID
         # directly, not its group
         try:
-            result = backend.stream(proc.stdout, process=proc, render=render)
+            result = backend.stream(
+                proc.stdout,
+                process=proc,
+                baseline=baseline,
+                render=render,
+            )
         except BaseException:
             if proc.poll() is None:
                 try:
@@ -6510,6 +7181,25 @@ class Node:
                 return provider
         return None
 
+    def user_settings_effective(self: Node) -> bool:
+        """Return whether the node's agent loads the user's own agent config.
+
+        The node's own ``user_settings``, else the nearest ancestor's that
+        sets one (the user node's is the tree's default) -- read at each
+        launch, so a change lands on the next one.
+
+        Returns:
+            Whether the node's agent sessions load the user's own settings
+            and MCP servers; ``False`` when no node up the chain sets it.
+
+        """
+        # a set false is a value of its own, so only an unset key defers
+        for ancestor in self._self_and_ancestors():
+            user_settings = ancestor.config.get('user_settings')
+            if user_settings is not None:
+                return user_settings
+        return False
+
     def _mark_active_killed(
         self: Node,
         *,
@@ -6667,8 +7357,8 @@ def _draining(node: Node) -> bool:
     across a pause/resume, which the export alone does not survive. Both
     of those still ask the seat who it is, and a seat that moves can
     answer wrongly -- so the last source asks the operating system
-    instead: whether this process sits in a draining seat's recorded
-    process group (:meth:`Node.drain_lineage`).
+    instead: whether this process descends from a draining seat's
+    recorded agent invocation (:meth:`Node.drain_lineage`).
 
     Args:
         node: Any node of the tree the verb acts on -- the drain that
@@ -6685,6 +7375,33 @@ def _draining(node: Node) -> bool:
     if actor is not None and actor.drain_bound():
         return True
     return node.drain_lineage()
+
+
+def _child_wiki(parent: Node, project: str) -> Optional[str]:
+    """Return the ``wiki`` value a child of ``parent`` records in ``project``.
+
+    The spawn rule :meth:`Node.init` applies and :meth:`Node.check_wiki`
+    re-applies at merge: a child in its parent's project carries the
+    parent's recorded value, and a child selecting another sub-project
+    takes that project's setting as committed on the tree's root branch
+    (never a node's editable checkout).
+
+    Args:
+        parent: The child's parent node.
+        project: The child's project path (``.`` for the repo root).
+
+    Returns:
+        The folder to record, or ``None`` for the default.
+
+    Raises:
+        ValueError: If the other project's committed settings file is
+            invalid.
+
+    """
+    if project == parent.project_path:
+        return parent.config.get('wiki')
+    root = parent.config.get('root')
+    return worktree.committed_wiki_setting(parent.repo_dir, ref=root, project=project)
 
 
 def _claim_in_flight(pgid_file: pathlib.Path, recorded: str) -> bool:

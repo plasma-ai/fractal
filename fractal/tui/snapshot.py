@@ -23,7 +23,9 @@ from typing import Any, Optional
 from rich.text import Text
 
 import fractal.core.cost
+import fractal.core.time
 import fractal.util
+from fractal.core.loop import Step
 
 from . import fmt, theme
 from .data import TuiData, display_name_of, leaf_of, parse_ts, span, user_tag
@@ -456,7 +458,8 @@ class SnapshotBuilder:
             return
         self._ensure_brief(scope)
         brief = self._brief[scope]
-        if self._data.node_dir(scope) is None:
+        node_dir = self._data.node_dir(scope)
+        if node_dir is None:
             self._stale.discard(scope)
             self._shaped[scope] = dict(
                 _EMPTY_SHAPE,
@@ -516,6 +519,7 @@ class SnapshotBuilder:
             it=it,
             step=step,
             spends=spends,
+            node_dir=node_dir,
         )
         history = _history(runs, iters, steps, runcost, config)
         log = _log(log_raw, [run['run_id'] for run in runs], scope, config)
@@ -559,12 +563,15 @@ class SnapshotBuilder:
         it: Optional[dict],
         step: Optional[dict],
         spends: dict[int, float],
+        node_dir: pathlib.Path,
     ) -> Optional[dict]:
         """Shape the run/iter/step x time/cost matrix with every configured cap.
 
         All six cap axes exist (``timeout`` is the per-RUN wall clock,
-        ``iter_timeout`` the per-iteration one); ``None`` means uncapped and
-        renders ``-``.
+        ``iter_timeout`` the per-iteration one, and the step time cap the
+        displayed step's own ceiling as its launch recorded it: its step
+        file's ``timeout:``, else ``step_timeout``); ``None`` means
+        uncapped and renders ``-``.
         """
         if run is None:
             return None
@@ -579,6 +586,23 @@ class SnapshotBuilder:
             iter_max = None
         if iter_max is not None and iter_max < 0:
             iter_max = None
+        # a steered step's clock runs from its stuck launch, as the loop's
+        # deadline does, so it reads against the same cap
+        elapsed_step = self._elapsed(step) if step else None
+        started_step = _open_epoch(step)
+        if step is not None:
+            charge = fractal.core.time._steer_charge(step, it_steps)
+            if elapsed_step is not None:
+                elapsed_step += charge
+            if started_step is not None:
+                started_step -= charge
+        # config.json is agent-editable, so a duration may arrive as a
+        # bare number (e.g. timeout: 3600) -- coerce to str before parsing
+        # (matching Config.validate) so a mistyped value reads as no cap,
+        # never an AttributeError that crashes the whole cockpit build
+        step_default = fractal.util.parse_duration_seconds(
+            str(config.get('step_timeout') or '')
+        )
         return {
             'run': len(runs),
             'iter': it['iter'] if it else None,
@@ -586,24 +610,23 @@ class SnapshotBuilder:
             'step': step['step'] if step else None,
             'step_total': _step_total(steps, run, _sync_ids(steps, config)),
             'step_name': step['step_name'] if step else None,
-            'elapsed_step': self._elapsed(step) if step else None,
+            'elapsed_step': elapsed_step,
             'elapsed_iter': self._elapsed(it) if it else None,
             'elapsed_run': self._elapsed(run),
             # open rows also carry their start instant: a quiet tree reuses
             # this snapshot tick after tick, so the pane re-ticks their
             # elapsed against the render clock instead of the baked value
-            'started_step': _open_epoch(step),
+            'started_step': started_step,
             'started_iter': _open_epoch(it),
             'started_run': _open_epoch(run),
             'cost_step': step['cost'] if step else None,
             'cost_iter': sum(s['cost'] or 0 for s in it_steps) if it else None,
             'cost_run': spends[run['run_id']],
-            # config.json is agent-editable, so a duration may arrive as a
-            # bare number (e.g. timeout: 3600) -- coerce to str before parsing
-            # (matching Config.validate) so a mistyped value reads as no cap,
-            # never an AttributeError that crashes the whole cockpit build
-            'cap_step_s': fractal.util.parse_duration_seconds(
-                str(config.get('step_timeout') or '')
+            'cap_step_s': _step_cap(
+                default=step_default,
+                step=step,
+                it_steps=it_steps,
+                node_dir=node_dir,
             ),
             'cap_step_cost': _cost_or_none(config.get('max_step_cost')),
             'cap_iter_s': fractal.util.parse_duration_seconds(
@@ -1037,6 +1060,42 @@ def _step_total(steps: list[dict], run: dict, sync: set[int]) -> Optional[int]:
         default=0,
     )
     return total or None
+
+
+def _step_cap(
+    *,
+    default: Optional[float],
+    step: Optional[dict],
+    it_steps: list[dict],
+    node_dir: pathlib.Path,
+) -> Optional[float]:
+    """Return the displayed step's effective time cap.
+
+    The ceiling its launch recorded on the row, which a step file edited
+    since leaves alone. A row with none (opened before the column
+    existed, or whose stamp failed) follows the loop's launch rule
+    instead: the step file's ``timeout:`` substitutes for the node's
+    ``step_timeout`` (``default``). Step files are live-edited, so a
+    vanished, unreadable, or malformed one falls back to ``default``, as
+    at launch -- never a crashed cockpit build.
+    """
+    if step is None:
+        return default
+    # read the ceiling the launch recorded on the row ('-1' when none);
+    # the column is absent where a write-denied reader cannot lift it
+    recorded = step.get('timeout')
+    if recorded is not None:
+        return float(recorded) if recorded > 0 else None
+    try:
+        found = Step.find(
+            node_dir / 'steps',
+            name=step['step_name'],
+            occurrence=fractal.core.time._step_occurrence(step, it_steps),
+        )
+        seconds = default if found is None else found.limit(default)
+    except (OSError, ValueError):
+        seconds = default
+    return float(seconds) if seconds is not None and seconds > 0 else None
 
 
 def _cost_or_none(value: object) -> Optional[float]:

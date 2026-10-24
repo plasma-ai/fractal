@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import typing
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Optional, Union
 
 from fractal.exceptions import AbstractMethodError, AgentStreamError
@@ -26,12 +26,14 @@ if typing.TYPE_CHECKING:
     from .node import Node
 
 __all__ = [
+    'lower_effort',
     'resolve',
     'register',
     'supported',
     'Invocation',
     'StreamEvent',
     'StreamResult',
+    'Settlement',
     'StreamParser',
     'Agent',
     'seed_agents',
@@ -76,6 +78,12 @@ _EFFORT_KEYS = (
 # step pin's flag or the session's own settings, never ambient env
 _MODEL_KEYS = ('CLAUDE_CODE_SUBAGENT_MODEL',)
 
+# ambient venv activation, unset the same way: an inherited VIRTUAL_ENV names
+# the launching project's environment, never the node worktree's, so every
+# `uv run` there warns that it does not match the project environment; the
+# installation's CLIs resolve through PATH, which keeps the venv's bin
+_VENV_KEYS = ('VIRTUAL_ENV',)
+
 
 def command_base(command: str) -> str:
     """Return an agent command's base word, refusing shell quoting.
@@ -105,6 +113,36 @@ def command_base(command: str) -> str:
         )
     base_word, *_ = command.split()
     return base_word
+
+
+def lower_effort(effort: str, *, levels: tuple[str, ...], floor: str) -> str:
+    """Return the effort one level below ``effort``, never below ``floor``.
+
+    Args:
+        effort: The effort to lower.
+        levels: The agent's effort levels, lowest first (empty never lowers).
+        floor: The lowest level a lowering may reach.
+
+    Returns:
+        The next level down, or ``effort`` itself when it is at or below
+        ``floor`` or is not one of ``levels``.
+
+    Examples:
+        >>> levels = ('low', 'medium', 'high', 'xhigh', 'max')
+        >>> lower_effort('max', levels=levels, floor='high')
+        'xhigh'
+        >>> lower_effort('high', levels=levels, floor='high')
+        'high'
+        >>> lower_effort('extreme', levels=levels, floor='high')
+        'extreme'
+
+    """
+    if effort not in levels or floor not in levels:
+        return effort
+    index = levels.index(effort)
+    if index <= levels.index(floor):
+        return effort
+    return levels[index - 1]
 
 
 def resolve(name: str, *, root: Optional[pathlib.Path] = None) -> type[Agent]:
@@ -190,8 +228,12 @@ class Invocation:
     inherited from an ancestor's route. ``session`` carries
     the caller-minted id for providers that do not mint their own; the
     launcher must pre-stamp it on the step row before spawning, so a
-    boot-window abort still leaves a resumable session. Pure serializable
-    data: a host can ship it to any executor.
+    boot-window abort still leaves a resumable session. ``mode`` says how
+    the launch reaches ``session``: ``'fresh'`` starts it, while
+    ``'resume'`` and ``'fork'`` continue its history, and with it any
+    spend the provider counts its result figure on from
+    (``Agent.cost_baseline``). Pure serializable data: a host can ship it
+    to any executor.
     """
 
     # base command name (DB/session-map key)
@@ -202,6 +244,8 @@ class Invocation:
     # values of None mean 'pop this key from the composed spawn env'
     env: Optional[Mapping[str, Optional[str]]] = None
     session: Optional[str] = None
+    # 'fresh' | 'resume' | 'fork'
+    mode: str = 'fresh'
 
 
 @dataclasses.dataclass(frozen=True)
@@ -209,10 +253,35 @@ class StreamEvent:
     """One semantic frame parsed from an agent's output stream.
 
     ``kind`` is one of: ``'session' | 'text' | 'tool' | 'tool_result' |
-    'cost' | 'result' | 'error'``. Fields are populated per kind; absent
-    facts stay ``None`` (a result with no cost fact reads ``$?``). Consumers
-    (renderer, TUI bubbles, record verbs) branch on ``kind`` only --
-    never on the provider.
+    'cost' | 'result' | 'error' | 'thinking_cap' | 'acting' | 'waiting'``.
+    Fields are populated per kind; absent facts stay ``None`` (a result
+    with no cost fact reads ``$?``). Consumers (renderer, TUI bubbles,
+    record verbs) branch on ``kind`` only -- never on the provider.
+
+    A ``'thinking_cap'`` (carrying ``session``) reports a top-level reply
+    that hit the output-token cap while still thinking -- no text and no
+    tool call -- once per reply: an agent that continues past it loses the
+    cut-off thought, so it restarts the thought and caps again. Sub-agent
+    replies never report one. When the stream recorded the capped reply's
+    final usage, it rides ``reply`` in the backend's own reply shape, for
+    the settle to book a reply the kill may keep from the provider's record.
+
+    A ``'result'`` names the launch's own spend. When the provider counts a
+    resumed session's figure on from the session's earlier spend, the
+    parser takes that spend (its ``baseline``) off. A figure the baseline
+    cannot settle (the baseline is unreadable, or above the figure) is
+    refused: the result names no cost and sets ``refused``, and the launch
+    is priced from its provider's record instead.
+
+    ``'acting'`` and ``'waiting'`` mark the agent's own control, for an
+    agent that ``reports_progress``: acting when it takes control (its
+    launch's first reply, a result answering its last pending tool call,
+    visible text, a thinking block's end, a wake-up after a turn ends),
+    waiting when it hands control off (a tool call, a turn's end) or opens
+    a thinking block, whose progress the stream does not show. A
+    ``'waiting'`` carrying a ``duration`` (seconds) is a pause of that
+    length, such as an API retry's backoff, not a hand-off. Thinking
+    deltas and sub-agent frames carry neither.
     """
 
     # NOTE: fields cluster by the event kind that populates them rather than
@@ -226,15 +295,19 @@ class StreamEvent:
     cost: Optional[float] = None
     # cost: authoritative vs estimate
     final: bool = False
-    # seconds; claude duration_ms coalesced, codex wall-time close
+    # seconds; claude duration_ms coalesced, codex wall-time close, a pause's length
     duration: Optional[float] = None
     turns: Optional[int] = None
     # claude error_max_budget_usd subtype
     budget_stopped: bool = False
     # result: is_error / non-success subtype
     failed: bool = False
+    # result: the figure the baseline could not settle (cost left None)
+    refused: bool = False
     # error detail / tool-result body
     message: Optional[str] = None
+    # the capped reply as the stream recorded it (kind='thinking_cap')
+    reply: Optional[dict[str, Any]] = None
 
 
 def _sanitize(value: Optional[str]) -> Optional[str]:
@@ -272,16 +345,30 @@ def _sanitize_event(event: StreamEvent) -> StreamEvent:
 class StreamResult:
     """Outcome of one streamed invocation."""
 
-    # NOTE: field order mirrors StreamEvent's session/model/cost/budget_stopped
+    # NOTE: field order mirrors StreamEvent's session/model/cost/final/budget_stopped
     #   run, so both sides of the parser boundary read the same top to bottom
     session: Optional[str]
     model: Optional[str]
     cost: Optional[float]
+    # cost: authoritative vs estimate
+    final: bool = False
     budget_stopped: bool = False
     # NOTE: every distinct model the stream's own rows named, in order -- the
     #   step row keeps only the last, so a mid-stream substitution that
     #   recovers before the stream ends is visible here alone
     models: tuple[str, ...] = ()
+    # the stream saw spend past its final figure and left it to the settle
+    trailing: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class Settlement:
+    """A launch's spend as its provider's own usage record prices it."""
+
+    # USD, the launch's own spend (None = the record priced nothing)
+    cost: Optional[float]
+    # the record leaves part of a reply out, whose spend it never holds
+    cut_off: bool = False
 
 
 class StreamParser:
@@ -301,8 +388,12 @@ class StreamParser:
         self.models: list[str] = []  # every distinct stream-named served model
         self.cost: Optional[float] = None  # running figure (None = no fact yet)
         self.final: bool = False  # a result frame settled the cost
+        self.trailing: bool = False  # spend past the final figure, left to the settle
+        # a resumed session's spend before the launch, which the provider's
+        # result figure can count on from (None = unreadable)
+        self.baseline: Optional[float] = 0.0
         self.budget_stopped: bool = False
-        self.errors: list[str] = []  # stream-borne failures (codex)
+        self.errors: list[str] = []  # stream-borne errors, settled by finalization
 
     def feed(self: StreamParser, line: str) -> list[StreamEvent]:
         """Parse one stdout line into normalized events. Hook for backends."""
@@ -344,11 +435,18 @@ class Agent:
     # token-priced: cost only via the LiteLLM cache; pricing fetch is fatal
     # at run start
     needs_pricing: bool = False
+    # cost-reporting, but prices a launch its own figure misses (a kill, a
+    # refused figure) via the LiteLLM cache; the run start refreshes a cache
+    # past the loop's refresh age, and a failed fetch only warns
+    wants_pricing: bool = False
     # 'call' (per-invocation figures) or 'thread' (cumulative totals settled
     # against prior sibling steps)
     cost_scope: str = 'call'
     # accepts a hard per-step budget flag
     enforces_budget: bool = False
+    # the stream's acting/waiting events mark when the agent holds control
+    # and when it hands it off, so the loop can time the agent's idle spans
+    reports_progress: bool = False
     # emits a result frame per step (opencode's step_finish), not one per turn
     # -- so a non-final result is mid-turn and only a final one closes a chat
     # turn; every other backend emits one terminal result
@@ -356,6 +454,11 @@ class Agent:
     # empty/None means the vendor-native endpoint; a listed route is
     # validated at the spawn verbs
     providers: tuple[str, ...] = ()
+    # the effort levels a thinking-capped step's steer lowers through, lowest
+    # first (empty never lowers), and the lowest level a lowering reaches;
+    # the project's committed settings override both per agent
+    effort_levels: tuple[str, ...] = ()
+    effort_floor: str = ''
 
     __parser__: type[StreamParser] = StreamParser
 
@@ -477,7 +580,8 @@ class Agent:
                 base ``os.environ``, then the overlay, then
                 ``_invocation``'s provider-specific keys, with any key
                 whose merged value is ``None`` popped and the ambient
-                effort vars (``_EFFORT_KEYS``) always unset; ``spawn``
+                effort, model-forcing, and venv vars (``_EFFORT_KEYS``,
+                ``_MODEL_KEYS``, ``_VENV_KEYS``) always unset; ``spawn``
                 kwargs stay supervision-only.
 
         Returns:
@@ -524,23 +628,25 @@ class Agent:
         )
         # stamp the id on the returned invocation centrally -- the launcher
         # pre-stamps invocation.session on the step row, so a backend that
-        # dropped it would silently break boot-window resumability
+        # dropped it would silently break boot-window resumability -- and
+        # its mode (a launch with no session is fresh)
         if session is not None:
-            result = dataclasses.replace(result, session=session)
+            result = dataclasses.replace(result, session=session, mode=mode)
         # compose the spawn environment: base os.environ, then the caller
         # overlay, then _invocation's provider-specific keys -- provider keys
         # win on collision (codex's CODEX_HOME must survive). _invocation
         # returns only its reserved keys, so the ambient snapshot never
         # re-clobbers the overlay; the composed dict is the full Popen env
-        # an ambient effort or model-forcing var forces composition, so the
-        # scrub lands even for a backend that reserves no env keys of its own
-        scrub_keys = (*_EFFORT_KEYS, *_MODEL_KEYS)
-        ambient_effort = any(key in os.environ for key in scrub_keys)
-        if env is not None or result.env is not None or ambient_effort:
-            # pin the ambient effort and model-forcing vars to None over
-            # every layer -- the pop below unsets them, so the only effort
-            # or model signal reaching the session is the step pin's own
-            # flag (see _EFFORT_KEYS / _MODEL_KEYS)
+        # an ambient effort, model-forcing, or venv var forces composition, so
+        # the scrub lands even for a backend that reserves no env keys of its own
+        scrub_keys = (*_EFFORT_KEYS, *_MODEL_KEYS, *_VENV_KEYS)
+        ambient_scrub = any(key in os.environ for key in scrub_keys)
+        if env is not None or result.env is not None or ambient_scrub:
+            # pin the ambient effort, model-forcing, and venv vars to None
+            # over every layer -- the pop below unsets them, so the only
+            # effort or model signal reaching the session is the step pin's
+            # own flag, and no foreign venv reaches the worktree (see
+            # _EFFORT_KEYS / _MODEL_KEYS / _VENV_KEYS)
             merged = {
                 **os.environ,
                 **(env or {}),
@@ -681,6 +787,11 @@ class Agent:
                     except (OSError, ValueError) as e:
                         self.log(f'usage unpriced: {e}', logging.WARNING)
                 return parser.finish()
+
+        A backend whose stream reports recoverable errors settles
+        ``parser.errors`` here too, once the exit status is known (codex
+        clears the in-turn error frames a completed turn recovered from);
+        only the errors still recorded afterwards fail the step.
         """
         return parser.finish()
 
@@ -691,6 +802,7 @@ class Agent:
         process: Optional[subprocess.Popen] = None,
         step_id: Optional[int] = None,
         model: Optional[str] = None,
+        baseline: Optional[float] = 0.0,
         detached: bool = False,
         render: Optional[Callable[[StreamEvent], None]] = None,
     ) -> StreamResult:
@@ -701,7 +813,7 @@ class Agent:
         hook (``on_session`` per session stamp -- once as the stream opens,
         and again from the finish frame when a backend learns the served
         model only after exit; ``on_action`` per tool, ``on_error`` per
-        stream-borne failure, ``on_budget`` on a budget stop), the
+        stream-borne error frame, ``on_budget`` on a budget stop), the
         render callback, and -- when ``step_id`` is given -- the record
         verbs (session stamped as the stream opens; each cost figure
         flushed immediately, so a signal-killed reader still recorded
@@ -715,6 +827,9 @@ class Agent:
                 nothing (a live chat writes nothing).
             model: Configured-model fallback for the parser (the
                 stream-reported model overwrites it).
+            baseline: The resumed session's spend before the launch
+                (``cost_baseline``), taken off a result figure that counts
+                on from it; ``None`` (unreadable) refuses the figure.
             detached: Suppress the ``.session`` map persistence (the
                 step-row stamp always lands).
             render: Presentation callback receiving every parsed event
@@ -724,13 +839,13 @@ class Agent:
             The stream outcome, read off the drained parser state.
 
         Raises:
-            AgentStreamError: When the stream carried error frames (codex
-                errors ride the JSON stream and must fail the step even
-                after a fully drained stdout).
+            AgentStreamError: When provider errors remain unresolved after
+                stdout drains and provider finalization completes.
 
         """
         # fresh parser per call; state accumulates for attribution after draining
         parser = self.parser(model=model)
+        parser.baseline = baseline
 
         def frames() -> Iterable[list[StreamEvent]]:
             for line in lines:
@@ -776,10 +891,10 @@ class Agent:
                     # presentation callback
                     if render is not None:
                         render(event)
-            # stream-borne errors fail the turn even after a fully drained
-            # stdout (else the step records completed/exit 0); the parser
-            # collects error detail raw, so sanitize the joined message --
-            # the loop folds it into the step-row failure detail (SQLite)
+            # errors still recorded after the finish frame fail the turn for
+            # every provider (else the step records completed/exit 0); the
+            # parser collects error detail raw, so sanitize the joined message
+            # -- the loop folds it into the step-row failure detail (SQLite)
             if parser.errors:
                 detail = _sanitize('; '.join(parser.errors))
                 raise AgentStreamError(f'{self.name} reported an error: {detail}')
@@ -791,10 +906,12 @@ class Agent:
             session=parser.session,
             model=parser.model,
             cost=parser.cost,
+            final=parser.final,
             budget_stopped=parser.budget_stopped,
             # parser state is raw wire text -- sanitize here like session
             # and model above, or a lone-surrogate model name reaches SQLite
             models=tuple(_sanitize(model) for model in parser.models),
+            trailing=parser.trailing,
         )
 
     def record_session(
@@ -933,6 +1050,148 @@ class Agent:
         """
         return self.node.record.step_cost(step_id=step_id, cost=cost)
 
+    def settle_cost(
+        self: Agent,
+        step_id: int,
+        *,
+        started: str,
+        ended: str,
+        after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
+        trailing: bool = False,
+    ) -> bool:
+        """Price a launch's spend past its recorded figure.
+
+        A launch killed before its closing cost fact (a deadline, a stall,
+        a thinking cap, a pause, a dead stream) leaves its step row at the
+        stream's running estimate, or NULL when none flushed. A backend
+        whose provider keeps its own usage record prices the launch's
+        window from it through ``_settle_cost``; the figure lands as an
+        estimate (``final=False``), and only above the recorded one --
+        each undercounts a killed launch, so the higher is the closer.
+        The figure is the launch's own spend, so it lands as-is whatever
+        the cost scope, never settled against the session's earlier steps
+        as a thread total is.
+
+        A launch whose result frame named its cost can still spend after
+        it: the process lives on while background work runs. With
+        ``after``, the instant that figure arrived, the hook prices only
+        the spend completing after it, which lands added to the recorded
+        figure, again as an estimate. A stream that saw such spend leaves
+        it to the hook (``trailing``), so a hook that books none leaves it
+        out of the figure.
+
+        A launch the loop ends on a reply's own stop (the thinking cap)
+        can die before the provider records that reply, so the stream's
+        record of it rides ``replies`` for the hook to book.
+
+        Args:
+            step_id: The launch's step row, stamped with its session.
+            started: The launch's spawn instant (ISO 8601 UTC).
+            ended: The launch's exit instant (ISO 8601 UTC).
+            after: The instant the launch's result frame named its cost
+                (ISO 8601 UTC), or ``None`` when none did.
+            replies: The replies the stream recorded whole, in the
+                backend's own reply shape.
+            trailing: Whether the stream saw spend past its final figure
+                (``StreamResult.trailing``), which only the hook can book.
+
+        Returns:
+            Whether the step's figure leaves spend out: the record misses
+            part of a reply, or the hook booked none of the ``trailing``
+            spend. The step books the spend recorded.
+
+        """
+        rows = self.node.db.read('steps', where={'step_id': step_id}, limit=1)
+        if not rows or rows[0]['session'] is None:
+            return False
+        settled = self._settle_cost(
+            rows[0]['session'],
+            started=started,
+            ended=ended,
+            after=after,
+            replies=replies,
+        )
+        # spend the stream left to the hook is missing when the hook books none
+        unbooked = settled.cut_off or trailing
+        if settled.cost is None:
+            return unbooked
+        # a launch can't have negative spend (as in record_cost)
+        cost = max(0.0, settled.cost)
+        recorded = rows[0]['cost']
+        if after is not None:
+            # the result's figure plus the spend past it
+            if not cost:
+                return unbooked
+            cost += recorded or 0.0
+        elif recorded is not None and recorded >= cost:
+            return settled.cut_off
+        # book the launch's own figure past record_cost's thread settle,
+        # firing the record event with exactly what lands
+        self.on_record_cost(cost=cost, final=False)
+        self._record_cost(step_id, cost, final=False)
+        return settled.cut_off
+
+    def _settle_cost(
+        self: Agent,
+        session: str,
+        *,
+        started: str,
+        ended: str,
+        after: Optional[str] = None,
+        replies: Sequence[dict[str, Any]] = (),
+    ) -> Settlement:
+        """Hook for pricing a launch's window from the provider's own record.
+
+        Default prices nothing (the stream's figure stands). Override in a
+        backend whose provider persists per-message usage, returning the
+        launch's own spend (per invocation, whatever the backend's
+        ``cost_scope`` -- never a thread total), or no cost with the
+        reason logged, and whether the record leaves part of a reply out;
+        with ``after``, only the spend completing after that instant, and
+        the stream's own ``replies`` over the record's::
+
+            def _settle_cost(self, session, *, started, ended, after=None, replies=()):
+                since = after or started
+                usage = provider.usage(session, since=since, until=ended)
+                return Settlement(
+                    cost=_compute_cost(usage, self.model),
+                    cut_off=usage.interrupted,
+                )
+        """
+        return Settlement(cost=None)
+
+    def cost_baseline(self: Agent, session: str) -> Optional[float]:
+        """Return the spend a session carries into a launch that resumes it.
+
+        Read before the launch spawns. A provider that restores a resumed
+        session's running total counts its result figure on from it, so the
+        stream takes this off that figure (``stream``'s ``baseline``).
+
+        Args:
+            session: The session the launch resumes.
+
+        Returns:
+            The session's spend before the launch, ``0.0`` when it carries
+            none, or ``None`` when it cannot be read (the result figure is
+            then refused, never booked whole).
+
+        """
+        return self._cost_baseline(session)
+
+    def _cost_baseline(self: Agent, session: str) -> Optional[float]:
+        """Hook for reading a resumed session's carried spend. Default ``0.0``.
+
+        Override in a backend whose result figure counts on from the
+        session's earlier spend, returning it in the figure's own measure,
+        or ``None`` with the reason logged when it cannot be read::
+
+            def _cost_baseline(self, session):
+                state = provider.cost_state(session)
+                return state.total if state is not None else 0.0
+        """
+        return 0.0
+
     def tracks_cost(self: Agent, model: Optional[str] = None) -> bool:
         """Return whether spend will be recorded.
 
@@ -961,6 +1220,21 @@ class Agent:
         """
         return None
 
+    def config_effort(self: Agent) -> Optional[str]:
+        """Return the effort this agent's own per-node config defaults to."""
+        return self._config_effort()
+
+    def _config_effort(self: Agent) -> Optional[str]:
+        """Hook for parsing the provider config file. Default returns ``None``.
+
+        Override in a backend to read the configured default::
+
+            def _config_effort(self):
+                path = self.config_dir / self.config_file
+                return json.loads(path.read_text(encoding='utf-8')).get('effort')
+        """
+        return None
+
     def _rates(self: Agent, model: str) -> Optional[dict[str, Any]]:
         """Hook for resolving a model to its pricing entry. Default: exact lookup.
 
@@ -971,6 +1245,26 @@ class Agent:
                 return pricing.rates(model) or pricing.rates(f'xai/{model}')
         """
         return pricing.rates(model)
+
+    def unavailable(self: Agent, detail: str) -> bool:
+        """Return whether a failed launch's detail names a provider outage.
+
+        The provider-neutral verdict the loop paces retries by: an
+        overloaded, erroring, or unreachable API is weather to wait out,
+        not work that failed. ``detail`` is everything the failed launch
+        said (failed result frames, stream errors, the stderr capture).
+        """
+        return self._unavailable(detail)
+
+    def _unavailable(self: Agent, detail: str) -> bool:
+        """Hook for matching a provider's outage shapes. Default returns ``False``.
+
+        Override in a backend whose CLI names its provider's outages::
+
+            def _unavailable(self, detail):
+                return 'overloaded' in detail.lower()
+        """
+        return False
 
     def transcript(self: Agent, session: str) -> dict[str, Any]:
         """Resolve a session's transcript for this node.
@@ -1078,7 +1372,7 @@ class Agent:
         model: Optional[str] = None,
         *,
         register: Optional[Callable[[subprocess.Popen], None]] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Fail fast before a run.
 
         Checks the agent binary is on ``PATH``, fires ``on_preflight``,
@@ -1091,6 +1385,12 @@ class Agent:
                 waits on it, so the supervising loop can record the
                 probe's process group under its own marker; ``None``
                 records nothing.
+
+        Returns:
+            A one-line summary of a provider probe that ran and passed,
+            naming what it spent -- the probe lands on no step row, so
+            the caller's log is where the spend is named -- or ``None``
+            when no probe ran.
 
         Raises:
             RuntimeError: For an unsupported provider route, a missing
@@ -1117,13 +1417,14 @@ class Agent:
         model: Optional[str],
         *,
         register: Optional[Callable[[subprocess.Popen], None]] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Hook for provider-specific probes. Default is a no-op.
 
         A backend that spawns a probe routes it through ``spawn`` (so a
-        host's ``_spawn`` override covers it) and calls ``register`` with
-        the process before waiting on it. Override in a backend to relay
-        provider diagnostics::
+        host's ``_spawn`` override covers it), calls ``register`` with
+        the process before waiting on it, and returns a one-line summary
+        of the passed probe naming what it spent. Override in a backend
+        to relay provider diagnostics::
 
             def _preflight(self, model, *, register=None):
                 probe = subprocess.run([*self.parts, 'auth'], check=False)

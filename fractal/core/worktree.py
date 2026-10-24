@@ -11,8 +11,8 @@ import re
 import shutil
 import signal
 import subprocess
-from collections.abc import Iterator
-from typing import Optional
+from collections.abc import Callable, Iterator
+from typing import Any, Optional
 
 import fractal.util
 from fractal.constants import (
@@ -21,9 +21,13 @@ from fractal.constants import (
     MERGE_LOCK_FILE,
     PROJECT_FOLDER,
     SEED_IGNORE_FILE,
+    SETTINGS_FILE,
+    WIKI_FOLDER,
     WORKTREES_FOLDER,
 )
 from fractal.typing import PathLike
+
+from .config import validate_wiki
 
 __all__ = []
 
@@ -43,6 +47,10 @@ _MAX_NODE_NAME_LENGTH = 64
 # exclude-block delimiters (matched only as whole lines, never substrings)
 _EXCLUDE_BEGIN = '# >>> fractal >>>'
 _EXCLUDE_END = '# <<< fractal <<<'
+
+# the keys a project's settings file may carry (any other key fails, so a
+# misspelled one never silently reads as its default)
+_SETTINGS_KEYS = ('effort_ladder', 'wiki')
 
 
 @contextlib.contextmanager
@@ -66,7 +74,11 @@ def lock(repo_dir: pathlib.Path) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def merge_lock(repo_dir: pathlib.Path) -> Iterator[None]:
+def merge_lock(
+    repo_dir: pathlib.Path,
+    *,
+    waiting: Optional[Callable[[], None]] = None,
+) -> Iterator[None]:
     """Hold the repo-wide merge flock while a squash merge runs.
 
     ``git merge --squash`` locks the target's index only for its final
@@ -79,12 +91,20 @@ def merge_lock(repo_dir: pathlib.Path) -> Iterator[None]:
 
     Args:
         repo_dir: Main git repo root.
+        waiting: Called once, before blocking, when another process holds
+            the lock -- so a caller can say what it waits for.
 
     """
     lock_dir = repo_dir / WORKTREES_FOLDER
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / MERGE_LOCK_FILE, 'a', encoding='utf-8') as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        # try without blocking first, so a held lock is known before the wait
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if waiting is not None:
+                waiting()
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
         yield
 
 
@@ -272,6 +292,100 @@ def set_project_path(repo_dir: pathlib.Path, branch: str, project: str) -> None:
     project_dir = repo_dir / WORKTREES_FOLDER / PROJECT_FOLDER
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / branch).write_text(f'{project}\n', encoding='utf-8')
+
+
+def read_wiki_setting(project_dir: pathlib.Path) -> Optional[str]:
+    """Read the shared project-wiki folder from the project's settings file.
+
+    The tracked ``<project>/.fractal/.settings.json`` is the repository's
+    source of truth for the folder: user init reads it once and fixes the
+    value into the tree's config, which every descendant inherits. The
+    file holds one JSON object whose keys are ``wiki`` and
+    ``effort_ladder``, so a misspelled key fails rather than silently
+    reading as the default.
+
+    Args:
+        project_dir: The project's directory in the user node's worktree.
+
+    Returns:
+        The validated folder, relative to the project, or ``None`` when the
+        file or its ``wiki`` key is absent.
+
+    Raises:
+        ValueError: If the file is not a JSON object, carries an unknown
+            key, names an invalid folder, or holds an invalid effort
+            ladder.
+
+    """
+    path = project_dir / FRACTAL_FOLDER / SETTINGS_FILE
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding='utf-8')
+    return _parse_settings(text, source=f'{path}').get('wiki')
+
+
+def committed_wiki_setting(
+    repo_dir: pathlib.Path,
+    ref: str,
+    project: str,
+) -> Optional[str]:
+    """Read a project's shared project-wiki folder as committed on ``ref``.
+
+    The spawn-time counterpart of :func:`read_wiki_setting`: it reads the
+    settings file from a branch's committed tree, never from a node's
+    checkout, so no node can steer the folder its children enforce.
+
+    Args:
+        repo_dir: Main repository root.
+        ref: The revision to read (the tree's root branch).
+        project: Project path (``.`` for the repo root).
+
+    Returns:
+        The validated folder, relative to the project, or ``None`` when the
+        file or its ``wiki`` key is absent at ``ref``.
+
+    Raises:
+        ValueError: If the committed file is not a JSON object, carries an
+            unknown key, names an invalid folder, or holds an invalid
+            effort ladder.
+
+    """
+    return _committed_settings(repo_dir, ref=ref, project=project).get('wiki')
+
+
+def committed_effort_ladders(
+    repo_dir: pathlib.Path,
+    ref: str,
+    project: str,
+) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Read a project's per-agent effort ladders as committed on ``ref``.
+
+    The settings file's ``effort_ladder`` key maps an agent name to the
+    levels a thinking-capped step's steer lowers through and the floor it
+    stops at, overriding that agent's own defaults::
+
+        {"effort_ladder": {"claude": {"levels": [...], "floor": "high"}}}
+
+    The loop reads it at boot from the tree's root branch, never a node's
+    checkout, so no node can change its own ladder.
+
+    Args:
+        repo_dir: Main repository root.
+        ref: The revision to read (the tree's root branch).
+        project: Project path (``.`` for the repo root).
+
+    Returns:
+        Each named agent's ``(levels, floor)``, levels lowest first; empty
+        when the file or its ``effort_ladder`` key is absent at ``ref``.
+
+    Raises:
+        ValueError: If the committed file is not a JSON object, carries an
+            unknown key, names an invalid folder, or holds an invalid
+            effort ladder.
+
+    """
+    settings = _committed_settings(repo_dir, ref=ref, project=project)
+    return settings.get('effort_ladder', {})
 
 
 def exclude_update(repo_dir: pathlib.Path) -> None:
@@ -497,11 +611,13 @@ def ensure_project_wiki(
     repo_dir: pathlib.Path,
     path: str,
     name: str,
+    *,
+    wiki: str = WIKI_FOLDER,
 ) -> bool:
     """Create the project wiki if missing; report whether it was created.
 
-    The wiki lives at ``<worktree>/wiki`` (repo root) or
-    ``<worktree>/<project>/wiki`` (sub-project). ``name`` is the validated
+    The wiki lives at ``<worktree>/<wiki>`` (repo root) or
+    ``<worktree>/<project>/<wiki>`` (sub-project). ``name`` is the validated
     display name; the wiki is seeded with the strict ASCII-identifier
     naming policy. A failed ``wiki init`` is surfaced, not swallowed, and
     a pre-existing directory that is not a wiki is refused, never adopted.
@@ -512,16 +628,19 @@ def ensure_project_wiki(
             derived-name adjustment).
         path: Project path (``.`` for the repo root).
         name: Validated wiki display name.
+        wiki: Validated wiki folder, relative to the project.
 
     Returns:
         ``True`` if the wiki was created, ``False`` if it already existed.
 
     """
+    from .commit import _ATTRIBUTES_INIT_LINES, _WIKI_ROOT_ATTRIBUTES_LINES
+
     # resolve the project wiki directory
     if path == '.':
-        wiki_dir = worktree / 'wiki'
+        wiki_dir = worktree / wiki
     else:
-        wiki_dir = worktree / path / 'wiki'
+        wiki_dir = worktree / path / wiki
     if (wiki_dir / '_index.md').exists():
         # an adopted index that lacks the tool's frontmatter stamps is flagged,
         # not rewritten (init leaves tracked files alone): siblings forking
@@ -536,22 +655,36 @@ def ensure_project_wiki(
                 ' before initializing nodes, or sibling nodes conflict on the'
                 ' index when they merge'
             )
-        # likewise the merge attribute `wiki init` writes for a fresh wiki:
-        # git reads it from the target's own tree, so an adopted wiki without
-        # it conflicts on its index at the first divergent merge
-        attributes = worktree / '.gitattributes'
-        lines = attributes.read_text(encoding='utf-8') if attributes.is_file() else ''
-        if '**/_index.md merge=wiki' not in lines:
+        # likewise the merge attributes `wiki init` writes for a fresh wiki:
+        # git reads them from the target's own tree, so an adopted wiki
+        # lacking one conflicts on the pages it maps at the first divergent
+        # merge; the index mapping lives in the repo-root file and the page
+        # mapping in the wiki root's own, each counting only as a whole line
+        # there, as the wiki tool judges it before appending
+        mappings = (
+            (worktree / '.gitattributes', _ATTRIBUTES_INIT_LINES[1]),
+            (wiki_dir / '.gitattributes', _WIKI_ROOT_ATTRIBUTES_LINES[1]),
+        )
+        missing = []
+        for attributes, mapping in mappings:
+            text = ''
+            if attributes.is_file():
+                text = attributes.read_text(encoding='utf-8')
+            if mapping not in text.splitlines():
+                relative = attributes.relative_to(worktree).as_posix()
+                missing.append(f"'{mapping}' in {relative}")
+        if missing:
+            listing = ', '.join(missing)
             logger.warning(
-                'Warning: .gitattributes lacks the wiki index merge driver line;'
-                " append '**/_index.md merge=wiki' to it and commit before"
-                ' initializing nodes, or wiki indexes that diverge on both sides'
-                ' conflict when they merge'
+                f'Warning: wiki merge driver lines are missing ({listing});'
+                ' append each to its file and commit before initializing nodes,'
+                ' or wiki pages that diverge on both sides conflict when they'
+                ' merge'
             )
         return False
     # refuse to adopt a pre-existing docs directory: `wiki init` rewrites
     # every page under its root (frontmatter, generated indexes), so a
-    # user's own wiki/ fails loud here instead of being silently rewritten;
+    # user's own folder fails loud here instead of being silently rewritten;
     # an empty dir or one carrying the .wiki marker is a partial prior
     # init, repaired in place
     foreign = wiki_dir.is_dir() and not (wiki_dir / '.wiki').exists()
@@ -569,8 +702,11 @@ def ensure_project_wiki(
             f'Note: using project wiki name {name!r}'
             f' (from repository directory {repo_dir.name!r}).'
         )
-    # seed the strict naming policy so fractal project wikis use identifiers
-    settings = json.dumps({'naming': {'validate': ['ascii', 'identifier']}})
+    # seed the strict naming policy so fractal project wikis use identifiers;
+    # the identifier rule allows '.', so a non-markdown file keeps its extension
+    settings = json.dumps(
+        {'naming': {'validate': ['ascii', 'identifier'], 'allow': '.'}}
+    )
     # resolve the wiki console script (the plasma-wiki dependency installs
     # it into fractal's own environment); name the remedy on a miss
     try:
@@ -762,3 +898,119 @@ def _strip_exclude_blocks(lines: list[str]) -> list[str]:
         kept.append(lines[index])
         index += 1
     return kept
+
+
+def _committed_settings(
+    repo_dir: pathlib.Path,
+    ref: str,
+    project: str,
+) -> dict[str, Any]:
+    """Read a project's validated settings as committed on ``ref``.
+
+    Args:
+        repo_dir: Main repository root.
+        ref: The revision to read.
+        project: Project path (``.`` for the repo root).
+
+    Returns:
+        The validated settings (see :func:`_parse_settings`), empty when
+        the file is absent at ``ref``.
+
+    Raises:
+        ValueError: If the committed file is invalid.
+
+    """
+    if project == '.':
+        rel = f'{FRACTAL_FOLDER}/{SETTINGS_FILE}'
+    else:
+        rel = f'{project}/{FRACTAL_FOLDER}/{SETTINGS_FILE}'
+    cmd = ['show', f'{ref}:{rel}']
+    text = fractal.util.git.run(cmd, cwd=repo_dir, check=False)
+    if text is None:
+        return {}
+    return _parse_settings(text, source=f'{ref}:{rel}')
+
+
+def _parse_settings(text: str, source: str) -> dict[str, Any]:
+    """Parse a settings file's text into its validated settings.
+
+    Args:
+        text: The file's content.
+        source: The file's name in the error.
+
+    Returns:
+        The keys present: ``wiki`` as its validated folder, and
+        ``effort_ladder`` as each agent's ``(levels, floor)``.
+
+    Raises:
+        ValueError: If ``text`` is not a JSON object, carries an unknown
+            key, names an invalid folder, or holds an invalid effort
+            ladder.
+
+    """
+    try:
+        settings = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f'{source} is not valid JSON: {e}') from e
+    if not isinstance(settings, dict):
+        raise ValueError(f'{source} must hold a JSON object.')
+    unknown = sorted(set(settings) - set(_SETTINGS_KEYS))
+    if unknown:
+        valid = list(_SETTINGS_KEYS)
+        raise ValueError(f'{source} has unknown keys {unknown} (valid keys: {valid}).')
+    parsed: dict[str, Any] = {}
+    if 'wiki' in settings:
+        parsed['wiki'] = validate_wiki(settings['wiki'], source=f'"wiki" in {source}')
+    if 'effort_ladder' in settings:
+        ladders = _parse_effort_ladder(settings['effort_ladder'], source=source)
+        parsed['effort_ladder'] = ladders
+    return parsed
+
+
+def _parse_effort_ladder(
+    value: Any,
+    source: str,
+) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Validate a settings file's ``effort_ladder`` key into each agent's ladder.
+
+    Args:
+        value: The key's value.
+        source: The settings file's name in the error.
+
+    Returns:
+        Each named agent's ``(levels, floor)``.
+
+    Raises:
+        ValueError: If ``value`` is not an object of agent ladders, or a
+            ladder's levels are not unique non-empty strings or its floor
+            is not one of them.
+
+    """
+    if not isinstance(value, dict):
+        raise ValueError(
+            f'"effort_ladder" in {source} must map agent names to ladders,'
+            f' not {value!r}.'
+        )
+    ladders = {}
+    for agent, ladder in value.items():
+        name = f'"effort_ladder.{agent}" in {source}'
+        if not isinstance(ladder, dict) or set(ladder) != {'levels', 'floor'}:
+            raise ValueError(
+                f'{name} must be an object with exactly "levels" and "floor",'
+                f' not {ladder!r}.'
+            )
+        levels, floor = ladder['levels'], ladder['floor']
+        is_list = isinstance(levels, list)
+        named = is_list and all(isinstance(level, str) and level for level in levels)
+        if not named:
+            raise ValueError(
+                f'{name} "levels" must be a list of non-empty strings, not {levels!r}.'
+            )
+        if len(set(levels)) != len(levels):
+            raise ValueError(f'{name} "levels" must be unique, not {levels!r}.')
+        if floor not in levels:
+            raise ValueError(
+                f'{name} "floor" must be one of its levels {levels}, not {floor!r}.'
+            )
+        ladders[agent] = (tuple(levels), floor)
+    return ladders

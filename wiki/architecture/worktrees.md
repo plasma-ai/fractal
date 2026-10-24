@@ -78,9 +78,10 @@ pipeline's ignore family rather than riding a commit.
 
 A node may be initialized with a `scope` — one or more subdirectories of the
 worktree that bound its commits. The commit pipeline rejects out-of-scope files,
-with two standing exceptions: the shared project `wiki/` and the node's own data
-directory are always committable. Scopes are directory-granular; finer ownership
-splits are contract text in a node's brief, not machinery.
+with two standing exceptions: the shared project wiki (`wiki/` unless the
+project's `.fractal/.settings.json` names another folder) and the node's own
+data directory are always committable. Scopes are directory-granular; finer
+ownership splits are contract text in a node's brief, not machinery.
 
 ## Merge topology
 
@@ -121,14 +122,18 @@ Work flows through three kinds of commit, each with a distinct shape:
   converges to the target and a later merge only diffs new work (skipped, with a
   warning, when the node's worktree is dirty, on another branch, or holds an
   untracked or ignored file or directory in the way of a path the target now
-  tracks). The merge runs one at a time per repository under the `.merge.lock`
-  flock, refuses while the node or its target is active or paused — except from
-  inside the target's own loop, which merges its settled children as part of a
-  normal iteration — and its failure paths, an interrupt before the squash
-  commit included, restore the target worktree so a half-merge never lands (an
-  interrupt once `git commit` has moved the target's ref finds a landed squash,
-  which the merge finishes — advance, event completed, `Squash-merged ...`, exit
-  0 — warning only when it cut an advance short).
+  tracks; a paused node's advance carries its frozen uncommitted state instead,
+  and refuses the whole merge by name when it cannot, see
+  [[user_flow/finishing/merge_guards]]). The merge runs one at a time per
+  repository under the `.merge.lock` flock, refuses while the node is active or
+  its target is active or paused — except from inside the target's own loop,
+  which merges its settled children as part of a normal iteration — or while a
+  paused node's worktree holds an unfinished git operation, and its failure
+  paths, an interrupt before the squash commit included, restore the target
+  worktree so a half-merge never lands (an interrupt once `git commit` has moved
+  the target's ref finds a landed squash, which the merge finishes — advance,
+  event completed, `Squash-merged ...`, exit 0 — warning only when it cut an
+  advance short).
 
 The net effect is a two-speed history: full per-iteration detail on every node
 branch, and one commit per integrated unit of work on each parent mainline. Why

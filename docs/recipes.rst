@@ -44,13 +44,15 @@ a budget flag; warn-only otherwise). Starting a node with neither
 a node can run and spend without bound.
 
 While the node runs, watch the headroom and retune mid-flight from the
-parent:
+parent. A reserve set by ``--reserve-budget`` keeps its figure when the cap
+changes, so resize it beside the cap (a reserve left at its default follows
+the cap on its own):
 
 .. code-block:: console
 
    $ fractal node cost remaining parser
    $3.4167
-   $ fractal node update parser --max-cost 100
+   $ fractal node update parser --max-cost 100 --reserve-budget 10%
    max_cost: 10.0 -> 100.0
    reserve_budget: 1.0 -> 10.0
 
@@ -89,7 +91,8 @@ While the tree is latched, spawning (``fractal node init``) and
 worktree keeps its uncommitted files as the frozen mid-step state that resume
 continues from. A paused node has no tmux session — that is its normal
 parked state, not a crash — and the only verbs it accepts are ``resume``,
-``kill``, and ``chat``.
+``kill``, ``chat``, and ``merge`` (committed work only; the node stays
+paused).
 
 Check what is parked, then release the tree:
 
@@ -136,8 +139,12 @@ with ``--csv`` (piped output is CSV automatically).
 
 Cost is recorded, never estimated. When ended steps carry no cost figure, the
 sums omit them and a disclosure rides stderr (``N unpriced step(s)
-(NULL cost) excluded``); a scope whose steps recorded no cost at all prints
-``untracked``. A deleted node still answers ``cost spent`` and
+(NULL cost) excluded``); steps whose record leaves part of their spend out
+(a reply cut off, or a resumed step's result figure refused) count at the
+spend recorded, with their own disclosure (``N partly unpriced step(s)
+(some spend missing from the record) counted at recorded spend``); a scope
+whose steps recorded no
+cost at all prints ``untracked``. A deleted node still answers ``cost spent`` and
 ``cost breakdown`` from its persisted history (its latest recorded run by
 default), while ``cost remaining`` for it always prints ``no budget`` — caps
 die with the node, history does not.

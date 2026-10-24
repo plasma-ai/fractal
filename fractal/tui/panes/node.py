@@ -50,6 +50,7 @@ _CONFIG_ORDER = (
     'title',
     'user',
     'project',
+    'wiki',
     'scope',
     'clone_dirs',
     'base',
@@ -74,11 +75,13 @@ _CONFIG_ORDER = (
     'max_iter_cost',
     'max_step_cost',
     'reserve_budget',
+    'reserve_mode',
     'sync',
     'local',
     'detached',
     'blind',
     'sealed',
+    'user_settings',
 )
 _SPOKEN_CONFIG = frozenset(
     {

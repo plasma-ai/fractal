@@ -273,7 +273,8 @@ The agent determines the node's state and proceeds accordingly:
      $ fractal node init parser --max-iters=10 --max-cost=10.0
 
   ``fractal init`` writes the root node data (``.fractal/``) and the project
-  wiki (``wiki/``); when you named no agent, the skill defaults to the
+  wiki (``wiki/``, or the folder the project's ``.fractal/.settings.json``
+  names); when you named no agent, the skill defaults to the
   invoking agent's own kind. ``fractal commit --init`` commits the wiki
   scaffold on your base branch first, because a node branches from a
   *committed* tree — an uncommitted wiki is invisible to
@@ -281,14 +282,14 @@ The agent determines the node's state and proceeds accordingly:
   and node directory with the parameters interpreted from your directive.
 
 Along the way the skill teaches the repository facts that matter: the project
-``wiki/`` is git-tracked and never belongs in ``.gitignore``; the root's
+wiki is git-tracked and never belongs in ``.gitignore``; the root's
 ``.fractal/<branch>/`` is git-ignored on the top-level branch by its own
 self-ignore ``.gitignore`` (toggled by ``fractal track`` /
 ``fractal untrack``, which never touch the index), while fractal's runtime
 artifacts ride the repo-local ``.git/info/exclude``; and the wiki merge
 driver lives in repo-local git config, which does not survive a clone — run
-``wiki config --path=wiki`` after cloning to register it again
-(``fractal init`` re-registers it only when it creates the wiki).
+``wiki config --path=<folder>`` on the project wiki after cloning to register
+it again (``fractal init`` re-registers it only when it creates the wiki).
 
 Define the node
 ~~~~~~~~~~~~~~~
@@ -405,7 +406,8 @@ the ``fractal init`` output (``.fractal/`` and the wiki scaffold it creates),
 the node seed, and the baseline and child configuration commits the workflow
 prescribes (the ``fractal commit ... --init`` calls above). These commits are
 what make a node launchable — the node must branch from a committed tree —
-and they touch only fractal's own files.
+and they touch only fractal's own files: a child's ``--init`` baseline refuses
+any change outside its own seed and init's ``.gitattributes`` edit.
 
 The exception is deliberately narrow. Ordinary project work — code in your
 main worktree, anything outside fractal's setup, seed, and configuration

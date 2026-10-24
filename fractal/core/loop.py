@@ -9,25 +9,33 @@ import os
 import pathlib
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
 import traceback
 import typing
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import fractal.util
 from fractal.constants import (
+    FRACTAL_FOLDER,
+    LATCH_PARK_REASON_PREFIX,
+    PARK_REASON,
     PAUSE_ABORT_FILE,
     PGID_FILE,
+    PREFLIGHT_PARK_REASON_PREFIX,
+    SETTINGS_FILE,
     SOCKET_FILE,
+    STEER_REASON_PREFIX,
     STEP_PGID_FILE,
+    UNAVAILABLE_REASON_PREFIX,
+    UNLAUNCHED_REASON_PREFIX,
 )
-from fractal.exceptions import AgentStreamError, _Abort
+from fractal.exceptions import AgentStreamError, _Abort, _ThinkingCap
 
 from . import commit, pricing, render, worktree
+from .agent import lower_effort, resolve
 from .config import DEFAULT_RESERVE_FRACTION
 from .event import FailureEvent, InitialEvent, TerminalEvent
 
@@ -54,8 +62,30 @@ _FRONTMATTER_LINE = re.compile(r'^([a-z_]+):\s*(.+)$')
 # NN- step filename: a digit prefix, a dash, and a name
 _STEP_PREFIX = re.compile(r'^([0-9]+)-.*\.md$')
 
-# grace between the deadline's TERM and the follow-up KILL on the step group
+# a step ceiling's unset convention passes through Step.limit untouched
+_Default = typing.TypeVar('_Default')
+
+# grace between the deadline's TERM and the follow-up KILL on the step tree
 _KILL_GRACE_SECONDS = 10.0
+
+# bound on the wait for a reap still running when its launch ends: the grace,
+# the KILL's settle, and slack for the process-table walks between signals
+_REAP_WAIT_SECONDS = _KILL_GRACE_SECONDS + fractal.util.process.SETTLE_SECONDS + 5.0
+
+# seconds of the agent's own idle time after which the loop ends the launch
+# as stuck -- counted while it holds control (from its launch, a tool result,
+# visible text, a think's end, or a wake-up), paused while a tool runs, a
+# think is open, or its turn has ended
+_NO_PROGRESS_SECONDS = 1_800
+
+# the stuck reason of a launch ended at a thinking cap, whose steer runs one
+# effort level lower (the no-action watchdog's steer keeps the effort)
+_THINKING_CAP_REASON = 'thinking cap'
+
+# grace between the TERM and KILL when the stream reader dies -- short, but
+# long enough for a tool's `git commit` to drop `.git/index.lock`, which
+# would otherwise block the force-commit backstop
+_STREAM_ERROR_GRACE_SECONDS = 2.0
 
 # cap consecutive setup failures so a deterministically broken setup.sh ends
 # the run exited with the honest reason instead of crash-looping into a
@@ -89,12 +119,35 @@ _BILLING_BACKOFF_CAP_SECONDS = 3600
 # a failed launch this quick with zero recorded cost never reached paid
 # inference -- the billing/credit-outage signature
 _BILLING_INSTANT_SECONDS = 10
+# provider-outage retry pacing: each consecutive failure the agent names as
+# its provider being unavailable doubles the retry wait from the step-retry
+# backoff to the billing breaker's cap -- an outage outlasts a fixed backoff
+_UNAVAILABLE_BACKOFF_CAP_SECONDS = _BILLING_BACKOFF_CAP_SECONDS
+
+# age past which the loop refetches the LiteLLM pricing cache -- model prices
+# change rarely, so a daily refresh keeps a long run's table current without
+# a fetch per iteration
+_PRICING_MAX_AGE = '24h'
 
 # the dash-segment widths a dated model snapshot stamps: one YYYYMMDD run,
 # or a dashed YYYY-MM-DD (a dotted date normalizes to the same three) -- the
 # whole tail must be the stamp, so a version bump ahead of a date
 # (<pin>-1-20250805) reads as the different model it is
 _SNAPSHOT_WIDTHS = ((8,), (4, 2, 2))
+
+# the way out of a leftover git operation whose generic finish-or-abort is not
+# enough, keyed by its marker: a child's squash merge finishes through fractal's
+# own tail and aborts without the MERGE_HEAD `git merge --abort` needs, and git
+# holds index.lock only while it runs, so whether a lock is stale is the
+# agent's to check
+_GIT_PENDING_HINTS = {
+    'SQUASH_MSG': (
+        'a child merge stopped before its commit; resolve and stage its'
+        ' conflicts, then finish it with `fractal node merge <child> --continue`,'
+        ' or abort it with `git reset --merge`'
+    ),
+    'index.lock': 'remove it only once no git process runs in this worktree',
+}
 
 
 class Step:
@@ -146,6 +199,38 @@ class Step:
                     frontmatter.setdefault(match.group(1), match.group(2).rstrip())
         return cls(path, number=number, frontmatter=frontmatter)
 
+    @classmethod
+    def find(
+        cls: type[Step],
+        steps_dir: pathlib.Path,
+        *,
+        name: str,
+        occurrence: int = 0,
+    ) -> Optional[Step]:
+        """Load the step file a step row names.
+
+        A row's step number is the file's sorted position when its
+        iteration began, which any file added or removed since shifts;
+        the name and its occurrence among same-named files (see
+        ``fractal.core.time._step_occurrence``) survive an edit to
+        differently-named files only.
+
+        Args:
+            steps_dir: The node's ``steps/`` directory.
+            name: The row's step name.
+            occurrence: Which file carrying the name, 0-based in sorted
+                order; past the last, the last.
+
+        Returns:
+            The parsed step, or ``None`` when no file carries the name.
+
+        """
+        paths = sorted(steps_dir.glob('*.md'))
+        named = [path for path in paths if cls(path).name == name]
+        if not named:
+            return None
+        return cls.load(named[min(occurrence, len(named) - 1)])
+
     @property
     def name(self: Step) -> str:
         """Return the step name: the filename stem past its ``NN-`` prefix."""
@@ -188,6 +273,33 @@ class Step:
         """Return the raw ``detached:`` frontmatter value, if any."""
         return self.frontmatter.get('detached')
 
+    def limit(self: Step, default: _Default) -> Union[int, _Default]:
+        """Return the step's effective ceiling in seconds.
+
+        The one rule every reader of a step's ceiling shares: the
+        ``timeout:`` override substitutes for the node-global
+        ``step_timeout`` in either direction (a slow step raises its own
+        ceiling rather than min-ing with the global).
+
+        Args:
+            default: The node's ``step_timeout`` seconds, in the caller's
+                unset convention (``-1`` or ``None``).
+
+        Returns:
+            The override's whole seconds (``-1`` for a blank ``timeout:``,
+            which bounds nothing), or ``default`` unchanged when there is
+            none.
+
+        Raises:
+            ValueError: If the override is malformed -- step files are
+                live-edited steering surfaces, so callers fall back to
+                ``default`` instead of failing.
+
+        """
+        if self.timeout is None:
+            return default
+        return _parse_duration(self.timeout, 'timeout')
+
 
 @dataclasses.dataclass(frozen=True)
 class StepResult:
@@ -198,14 +310,19 @@ class StepResult:
     as process exit sentinels or marker files.
 
     ``status`` is one of ``'completed' | 'timed out' | 'skipped' |
-    'paused' | 'failed'``; ``reason`` carries the fractal-owned label
-    that lands in step-row metadata (``'agent error (exit N)'`` /
-    ``'stream error'``), suffixed with the one-line cause when the
-    launch captured one (the stderr tail or the stream exception) -- the
-    iter/run rollups keep the bare label (a budget skip's ``'over
-    budget'`` label is applied at step close, not carried here). A
-    budget-cap stop is a clean ``completed`` with ``budget_stopped``
-    set, never a failure.
+    'paused' | 'failed' | 'stuck' | 'stalled'``; ``reason`` carries the
+    fractal-owned label that lands in step-row metadata (``'agent error
+    (exit N)'`` / ``'stream error'``), suffixed with the one-line cause
+    when the launch captured one (the stderr tail or the stream
+    exception) -- the iter/run rollups keep the bare label (a budget
+    skip's ``'over budget'`` label is applied at step close, not carried
+    here). A budget-cap stop is a clean ``completed`` with
+    ``budget_stopped`` set, never a failure. ``stuck`` is a launch the
+    loop ended at a thinking cap or after no action for
+    ``_NO_PROGRESS_SECONDS``, its ``reason`` naming which; ``stalled`` is a
+    steered launch that got stuck again. ``unavailable`` marks a failure
+    the agent's backend names as its provider being unavailable (an
+    overloaded or erroring API), which paces the retry exponentially.
     """
 
     status: str
@@ -214,6 +331,7 @@ class StepResult:
     session: Optional[str] = None
     cost: Optional[float] = None
     budget_stopped: bool = False
+    unavailable: bool = False
 
 
 class Loop:
@@ -256,11 +374,6 @@ class Loop:
             render: Presentation callback for parsed agent stream events
                 (the pane rendering); ``None`` renders nothing.
 
-        Raises:
-            ValueError: If no agent is configured or the agent command
-                names no registered backend, or a run parameter is
-                invalid (a malformed duration, conflicting schedules).
-
         """
         # bind the node and the pane renderer
         self.node = node
@@ -268,68 +381,13 @@ class Loop:
         self._continue = continue_
         self._resume = resume
         self._drain = drain
-        # the agent comes from the argument or the node config (--agent at init)
+        # the agent argument, resolved with the run parameters at boot
+        self._agent_argument = agent_command
         config = node.config
-        self._agent_command = agent_command or config.get('agent')
-        if not self._agent_command:
-            raise ValueError('No agent configured; set --agent at node init.')
-        # resolve the backend now so an unsupported agent fails before any row
-        # is opened (the registry's error names the supported commands)
-        self._agent: Agent = node.agent(self._agent_command)
-        # read the budget caps (re-read at each iteration top for retunes)
-        self._read_cost_caps()
-        # label the per-step cost cap honestly: enforced for agents with a
-        # budget flag (claude, passed as --max-budget-usd), warn-only for
-        # agents without one (codex)
-        self._step_cost_verb = 'max' if self._agent.enforces_budget else 'warn'
-        # read the iteration cap and the wall-clock/schedule parameters
-        self._max_iters = int(config.get('max_iters') or -1)
-        self._timeout = config.get('timeout') or ''
-        self._iter_timeout = config.get('iter_timeout') or ''
-        self._step_timeout = config.get('step_timeout') or ''
-        self._interval = config.get('interval') or ''
-        self._sleep = config.get('sleep') or ''
-        self._wait = config.get('wait') or ''
-        self._run_timeout_seconds = _parse_duration(self._timeout, 'timeout')
-        self._iter_timeout_seconds = _parse_duration(self._iter_timeout, 'iter_timeout')
-        self._step_timeout_seconds = _parse_duration(self._step_timeout, 'step_timeout')
-        self._interval_seconds = _parse_duration(self._interval, 'interval')
-        self._sleep_seconds = _parse_duration(self._sleep, 'sleep')
-        self._wait_seconds = _parse_duration(self._wait, 'wait')
-        if self._wait_seconds <= 0:
-            self._wait_seconds = 60
-        # failed-step retries: extra attempts a failed launch gets (0
-        # disables) and the backoff before each retry; clamp a hand-edited
-        # negative to 0 -- an empty attempt loop would crash the iteration
-        step_retries = config.get('step_retries')
-        self._step_retries = 1 if step_retries is None else max(0, int(step_retries))
-        self._step_retry_backoff = config.get('step_retry_backoff') or '10s'
-        self._step_retry_backoff_seconds = _parse_duration(
-            value=self._step_retry_backoff,
-            label='step_retry_backoff',
-        )
-        # --interval and --sleep are mutually exclusive (checked after
-        # durations are parsed, so the *_SECONDS values are real)
-        if self._interval_seconds > 0 and self._sleep_seconds > 0:
-            raise ValueError('--interval and --sleep are mutually exclusive.')
-        # interval defaults the per-iteration deadline to the slot (an
-        # iteration cannot run past its cadence) -- but only when none was
-        # set: an explicit tighter iter_timeout is honored, never loosened to
-        # the full interval; a looser one is rejected at the config boundary
-        # (Config.validate); this raise backstops direct loop construction
-        if self._interval_seconds > 0:
-            if self._iter_timeout_seconds > self._interval_seconds:
-                raise ValueError(
-                    f'--iter-timeout ({self._iter_timeout}) exceeds'
-                    f' --interval ({self._interval}).'
-                )
-            if self._iter_timeout_seconds <= 0:
-                self._iter_timeout = self._interval
-                self._iter_timeout_seconds = self._interval_seconds
         # SYNC_MODE gates the SYNC step run before each step; unlike the
         # prompt-injection modes (DETACHED_MODE/CONTINUE_MODE/RESUME_MODE/
-        # RESERVE_MODE/META_MODE) SYNC.md is run as its own step, not appended
-        # to step prompts (the prompt builder skips it)
+        # RESERVE_MODE/DRAIN_MODE/META_MODE) SYNC.md is run as its own step, not
+        # appended to step prompts (the prompt builder skips it)
         sync = config.get('sync')
         self._sync_mode = True if sync is None else bool(sync)
         # pin the boot-time modes so a mid-run config edit cannot flip a run's
@@ -337,11 +395,21 @@ class Loop:
         self._detached = bool(config.get('detached', False))
         self._node_model = config.get('model') or ''
         self._node_effort = config.get('effort') or ''
+        # the effort ladders a thinking-capped step's steer lowers through,
+        # as committed on the tree's root branch, read at boot and held for
+        # the run (no node can change its own, and an edit lands at the next
+        # start or resume); an agent the settings do not name
+        # keeps its own ladder
+        self._effort_ladders: dict[str, tuple[tuple[str, ...], str]] = {}
         meta = config.get('meta') or ''
         self._meta_mode = bool(meta)
-        # the boot-static env/prompt vocabulary, derived once (the single
-        # var-map derivation) and pinned for the run
-        self._env_base = _boot_env(node, detached=self._detached, meta=meta)
+        # the boot-pinned mode flags, the one source the step env and the
+        # step prompt both read (every other variable is derived per step)
+        self._boot_modes = _boot_modes(node, detached=self._detached, meta=meta)
+        # the static variables a step's prompt and env share, re-read per step
+        # under the prompt build's guard (the render parameter shadows the
+        # module here, hence the alias)
+        self._step_vars = _render_variables(node)
         # run/iteration lifecycle state
         self._iter = 0
         self._iter_timestamp = ''
@@ -378,8 +446,10 @@ class Loop:
         self._setup_fails = 0
         self._setup_abort = False
         self._billing_fails = 0
+        self._unavailable_fails = 0
         self._fail_reason: Optional[str] = None
         self._time_budget = 'no limit'
+        self._step_time_budget = 'no limit'
         self._cost_budget = 'no limit'
         # per-launch state (the exported step vocabulary)
         self._step_label = ''
@@ -393,18 +463,27 @@ class Loop:
         # must see a substitution the stream recovered from; empty for an
         # agent whose stream names none)
         self._step_served: tuple[str, ...] = ()
+        # this launch's record leaves part of its spend out (a reply cut
+        # off, or a result figure refused), so its booked figure
+        # misses that part
+        self._step_partly_unpriced = False
         self._step_limit_seconds = 0
-        self._step_timeout_effective = self._step_timeout_seconds
+        self._step_ceiling_seconds = 0
         self._step_budget_value: Optional[float] = None
+        # a steered launch: the stuck session it resumes, the seconds its
+        # attempt already ran (the step ceiling spans both), and whether a
+        # thinking cap stuck it (the steer then runs one effort level lower)
+        self._steer_session: Optional[str] = None
+        self._steer_elapsed = 0
+        self._steer_capped = False
         # the immutable mode docs run from the installed package,
         # never a per-node copy
         self._modes_dir = node._package_dir / '_node' / 'modes'
         self._sync_file = self._modes_dir / 'SYNC.md'
+        self._stall_file = self._modes_dir / 'STALL.md'
+        self._git_pending_file = self._modes_dir / 'GIT_PENDING.md'
         # whether any step will need the pricing cache (resolved in preflight)
         self._needs_pricing = False
-        # armed caps with a non-enforcing agent and no timeout have no
-        # in-step brake -- disclose the unbounded-overshoot exposure once
-        self._warn_soft_cap()
 
     @functools.cached_property
     def logger(self: Loop) -> logging.Logger:
@@ -497,6 +576,11 @@ class Loop:
         # before the re-entry exec, but set it here too so a
         # direct launch self-identifies
         os.environ['_NODE'] = f'{node.node_dir}'
+        # setup.sh and the other worktree processes this loop runs outside
+        # the agent seam inherit its env; an inherited VIRTUAL_ENV names the
+        # launching project's venv, never the worktree's, so uv there would
+        # warn on every call -- PATH alone keeps the venv's bin
+        os.environ.pop('VIRTUAL_ENV', None)
         # a live .step_pgid at boot is a dead boot's orphan probe: the probe
         # runs before the active stamp, so the crashed-active heal never
         # judges it, and this boot's _register_probe would replace its only
@@ -507,10 +591,22 @@ class Loop:
         _, probe_entry = node._records_snapshot()
         if probe_entry is not None:
             node._reap_orphan((None, probe_entry))
+
+        # say once per wait why the boot blocks: a merge's validation can run long
+        def _waiting() -> None:
+            print('Waiting for a running merge to finish...')
+
+        # Node.merge refuses only an active node and can rewrite any other's
+        # worktree, re-reading the status under the merge flock -- so the
+        # continue clean-up and the active stamp below hold that flock too,
+        # taken before any .worktrees flock (merge.sh shells into verbs that
+        # take that one)
         if self._continue:
-            self._clean_worktree()
-        self._labels()
+            with worktree.merge_lock(node.repo_dir, waiting=_waiting):
+                self._clean_worktree()
         try:
+            self._read_boot_config()
+            self._labels()
             self._preflight()
             self._adopt()
         except _Abort:
@@ -563,23 +659,32 @@ class Loop:
             (node.node_dir / PGID_FILE).write_text(f'{pgid}\n', encoding='utf-8')
         except OSError:
             pass
-        # stamp the node active -- under the .worktrees flock, so a retire
+        # stamp the node active -- under the merge flock (see the continue
+        # clean-up above) and inside it the .worktrees flock, so a retire
         # or kill that won the boot window (its flock-guarded read legally
         # saw 'idle' after start's checks but before this stamp) is honored
         # instead of clobbered: an idle kill stamps 'killed' with no session
         # to reap, and overwriting it here would activate a node the kill
         # already reported dead; guarded so a transient failure (a DB
-        # contended under wide fan-out) never aborts the run and strands
-        # .status at 'idle' (a missed stamp self-corrects as the loop runs)
+        # contended under wide fan-out) never aborts the run -- nothing
+        # re-stamps a missed one, so .status keeps the boot's own status for
+        # the whole run: a start's 'idle', read 'idle (starting)' while --live
+        # still reads it active, or a resume's 'paused', which
+        # no reading relabels
         stood_down = ''
         try:
-            with worktree.lock(node.repo_dir):
-                if node.status() in ('retired', 'killed'):
-                    stood_down = node.status()
-                else:
-                    node.status_set('active')
-        except Exception:
-            pass
+            with worktree.merge_lock(node.repo_dir, waiting=_waiting):
+                with worktree.lock(node.repo_dir):
+                    if node.status() in ('retired', 'killed'):
+                        stood_down = node.status()
+                    else:
+                        node.status_set('active')
+        except Exception as error:
+            if self._resume:
+                kept = 'paused for this run; --live reads it paused too'
+            else:
+                kept = 'idle (starting) for this run; --live still reads it active'
+            print(f'=== Active stamp failed ({error}): the node reads {kept} ===')
         if stood_down:
             print(f'=== Stood down at boot: node was {stood_down} ===')
             try:
@@ -648,6 +753,105 @@ class Loop:
         finally:
             self._on_exit()
 
+    def _read_boot_config(self: Loop) -> None:
+        """Load the run parameters and effort ladders, aborting on a bad one.
+
+        ``start`` and ``resume`` refuse a bad config or ladder up front,
+        but an edit can land between their check and this boot, so the
+        fault aborts through :meth:`_abort_preflight` and lands on record.
+        A malformed ``OFFLINE_MODE``, which the price refresh reads, aborts
+        the same way before the refresh can raise past the run row.
+        """
+        # a RuntimeError is the tree's agent hook file failing to load, which
+        # the agent registry raises naming the file
+        try:
+            self._read_run_parameters()
+            self._effort_ladders = _effort_ladders(self.node)
+            pricing.offline()
+        except (ValueError, RuntimeError) as error:
+            reason = f'{error}'
+            print(f'Error: {reason}', file=sys.stderr)
+            self._abort_preflight(reason)
+
+    def _read_run_parameters(self: Loop) -> None:
+        """Load the agent and the run parameters from the node's config.
+
+        Read at boot, never at construction, so a bad value aborts
+        through the boot's preflight guard and lands on record.
+
+        Raises:
+            ValueError: If no agent is configured or the agent command
+                names no registered backend, or a run parameter is
+                invalid (a malformed duration, conflicting schedules, a
+                cap the launch invariants refuse).
+
+        """
+        node = self.node
+        # the agent comes from the argument or the node config (--agent at init)
+        config = node.config
+        self._agent_command = self._agent_argument or config.get('agent')
+        if not self._agent_command:
+            raise ValueError('No agent configured; set --agent at node init.')
+        # resolve the backend now so an unsupported agent fails before any row
+        # is opened (the registry's error names the supported commands)
+        self._agent: Agent = node.agent(self._agent_command)
+        # read the budget caps (re-read at each iteration top for retunes)
+        self._read_cost_caps()
+        # label the per-step cost cap honestly: enforced for agents with a
+        # budget flag (claude, passed as --max-budget-usd), warn-only for
+        # agents without one (codex)
+        self._step_cost_verb = 'max' if self._agent.enforces_budget else 'warn'
+        # read the iteration cap and the wall-clock/schedule parameters
+        self._max_iters = int(config.get('max_iters') or -1)
+        self._timeout = config.get('timeout') or ''
+        self._iter_timeout = config.get('iter_timeout') or ''
+        self._step_timeout = config.get('step_timeout') or ''
+        self._interval = config.get('interval') or ''
+        self._sleep = config.get('sleep') or ''
+        self._wait = config.get('wait') or ''
+        self._run_timeout_seconds = _parse_duration(self._timeout, 'timeout')
+        self._iter_timeout_seconds = _parse_duration(self._iter_timeout, 'iter_timeout')
+        self._step_timeout_seconds = _parse_duration(self._step_timeout, 'step_timeout')
+        self._interval_seconds = _parse_duration(self._interval, 'interval')
+        self._sleep_seconds = _parse_duration(self._sleep, 'sleep')
+        self._wait_seconds = _parse_duration(self._wait, 'wait')
+        if self._wait_seconds <= 0:
+            self._wait_seconds = 60
+        # a launch's effective step ceiling starts at the node value (each
+        # launch re-derives it from its own step file)
+        self._step_timeout_effective = self._step_timeout_seconds
+        # failed-step retries: extra attempts a failed launch gets (0
+        # disables) and the backoff before each retry; clamp a hand-edited
+        # negative to 0 -- an empty attempt loop would crash the iteration
+        step_retries = config.get('step_retries')
+        self._step_retries = 1 if step_retries is None else max(0, int(step_retries))
+        self._step_retry_backoff = config.get('step_retry_backoff') or '10s'
+        self._step_retry_backoff_seconds = _parse_duration(
+            value=self._step_retry_backoff,
+            label='step_retry_backoff',
+        )
+        # --interval and --sleep are mutually exclusive (checked after
+        # durations are parsed, so the *_SECONDS values are real)
+        if self._interval_seconds > 0 and self._sleep_seconds > 0:
+            raise ValueError('--interval and --sleep are mutually exclusive.')
+        # interval defaults the per-iteration deadline to the slot (an
+        # iteration cannot run past its cadence) -- but only when none was
+        # set: an explicit tighter iter_timeout is honored, never loosened to
+        # the full interval; a looser one is rejected at the config boundary
+        # (Config.validate); this raise backstops a direct loop boot
+        if self._interval_seconds > 0:
+            if self._iter_timeout_seconds > self._interval_seconds:
+                raise ValueError(
+                    f'--iter-timeout ({self._iter_timeout}) exceeds'
+                    f' --interval ({self._interval}).'
+                )
+            if self._iter_timeout_seconds <= 0:
+                self._iter_timeout = self._interval
+                self._iter_timeout_seconds = self._interval_seconds
+        # armed caps with a non-enforcing agent and no timeout have no
+        # in-step brake -- disclose the unbounded-overshoot exposure once
+        self._warn_soft_cap()
+
     def _preflight(self: Loop) -> None:
         """Fail fast (step files, binary, pricing, provider probe via seam hooks).
 
@@ -659,8 +863,11 @@ class Loop:
         # priced from the LiteLLM table -- a token-priced agent prices at the
         # served model its own session record names, configured model or
         # not, and a routed backend chain-prices its result usage; an agent
-        # that reports its own cost natively gives pricing nothing to do
+        # that reports its own cost natively needs none, though one that
+        # prices what its figure misses from the table wants it current
         self._needs_pricing = False
+        wants_pricing = False
+        priced: list[tuple[pathlib.Path, Agent, str]] = []
         for path in sorted((node.node_dir / 'steps').glob('*.md')):
             # step files are hand-edited: a bad byte must abort through the
             # machinery below -- a bare UnicodeDecodeError names a byte
@@ -680,7 +887,9 @@ class Loop:
             if not backend.tracks_cost():
                 if backend.needs_pricing or backend.provider is not None:
                     self._needs_pricing = True
-                    break
+                    priced.append((path, backend, step.model or self._node_model))
+            elif backend.wants_pricing:
+                wants_pricing = True
         # refresh model pricing before the run; a fetch failure with no cache
         # is fatal -- the cost/cap pipeline cannot price token usage without it
         if self._needs_pricing:
@@ -694,6 +903,48 @@ class Loop:
                     'Warning: could not refresh pricing; using cached pricing.json.',
                     file=sys.stderr,
                 )
+        # a cost-reporting agent prices only what its own figure misses, so a
+        # table within the refresh age serves and a failed fetch only warns --
+        # every launch that reports its figure still books it
+        elif wants_pricing:
+            status = pricing.update(max_age=_PRICING_MAX_AGE)
+            if status == 'missing':
+                print(
+                    'Warning: could not fetch pricing and no cached pricing.json'
+                    ' exists; a launch that ends without its own cost figure'
+                    ' books unpriced.',
+                    file=sys.stderr,
+                )
+            if status == 'stale':
+                print(
+                    'Warning: could not refresh pricing; using cached pricing.json.',
+                    file=sys.stderr,
+                )
+        # a cost cap requires spend the loop can track: judge every
+        # token-priced step's effective model against the refreshed table
+        # here, before the run row commits and before the paid probe, so a
+        # gap aborts the boot once by name -- refused at launch instead, the
+        # instant zero-cost failures would read as a billing outage
+        caps = (self._max_cost, self._max_iter_cost, self._max_step_cost)
+        if any(cap is not None for cap in caps):
+            for path, backend, model in priced:
+                if backend.tracks_cost(model or None):
+                    continue
+                # the gap alone is the short reason the run row persists;
+                # the remedy rides stderr with it
+                if not model:
+                    gap = (
+                        f'a cost cap requires a model for {backend.name} in {path.name}'
+                    )
+                    remedy = 'set --model or model: to a priced model'
+                else:
+                    gap = (
+                        f'cost cap set but model {model!r} ({path.name})'
+                        f' has no pricing entry'
+                    )
+                    remedy = 'set a priced model or remove the cost cap'
+                print(f'Error: {gap}; {remedy}', file=sys.stderr)
+                self._abort_preflight(gap)
         # provider preflight via the seam: the binary must be on PATH, and a
         # token-priced agent with an explicit model is probed once (some codex
         # accounts reject some explicit models; the pricing check only proves
@@ -702,9 +953,10 @@ class Loop:
         # diagnosis on stderr; the probe's group rides the step marker while
         # it runs so kill.sh can reap it (pause is refused until the active
         # stamp, which lands after this returns)
+        summary = None
         try:
             model = self._node_model or None
-            self._agent.preflight(model, register=self._register_probe)
+            summary = self._agent.preflight(model, register=self._register_probe)
         except RuntimeError as error:
             print(f'Error: {error}', file=sys.stderr)
             reason, *_ = f'{error}'.split('\n')
@@ -713,6 +965,18 @@ class Loop:
             # the probe is over -- drop the group handle so a later kill can
             # never signal a recycled pgid
             (node.node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
+        # a passed probe is paid inference that lands on no step row and
+        # counts toward no cap: the banner names it on the log, and an event
+        # carrying the same line keeps it in node activity -- an event, not
+        # a step row, since events carry no cost and the caps leave it out
+        if summary is not None:
+            print(f'=== Preflight: {summary} ===')
+            try:
+                event_id = node.record.event_start('preflight', metadata=summary)
+                if event_id is not None:
+                    node.record.event_end(event_id=event_id, status='completed')
+            except Exception:
+                pass
 
     def _register_probe(self: Loop, process: subprocess.Popen) -> None:
         """Record the preflight probe as the leader of its own process group.
@@ -753,6 +1017,9 @@ class Loop:
         there the durable exited record must land, or the node wedges
         ``paused`` with no reason and only ``kill`` recovers.
         """
+        # persisted data names paths from the repo root -- the caller already
+        # printed the reason whole (an absolute path reads fine on the pane)
+        reason = reason.replace(f'{self.node.repo_dir}{os.sep}', '')
         # a resume boot preserves its paused run: the open run and iteration
         # rows are exactly what `resume` re-adopts, and the frozen worktree is
         # what pause preserves -- recording a fresh exited run would reconcile
@@ -779,7 +1046,7 @@ class Loop:
                     if stood_down not in ('retired', 'killed'):
                         event_id = self.node.record.event_start(
                             'pause',
-                            metadata=f'resume preflight failed: {reason}',
+                            metadata=f'{PREFLIGHT_PARK_REASON_PREFIX}{reason}',
                         )
                         self.node.record.event_end(
                             event_id=event_id, status='completed'
@@ -839,7 +1106,7 @@ class Loop:
             return False
         print(f'=== Parked at boot: {latched} is paused ===')
         try:
-            node.record.signal_set('pause', f'via pause latch ({latched})')
+            node.record.signal_set('pause', f'{LATCH_PARK_REASON_PREFIX}({latched})')
         except Exception:
             pass
         # open the pause span -- without the instant, the parked time would
@@ -847,7 +1114,7 @@ class Loop:
         try:
             event_id = node.record.event_start(
                 'pause',
-                metadata=f'via pause latch ({latched})',
+                metadata=f'{LATCH_PARK_REASON_PREFIX}({latched})',
                 run_id=self._run_id,
             )
             if event_id is not None:
@@ -975,7 +1242,7 @@ class Loop:
         except Exception:
             pass
         # close the pause span for the deadline credit even when no resume CLI
-        # ran (a bare --resume launch) -- a resume event with no open pause
+        # ran (a bare --resume launch) -- a resume event with no open park
         # is inert to the credit walk, so the CLI-then-boot double write is safe
         try:
             event_id = node.record.event_start('resume', run_id=self._run_id)
@@ -1084,18 +1351,42 @@ class Loop:
     def _clean_worktree(self: Loop) -> None:
         """Restore the worktree for a continue launch.
 
-        Continue-mode cleanup: commit operator seed edits --no-verify,
-        clean, re-arm budgets, preserve config.json.
+        Commit the operator's edits under the node folder (--no-verify),
+        then discard every other uncommitted change, staged or not,
+        keeping config.json. A worktree holding a git operation in
+        progress is left as found.
         """
         node = self.node
         worktree = node.worktree
         node_dir = node.node_dir
+        # a git operation left in progress is the agent's to finish or abort
+        # (its first prompt names it): the reset and restore below would
+        # discard the operation's state; a probe that cannot
+        # answer names nothing
+        if operations := fractal.util.git.in_progress(worktree, check=False):
+            named = ', '.join(
+                f'{operation} ({marker.name})' for operation, marker in operations
+            )
+            print(
+                'Continuing: skipped the operator-edit commit and the clean:'
+                f' the worktree has {named}, which the first step prompt names'
+            )
+            return
+        # unstage everything first (unguarded: a failed reset would let a
+        # staged project change ride the commit below): the commit then
+        # carries only what its add stages, and the checkout/clean below
+        # discard a staged project change like an unstaged one; the worktree
+        # is untouched, so no edit is lost
+        fractal.util.git.run(['reset', '-q'], cwd=worktree)
         # commit operator steering edits before the checkout/clean below
         # reverts them (--no-verify, unguarded: failing loud beats destroying
         # them); the excludes-scoped -uall probe keeps runtime artifacts from
         # triggering or riding the commit, and the add takes its listed paths
-        # -- an exclude-riding add silently stages nothing over an untracked tree
+        # without the excludes: git before 2.56 strips the paths' common
+        # directory from each exclude, which can then match every untracked
+        # file, so an add carrying them stages no new file (see commit._sweep)
         cmd = [
+            '--no-optional-locks',
             'status',
             '--porcelain',
             '-z',
@@ -1105,28 +1396,9 @@ class Loop:
             *commit._STAGE_EXCLUDES,
         ]
         raw = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
-        # "XY <path>" entries; a rename or copy in either column (an
-        # operator's git mv, a worktree-detected move) trails its origin
-        # path as a bare extra token
-        entries = []
-        tokens = iter(os.fsdecode(raw).split('\0'))
-        for token in tokens:
-            if not token:
-                continue
-            entries.append(token[3:])
-            if 'R' in token[:2] or 'C' in token[:2]:
-                entries.append(next(tokens))
-        # stage only paths the add can express: an entry gone from both the
-        # index and the worktree (a staged rename's origin, a staged
-        # deletion) is already fully staged, and naming it is fatal
-        cmd = ['ls-files', '-z', '--', f'{node_dir}']
-        tracked = fractal.util.git.run_bytes(cmd, cwd=worktree) or b''
-        index = set(os.fsdecode(tracked).split('\0'))
-        paths = [
-            path
-            for path in entries
-            if path in index or (worktree / path).exists(follow_symlinks=False)
-        ]
+        # "XY <path>" entries; with nothing staged, each is a worktree change
+        # the add can name (a deletion, or each side of a move, included)
+        paths = [token[3:] for token in os.fsdecode(raw).split('\0') if token]
         if paths:
             print(
                 f'Continuing: committing operator edits under .fractal/{node.branch}...'
@@ -1170,10 +1442,12 @@ class Loop:
             iter_timeout_label = self._iter_timeout
         else:
             iter_timeout_label = 'none'
+        # the node's step_timeout is only the default: a step file's own
+        # timeout: substitutes for it at that step's launch
         if self._step_timeout_seconds > 0:
-            step_timeout_label = self._step_timeout
+            step_timeout_label = f'{self._step_timeout} (default)'
         else:
-            step_timeout_label = 'none'
+            step_timeout_label = 'none (default)'
         interval_label = self._interval if self._interval_seconds > 0 else 'none'
         sleep_label = self._sleep if self._sleep_seconds > 0 else 'none'
         if self._max_cost is not None:
@@ -1310,20 +1584,11 @@ class Loop:
                 if self._wait_seconds <= 0:
                     self._wait_seconds = 60
 
-            # build the time-budget label from whichever of the
-            # run/iter/step timeouts are set
-            time_budget = ''
-            if self._timeout:
-                time_budget = f'{self._timeout} total'
-            if self._iter_timeout:
-                if time_budget:
-                    time_budget += ', '
-                time_budget += f'{self._iter_timeout}/iter'
-            if self._step_timeout:
-                if time_budget:
-                    time_budget += ', '
-                time_budget += f'{self._step_timeout}/step'
-            self._time_budget = time_budget or 'no limit'
+            # build the iteration's time-budget label from whichever of the
+            # run/iter/step timeouts are set -- the node's step_timeout, so
+            # a timed-out run's reason names the configured walls; each
+            # step's prompt and env carry that step's own (_run_step)
+            self._time_budget = self._time_budget_label(self._step_timeout)
 
             # refresh the budget caps and heal registry drift: the boundary
             # checks take their own fresh reads, so this read feeds the
@@ -1397,7 +1662,7 @@ class Loop:
 
             # refresh stale pricing for long-running token-reporting nodes
             if self._needs_pricing:
-                status = pricing.update(max_age='24h')
+                status = pricing.update(max_age=_PRICING_MAX_AGE)
                 if status == 'missing':
                     raise RuntimeError(
                         'Could not fetch pricing and no cached pricing.json exists.'
@@ -1652,6 +1917,28 @@ class Loop:
                         if self._check_stop():
                             break
 
+        # a resume whose loop top ends the run before re-entering the adopted
+        # iteration (its run deadline spent, or max_iters lowered, while
+        # parked) closes it as its own pass would; a park leaves it open, and
+        # the count steps back onto its number so the exit reason names it
+        if self._adopt_iter_id is not None and not self._paused:
+            self._iter += 1
+            if self._timed_out:
+                iter_status, iter_exit_code, iter_reason = 'failed', 1, 'timed out'
+            else:
+                iter_status, iter_exit_code, iter_reason = 'stopped', 0, None
+            self._last_iter_failed = self._timed_out
+            try:
+                node.record.iter_end(
+                    iter_id=self._adopt_iter_id,
+                    status=iter_status,
+                    exit_code=iter_exit_code,
+                    metadata=iter_reason,
+                )
+            except Exception:
+                pass
+            self._adopt_iter_id = None
+
     def _discover_steps(self: Loop) -> Optional[list[Step]]:
         """Re-discover the NN- step files (lexicographic order).
 
@@ -1787,9 +2074,16 @@ class Loop:
                 if self._paused:
                     return True
                 break
+            # and through a provider outage's: one that outlasted the last
+            # step's retries still paces the next launch
+            if not self._unavailable_gate(steps, step_num):
+                if self._paused:
+                    return True
+                break
 
             # --- SYNC before each step ---
-            if self._sync_mode and self._sync_file.is_file():
+            synced = self._sync_mode and self._sync_file.is_file()
+            if synced:
                 started = True
                 # the sync belongs to the step it precedes (the drain-wait
                 # sync, which precedes nothing, stays step 0)
@@ -1843,8 +2137,15 @@ class Loop:
 
             # the SYNC was a launch of its own, so re-read the breaker it may
             # have just armed: the work step must never be the hot call the
-            # gate above exists to refuse
-            if not self._billing_gate(steps, step_num):
+            # gate above exists to refuse -- with no SYNC, the breaker is the
+            # one the hold above already waited out
+            if synced and not self._billing_gate(steps, step_num):
+                if self._paused:
+                    return True
+                break
+            # and the outage streak it may have extended -- with no SYNC, the
+            # streak is the one the hold above already waited out
+            if synced and not self._unavailable_gate(steps, step_num):
                 if self._paused:
                     return True
                 break
@@ -1886,6 +2187,9 @@ class Loop:
             # re-dispatches once, outside the failure-retry allowance
             attempt = 0
             drop_retried = False
+            # a stuck launch (a thinking cap, or no action for too long) buys one
+            # steered relaunch per attempt, on a row of its own, never a retry
+            steered = False
             # the newest step name rides every backstop commit's context
             self._last_step_name = step_name
             while True:
@@ -1916,8 +2220,73 @@ class Loop:
                 step_start = time.monotonic()
                 step_budget_skip = False
                 result = self._run_step(step)
+                self._steer_session = None
+                self._steer_elapsed = 0
+                self._steer_capped = False
                 duration = int(time.monotonic() - step_start)
                 failed = False
+
+                # the first stuck launch ends its row stopped and relaunches
+                # the step on its session; stuck again after the steer, by
+                # either trigger, is a stall
+                trigger = f'{result.reason}'
+                if result.status == 'stuck' and not steered:
+                    # the steer buys a launch, so it polls what a retry's
+                    # backoff polls: a pause parks with the stuck row closed
+                    # (resume re-enters the step), and a stop, finish, or
+                    # spent ceiling abandons it to the failure path
+                    paused = self._check_pause()
+                    abandoned = False
+                    if not paused:
+                        if self._check_stop():
+                            abandoned = True
+                        elif self._check_finish():
+                            abandoned = True
+                        elif self._check_subtree_ceiling():
+                            abandoned = True
+                    if abandoned:
+                        self._fail_reason = f'{step_name} {trigger}; steer abandoned'
+                        result = dataclasses.replace(
+                            result,
+                            status='failed',
+                            reason=f'{trigger}; steer abandoned',
+                        )
+                    else:
+                        if self._step_id is not None:
+                            steer_reason = f'{STEER_REASON_PREFIX}{trigger}'
+                            if paused:
+                                steer_reason = f'{trigger}; paused before the steer'
+                            if attempt > 0:
+                                steer_reason = f'{steer_reason}; retry'
+                            try:
+                                node.record.step_end(
+                                    step_id=self._step_id,
+                                    status='stopped',
+                                    exit_code=0,
+                                    metadata=steer_reason,
+                                    partly_unpriced=self._step_partly_unpriced,
+                                )
+                            except Exception:
+                                pass
+                        if paused:
+                            self._paused = True
+                            return True
+                        steered = True
+                        self._steer_session = result.session
+                        self._steer_elapsed = duration
+                        self._steer_capped = trigger == _THINKING_CAP_REASON
+                        print(
+                            f'--- Step {step_num}/{step_count} ({step_name}):'
+                            f' {trigger}; steering ({duration}s) ---'
+                        )
+                        continue
+                elif result.status == 'stuck':
+                    result = dataclasses.replace(
+                        result,
+                        status='stalled',
+                        exit_code=1,
+                        reason=f'stalled: {trigger}, after a steer',
+                    )
 
                 if result.status == 'timed out':
                     self._timed_out = True
@@ -1926,8 +2295,8 @@ class Loop:
                     # a deadline that expired before the launch resolved no
                     # ceiling, so the label skips the parenthetical
                     limit = ''
-                    if self._step_limit_seconds > 0:
-                        limit = f' ({self._step_limit_seconds}s)'
+                    if self._step_ceiling_seconds > 0:
+                        limit = f' ({self._step_ceiling_seconds}s)'
                     self._fail_reason = f'{step_name} timed out{limit}'
                     step_status = 'exited'
                     step_exit_code = 1
@@ -1961,6 +2330,19 @@ class Loop:
                         f'--- Step {step_num}/{step_count} ({step_name}):'
                         f' paused ({duration}s) ---'
                     )
+                elif result.status == 'stalled':
+                    # the steer did not break the capping: end the step like a
+                    # timeout (the retry gate below passes only failures) and
+                    # tell the parent
+                    self._fail_reason = f'{step_name} {result.reason}'
+                    step_status = 'exited'
+                    step_exit_code = 1
+                    failed = True
+                    print(
+                        f'--- Step {step_num}/{step_count} ({step_name}):'
+                        f' stalled ({duration}s) ---'
+                    )
+                    self._send_stall_notice(step_name, f'{trigger}, after a steer')
                 elif result.status == 'failed':
                     step_status = 'failed'
                     step_exit_code = 1
@@ -2041,10 +2423,12 @@ class Loop:
                     # the agent itself (with its exit code and captured cause)
                     # vs the downstream stream consumer (default "agent error"
                     # if unmarked); stopped == skipped because the run is
-                    # out of budget
+                    # out of budget; a stall books exited with its own reason
                     step_reason = None
                     if step_status == 'exited':
                         step_reason = 'timed out'
+                        if result.status == 'stalled':
+                            step_reason = result.reason
                     elif step_status == 'stopped':
                         if step_budget_skip:
                             step_reason = 'over budget'
@@ -2056,6 +2440,14 @@ class Loop:
                             step_reason = 'awaiting approval'
                     elif step_status == 'failed':
                         step_reason = result.reason or 'agent error'
+                        # the outage verdict leads the reason, so the census
+                        # never reads an instant unpriced outage as billing
+                        if result.unavailable:
+                            step_reason = f'{UNAVAILABLE_REASON_PREFIX}{step_reason}'
+                        # and so does a refusal before the launch, which bought
+                        # nothing for the census to read as dead credits
+                        elif not self._step_launched:
+                            step_reason = f'{UNLAUNCHED_REASON_PREFIX}{step_reason}'
                     elif step_status == 'completed':
                         # a drop marks its own attempt's row -- the durable
                         # fact `node list` composes into its detail column
@@ -2064,6 +2456,13 @@ class Loop:
                         # abandoned or failed one leaves it standing)
                         if served is not None:
                             step_reason = f'model drop (served {served})'
+                    # the steered launch's row is marked like a retry's (a
+                    # stall's reason already names the steer)
+                    if steered and result.status != 'stalled':
+                        if step_reason:
+                            step_reason = f'{step_reason}; steer'
+                        else:
+                            step_reason = 'steer'
                     # a retry attempt's row is marked so the row-per-attempt
                     # shape reads in `node activity`; the failed first
                     # attempt keeps its plain reason
@@ -2078,6 +2477,7 @@ class Loop:
                             status=step_status,
                             exit_code=step_exit_code,
                             metadata=step_reason,
+                            partly_unpriced=self._step_partly_unpriced,
                         )
                         # a step that never reached its launch spent nothing:
                         # stamp the knowable zero so NULL cost stays reserved
@@ -2106,6 +2506,7 @@ class Loop:
                     return True
 
                 self._book_billing(result, duration)
+                self._book_unavailable(result)
 
                 # every drop lands an event; the first re-dispatches the step
                 # once (infrastructure weather can silently serve a different
@@ -2121,6 +2522,7 @@ class Loop:
                     expired = deadline > 0 and time.time() >= deadline
                     if not drop_retried and not expired:
                         drop_retried = True
+                        steered = False
                         print(
                             f'--- Step {step_num}/{step_count} ({step_name}):'
                             f' retrying after model drop in'
@@ -2139,21 +2541,25 @@ class Loop:
                         if self._paused:
                             return True
 
-                # only a failed launch buys a retry, and only
-                # while attempts remain; a billing-shaped failure waits the
-                # breaker's exponential clock instead of the hot default
+                # only a failed launch buys a retry, and only while attempts
+                # remain; a billing-shaped failure waits the breaker's exponential
+                # clock instead of the hot default, and a provider-unavailable one
+                # doubles the default per consecutive failure
                 if result.status != 'failed' or attempt >= self._step_retries:
                     break
-                billing = self._billing_fails >= _BILLING_OUTAGE_THRESHOLD
-                if billing:
-                    backoff_label = f'{self._billing_wait()}s (billing breaker)'
+                retry_wait: Optional[int] = None
+                if self._billing_fails >= _BILLING_OUTAGE_THRESHOLD:
+                    retry_wait = self._billing_wait()
+                    backoff_label = f'{retry_wait}s (billing breaker)'
+                elif self._unavailable_fails:
+                    retry_wait = self._unavailable_wait()
+                    backoff_label = f'{retry_wait}s (provider unavailable)'
                 else:
                     backoff_label = self._step_retry_backoff
                 print(
                     f'--- Step {step_num}/{step_count} ({step_name}):'
                     f' retrying in {backoff_label} ---'
                 )
-                retry_wait = self._billing_wait() if billing else None
                 if not self._retry_backoff(seconds=retry_wait):
                     # a pause landing during the backoff parks; stop, finish,
                     # and the spent subtree ceiling abandon the retry to the
@@ -2162,6 +2568,7 @@ class Loop:
                         return True
                     break
                 attempt += 1
+                steered = False
 
             # pins are honored or the step fails loudly: an unresolved drop
             # -- the re-dispatch also served off-pin, or could not run --
@@ -2224,7 +2631,9 @@ class Loop:
         Per-step agent/model/detached overrides, the deadline, and the
         budget resolve here; a non-positive budget skips the step. Fires
         the on_step pairing around the launch (SYNC launches fire it
-        too, via ``_sync``).
+        too, via ``_sync``). A steer (``_steer_session`` set) prompts
+        with ``STALL.md`` and charges the attempt's elapsed seconds
+        against the step's own ceiling.
         """
         node = self.node
         step_event = self.on_step(step=self._step_label)
@@ -2232,10 +2641,12 @@ class Loop:
         # spent nothing, so its row's cost is a knowable zero -- NULL cost stays
         # reserved for unknowable spend (a kill before the first stream flush)
         self._step_launched = False
+        # nor can a launch that never ran leave a reply out of its record
+        self._step_partly_unpriced = False
 
         def close(result: StepResult) -> StepResult:
             """Fire the terminal pairing for this step's attribution."""
-            if result.status in ('failed', 'timed out'):
+            if result.status in ('failed', 'timed out', 'stuck'):
                 error = RuntimeError(result.reason or result.status)
                 self.on_step_failure(
                     initial_event=step_event,
@@ -2287,6 +2698,17 @@ class Loop:
             )
         step_model = step.model or self._node_model
         step_effort = step.effort or self._node_effort
+        # a thinking-capped launch's steer runs one level below the step's
+        # effort (else the agent's own default), never below the ladder's
+        # floor; at or below the floor, or off the ladder, it keeps the effort
+        if self._steer_capped:
+            effort = step_effort or agent.config_effort() or ''
+            ladder = (agent.effort_levels, agent.effort_floor)
+            levels, floor = self._effort_ladders.get(agent.name, ladder)
+            lowered = lower_effort(effort, levels=levels, floor=floor)
+            if lowered != effort:
+                print(f'  (effort {effort} -> {lowered} for the steer)')
+                step_effort = lowered
 
         # validate detached: in a detached node any per-step detached: key is
         # invalid (already detached); in a continuous node detached: true
@@ -2302,10 +2724,44 @@ class Loop:
                 StepResult(status='failed', exit_code=1, reason=_one_line(msg))
             )
 
+        # the step's own ceiling: timeout: frontmatter substitutes for the
+        # node-global step_timeout; step files are live-edited steering
+        # surfaces, so a malformed scalar warns and falls back to the global
+        # instead of crashing the loop; resolved ahead of the prompt build,
+        # whose $TIME_BUDGET names this ceiling
+        step_timeout_label = self._step_timeout
+        try:
+            self._step_timeout_effective = step.limit(self._step_timeout_seconds)
+            if step.timeout is not None:
+                step_timeout_label = step.timeout
+        except ValueError as error:
+            self._step_timeout_effective = self._step_timeout_seconds
+            print(
+                f'Warning: {error} (timeout: in {step.path.name});'
+                f' falling back to the node step_timeout',
+                file=sys.stderr,
+            )
+        self._step_time_budget = self._time_budget_label(step_timeout_label)
+
+        # the ceiling lands on the step row, so a reader outside the seat
+        # reports the one this launch enforces, never a step file edited
+        # since (the loop reads step files once per iteration)
+        if self._step_id is not None:
+            try:
+                node.record.step_timeout(
+                    step_id=self._step_id,
+                    seconds=self._step_timeout_effective,
+                )
+            except Exception:
+                pass
+
         # a failed build (builder error, missing charter/step file) must fail
         # the step -- launching the agent on an empty prompt would burn
         # a full turn
+        # (the static variables are read once here, inside the guard: the
+        # prompt and the env share them, and the spawn reads no config)
         try:
+            self._step_vars = render.variables(self.node)
             prompt = self._build_step_prompt(step)
         except Exception as error:
             print(f'Error: {error}', file=sys.stderr)
@@ -2313,35 +2769,28 @@ class Loop:
                 StepResult(status='failed', exit_code=1, reason=_one_line(f'{error}'))
             )
 
-        # the step's own ceiling: timeout: frontmatter substitutes for the
-        # node-global step_timeout; step files are live-edited steering
-        # surfaces, so a malformed scalar warns and falls back to the global
-        # instead of crashing the loop
-        self._step_timeout_effective = self._step_timeout_seconds
-        if step.timeout is not None:
-            try:
-                self._step_timeout_effective = _parse_duration(step.timeout, 'timeout')
-            except ValueError as error:
-                print(
-                    f'Warning: {error} (timeout: in {step.path.name});'
-                    f' falling back to the node step_timeout',
-                    file=sys.stderr,
-                )
-
         # compute step time limit: min(run remaining, iteration
-        # remaining, step timeout)
+        # remaining, step timeout) -- and the ceiling a timeout names: the
+        # step's whole timeout when it binds, a steer's charge included
         self._step_limit_seconds = 0
+        self._step_ceiling_seconds = 0
         deadline = self._soonest_deadline()
         if deadline > 0:
             remaining = deadline - int(time.time())
             if remaining <= 0:
                 return close(StepResult(status='timed out', exit_code=124))
             self._step_limit_seconds = remaining
+            self._step_ceiling_seconds = remaining
         if self._step_timeout_effective > 0:
+            step_timeout = self._step_timeout_effective - self._steer_elapsed
+            if step_timeout <= 0:
+                self._step_ceiling_seconds = self._step_timeout_effective
+                return close(StepResult(status='timed out', exit_code=124))
             no_limit = self._step_limit_seconds == 0
-            tighter = self._step_timeout_effective < self._step_limit_seconds
+            tighter = step_timeout < self._step_limit_seconds
             if no_limit or tighter:
-                self._step_limit_seconds = self._step_timeout_effective
+                self._step_limit_seconds = step_timeout
+                self._step_ceiling_seconds = self._step_timeout_effective
 
         # a cost cap requires spend the loop can track: token-priced and
         # routed agents price from token counts, so a cap needs a priceable
@@ -2396,35 +2845,80 @@ class Loop:
 
         The charter, the step (frontmatter stripped), and any active
         modes (SYNC.md runs as its own step, so it is skipped there):
-        static vars (paths, limits) come from the node's config/git, and
-        the run-scoped vars pass through as overrides -- the boot-pinned
-        DETACHED/META flags included, so a mid-run config edit cannot
-        flip a run's mode composition.
+        static vars (paths, limits) come from the step's one config/git
+        read, the one its env exports, and the run-scoped vars pass
+        through as overrides -- the boot-pinned DETACHED/META flags and
+        meta target included, so a mid-run config edit cannot flip a run's
+        mode composition. A steer renders ``STALL.md`` alone: its resumed
+        session already holds the step. A git operation left unfinished in
+        the worktree joins as the ``GIT_PENDING`` mode, beneath the charter
+        like every mode, and opens a steer's prompt, which has no charter.
         """
         # refresh the cost budget so each step's context reflects spend so far
         self._build_cost_budget()
+        operations = self._git_pending_operations()
         overrides = {
             'STEP_LABEL': self._step_label,
             'ITER_LABEL': self._iter_label,
             'ITER_TIMESTAMP': self._iter_timestamp,
             'ITER_REF': self._iter_ref,
-            'TIME_BUDGET': self._time_budget,
+            'TIME_BUDGET': self._step_time_budget,
             'COST_BUDGET': self._cost_budget,
             'CONTINUE_MODE': 'true' if self._continue else 'false',
             'RESUME_MODE': 'true' if self._resume_mode else 'false',
             # reserve mode is per-iteration (budget can exhaust mid-run)
             'RESERVE_MODE': 'true' if self._reserve else 'false',
-            'DETACHED_MODE': self._env_base['DETACHED_MODE'],
-            'META_MODE': self._env_base['META_MODE'],
+            'DETACHED_MODE': self._boot_modes['DETACHED_MODE'],
+            'META_MODE': self._boot_modes['META_MODE'],
+            'META_TARGET': self._boot_modes['META_TARGET'],
             'DRAIN_MODE': 'true' if self._drain else 'false',
+            # git-pending mode is per-launch (each launch can leave a git operation)
+            'GIT_PENDING_MODE': 'true' if operations else 'false',
+            'GIT_OPERATIONS': operations,
         }
-        prompt = self.node.build_prompt(f'{step.path}', overrides=overrides)
+        variables = {**self._step_vars, **overrides}
+        if self._steer_session is not None:
+            text = self._stall_file.read_text(encoding='utf-8')
+            if operations:
+                notice = self._git_pending_file.read_text(encoding='utf-8')
+                text = f'{notice}\n{text}'
+            return render.render(text, variables)
+        prompt = self.node.build_prompt(f'{step.path}', overrides=variables)
         # a resumed iteration replays a frozen plan -- the harness re-reads
         # the inbox at every attached seat, so directives that arrived after
         # the plan froze are in context before any replayed decision executes
         if self._resume_mode and (digest := self._inbox_digest()):
             prompt = f'{prompt}\n{digest}'
         return prompt
+
+    def _git_pending_operations(self: Loop) -> str:
+        """List the git operations left unfinished in the worktree, or ``''``.
+
+        Probed at every launch: a killed, paused, or stuck step can stop
+        inside a merge, squash, cherry-pick, revert, or rebase, or with
+        ``index.lock`` held, and the next launch would otherwise run git on
+        top of it. One bullet per operation, the ``GIT_OPERATIONS`` that
+        ``GIT_PENDING.md`` renders. A probe that cannot answer names nothing.
+        """
+        operations = fractal.util.git.in_progress(self.node.worktree, check=False)
+        lines = []
+        for operation, marker in operations:
+            line = f'- {operation} ({marker.name})'
+            # a linked worktree's lock lives in its own git dir, never the
+            # main checkout's .git/index.lock, so the lock is named by its
+            # resolved path; a lock its git command just dropped has no age
+            if marker.name == 'index.lock':
+                try:
+                    age = time.time() - marker.stat().st_mtime
+                except OSError:
+                    line = f'- {operation} ({marker})'
+                else:
+                    age_label = fractal.util.duration.format_age(max(0.0, age))
+                    line = f'- {operation} ({marker}, {age_label} old)'
+            if hint := _GIT_PENDING_HINTS.get(marker.name):
+                line = f'{line}: {hint}'
+            lines.append(line)
+        return '\n'.join(lines)
 
     def _inbox_digest(self: Loop) -> str:
         """Render the unread inbox for a resumed seat's prompt, or ``''``.
@@ -2467,6 +2961,35 @@ class Loop:
         ]
         return '\n'.join(lines)
 
+    def _time_budget_label(self: Loop, step_timeout: str) -> str:
+        """Compose a time-budget label from the run/iter walls and a step part.
+
+        The step part is the caller's: a launching step's own ceiling (its
+        ``timeout:`` override, else the node's ``step_timeout``) for the
+        per-step ``$TIME_BUDGET``, the node's ``step_timeout`` for the
+        iteration's label.
+
+        Args:
+            step_timeout: The step timeout as written (``''`` when none).
+
+        Returns:
+            The label, e.g. ``24h total, 1h/iter, 10m/step``, or
+            ``no limit``.
+
+        """
+        time_budget = ''
+        if self._timeout:
+            time_budget = f'{self._timeout} total'
+        if self._iter_timeout:
+            if time_budget:
+                time_budget += ', '
+            time_budget += f'{self._iter_timeout}/iter'
+        if step_timeout:
+            if time_budget:
+                time_budget += ', '
+            time_budget += f'{step_timeout}/step'
+        return time_budget or 'no limit'
+
     def _build_cost_budget(self: Loop) -> None:
         """Refresh the cost-budget label from the CURRENT remaining.
 
@@ -2497,23 +3020,24 @@ class Loop:
     def _agent_env(self: Loop, step_label: str) -> dict[str, str]:
         """Build the per-launch agent environment.
 
-        Rebuilt at every step/SYNC launch, never boot-static: the boot
-        vocabulary (paths, caps, modes, ``AGENT_COMMAND``, timeouts --
-        ``STEP_TIMEOUT_SECONDS`` carrying the step's own effective
-        ceiling, ``_NODE``, ``NODE_BRANCH``) plus live lineage
-        (``RUN_ID``, ``ITER_ID``, ``STEP_ID``, ``STEP_MODEL``), the
-        per-iteration quartet
-        (``ITER``, ``ITER_TIMESTAMP``, ``ITER_REF``, ``ITER_LABEL``),
-        and the current ``STEP_LABEL``; ``$ITER_REF`` feeds
-        ``fractal plan init``'s envvar fallback. Passed to the seam as
-        ``invocation(env=...)``'s caller overlay (merge order ruled at
-        the seam: ``os.environ``, then this overlay, then provider keys
-        -- provider wins).
+        Rebuilt at every step/SYNC launch, never boot-static: the static
+        vocabulary the step's prompt rendered (paths, spawn limits, read
+        once per step) under the boot-pinned mode flags, plus the run
+        parameters (cost caps, ``AGENT_COMMAND``, timeouts --
+        ``STEP_TIMEOUT_SECONDS`` carrying the step's own effective ceiling,
+        ``_NODE``, ``NODE_BRANCH``) plus live lineage (``RUN_ID``,
+        ``ITER_ID``, ``STEP_ID``, ``STEP_MODEL``), the per-iteration
+        quartet (``ITER``, ``ITER_TIMESTAMP``, ``ITER_REF``,
+        ``ITER_LABEL``), and the current ``STEP_LABEL``; ``$ITER_REF``
+        feeds ``fractal plan init``'s envvar fallback. Passed to the seam
+        as ``invocation(env=...)``'s caller overlay (merge order ruled at
+        the seam: ``os.environ``, then this overlay, then provider keys --
+        provider wins).
         """
         step_budget = ''
         if self._step_budget_value is not None:
             step_budget = f'{self._step_budget_value:.6g}'
-        env = dict(self._env_base)
+        env = {**self._step_vars, **self._boot_modes}
         overlay = {
             'MAX_COST': self._max_cost_label,
             'MAX_ITER_COST': self._max_iter_cost_label,
@@ -2540,7 +3064,7 @@ class Loop:
             'ITER_TIMESTAMP': self._iter_timestamp,
             'ITER_REF': self._iter_ref,
             'ITER_LABEL': self._iter_label,
-            'TIME_BUDGET': self._time_budget,
+            'TIME_BUDGET': self._step_time_budget,
             'COST_BUDGET': self._cost_budget,
             'STEP_LABEL': step_label,
             'STEP_MODEL': self._step_model,
@@ -2570,8 +3094,13 @@ class Loop:
         Records ``.step_pgid``, redirects stderr to ``<agent>.err``
         (copied to a durable ``tmp/err/`` snapshot on failure/timeout),
         parses the stream in-process, enforces the deadline
-        (TERM-grace-KILL on the group), and attributes the outcome
-        (completed / timed out / paused / failed / budget stop).
+        (TERM-grace-KILL on the invocation's tree), and attributes the outcome
+        (completed / timed out / paused / failed / budget stop / stuck).
+        A work step's reply that hits the output cap while still thinking
+        ends the invocation on the stream-error path, before the agent
+        continues past it; for an agent that reports progress, a watchdog
+        ends it like the deadline after ``_NO_PROGRESS_SECONDS`` of the
+        agent's own idle time. A steer resumes the stuck session.
         """
         node = self.node
         node_dir = node.node_dir
@@ -2585,9 +3114,9 @@ class Loop:
         self._step_served = ()
 
         # resolve this agent's session (empty unless a
-        # continuous session exists)
-        session = None
-        if not self._step_detached:
+        # continuous session exists); a steer resumes the stuck one
+        session = self._steer_session
+        if session is None and not self._step_detached:
             session = node.sessions.get(agent.name)
 
         # the model recorded with the woven session: the explicit step model,
@@ -2623,6 +3152,31 @@ class Loop:
                 )
             except Exception:
                 pass
+        # the effort the invocation was handed lands on the row the same way,
+        # so the row names it even when the stream never opens
+        if effort is not None and self._step_id is not None:
+            try:
+                node.record.step_effort(step_id=self._step_id, effort=effort)
+            except Exception:
+                pass
+
+        # a resumed session's result figure can count on from the session's
+        # earlier spend: read what it carries before the launch adds to it
+        # (an unknown baseline refuses the figure rather than book it whole)
+        baseline: Optional[float] = 0.0
+        if session is not None:
+            try:
+                baseline = agent.cost_baseline(session)
+            except Exception as error:
+                print(
+                    f'Warning: reading the session cost baseline failed ({error})',
+                    file=sys.stderr,
+                )
+                baseline = None
+
+        # the launch's window opens at the spawn: a killed launch is priced
+        # from the provider's record of this window alone
+        launched = fractal.util.time.utc_now()
 
         # run in the worktree (the project) so a bare relative write lands in
         # the deliverable tree, never inside .fractal/; capture stderr
@@ -2656,10 +3210,12 @@ class Loop:
             pass
 
         # enforce the deadline in-process: TERM the whole invocation group at
-        # the limit, then KILL any survivor after a short grace
+        # the limit, then KILL any survivor after a short grace; the
+        # no-progress watchdog ends the group the same way under its own flag
         timed_out = threading.Event()
+        idle = threading.Event()
 
-        def _deadline() -> None:
+        def _deadline(flag: threading.Event = timed_out) -> None:
             # a launch that finished in the hair between wait() returning
             # and cancel() keeps its real outcome -- a fired timer over an
             # already-gone invocation group must mark nothing; a live group
@@ -2674,30 +3230,18 @@ class Loop:
                 return
             except PermissionError:
                 pass
-            timed_out.set()
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                return
-            deadline = time.monotonic() + _KILL_GRACE_SECONDS
-            while time.monotonic() < deadline:
-                # reap the leader (clears its zombie so the group probe below
-                # reads true), then check the WHOLE group: a survivor that traps
-                # TERM -- e.g. a grandchild holding the stdout pipe -- must still
-                # draw the KILL, which a leader-only poll() would skip, leaving
-                # the reader blocked on that pipe for the rest of the run
-                process.poll()
-                try:
-                    os.killpg(process.pid, 0)
-                except ProcessLookupError:
-                    return
-                except PermissionError:
-                    pass
-                time.sleep(0.1)
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            flag.set()
+            # reap the invocation's whole tree, sparing other nodes' loops --
+            # tool commands run in groups of their own, and a TERM-trapping
+            # survivor holding the stdout pipe must still draw the KILL or
+            # the reader blocks on it
+            lines = fractal.util.process.reap_or_kill(
+                [process.pid],
+                grace=_KILL_GRACE_SECONDS,
+                spare=node.loop_records,
+            )
+            for line in lines:
+                print(line, file=sys.stderr)
 
         timer: Optional[threading.Timer] = None
         if self._step_limit_seconds > 0:
@@ -2709,6 +3253,70 @@ class Loop:
             timer.daemon = True
             timer.start()
 
+        # a thinking cap raises out of the stream driver, so the reader's
+        # death below ends the invocation; SYNC runs as its own unsteered step
+        watch_cap = step.path != self._sync_file
+        # the agent's own idle clock, kept by the stream's acting/waiting
+        # events: running from the launch and each time the agent takes
+        # control, paused (None) while it has handed control off, and pushed
+        # back by a timed pause
+        idle_since: Optional[float] = time.monotonic()
+        # failed result frames' detail -- a backend that reports its failure
+        # there (claude) names the provider error nowhere else
+        failures: list[str] = []
+        # the session the stream names, which a capped launch's steer
+        # resumes (the reader dies at the cap, so no result carries it)
+        stream_session: Optional[str] = None
+        # the instant a result frame named the launch's cost -- spend the
+        # agent completes after it lies past that figure -- and whether one
+        # named a figure the baseline could not settle
+        settled_at: Optional[str] = None
+        refused = False
+        # the capped reply as the stream recorded it, which the cap's kill
+        # can keep from the agent's own record
+        capped: list[dict[str, Any]] = []
+
+        def _render(event: StreamEvent) -> None:
+            nonlocal idle_since, stream_session, settled_at, refused
+            if self._render is not None:
+                self._render(event)
+            if event.session is not None:
+                stream_session = event.session
+            if event.kind == 'result' and event.cost is not None:
+                settled_at = fractal.util.time.utc_now()
+            if event.kind == 'result' and event.refused:
+                refused = True
+            if event.kind == 'result' and event.failed and event.message:
+                failures.append(event.message)
+            if watch_cap and event.kind == 'thinking_cap':
+                if event.reply is not None:
+                    capped.append(event.reply)
+                raise _ThinkingCap()
+            if event.kind == 'acting':
+                idle_since = time.monotonic()
+            elif event.kind == 'waiting':
+                if event.duration is None:
+                    idle_since = None
+                elif idle_since is not None:
+                    idle_since += event.duration
+
+        # poll the idle clock (the reader blocks on stdout, so it cannot);
+        # stopped once the stream ends, however it ends
+        watchdog_done = threading.Event()
+
+        def _watchdog() -> None:
+            limit = _NO_PROGRESS_SECONDS
+            while not watchdog_done.wait(min(1.0, limit / 10)):
+                since = idle_since
+                if since is not None and time.monotonic() - since >= limit:
+                    _deadline(idle)
+                    return
+
+        watchdog: Optional[threading.Thread] = None
+        if watch_cap and agent.reports_progress:
+            watchdog = threading.Thread(target=_watchdog, daemon=True)
+            watchdog.start()
+
         # drive the stream in-process: recording (session, per-frame cost
         # flush) and the pane rendering ride the seam's driver
         stream_error: Optional[Exception] = None
@@ -2719,19 +3327,25 @@ class Loop:
                 process=process,
                 step_id=self._step_id,
                 model=record_model,
+                baseline=baseline,
                 detached=self._step_detached,
-                render=self._render,
+                render=_render,
             )
         except Exception as error:
             stream_error = error
             # the reader died with the agent possibly still writing -- drop
-            # the group so a blocked writer cannot outlive its step
+            # the whole tree (other nodes' loops spared) so a blocked writer
+            # cannot outlive its step
             if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                lines = fractal.util.process.reap_or_kill(
+                    [process.pid],
+                    grace=_STREAM_ERROR_GRACE_SECONDS,
+                    spare=node.loop_records,
+                )
+                for line in lines:
+                    print(line, file=sys.stderr)
         finally:
+            watchdog_done.set()
             # a truncated stream (no result frame) ends mid-line with no summary
             close = getattr(self._render, 'close', None)
             if close is not None:
@@ -2739,10 +3353,76 @@ class Loop:
         agent_status = process.wait()
         if timer is not None:
             timer.cancel()
+        # a reap the deadline or the watchdog started runs on its own thread:
+        # wait out its grace and KILL, so a tool that ignores TERM never
+        # outlives the launch into the next one; an unfired thread ends at once
+        for thread in (timer, watchdog):
+            if thread is not None:
+                thread.join(_REAP_WAIT_SECONDS)
 
         # the invocation is over -- drop the group handle so a later
         # pause/kill can never signal a recycled pgid
         (node_dir / STEP_PGID_FILE).unlink(missing_ok=True)
+
+        # a launch that ended without its authoritative cost (killed, its
+        # stream dead before the closing figure, or that figure refused) is
+        # priced from the provider's own usage record, read once the process
+        # has exited and flushed it; one that reached it is priced for the
+        # spend past it, since the process outlives its result while
+        # background work runs
+        if self._step_id is not None:
+            after = settled_at if result is not None and result.final else None
+            trailing = result is not None and result.trailing
+            try:
+                self._step_partly_unpriced = agent.settle_cost(
+                    step_id=self._step_id,
+                    started=launched,
+                    ended=fractal.util.time.utc_now(),
+                    after=after,
+                    replies=capped,
+                    trailing=trailing,
+                )
+            except Exception as error:
+                print(
+                    f'Warning: pricing the ended launch failed ({error})',
+                    file=sys.stderr,
+                )
+                # with no result figure, the stream's estimate leaves out
+                # whatever the failed settle would have added; past one, the
+                # figure leaves out the spend the stream saw after it
+                self._step_partly_unpriced = after is None or trailing
+            # name the marker the step's close gives the row: one holding no
+            # figure is unpriced, not partly unpriced (a contended read keeps
+            # the partial wording)
+            marker = 'partly unpriced'
+            if self._step_partly_unpriced or refused:
+                try:
+                    rows = node.db.read(
+                        'steps',
+                        where={'step_id': self._step_id},
+                        limit=1,
+                    )
+                except Exception:
+                    rows = []
+                if rows and rows[0]['cost'] is None:
+                    marker = 'unpriced'
+            if self._step_partly_unpriced:
+                print(
+                    "Warning: part of the launch's spend is missing from its"
+                    f' record; its step books the spend recorded ({marker})',
+                    file=sys.stderr,
+                )
+            # a refused result figure leaves the step the record's own figure
+            # (the settle above, with no result to count past), which can miss
+            # spend the result held
+            if refused:
+                print(
+                    "Warning: the launch's result figure could not be settled"
+                    " against its session's earlier spend; its step books the"
+                    f' spend recorded ({marker})',
+                    file=sys.stderr,
+                )
+                self._step_partly_unpriced = True
 
         session_out = result.session if result is not None else None
         cost_out = result.cost if result is not None else None
@@ -2782,6 +3462,37 @@ class Loop:
                 pass
 
         # attribute the outcome
+        agent_borne = isinstance(stream_error, AgentStreamError)
+
+        # the backend reads its provider's outage shapes off everything the
+        # failed launch said: failed result frames, the stream's own error,
+        # and the stderr capture
+        def _unavailable() -> bool:
+            details = [*failures]
+            if agent_borne:
+                details.append(f'{stream_error}')
+            try:
+                details.append(
+                    agent.err_path.read_text(encoding='utf-8', errors='replace')
+                )
+            except OSError:
+                pass
+            return agent.unavailable('\n'.join(details))
+
+        if idle.is_set() and not timed_out.is_set():
+            # the watchdog ended an agent that sat idle -- a pause racing it
+            # still parks; the caller-minted session stands in when the
+            # stream never named one
+            if self._consume_pause_abort():
+                return StepResult(status='paused', session=session_out, cost=cost_out)
+            stuck_session = session_out or invocation.session
+            return StepResult(
+                status='stuck',
+                exit_code=1,
+                reason=f'no action for {_span(_NO_PROGRESS_SECONDS)}',
+                session=stuck_session,
+                cost=cost_out,
+            )
         if agent_status != 0 and result is not None and result.budget_stopped:
             # the agent stopped because it reached its per-step budget cap
             # (claude exits non-zero + emits result subtype
@@ -2824,30 +3535,40 @@ class Loop:
                     session=session_out,
                     cost=cost_out,
                 )
-            # a stream-consumer failure the handler above SIGKILLed the agent
-            # for surfaces here as a signal death -- defer to the stream_error
-            # branch below so it owns the attribution (right side + traceback),
-            # rather than bury the real fault under a generic 'agent error'; safe
-            # because stream_error is set only on a fractal-side stream failure:
-            # a genuine agent crash closes stdout, so the reader hits EOF and
-            # returns without raising (stream_error stays None -> here)
-            if stream_error is None:
+            # a fractal-side stream-consumer failure the handler above SIGKILLed
+            # the agent for surfaces here as a signal death -- defer to the
+            # stream_error branch below so it owns the attribution rather than
+            # bury the real fault under a generic 'agent error'; an error the
+            # agent named on its own stream is the agent's failure, so the exit
+            # code leads and the stream detail joins the stderr tail in the reason
+            if stream_error is None or agent_borne:
                 # a signal death surfaces as a negative returncode -- report it
                 # in the 128+N convention the exit banner prints
                 exit_code = agent_status if agent_status > 0 else 128 - agent_status
-                _snapshot_err()
-                # the stderr tail rides the durable reason -- the pane is mortal,
-                # and agents put the cause on the last line
+                if agent_borne:
+                    trace = ''.join(traceback.format_exception(stream_error))
+                    _snapshot_err(trace=trace)
+                else:
+                    _snapshot_err()
+                # the stream detail and the stderr tail ride the durable reason
+                # -- the pane is mortal, and agents put the cause on the last line
                 reason = f'agent error (exit {exit_code})'
+                details = []
+                if agent_borne:
+                    details.append(_one_line(f'{stream_error}'))
                 tail = _log_tail(agent.err_path)
                 if tail:
-                    reason = f'{reason}: {tail}'
+                    details.append(tail)
+                if details:
+                    detail = '; '.join(details)
+                    reason = f'{reason}: {detail}'
                 return StepResult(
                     status='failed',
                     exit_code=exit_code,
                     reason=reason,
                     session=session_out,
                     cost=cost_out,
+                    unavailable=_unavailable(),
                 )
         if timed_out.is_set():
             # the deadline fired but the agent shut down cleanly within the
@@ -2860,6 +3581,19 @@ class Loop:
                 session=session_out,
                 cost=cost_out,
             )
+        if isinstance(stream_error, _ThinkingCap):
+            # the loop ended the invocation itself; a pause racing the cap still parks
+            if self._consume_pause_abort():
+                return StepResult(status='paused', session=session_out, cost=cost_out)
+            # the caller-minted session stands in when the stream never
+            # named one, as for the watchdog's stuck launch
+            stuck_session = stream_session or invocation.session
+            return StepResult(
+                status='stuck',
+                exit_code=1,
+                reason=_THINKING_CAP_REASON,
+                session=stuck_session,
+            )
         if stream_error is not None:
             # an agent that named a failure on its own stream (drained clean,
             # exit 0) is an agent error; a fractal-side stream-consumer failure
@@ -2868,7 +3602,6 @@ class Loop:
             print(f'Error: {stream_error}', file=sys.stderr)
             if self._consume_pause_abort():
                 return StepResult(status='paused', session=session_out, cost=cost_out)
-            agent_borne = isinstance(stream_error, AgentStreamError)
             self._fail_reason = 'agent error' if agent_borne else 'stream error'
             _snapshot_err(trace=''.join(traceback.format_exception(stream_error)))
             # the step row carries the exception one-liner (the iter/run
@@ -2879,12 +3612,14 @@ class Loop:
             else:
                 message = f'{type(stream_error).__name__}: {stream_error}'
             detail = _one_line(message)
+            unavailable = agent_borne and _unavailable()
             return StepResult(
                 status='failed',
                 exit_code=1,
                 reason=f'{self._fail_reason}: {detail}',
                 session=session_out,
                 cost=cost_out,
+                unavailable=unavailable,
             )
         # a budget stop reported on the stream keeps its attribution even
         # when the agent exits 0
@@ -3018,6 +3753,9 @@ class Loop:
         # against the node default, or erased with it)
         saved_model = self._step_model
         saved_served = self._step_served
+        # and its own cut-off verdict over the awaited step's, which that
+        # step's close books
+        saved_partly = self._step_partly_unpriced
         print()
         print(f'--- SYNC ({label}) ---')
         self._step_label = f'SYNC ({label})'
@@ -3053,6 +3791,12 @@ class Loop:
                 sync_reason = 'over budget'
             elif result.status == 'failed':
                 sync_status, sync_exit_code = 'failed', 1
+                # the outage verdict leads the reason, as on a work step's row
+                if result.unavailable:
+                    sync_reason = f'{UNAVAILABLE_REASON_PREFIX}{result.reason}'
+                # and so does a refusal before the launch
+                elif not self._step_launched:
+                    sync_reason = f'{UNLAUNCHED_REASON_PREFIX}{result.reason}'
             else:
                 sync_status, sync_exit_code = 'completed', 0
         else:
@@ -3077,6 +3821,7 @@ class Loop:
                     status=sync_status,
                     exit_code=sync_exit_code,
                     metadata=sync_reason,
+                    partly_unpriced=self._step_partly_unpriced,
                 )
                 # a sync that never reached its launch spent nothing: stamp the
                 # knowable zero so NULL cost stays reserved for unknowable spend
@@ -3088,6 +3833,7 @@ class Loop:
         # stands (the caller's is restored below) -- its cost is what the
         # dead-credits signature is read against
         self._book_billing(result, duration)
+        self._book_unavailable(result)
 
         if not strict:
             print(f'--- SYNC ({close or label}): done ---')
@@ -3097,6 +3843,7 @@ class Loop:
         self._step_launched = saved_launched
         self._step_model = saved_model
         self._step_served = saved_served
+        self._step_partly_unpriced = saved_partly
         return result, duration, sync_step_id
 
     def _wait_for_children(self: Loop, context: str) -> bool:
@@ -3213,11 +3960,14 @@ class Loop:
         once the cap is spent, and the billing breaker's waits reach an
         hour: a cascaded budget finish (the very signal an outage
         produces) must never sleep one out, especially since a pending
-        finish silences the ceiling poll.
+        finish silences the ceiling poll. Nor does a wait run past the
+        run or iteration deadline: it ends there, and the launch it was
+        holding books the timeout.
 
         Args:
             seconds: Wait to sleep out; ``None`` takes the step-retry
-                backoff (the billing breaker passes its own clock).
+                backoff (the billing breaker and the provider-outage
+                pacing pass their own clocks).
 
         Returns:
             Whether the retry may proceed (``False`` abandons it).
@@ -3225,6 +3975,10 @@ class Loop:
         """
         if seconds is None:
             seconds = self._step_retry_backoff_seconds
+        # never sleep past the soonest deadline (keeps the walls true)
+        deadline = self._soonest_deadline()
+        if deadline > 0:
+            seconds = min(seconds, max(0, deadline - int(time.time())))
         waited = 0
         while waited < seconds:
             time.sleep(1)
@@ -3247,6 +4001,16 @@ class Loop:
             _BILLING_BACKOFF_CAP_SECONDS,
             _BILLING_BACKOFF_BASE_SECONDS * 2**doublings,
         )
+
+    def _unavailable_wait(self: Loop) -> int:
+        """Return the provider-outage retry wait, doubling to the cap.
+
+        Never shorter than the step-retry backoff, so a configured backoff
+        above the cap still holds.
+        """
+        base = self._step_retry_backoff_seconds
+        doublings = self._unavailable_fails - 1
+        return max(base, min(_UNAVAILABLE_BACKOFF_CAP_SECONDS, base * 2**doublings))
 
     def _billing_gate(self: Loop, steps: list[Step], step_num: int) -> bool:
         """Hold the next launch through the breaker's backoff, if it is armed.
@@ -3310,6 +4074,63 @@ class Loop:
         self._iter_interrupted = True
         return False
 
+    def _unavailable_gate(self: Loop, steps: list[Step], step_num: int) -> bool:
+        """Hold the next launch through a provider outage's backoff, if one stands.
+
+        A failure the agent names as its provider being unavailable paces
+        its own step's retries; once those run out, the iteration fails and
+        the next launch would go out hot for as long as the outage lasts
+        (with no retries at all, nothing would pace it). While the streak
+        stands, the step's first launch waits its doubling clock instead:
+        the launch after the wait is the probe that clears or extends it.
+
+        Args:
+            steps: The iteration's whole step sequence.
+            step_num: The gated step's 1-based number.
+
+        Returns:
+            Whether the step loop may proceed. ``False`` means the wait
+            was interrupted: the caller parks on ``_paused``, else ends
+            the sequence.
+
+        """
+        if not self._unavailable_fails:
+            return True
+        node = self.node
+        wait = self._unavailable_wait()
+        print(
+            f'=== Provider unavailable — {self._unavailable_fails} consecutive'
+            f' failure(s); probing again in {wait}s ==='
+        )
+        # an interrupted wait never buys a hot launch: a pause parks, and a
+        # stop, finish, or spent ceiling ends the step loop
+        if self._retry_backoff(seconds=wait):
+            return True
+        if self._paused:
+            return False
+        # book the gated step and the never-run tail as the billing gate does
+        for missed in steps[step_num - 1 :]:
+            try:
+                missed_id = node.record.step_start(
+                    iter_id=self._iter_id,
+                    run_id=self._run_id,
+                    step=missed.number,
+                    step_name=missed.name,
+                )
+                node.record.step_end(
+                    step_id=missed_id,
+                    status='stopped',
+                    exit_code=0,
+                    metadata='outage gate interrupted',
+                )
+                # never launched, so the spend is a knowable zero
+                node.record.step_cost(step_id=missed_id, cost=0.0)
+            except Exception:
+                pass
+        # the sequence was cut short: never book this iteration 'completed'
+        self._iter_interrupted = True
+        return False
+
     def _book_billing(self: Loop, result: StepResult, duration: int) -> None:
         """Fold one agent launch's outcome into the billing breaker's streak.
 
@@ -3338,15 +4159,45 @@ class Loop:
             else:
                 self._billing_fails = 0
 
+    def _book_unavailable(self: Loop, result: StepResult) -> None:
+        """Fold one agent launch's outcome into the provider-outage streak.
+
+        Every launch counts, work step and SYNC alike, as the billing
+        breaker's does: a completed launch clears the streak, a failure
+        the backend names as its provider being unavailable extends it,
+        and any other failed or timed-out launch breaks it. Deliberate
+        outcomes (paused, budget-skipped) leave it untouched.
+
+        Args:
+            result: The launch's result.
+
+        """
+        if result.status == 'completed':
+            self._unavailable_fails = 0
+        elif result.status in ('failed', 'timed out'):
+            if result.unavailable:
+                self._unavailable_fails += 1
+            else:
+                self._unavailable_fails = 0
+
     def _billing_failure(self: Loop, result: StepResult, duration: int) -> bool:
         """Return whether a failed launch carries the billing signature.
 
-        Instant and zero-cost: the launch died before buying any paid
-        inference -- an API billing/credit refusal, not work that failed.
-        A cannot-exec launch (127) is a different class and never arms
-        the breaker; an unknowable (``None``) cost on an instant failure
-        reads as zero, since a launch that paid reports its frames.
+        Instant and zero-cost, from a launch that was bought: the launch
+        died before buying any paid inference -- an API billing/credit
+        refusal, not work that failed. A step refused before its launch
+        (a cost cap over an unpriced model, a per-step agent that cannot
+        run) bought nothing and proves nothing about credits; a
+        cannot-exec launch (127) is a different class and never arms the
+        breaker, and neither does a failure the agent names as its
+        provider being unavailable, which the outage streak paces; an
+        unknowable (``None``) cost on an instant failure reads as zero,
+        since a launch that paid reports its frames.
         """
+        if not self._step_launched:
+            return False
+        if result.unavailable:
+            return False
         if result.exit_code == 127 or duration >= _BILLING_INSTANT_SECONDS:
             return False
         spent = None
@@ -3705,9 +4556,10 @@ class Loop:
         """Scream once per loop process when armed caps have no in-step brake.
 
         A non-enforcing agent takes no per-step budget flag, so its cap
-        is checked only between steps -- with no run/iter/step timeout
-        either, one runaway step can overshoot every cap unbounded while
-        the loop waits on the process. Advisory only; the remedy it
+        is checked only between steps -- with no timeout bounding every
+        step either (a run/iter/step timeout, or each step file's own
+        ``timeout:``), one runaway step can overshoot every cap unbounded
+        while the loop waits on the process. Advisory only; the remedy it
         names (``--step-timeout``) is the existing in-step brake.
         """
         if self._soft_cap_warned:
@@ -3722,10 +4574,27 @@ class Loop:
         )
         if any(seconds > 0 for seconds in timeouts):
             return
+        # a step file's own timeout: brakes its launch, so the exposure stands
+        # only while some launch has no ceiling -- SYNC runs on the unset node
+        # value, and an unreadable or malformed file falls back to it
+        launches = sorted((self.node.node_dir / 'steps').glob('*.md'))
+        if self._sync_mode and self._sync_file.is_file():
+            launches.append(self._sync_file)
+        unbraked = False
+        for path in launches:
+            try:
+                seconds = Step.load(path).limit(self._step_timeout_seconds)
+            except (OSError, ValueError):
+                seconds = self._step_timeout_seconds
+            if seconds <= 0:
+                unbraked = True
+                break
+        if not unbraked:
+            return
         self._soft_cap_warned = True
         print(
             f'WARNING: cost caps are set but {self._agent.name} does not'
-            ' enforce a per-step budget and no timeout is configured; one'
+            ' enforce a per-step budget and no timeout bounds every step; one'
             ' runaway step can overshoot the caps unbounded — set'
             ' --step-timeout to bound it.'
         )
@@ -3801,6 +4670,27 @@ class Loop:
             self.node.radio.send(
                 channel='outbox',
                 subject=f'run {status}: {reason}',
+                data=notice,
+                priority=7,
+            )
+        except Exception:
+            pass
+
+    def _send_stall_notice(self: Loop, step_name: str, reason: str) -> None:
+        """Post a radio notice for a step that stalled after its steer.
+
+        The parent follows this outbox, so the stall shows in its feed;
+        the send is guarded like the exit notice -- radio must never
+        break the step close.
+        """
+        notice = (
+            f'Node {self.node.branch} stalled on step {step_name} at iteration'
+            f' {self._run_id}.{self._iter}: {reason}.'
+        )
+        try:
+            self.node.radio.send(
+                channel='outbox',
+                subject=f'step stalled: {step_name}',
                 data=notice,
                 priority=7,
             )
@@ -3906,15 +4796,15 @@ class Loop:
         # mid-step state resume continues from); _on_exit reads the paused
         # stamp and leaves it alone
         if self._paused:
-            # (re)open the pause span at the park instant -- a duplicate
-            # pause event collapses in the credit walk, and a park after a
-            # withdrawn pause (whose resume event closed the span) would
-            # otherwise burn its parked wall-clock against
+            # open the pause span at the park instant -- the credit walk
+            # opens spans only at the loop's park rows, never at the pause
+            # request (the step may have worked on past it), so without
+            # this row the parked wall-clock would burn against
             # the adopted deadlines
             try:
                 event_id = node.record.event_start(
                     'pause',
-                    metadata='parked',
+                    metadata=PARK_REASON,
                     run_id=self._run_id,
                 )
                 if event_id is not None:
@@ -4477,6 +5367,10 @@ class LoopStepFailureEvent(FailureEvent):
 # ------ helper functions
 
 
+# render.variables under a name Loop.__init__'s render parameter cannot shadow
+_render_variables = render.variables
+
+
 def _as_data(value: object, /, *, limit: int) -> str:
     """Render untrusted message text as one bounded, inert prompt line.
 
@@ -4580,19 +5474,98 @@ def _models_match(pinned: str, served: str) -> bool:
     return False
 
 
-def _boot_env(node: Node, *, detached: bool, meta: str) -> dict[str, str]:
-    """Derive the boot-static env/prompt vocabulary, pinned for the run.
+def _effort_ladders(node: Node) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Read and check the effort ladders a node's loop runs on.
 
-    The single var-map derivation (``render.variables``) with the mode
-    flags pinned to their boot values, so a mid-run config edit cannot
-    flip a run's mode composition or its exported environment.
+    The one read the loop's boot and the verbs that launch it (``start``,
+    ``resume``) share: the ladders committed on the tree's root branch in
+    the node's own project, checked against the tree's registered agents.
+
+    Args:
+        node: The node whose loop the ladders steer.
+
+    Returns:
+        Each named agent's ``(levels, floor)``, levels lowest first.
+
+    Raises:
+        ValueError: If the committed settings file is invalid, or a ladder
+            names no registered agent or lists its agent's own levels out
+            of the agent's order.
+
     """
-    base = render.variables(node)
-    base['DETACHED_MODE'] = 'true' if detached else 'false'
-    base['META_MODE'] = 'true' if meta else 'false'
-    base['META_TARGET'] = meta
-    base['FRACTAL_HEADLESS'] = 'true' if node.headless else 'false'
-    return base
+    ref = node.config.get('root')
+    ladders = worktree.committed_effort_ladders(
+        node.repo_dir,
+        ref=ref,
+        project=node.project_path,
+    )
+    _check_effort_ladders(
+        ladders=ladders,
+        ref=ref,
+        project=node.project_path,
+        root=node.db.path.parent,
+    )
+    return ladders
+
+
+def _check_effort_ladders(
+    ladders: dict[str, tuple[tuple[str, ...], str]],
+    *,
+    ref: str,
+    project: str,
+    root: pathlib.Path,
+) -> None:
+    """Refuse committed effort ladders that name no agent or invert one.
+
+    The settings parser checks each ladder's shape; which agents exist,
+    and how each orders its own levels, is known only once the tree's
+    deployment hook file has registered its agents. A ladder built only
+    from levels its agent declares must list them in the agent's order,
+    lowest first; a ladder with a level of its own is taken as written.
+
+    Args:
+        ladders: The committed ladders, keyed by agent name.
+        ref: The root branch they were read from.
+        project: The project whose settings file holds them (``.`` for
+            the repo root).
+        root: The tree's data dir, whose hook file registers custom agents.
+
+    Raises:
+        ValueError: If a ladder names no registered agent, or lists its
+            agent's own levels out of the agent's order.
+
+    """
+    settings = pathlib.PurePosixPath(project, FRACTAL_FOLDER, SETTINGS_FILE)
+    for name, (levels, _) in ladders.items():
+        setting = f'"effort_ladder.{name}" in {settings} on {ref!r}'
+        try:
+            declared = resolve(name, root=root).effort_levels
+        except ValueError as error:
+            raise ValueError(f'{setting} names no registered agent: {error}') from error
+        if set(levels) <= set(declared):
+            ranks = [declared.index(level) for level in levels]
+            if ranks != sorted(ranks):
+                raise ValueError(
+                    f"{setting} lists {list(levels)} out of the agent's order"
+                    f' {list(declared)}; list the levels lowest first.'
+                )
+
+
+def _boot_modes(node: Node, *, detached: bool, meta: str) -> dict[str, str]:
+    """Derive the mode flags pinned to their boot values for the run.
+
+    ``DETACHED_MODE``, ``META_MODE``, ``META_TARGET``, and
+    ``FRACTAL_HEADLESS`` only: a mid-run config edit cannot flip a run's
+    mode composition or its launch backend. Every other variable
+    (``render.variables``: paths, spawn limits) is derived fresh per step,
+    so a mid-run limit edit reaches the next step's prompt and env alike.
+    """
+    return {
+        'DETACHED_MODE': 'true' if detached else 'false',
+        'META_MODE': 'true' if meta else 'false',
+        'META_TARGET': meta,
+        'FRACTAL_HEADLESS': 'true' if node.headless else 'false',
+    }
 
 
 def _parse_duration(value: str, label: str) -> int:
@@ -4636,6 +5609,13 @@ def _log_tail(path: pathlib.Path) -> str:
         if line.strip():
             return line[:_REASON_CHARS]
     return ''
+
+
+def _span(seconds: int) -> str:
+    """Name a duration in whole minutes when it is one, else in seconds."""
+    if seconds >= 60 and seconds % 60 == 0:
+        return f'{seconds // 60} minutes'
+    return f'{seconds}s'
 
 
 def _one_line(text: str) -> str:

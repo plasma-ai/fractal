@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import os
 import typing
 from typing import Optional
 
 import fractal.util
+from fractal.constants import (
+    LATCH_PARK_REASON_PREFIX,
+    PARK_REASON,
+    PREFLIGHT_PARK_REASON_PREFIX,
+    STEER_REASON_PREFIX,
+)
 
 if typing.TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from .db import Database
     from .node import Node
 
@@ -49,10 +58,11 @@ class Time:
         persisted state), so it works for any node, not only the running
         one. The ``run`` scope (``--timeout``) is anchored on the active
         run's ``started_at``; the ``iter`` scope (``--iter-timeout``) on
-        its active iteration's; the ``step`` scope (``--step-timeout``)
-        on its active step's. With no ``scope`` the soonest of the
-        configured deadlines is returned -- the time until the next
-        timeout fires.
+        its active iteration's; the ``step`` scope on its active step's,
+        against that step's effective ceiling (see :meth:`limit`), with a
+        steered relaunch also charged its stuck launch's span, as the loop
+        charges it. With no ``scope`` the soonest of the configured
+        deadlines is returned -- the time until the next timeout fires.
 
         Args:
             scope: ``'run'``, ``'iter'``, or ``'step'`` to query one
@@ -105,26 +115,33 @@ class Time:
             )
         if not rows:
             return None
-        # subtract elapsed time from the budget, crediting paused spans -- a
-        # pause parks the loop with the run/iter rows left open, so the raw
-        # wall clock would charge the frozen time against the deadline (a
-        # step never spans a pause: the interrupted step row closes paused
-        # and resume opens a fresh one)
+        # subtract elapsed time from the budget, crediting paused
+        # spans -- a pause parks the loop with the run/iter rows
+        # left open, so the raw wall clock would charge the frozen
+        # time against the deadline (a step never spans a pause: the
+        # interrupted step row closes paused and resume opens a fresh
+        # one); a steered step also owes its stuck launch's span
         elapsed = fractal.util.time.elapsed(rows[0]['started_at'])
         if scope in ('run', 'iter'):
             elapsed -= self._pause_credit(run_id=run_id, since=rows[0]['started_at'])
+        else:
+            iter_rows = self.db.read('steps', where={'iter_id': rows[0]['iter_id']})
+            elapsed += _steer_charge(rows[0], iter_rows)
         remaining = seconds - elapsed
         return remaining if remaining > 0 else 0.0
 
     def limit(self: Time, scope: Optional[str] = None) -> Optional[float]:
         """Return the configured limit seconds for a scope (``run`` is ``timeout``).
 
-        Pure config -- no row reads -- so it answers for an idle node too:
-        the ``run`` scope reads the whole-run ``timeout`` key, ``iter``/
-        ``step`` their per-level timeouts; an unset ``iter_timeout`` falls
-        back to ``interval`` (the loop bounds an interval iteration by its
-        slot). With no ``scope`` the soonest applicable limit (the smallest
-        configured) is returned.
+        Answers for an idle node too: the ``run`` scope reads the
+        whole-run ``timeout`` key, ``iter`` the ``iter_timeout`` key, with
+        an unset one falling back to ``interval`` (the loop bounds an
+        interval iteration by its slot). The ``step`` scope is the active
+        step's effective ceiling as its launch recorded it -- its step
+        file's ``timeout:`` override, else ``step_timeout`` -- and with no
+        active step the node's ``step_timeout``, else the tightest step
+        file's own (see :meth:`_step_limit`). With no ``scope`` the
+        soonest applicable limit (the smallest configured) is returned.
 
         Args:
             scope: ``'run'``, ``'iter'``, or ``'step'`` to query one
@@ -150,12 +167,85 @@ class Time:
             if not timeout:
                 timeout = self._node.config.get('interval')
         elif scope == 'step':
-            timeout = self._node.config.get('step_timeout')
+            return self._step_limit()
         else:
             raise ValueError(f"scope must be 'run', 'iter', or 'step', got {scope!r}.")
         if not timeout:
             return None
-        return fractal.util.parse_duration_seconds(timeout)
+        return fractal.util.parse_duration_seconds(f'{timeout}')
+
+    def _step_limit(self: Time) -> Optional[float]:
+        """Return the active step's effective ceiling seconds.
+
+        The ceiling the active step's launch enforces, by the loop's
+        launch rule (``Step.limit``): its step file's ``timeout:``
+        override when it parses, else the node's ``step_timeout``. The
+        launch records it on its step row, so a step file edited
+        mid-iteration -- the loop reads step files once per iteration --
+        never shows here; the node's own seat (its exported ``STEP_ID``
+        naming the active step) reads the same ceiling from its exported
+        ``STEP_TIMEOUT_SECONDS``. A row with no recorded ceiling (opened
+        before the column existed, or whose stamp failed) resolves its
+        step file instead. An idle node has no current step, so it
+        answers with the node's ``step_timeout``, else the tightest step
+        file's own ``timeout:`` -- a limit exists either way, which the
+        run and iteration scopes report as not running.
+        """
+        from .loop import Step
+
+        # read the node default
+        timeout = self._node.config.get('step_timeout')
+        default = fractal.util.parse_duration_seconds(f'{timeout}') if timeout else None
+        steps_dir = self._node.node_dir / 'steps'
+        step_id, _, _ = self._node.record.resolve_context(active=True)
+        if step_id is None:
+            if default is not None:
+                return default
+            limits = []
+            for path in sorted(steps_dir.glob('*.md')):
+                try:
+                    seconds = Step.load(path).limit(None)
+                except (OSError, ValueError):
+                    continue
+                if seconds is not None and seconds > 0:
+                    limits.append(float(seconds))
+            return min(limits, default=None)
+        # trust the seat's exported ceiling, the one its launch enforces
+        # ('-1' when none); seat-editable, so garbage falls through
+        if os.environ.get('STEP_ID') == f'{step_id}':
+            try:
+                seconds = int(os.environ.get('STEP_TIMEOUT_SECONDS', ''))
+            except ValueError:
+                pass
+            else:
+                return float(seconds) if seconds > 0 else None
+        # read the ceiling the launch recorded on the row ('-1' when none);
+        # the column is absent where a write-denied reader cannot lift it
+        row, *_ = self.db.read('steps', where={'step_id': step_id}, limit=1)
+        recorded = row.get('timeout')
+        if recorded is not None:
+            return float(recorded) if recorded > 0 else None
+        # resolve an unrecorded row's step file; the built-in sync pass
+        # (a SYNC row at step 0 or under sync mode, as the loop reads it)
+        # runs from the package's mode doc, and a vanished, unreadable,
+        # or malformed file falls back to the node value, as at launch
+        sync = self._node.config.get('sync')
+        sync_mode = True if sync is None else bool(sync)
+        try:
+            if row['step_name'] == 'SYNC' and (row['step'] == 0 or sync_mode):
+                sync_file = self._node._package_dir / '_node' / 'modes' / 'SYNC.md'
+                step = Step.load(sync_file)
+            else:
+                iter_rows = self.db.read('steps', where={'iter_id': row['iter_id']})
+                step = Step.find(
+                    steps_dir,
+                    name=row['step_name'],
+                    occurrence=_step_occurrence(row, iter_rows),
+                )
+            seconds = default if step is None else step.limit(default)
+        except (OSError, ValueError):
+            seconds = default
+        return float(seconds) if seconds is not None and seconds > 0 else None
 
     def _pause_credit(
         self: Time,
@@ -163,12 +253,15 @@ class Time:
         run_id: int,
         since: Optional[str] = None,
     ) -> float:
-        """Return seconds the run spent paused, from its pause/resume instants.
+        """Return seconds the run spent parked, from its park/resume instants.
 
-        Sums the pause->resume spans recorded on the run's events, clipping
+        Sums the park->resume spans recorded on the run's events, clipping
         each to ``since`` (an iteration deadline credits only the span inside
-        the iteration); an unmatched trailing pause accrues to now (the node
-        is still parked). The instants are the substrate for pause-aware cost
+        the iteration); an unmatched trailing park accrues to now (the node
+        is still parked). A span opens at the loop's own park row, never at
+        the pause request: a step in flight works on past the request until
+        the loop parks, and a resume can withdraw the request before any
+        park. The instants are the substrate for pause-aware cost
         attribution as well.
 
         Args:
@@ -183,17 +276,22 @@ class Time:
             'events',
             where={'node': self._node.branch, 'run_id': run_id},
         )
-        # a failed resume never relaunched the loop (the node is still
-        # parked), so only a completed one closes a span; a failed pause
-        # still opens one -- its signal is durable and the loop parks anyway
-        spans = [
-            row
-            for row in rows
-            if row['event'] == 'pause'
-            or (row['event'] == 'resume' and row['status'] == 'completed')
-        ]
+        # a span opens at a pause row the loop wrote as it parked (at a
+        # pause checkpoint, at a latched boot, or at a resume boot's failed
+        # preflight), told from the pause verb's request by its reason; a
+        # failed resume never relaunched the loop (the node is still
+        # parked), so only a completed one closes a span
+        prefixes = (LATCH_PARK_REASON_PREFIX, PREFLIGHT_PARK_REASON_PREFIX)
+        spans: list[dict] = []
+        for row in rows:
+            reason = row['metadata']
+            parked = reason == PARK_REASON or reason.startswith(prefixes)
+            park = row['event'] == 'pause' and parked
+            closed = row['event'] == 'resume' and row['status'] == 'completed'
+            if park or closed:
+                spans.append(row)
         spans.sort(key=lambda row: row['created_at'])
-        # walk the interleaved instants; duplicate pauses collapse onto the
+        # walk the interleaved instants; duplicate parks collapse onto the
         # first, duplicate resumes are inert, and the fixed-width UTC format
         # makes string comparison safe
         credit = 0.0
@@ -213,3 +311,68 @@ class Time:
             start = max(pause_at, since) if since else pause_at
             credit += max(fractal.util.time.elapsed(start), 0.0)
         return credit
+
+
+# ------ helper functions
+
+
+def _step_occurrence(row: dict, rows: Iterable[dict]) -> int:
+    """Return which same-named step file a step row ran, 0-based.
+
+    Each step of an iteration books its row before the next step opens,
+    so the distinct earlier step numbers carrying the row's name count the
+    same-named files ahead of it when the iteration began -- a count a
+    file added or removed since leaves intact, unlike the step number.
+
+    Args:
+        row: The step row.
+        rows: Step rows covering the row's iteration (others are ignored).
+
+    Returns:
+        The occurrence, for ``Step.find``.
+
+    """
+    numbers: set[int] = set()
+    for other in rows:
+        same_iter = other['iter_id'] == row['iter_id']
+        same_name = other['step_name'] == row['step_name']
+        earlier = other['step'] < row['step']
+        if same_iter and same_name and earlier:
+            numbers.add(other['step'])
+    return len(numbers)
+
+
+def _steer_charge(row: dict, rows: Iterable[dict]) -> float:
+    """Return the seconds a steered step's stuck launch already ran.
+
+    A steer relaunches a stuck step on a row of its own, and the loop
+    charges the stuck launch's span against the steered launch's ceiling,
+    so the step deadline runs from the attempt's first launch. The stuck
+    row is the step's previous row in the iteration, closed with a
+    ``steered:`` reason; an attempt buys at most one steer, so the chain is
+    one row long. A retry or a model-drop re-dispatch arms a fresh deadline
+    in the loop, and its row never follows a ``steered:`` one.
+
+    Args:
+        row: The step row.
+        rows: Step rows covering the row's iteration (others are ignored).
+
+    Returns:
+        The stuck launch's seconds, ``0.0`` when the row is no steer.
+
+    """
+    prior: list[dict] = []
+    for other in rows:
+        same_iter = other['iter_id'] == row['iter_id']
+        same_step = other['step'] == row['step']
+        same_name = other['step_name'] == row['step_name']
+        earlier = other['step_id'] < row['step_id']
+        if same_iter and same_step and same_name and earlier:
+            prior.append(other)
+    if not prior:
+        return 0.0
+    stuck = max(prior, key=lambda other: other['step_id'])
+    if not stuck['metadata'].startswith(STEER_REASON_PREFIX):
+        return 0.0
+    started = fractal.util.time.elapsed(stuck['started_at'])
+    return started - fractal.util.time.elapsed(stuck['ended_at'])

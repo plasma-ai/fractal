@@ -21,11 +21,11 @@ requires_approval: false
    lints, stages, commits, and pushes (unless `--local` was passed to
    initialization). Fix and retry on lint failure. Hook reformats of project
    files are auto-retried once -- review what they changed (`git diff HEAD~`).
-   Hook rewrites of wiki pages (`wiki/` and your memory wiki) are auto-retried
-   too when they preserve wiki structure (a breaking rewrite fails with the fix
-   in the error); any hook rewrite of other `.fractal/` pages is refused -- and
-   never run project format hooks over those paths yourself: damage applied
-   before staging bypasses the commit-time guard.
+   Hook rewrites of wiki pages (`$WIKI_DIR` and your memory wiki) are
+   auto-retried too when they preserve wiki structure (a breaking rewrite fails
+   with the fix in the error); any hook rewrite of other `.fractal/` pages is
+   refused -- and never run project format hooks over those paths yourself:
+   damage applied before staging bypasses the commit-time guard.
 
    The summary is wrapped as `<branch>: iteration <run>.<iter> (<summary>)` --
    pass only the bare summary. A message containing the branch name or the word

@@ -119,12 +119,13 @@ if [[ -n "$MERGE_TARGET" ]] \
     # derive PROJECT_PATH the way merge.sh does (a subdir project nests its seed
     # under PROJECT_PATH) so SEED_EXCLUDE below points at the real seed location
     PROJECT_PATH=$(cat "$REPO_DIR/.worktrees/.project/$BRANCH" 2>/dev/null || echo ".")
+    WIKI=$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null || true)
     if [[ "$PROJECT_PATH" == "." ]]; then
         SEED_PREFIX=".fractal"
-        WIKI_PREFIX="wiki"
+        WIKI_PREFIX="${WIKI:-wiki}"
     else
         SEED_PREFIX="$PROJECT_PATH/.fractal"
-        WIKI_PREFIX="$PROJECT_PATH/wiki"
+        WIKI_PREFIX="$PROJECT_PATH/${WIKI:-wiki}"
     fi
     # a scope root that is, or lies under, a .fractal dir is work the
     # merge lands (a --meta node's scope is the target's own seed dir), so
@@ -170,13 +171,13 @@ if [[ -n "$MERGE_TARGET" ]] \
         CHANGED_PATHS=()
         while IFS= read -r -d '' CHANGED_PATH; do
             CHANGED_PATHS+=("$CHANGED_PATH")
-        done < <(git -C "$REPO_DIR" diff --name-only -z "$MERGE_BASE" "$BRANCH" \
+        done < <(git -C "$REPO_DIR" --no-optional-locks diff --name-only -z "$MERGE_BASE" "$BRANCH" \
             -- "${SEED_EXCLUDE[@]}" ":(exclude,glob)$WIKI_PREFIX/**/_index.md" \
             ":(exclude)$WIKI_PREFIX/.wiki" 2>/dev/null || true)
         # warn only when the target still differs from the branch on those paths
         # (after a squash merge the target already matches them -> no warning)
         if [[ ${#CHANGED_PATHS[@]} -gt 0 ]] \
-            && ! git -C "$REPO_DIR" diff --quiet "$MERGE_TARGET" "$BRANCH" \
+            && ! git -C "$REPO_DIR" --no-optional-locks diff --quiet "$MERGE_TARGET" "$BRANCH" \
                 -- "${CHANGED_PATHS[@]}" 2>/dev/null; then
             # word for word the line Node.unmerged_warning builds: the CLI
             # prints that one before its prompt and drops this copy by equality

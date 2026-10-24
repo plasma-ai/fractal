@@ -35,8 +35,9 @@ history. It rejects:
 - a path whose resolution escapes the worktree (a symlinked intermediate
   directory must not lead outside).
 
-Fractal's own content passes this tier: `wiki/` and `.fractal/` are readable
-project state, filtered or collapsed by consumers, not a boundary.
+Fractal's own content passes this tier: the project wiki (`wiki/` unless the
+project's `.fractal/.settings.json` names another folder) and `.fractal/` are
+readable project state, filtered or collapsed by consumers, not a boundary.
 
 Beyond structure, a read or download serves only what the surface exposes: the
 path must be git-tracked — a read under a `since` scope also accepts a member of
@@ -61,4 +62,5 @@ The listing and the validators agree by construction: a listing never names an
 entry a read or download would reject, so a consumer can fetch anything it was
 shown. Reads are non-mutating and allowed regardless of lifecycle state; writes
 and upload commits additionally refuse on a paused node, whose frozen work
-admits only resume, kill, and chat.
+admits only resume, kill, chat, and merge (committed work only; the node stays
+paused).

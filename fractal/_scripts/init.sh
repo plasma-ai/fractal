@@ -12,6 +12,7 @@ TITLE=""
 PARENT=""
 ROOT=""
 PROJECT=""
+WIKI=""
 SCOPE=""
 BASE=""
 META=""
@@ -37,6 +38,7 @@ MAX_COST=""
 MAX_ITER_COST=""
 MAX_STEP_COST=""
 RESERVE_BUDGET=""
+RESERVE_MODE=""
 SYNC=""
 DETACHED=""
 LOCAL=false
@@ -57,6 +59,8 @@ Options:
     --root=<branch>                    Tree root branch (resolved by the caller)
     --project=<relpath>                Sub-project within the repo
                                        (default: inherit the parent's)
+    --wiki=<relpath>                   Shared project-wiki folder within the project
+                                       (resolved by the caller; default: wiki)
     --scope=<subdirs>                  Subdirectory scope within the worktree
                                        (comma-separated; repeatable)
     --base=<branch>                    Branch to start from
@@ -92,6 +96,8 @@ Options:
     --max-iter-cost=<usd>              Maximum cost per iteration in USD
     --max-step-cost=<usd>              Cost per step in USD (warn-only when unenforceable)
     --reserve-budget=<usd>             Budget reserved for cleanup (shifts reserve mode)
+    --reserve-mode=<mode>              Origin of the reserve: default (retunes with
+                                       --max-cost) or explicit (keeps its figure)
     --sync                             Enable sync mode before each step (default)
     --no-sync                          Disable sync mode before each step
     --detached                         Run each step as a separate invocation
@@ -113,6 +119,7 @@ for arg in "$@"; do
         --parent=*) PARENT="${arg#*=}" ;;
         --root=*) ROOT="${arg#*=}" ;;
         --project=*) PROJECT="${arg#*=}" ;;
+        --wiki=*) WIKI="${arg#*=}" ;;
         --base=*) BASE="${arg#*=}" ;;
         --scope=*) SCOPE="${SCOPE:+$SCOPE,}${arg#*=}" ;;
         --agent=*) AGENT="${arg#*=}" ;;
@@ -232,6 +239,13 @@ for arg in "$@"; do
             RESERVE_BUDGET="${arg#*=}"
             if [[ ! "$RESERVE_BUDGET" =~ ^[0-9]*\.?[0-9]+$ ]]; then
                 echo "Error: --reserve-budget requires a non-negative number (USD)" >&2
+                exit 1
+            fi
+            ;;
+        --reserve-mode=*)
+            RESERVE_MODE="${arg#*=}"
+            if [[ ! "$RESERVE_MODE" =~ ^(default|explicit)$ ]]; then
+                echo "Error: --reserve-mode requires default or explicit" >&2
                 exit 1
             fi
             ;;
@@ -438,15 +452,16 @@ if ! git -C "$REPO_DIR" rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/nu
     exit 1
 fi
 if [[ "$PROJECT_PATH" == "." ]]; then
-    WIKI_DIR="wiki"
+    WIKI_DIR="${WIKI:-wiki}"
 else
-    WIKI_DIR="$PROJECT_PATH/wiki"
+    WIKI_DIR="$PROJECT_PATH/${WIKI:-wiki}"
 fi
 if ! git -C "$REPO_DIR" cat-file -e "$BASE_REF:$WIKI_DIR/_index.md" 2>/dev/null; then
     echo "Error: base branch '$BASE_REF' has no project wiki at $WIKI_DIR/_index.md" >&2
     echo "Create one first:" >&2
     echo "  (cd \"$REPO_DIR\" && wiki init --path=\"$WIKI_DIR\"" \
-        "--settings='{\"naming\": {\"validate\": [\"ascii\", \"identifier\"]}}' &&" \
+        "--settings='{\"naming\": {\"validate\": [\"ascii\", \"identifier\"]," \
+        "\"allow\": \".\"}}' &&" \
         "git add \"$WIKI_DIR\" && git commit -m 'add project wiki')" >&2
     exit 1
 fi
@@ -454,7 +469,7 @@ fi
 # tracked changes (untracked .fractal/ metadata is ignored); deeper nodes may
 # branch from a parent mid-iteration
 if [[ "$PARENT_BRANCH" != *.* ]] \
-    && [[ -n "$(git -C "$PARENT_WORKTREE_DIR" status --porcelain -uno)" ]]; then
+    && [[ -n "$(git -C "$PARENT_WORKTREE_DIR" --no-optional-locks status --porcelain -uno)" ]]; then
     echo "Error: branch '$PARENT_BRANCH' has uncommitted changes in $PARENT_WORKTREE_DIR" >&2
     echo "Commit them before initializing a top-level node" >&2
     exit 1
@@ -695,6 +710,7 @@ if [[ "$RESET" == true ]] || [[ ! -f "$NODE_DIR/config.json" ]]; then
     fractal config _set \
         title="${TITLE:-null}" \
         project="$PROJECT_PATH" \
+        ${WIKI:+"wiki=$WIKI"} \
         root="$ROOT" \
         scope="${SCOPE:-null}" \
         base="${BASE:-null}" \
@@ -719,6 +735,7 @@ if [[ "$RESET" == true ]] || [[ ! -f "$NODE_DIR/config.json" ]]; then
         max_iter_cost="${MAX_ITER_COST:-null}" \
         max_step_cost="${MAX_STEP_COST:-null}" \
         reserve_budget="${RESERVE_BUDGET:-null}" \
+        reserve_mode="${RESERVE_MODE:-null}" \
         sync="${SYNC:-null}" \
         detached="${DETACHED:-null}" \
         local="$LOCAL" \
@@ -743,9 +760,10 @@ fi
 
 if [[ ! -f "$MEMORY_DIR/_index.md" ]]; then
     # --quiet: drop wiki's own "Initialized wiki at ..." line so the
-    # created-memory message below is the single user-facing line
+    # created-memory message below is the single user-facing line; the
+    # identifier rule allows '.', so a non-markdown file keeps its extension
     wiki init --quiet --path="$MEMORY_DIR" \
-        --settings='{"naming": {"validate": ["ascii", "identifier"]}}'
+        --settings='{"naming": {"validate": ["ascii", "identifier"], "allow": "."}}'
     echo "Created memory wiki at $MEMORY_DIR"
 fi
 

@@ -62,9 +62,10 @@ intent:
   completed means the run did what was asked — the node declared its goal met (a
   drained finish), or it ran its full configured iteration count with a clean
   final iteration; exited means the run ended for any structural reason —
-  budget, timeout, max iterations with a failed final iteration, crash. A parent
-  deciding whether to merge, continue, or absorb a child's work reads this one
-  word first, which is why the loop is strict about never letting a failed or
+  budget, timeout, max iterations with a failed final iteration, crash (a dead
+  loop's rows closed by the heal, the run row naming it). A parent deciding
+  whether to merge, continue, or absorb a child's work reads this one word
+  first, which is why the loop is strict about never letting a failed or
   budget-cut stop launder into completed. The completed landings stay
   distinguishable too: a full iteration count records its cap on the run row and
   surfaces as `run exhausted: ...` in the status detail, a drained finish whose

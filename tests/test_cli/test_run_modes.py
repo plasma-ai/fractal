@@ -63,6 +63,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -75,11 +76,12 @@ import pytest
 
 from fractal.core.loop import _SETUP_FAIL_CAP
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _git, _kill_tagged
 
 from .conftest import (
     _await_progress,
     _cli_env,
+    _fractal_bin,
     _loop_cmd,
     _reap_group,
     _require_tmux,
@@ -100,6 +102,14 @@ __all__ = [
     'test_checkpoint_pause_resumes_at_next_step',
     'test_boundary_pause_resume_continues_iteration_count',
     'test_pause_with_pending_finish_still_finishes_the_iteration',
+    'test_abort_reaps_the_agents_tool_groups',
+    'test_crash_heal_reaps_the_agents_tool_groups',
+    'test_abort_names_a_worktree_stray_and_leaves_it_running',
+    'test_abort_spares_another_nodes_loop_group',
+    'test_pause_reaps_past_a_broken_sibling',
+    'test_self_pause_finishes_the_step_unmarked',
+    'test_pause_abort_marker_alone_parks_the_step',
+    'test_abort_falls_back_when_the_reap_helper_fails',
     'test_tree_latch_parks_a_booting_loop',
     'test_finish_drain_blocks_on_paused_child',
     'test_per_step_agent_override_runs_in_detached',
@@ -129,11 +139,13 @@ __all__ = [
     'test_codex_preflight_probe_aborts_on_model_rejection',
     'test_codex_preflight_failure_is_loud_and_recoverable',
     'test_codex_preflight_runs_without_timeout_binary',
+    'test_codex_boot_stays_offline_under_the_suite',
     'test_stop_during_approval_wait_records_iteration_stopped',
     'test_run_exits_with_status_exited_on_timeout',
     'test_timeout_killed_step_records_partial_cost',
     'test_timeout_pre_flush_kill_marks_step_unpriced',
     'test_step_timeout_frontmatter_kills_at_the_steps_own_ceiling',
+    'test_step_timeout_reaps_the_agents_tool_groups',
     'test_midrun_step_timeout_retune_takes_effect_next_iteration',
     'test_timeout_force_commit_bypasses_a_failing_hook',
     'test_failing_setup_records_iteration_failed_not_loop_brick',
@@ -146,6 +158,8 @@ __all__ = [
     'test_iter_failure_reason_names_missing_steps_not_agent',
     'test_failed_step_stderr_snapshot_and_exit_coded_reason',
     'test_stream_borne_failure_reason_carries_the_cause',
+    'test_thinking_cap_steers_the_capped_session_once',
+    'test_thinking_cap_after_the_steer_stalls_without_retry',
     'test_cost_cap_guard_failure_reason_is_durable',
     'test_drain_wait_sync_failure_keeps_completed_with_note',
     'test_gate_teardown_reaps_full_process_group',
@@ -158,6 +172,7 @@ _DETACHED_MARKER = 'Each step is a separate session'  # modes/DETACHED.md
 _CONTINUE_MARKER = 'This node was continued'  # modes/CONTINUE.md
 _RESUME_MARKER = 'This node was paused mid-run'  # modes/RESUME.md
 _RESERVE_MARKER = 'Reserve Mode'  # modes/RESERVE.md
+_STALL_MARKER = 'went too long without an action'  # modes/STALL.md
 
 
 # marker that arms the stub's gate: a step prompt carrying it makes the stub
@@ -243,7 +258,55 @@ if [[ "$SELF" == "claude" ]]; then
     # echo session_id like real claude: the opened/resumed id, or a fresh one
     SID="${SESSION##* }"
     [[ -n "$SID" ]] || SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    # open the session's transcript where real claude keeps it, keyed by the
+    # cwd with every non-alphanumeric character dashed
+    SLUG=$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')
+    TRANSCRIPTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$SLUG"
+    mkdir -p "$TRANSCRIPTS"
+    touch "$TRANSCRIPTS/$SID.jsonl"
     printf '{"type":"system","subtype":"init","session_id":"%s"}\\n' "$SID"
+    # a prompt carrying SPAWN-TOOLS starts two long sleepers the way agent
+    # CLIs run tool commands -- one in a process group of its own, one in a
+    # session of its own; SPAWN-LOOP starts another in a session of its own,
+    # standing in for a node loop the agent launched; SPAWN-DAEMON starts a
+    # double-forked daemon that leaves the session and outlives its parent;
+    # each records its pid before the stub moves on, and none holds the
+    # stream pipe
+    TOOL='
+import os, sys, time
+role, capture = sys.argv[1:3]
+if role == "group":
+    os.setpgid(0, 0)
+elif role in ("session", "loop"):
+    os.setsid()
+elif os.fork():
+    os._exit(0)
+else:
+    os.setsid()
+    if os.fork():
+        os._exit(0)
+with open(f"{capture}/tool_{role}.pid", "w") as handle:
+    handle.write(f"{os.getpid()}")
+time.sleep(600)
+'
+    ROLES=()
+    [[ "$PROMPT" == *SPAWN-TOOLS* ]] && ROLES+=(group session)
+    [[ "$PROMPT" == *SPAWN-LOOP* ]] && ROLES+=(loop)
+    [[ "$PROMPT" == *SPAWN-DAEMON* ]] && ROLES+=(daemon)
+    for ROLE in "${ROLES[@]}"; do
+        python3 -c "$TOOL" "$ROLE" "$CAPTURE_DIR" >/dev/null 2>&1 &
+    done
+    for ROLE in "${ROLES[@]}"; do
+        while [[ ! -s "$CAPTURE_DIR/tool_$ROLE.pid" ]]; do sleep 0.05; done
+    done
+    # a prompt carrying SELF-PAUSE pauses the stub's own node from inside the
+    # step's process tree, in a process group of its own the way an agent's
+    # tool command runs, recording the exit
+    if [[ "$PROMPT" == *SELF-PAUSE* ]]; then
+        python3 -c 'import os, sys; os.setpgid(0, 0); os.execvp(sys.argv[1], sys.argv[1:])' \
+            fractal node pause --reason self >"$CAPTURE_DIR/self_pause.out" 2>&1
+        echo "$?" >"$CAPTURE_DIR/self_pause.rc"
+    fi
     # a prompt carrying USAGE-THEN-HANG emits one usage-bearing frame and hangs
     # with NO result, so the timeout kill yields the killed-mid-stream shape;
     # the usage_flushed marker tells load starvation from a recording gap
@@ -257,6 +320,25 @@ if [[ "$SELF" == "claude" ]]; then
     # recorded); the marker tells load starvation from a streamed-then-hung stub
     if [[ "$PROMPT" == *INIT-THEN-HANG* ]]; then
         touch "$CAPTURE_DIR/init_hung"
+        exec sleep 60
+    fi
+    # a prompt carrying THINKING-CAP streams a thinking-only reply cut at the
+    # output cap plus claude's own synthetic continuation, then hangs as the
+    # auto-continued reply would -- the loop must end the call; CAP-TWICE also
+    # flags the session (once per capture) so its steered resume caps again
+    CAP=""
+    if [[ "$PROMPT" == *THINKING-CAP* ]]; then CAP=1; fi
+    if [[ -f "$CAPTURE_DIR/recap_$SID" ]]; then
+        rm -f "$CAPTURE_DIR/recap_$SID"
+        CAP=1
+    fi
+    if [[ -n "$CAP" ]]; then
+        if [[ "$PROMPT" == *CAP-TWICE* ]] && [[ ! -f "$CAPTURE_DIR/recapped" ]]; then
+            touch "$CAPTURE_DIR/recap_$SID" "$CAPTURE_DIR/recapped"
+        fi
+        printf '{"type":"assistant","message":{"id":"msg_cap_%s","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"","signature":"CAQS"}],"stop_reason":null},"parent_tool_use_id":null,"session_id":"%s"}\\n' "$N" "$SID"
+        printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces."}]},"parent_tool_use_id":null,"session_id":"%s","isSynthetic":true}\\n' "$SID"
+        echo "$$" > "$CAPTURE_DIR/capped_$N.txt"
         exec sleep 60
     fi
     # a prompt carrying FAIL-WITH-STDERR prints a diagnosis to stderr and
@@ -376,6 +458,16 @@ _INIT_HANG_STEPS = {
     '02-commit.md': '# Commit\n\nCommit step.\n',
 }
 
+# the tool modes: a body carrying the tools marker makes the stub start one
+# sleeper in its own process group and one in its own session, the loop
+# marker another in its own session standing in for a launched node loop,
+# the daemon marker a double-forked daemon working in the worktree (see the
+# stub)
+_TOOLS_MARKER = 'SPAWN-TOOLS'
+_SELF_PAUSE_MARKER = 'SELF-PAUSE'
+_LOOP_MARKER = 'SPAWN-LOOP'
+_DAEMON_MARKER = 'SPAWN-DAEMON'
+
 # the stub's fail modes: a body carrying the fail marker fails that step, and
 # a fail_syncs marker file in the capture dir fails every SYNC launch -- both
 # print the diagnosis line to stderr and exit 7, the agent-failure shape
@@ -387,6 +479,12 @@ _FAIL_STDERR = 'stub failure: credentials expired'
 # step, not the exit code, and the .err capture stays blank)
 _STREAM_ERROR_MARKER = 'ERROR-ON-STREAM'
 _STREAM_ERROR_DETAIL = 'stub stream failure: quota exhausted'
+
+# the thinking-cap mode: a claude body carrying the marker streams a
+# thinking-only reply cut at the output cap and claude's continuation, then
+# hangs; adding the twice marker makes the steered resume cap as well
+_THINKING_CAP_MARKER = 'THINKING-CAP'
+_CAP_TWICE_MARKER = 'CAP-TWICE'
 
 # rates + expected cost for the killed-step assertion (Anthropic convention:
 # disjoint buckets); the usage figures must match the stub's emitted frame
@@ -743,12 +841,7 @@ def test_pause_mid_step_parks_and_resume_adopts_run(repo: dict) -> None:
         # pause: signal first (the loop reclassifies the abort by it), then
         # the real pause.sh reaps the gated agent's group
         Node(worktree).record.signal_set('pause', 'take five')
-        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
-        abort = subprocess.run(
-            ['bash', f'{pause_sh}', f'{worktree}'],
-            capture_output=True,
-            text=True,
-        )
+        abort = _run_script('pause.sh', worktree)
         assert abort.returncode == 0, abort.stderr
         assert 'Aborted in-flight agent' in abort.stdout, abort.stdout
         proc.wait(timeout=60)
@@ -1021,12 +1114,7 @@ def test_pause_with_pending_finish_still_finishes_the_iteration(repo: dict) -> N
         # finish lands first, then the pause aborts the gated step mid-flight
         Node(worktree).record.signal_set('finish', 'wrap up')
         Node(worktree).record.signal_set('pause', 'brake')
-        pause_sh = _worktree_root() / 'fractal' / '_scripts' / 'pause.sh'
-        abort = subprocess.run(
-            ['bash', f'{pause_sh}', f'{worktree}'],
-            capture_output=True,
-            text=True,
-        )
+        abort = _run_script('pause.sh', worktree)
         assert abort.returncode == 0, abort.stderr
         proc.wait(timeout=60)
     finally:
@@ -1069,6 +1157,367 @@ def test_pause_with_pending_finish_still_finishes_the_iteration(repo: dict) -> N
         .splitlines()[1:]
     )
     assert iters == ['1,completed,0'], iters
+
+
+@pytest.mark.parametrize(('verb', 'status'), [('pause', 'paused'), ('kill', 'killed')])
+def test_abort_reaps_the_agents_tool_groups(repo: dict, verb: str, status: str) -> None:
+    """Pause and kill reap the process groups the agent's tool commands run in.
+
+    Agent CLIs run each tool command in a group (or session) of its own, so
+    aborting the recorded step group alone leaves them running, reparented
+    to init. With the gated step parked mid-invocation and two tool sleepers
+    up -- one in its own group, one ``setsid``'d -- the verb must leave
+    neither alive, and the node still lands its status.
+    """
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, f'reap{verb}', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+
+    capture_name = f'reap_{verb}'
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name=capture_name)
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        tools = _tool_pids(capture)
+        assert len(tools) == 2, tools
+        abort = _run(worktree, 'node', verb, '--reason', 'reap')
+        assert abort.returncode == 0, abort.stderr
+        proc.wait(timeout=60)
+        alive = _alive_pids(tools)
+    finally:
+        _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    assert alive == [], (alive, tools)
+    assert _run(worktree, 'node', 'status').stdout.strip() == status
+
+
+def test_crash_heal_reaps_the_agents_tool_groups(repo: dict) -> None:
+    """The crash heal reaps the process groups the dead loop's agent tools run in.
+
+    A loop that dies out of band leaves its agent invocation running, and
+    the agent's tool commands run in groups (or sessions) of their own. With
+    the gated step parked and two tool sleepers up -- one in its own group,
+    one ``setsid``'d -- the loop process alone is killed: the next status
+    read heals the node and must leave neither sleeper alive.
+    """
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'reapheal', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='reap_heal')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        tools = _tool_pids(capture)
+        assert len(tools) == 2, tools
+        # the out-of-band death: the loop process alone, its agent left running
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=60)
+        status = _run(worktree, 'node', 'status')
+        alive = _alive_pids(tools)
+    finally:
+        (capture / 'gate_release').touch()
+        _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    assert status.stdout.startswith('exited'), status.stdout
+    assert alive == [], (alive, tools, status.stderr)
+
+
+@pytest.mark.parametrize('verb', ['pause', 'kill'])
+def test_abort_names_a_worktree_stray_and_leaves_it_running(
+    repo: dict,
+    verb: str,
+) -> None:
+    """A process outside the agent's tree working in the worktree is named, not killed.
+
+    A double-forked daemon leaves the agent's session and loses its parent
+    before the verb, so no walk can tie it to the invocation; the pause's
+    and the kill's working-directory sweep names it in the output, with
+    the node whose reap left it, and leaves it alive. The node's own loop
+    group is no stray: the launch backgrounds a sleeper in it, working in
+    the worktree too, and the sweep names the daemon alone.
+    """
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_DAEMON_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, f'stray{verb}', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+
+    proc, capture, log = _launch_finish_wait(
+        repo=repo,
+        node=node,
+        capture_name=f'reap_stray_{verb}',
+        prelude='sleep 600 &',
+    )
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        (daemon,) = _tool_pids(capture)
+        abort = _run(worktree, 'node', verb, '--reason', 'stray')
+        assert abort.returncode == 0, abort.stderr
+        proc.wait(timeout=60)
+        alive = _alive_pids([daemon])
+    finally:
+        _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    strays = {int(pid) for pid in re.findall(r'pid (\d+) works in', abort.stderr)}
+    assert strays == {daemon}, abort.stderr
+    # the line names the node whose reap left the daemon running
+    named = f'pid {daemon} works in the worktree of main.stray{verb}'
+    assert named in abort.stderr, abort.stderr
+    assert 'left running' in abort.stderr, abort.stderr
+    assert alive == [daemon]
+
+
+@pytest.mark.parametrize('verb', ['pause', 'kill'])
+def test_abort_spares_another_nodes_loop_group(repo: dict, verb: str) -> None:
+    """Pause and kill never reap a group another node records as its loop.
+
+    A node the agent launches stays a child of the agent's tool until its
+    launcher returns, so a walk from the agent reaches its loop. The stub
+    starts a ``setsid``'d sleeper standing in for that loop, recorded in a
+    sibling node's ``.pgid``, beside the plain tool sleepers: the verb
+    reaps the tools, spares the loop, and names the spared group -- never
+    as a stray, though the loop works in the worktree it was started in.
+    """
+    steps = {
+        '01-gate.md': (
+            f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER} {_LOOP_MARKER}\n'
+        ),
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, f'spare{verb}', detached=False, sync=False, steps=steps)
+    sibling = _make_node(repo, f'spare{verb}kid', detached=False, sync=False)
+    worktree = node['worktree']
+    record = sibling['node_dir'] / '.pgid'
+
+    capture_name = f'reap_spare_{verb}'
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name=capture_name)
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        # role order: group, loop, session
+        group, loop, session = _tool_pids(capture)
+        record.write_text(f'{loop}\n', encoding='utf-8')
+        abort = _run(worktree, 'node', verb, '--reason', 'spare')
+        assert abort.returncode == 0, abort.stderr
+        proc.wait(timeout=60)
+        alive = _alive_pids([group, loop, session])
+    finally:
+        record.unlink(missing_ok=True)
+        _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    assert alive == [loop], (alive, group, loop, session)
+    assert f'spared process group {loop}' in abort.stderr, abort.stderr
+    assert f'pid {loop} works in' not in abort.stderr, abort.stderr
+
+
+def test_pause_reaps_past_a_broken_sibling(repo: dict) -> None:
+    """A sibling node git cannot resolve never stops the reap.
+
+    The spared-group records are found by path from the registry alone, so
+    a sibling whose worktree no longer resolves (its ``.git`` link points
+    nowhere) is skipped, not fatal: the pause still reaps the tools.
+    """
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'reapbroken', detached=False, sync=False, steps=steps)
+    sibling = _make_node(repo, 'reapbrokenkid', detached=False, sync=False)
+    worktree = node['worktree']
+    link = sibling['worktree'] / '.git'
+    saved = link.read_text(encoding='utf-8')
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='reap_broken')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        tools = _tool_pids(capture)
+        assert len(tools) == 2, tools
+        link.write_text('gitdir: /nonexistent\n', encoding='utf-8')
+        pause = _run(worktree, 'node', 'pause', '--reason', 'broken')
+        assert pause.returncode == 0, pause.stderr
+        proc.wait(timeout=60)
+        alive = _alive_pids(tools)
+    finally:
+        link.write_text(saved, encoding='utf-8')
+        _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    assert alive == [], (alive, tools, pause.stderr)
+
+
+def test_self_pause_finishes_the_step_unmarked(repo: dict) -> None:
+    """A pause run from inside the step's own tree leaves that tree whole, unmarked.
+
+    The agent that pauses its own node is not aborted, and neither is any
+    tool it started: both tool sleepers keep running, no abort marker may
+    land (it would classify a later, unrelated failure as paused), the
+    confirmation claims no abort of the caller's own agent, the step
+    finishes, and the loop parks at the next checkpoint.
+    """
+    steps = {
+        '01-gate.md': (
+            f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}'
+            f' {_SELF_PAUSE_MARKER}\n'
+        ),
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'selfpause', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+    node_dir = node['node_dir']
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='self_pause')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        output = (capture / 'self_pause.out').read_text(encoding='utf-8')
+        assert (capture / 'self_pause.rc').read_text().strip() == '0', output
+        tools = _tool_pids(capture)
+        alive = _alive_pids(tools)
+        marked = (node_dir / '.pause_abort').exists()
+        (capture / 'gate_release').touch()
+        proc.wait(timeout=60)
+    finally:
+        _, result = _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    assert len(tools) == 2, tools
+    assert sorted(alive) == sorted(tools), (alive, tools, output)
+    assert "except the caller's own" in output, output
+    assert not marked, output
+    assert result.returncode == 0, result.stdout
+    assert _run(worktree, 'node', 'status').stdout.strip() == 'paused', result.stdout
+    steps_rows = (
+        _run(
+            worktree,
+            'db',
+            '_query',
+            "SELECT step, status FROM steps WHERE node = 'main.selfpause'"
+            ' ORDER BY step_id',
+            '--csv',
+        )
+        .stdout.strip()
+        .splitlines()[1:]
+    )
+    assert steps_rows == ['1,completed'], steps_rows
+
+
+def test_pause_abort_marker_alone_parks_the_step(repo: dict) -> None:
+    """The reap marks the abort before its signal, and the mark alone parks the step.
+
+    With no pause signal at all -- the shape a resume withdrawing the signal
+    mid-abort leaves -- the real ``pause.sh`` hands the marker to the reap,
+    which touches it before the agent dies, so the loop records the step
+    paused, never failed. The tool sleepers dying proves the reap ran (the
+    group-only fallback, which marks on its own, never reaches them).
+    """
+    steps = {
+        '01-gate.md': f'# Gate\n\nGated step. {_GATE_MARKER} {_TOOLS_MARKER}\n',
+        '02-commit.md': '# Commit\n\nCommit step.\n',
+    }
+    node = _make_node(repo, 'markpause', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name='mark_pause')
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        abort = _run_script('pause.sh', worktree)
+        assert abort.returncode == 0, abort.stderr
+        tools = _tool_pids(capture)
+        alive = _alive_pids(tools)
+    finally:
+        # an unmarked abort fails the step and re-enters the gate, so the
+        # launch never exits -- the step rows below name the failure
+        _, result = _finish_wait_result(proc, capture, log)
+        _kill_tools(capture)
+
+    steps_rows = (
+        _run(
+            worktree,
+            'db',
+            '_query',
+            "SELECT step, status FROM steps WHERE node = 'main.markpause'"
+            ' ORDER BY step_id',
+            '--csv',
+        )
+        .stdout.strip()
+        .splitlines()[1:]
+    )
+    assert len(tools) == 2, tools
+    assert alive == [], (alive, tools)
+    assert steps_rows == ['1,paused'], (steps_rows, result.stdout)
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize('script', ['pause.sh', 'kill.sh'])
+def test_abort_falls_back_when_the_reap_helper_fails(repo: dict, script: str) -> None:
+    """Pause and kill still end the step when ``fractal node _reap`` cannot run.
+
+    A shim fails ``node _reap`` with the CLI's error exit. ``pause.sh`` then
+    marks the abort and ends the step group itself, so with no pause signal
+    set the loop records the step paused on the mark alone and parks;
+    ``kill.sh``'s own teardown ends both recorded groups and drops their
+    records.
+    """
+    verb = script.removesuffix('.sh')
+    name = f'fallback{verb}'
+    node = _make_node(repo, name, detached=False, sync=False, steps=_GATE_STEPS)
+    worktree = node['worktree']
+    node_dir = node['node_dir']
+    # a fractal whose reap helper breaks and whose every other call runs
+    shim = repo['root'] / f'shim_{verb}'
+    shim.mkdir()
+    fractal_shim = shim / 'fractal'
+    fractal_shim.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ "${1:-} ${2:-}" == "node _reap" ]]; then exit 2; fi\n'
+        f'exec "{_fractal_bin()}" "$@"\n',
+        encoding='utf-8',
+    )
+    fractal_shim.chmod(0o755)
+
+    proc, capture, log = _launch_finish_wait(repo, node, capture_name=name)
+    try:
+        assert _await_gate(capture, deadline=time.monotonic() + 60), log.read_text()
+        step_pgid = int((node_dir / '.step_pgid').read_text(encoding='utf-8'))
+        loop_pgid = int((node_dir / '.pgid').read_text(encoding='utf-8'))
+        abort = _run_script(script, worktree, bindir=shim)
+        proc.wait(timeout=60)
+    finally:
+        _, result = _finish_wait_result(proc, capture, log)
+
+    assert abort.returncode == 0, abort.stderr
+    if script == 'pause.sh':
+        # the loop outlives the abort and parks the step on the mark alone
+        assert 'Aborted in-flight agent' in abort.stdout, abort.stdout
+        steps_rows = _query_column(
+            worktree,
+            "SELECT step || ',' || status FROM steps"
+            f" WHERE node = 'main.{name}' ORDER BY step_id",
+        )
+        assert steps_rows == ['1,paused'], (steps_rows, result.stdout)
+        assert result.returncode == 0, result.stdout
+        groups = [step_pgid]
+    else:
+        assert 'Killed node' in abort.stdout, abort.stdout
+        assert not (node_dir / '.pgid').exists()
+        assert not (node_dir / '.step_pgid').exists()
+        groups = [step_pgid, loop_pgid]
+    # kill delivery is asynchronous: wait for the signaled groups to empty,
+    # re-arming the wait as each survivor dies
+    gone = _await_progress(
+        check=lambda: not _alive_group_pids(groups),
+        progress=lambda: tuple(_alive_group_pids(groups)),
+        deadline=time.monotonic() + 15,
+    )
+    assert gone, _alive_group_pids(groups)
 
 
 def test_tree_latch_parks_a_booting_loop(repo: dict) -> None:
@@ -2449,20 +2898,20 @@ def test_cascaded_budget_finish_records_exited(
 
 
 def test_codex_preflight_probe_aborts_on_model_rejection(repo: dict) -> None:
-    """A cost-capped codex node aborts at launch if codex rejects its model.
+    """A codex node with an explicit model aborts at launch if codex rejects it.
 
-    Codex spend is priced from token counts, so a cost cap needs an explicit
-    ``--model`` -- but some codex accounts reject some explicit models (e.g. a
-    ChatGPT-plan account lacking the entitlement) and would fail every step.
-    The run-start probe catches this and aborts with the probe's own error
-    before any step (or run) starts.
+    Some codex accounts reject some explicit models (e.g. a ChatGPT-plan
+    account lacking the entitlement) and would fail every step. The
+    run-start probe catches this and aborts with the probe's own error
+    before any step (or run) starts. The probe runs for any explicit
+    model; under a cost cap the pricing check precedes it, so a capped
+    node's model is already priced by the time the probe asks codex.
     """
     node = _make_node(
         repo=repo,
         name='codexprobe',
         detached=False,
         sync=False,
-        max_cost=1.0,
         agent='codex',
     )
     # point the node model at the stub's rejection sentinel
@@ -2565,14 +3014,21 @@ def test_codex_preflight_runs_without_timeout_binary(repo: dict) -> None:
         agent='codex',
     )
     worktree = node['worktree']
-    # a real priced model: codex accepts it (not the reject sentinel) and the
-    # per-step cost-cap pricing check passes, so the iteration runs to completion
+    # a priced model: codex accepts it (not the reject sentinel) and the
+    # per-step cost-cap pricing check passes against a test-scoped HOME
+    # cache, so the iteration runs to completion
     assert _run(worktree, 'config', '_set', 'model=gpt-4o-mini').returncode == 0
+    home = repo['root'] / 'home_codexnotimeout'
+    (home / '.fractal').mkdir(parents=True, exist_ok=True)
+    (home / '.fractal' / 'pricing.json').write_text(
+        json.dumps({'gpt-4o-mini': _STUB_PRICING[_STUB_MODEL]}),
+        encoding='utf-8',
+    )
     capture = repo['root'] / 'capture_codexnotimeout'
     if capture.exists():
         shutil.rmtree(capture)
     capture.mkdir()
-    env = _cli_env(CAPTURE_DIR=f'{capture}', STUB_COST='0')
+    env = _cli_env(CAPTURE_DIR=f'{capture}', STUB_COST='0', HOME=f'{home}')
     env['PATH'] = _path_without_timeout(repo['bindir'], repo['root'])
     result = _run_reaped(
         _loop_cmd(worktree),
@@ -2586,6 +3042,29 @@ def test_codex_preflight_runs_without_timeout_binary(repo: dict) -> None:
     assert 'codex preflight failed' not in result.stderr, result.stderr
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert any(c['agent'] == 'codex' for c in calls.values()), (calls, result.stderr)
+
+
+def test_codex_boot_stays_offline_under_the_suite(repo: dict) -> None:
+    """A codex loop under the suite's ``OFFLINE_MODE`` never fetches the price table.
+
+    Online, a token-priced boot refreshes the LiteLLM table on every start.
+    The session's ``OFFLINE_MODE=true`` reaches the loop subprocess through
+    its env, so the boot skips the fetch, warns that it serves the cached
+    table, and runs its steps on it: no fetch swaps a table in over the
+    hermetic home's seeded one.
+    """
+    node = _make_node(repo, 'codexoffline', detached=False, sync=False, agent='codex')
+    table = pathlib.Path(_cli_env()['HOME']) / '.fractal' / 'pricing.json'
+    seeded = table.stat()
+    calls, result = _run_loop(repo, node, capture_name='codexoffline')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert calls[1]['agent'] == 'codex', (calls, result.stderr)
+    warning = 'Warning: could not refresh pricing; using cached pricing.json.'
+    assert warning in result.stderr, result.stderr
+    # the seeded table is the same file, unwritten
+    after = table.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (seeded.st_ino, seeded.st_mtime_ns)
 
 
 def test_stop_during_approval_wait_records_iteration_stopped(repo: dict) -> None:
@@ -2844,6 +3323,40 @@ def test_step_timeout_frontmatter_kills_at_the_steps_own_ceiling(repo: dict) -> 
         .splitlines()[-1]
     )
     assert run == 'exited/1', (run, result.stdout)
+
+
+def test_step_timeout_reaps_the_agents_tool_groups(repo: dict) -> None:
+    """A step deadline reaps the process groups the agent's tool commands run in.
+
+    The hanging stub starts one tool sleeper in its own group and one
+    ``setsid``'d before it hangs; the step's own ceiling kills the
+    invocation, and neither tool may outlive it.
+    """
+    steps = {
+        '01-hang.md': (
+            '---\ntimeout: 5s\n---\n# Hang\n\nHanging step.'
+            f' {_TOOLS_MARKER} {_INIT_HANG_MARKER}\n'
+        ),
+    }
+    node = _make_node(repo, 'reapdeadline', detached=False, sync=False, steps=steps)
+    capture = repo['root'] / 'capture_reap_deadline'
+    try:
+        _, result = _run_loop(repo, node, capture_name='reap_deadline')
+        # under full-suite load the step's ceiling can lapse before the stub
+        # starts both tools; the hang marker, touched once both recorded,
+        # tells that starvation (nothing to reap -- skip) from a tool
+        # outliving the reap, and orders the pid reads after both writes (a
+        # tool reaped mid-record leaves its pid file empty)
+        if not (capture / 'init_hung').exists():
+            pytest.skip('load starvation: the stub never started both tools')
+        tools = _tool_pids(capture)
+        alive = _alive_pids(tools)
+    finally:
+        _kill_tools(capture)
+
+    assert 'timed out' in result.stdout, result.stdout
+    assert len(tools) == 2, (tools, result.stdout)
+    assert alive == [], (alive, tools)
 
 
 def test_midrun_step_timeout_retune_takes_effect_next_iteration(repo: dict) -> None:
@@ -3133,8 +3646,9 @@ def test_agent_runs_from_worktree_root_cwd(repo: dict) -> None:
     The charter tells every node to work in the worktree, so a bare relative
     write must land in the deliverable tree -- never inside ``.fractal/``,
     where the merge's seed strip would silently drop it. The node's claude
-    settings arrive via the ``--settings`` flag, and claude's config home is
-    never overridden -- auth and session storage stay the user's own.
+    settings arrive via the ``--settings`` flag (with the instruction
+    excludes beside them), and claude's config home is never overridden --
+    auth and session storage stay the user's own.
     """
     node = _make_node(repo, 'agentcwd', detached=False, sync=False)
     # launch from the node dir -- the ambient CWD must not leak into the agent
@@ -3146,11 +3660,14 @@ def test_agent_runs_from_worktree_root_cwd(repo: dict) -> None:
     )
     assert calls, result.stdout
     worktree = node['worktree'].resolve()
-    settings = node['node_dir'] / '.claude' / 'settings.json'
+    path = node['node_dir'] / '.claude' / 'settings.json'
+    seeded = json.loads(path.read_text(encoding='utf-8'))
     for call in calls.values():
         assert pathlib.Path(call['cwd']).resolve() == worktree, result.stdout
         assert call['claude_config'] == '', result.stdout
-        assert pathlib.Path(call['settings']) == settings, result.stdout
+        settings = json.loads(call['settings'])
+        assert settings.pop('claudeMdExcludes'), result.stdout
+        assert settings == seeded, result.stdout
 
 
 def test_run_completes_when_max_iters_reached(repo: dict) -> None:
@@ -3277,11 +3794,11 @@ def test_failed_step_stderr_snapshot_and_exit_coded_reason(repo: dict) -> None:
 def test_stream_borne_failure_reason_carries_the_cause(repo: dict) -> None:
     """A stream-borne failure's step row names the cause; the iter stays short.
 
-    An agent that reports its failure on the JSON stream and exits 0 (the
-    codex shape) leaves a blank ``.err`` capture, so the stream exception is
-    the only diagnosis. The step row's reason carries the one-line cause, the
-    iteration rollup keeps the short ``agent error`` label, and the
-    ``tmp/err/`` snapshot holds the full traceback.
+    An agent that reports its failure on the JSON stream and exits 0 leaves a
+    blank ``.err`` capture, so the stream exception is the only diagnosis. The
+    step row's reason carries the one-line cause, the iteration rollup keeps
+    the short ``agent error`` label, and the ``tmp/err/`` snapshot holds the
+    full traceback.
     """
     steps = {'01-boom.md': f'# Boom\n\nStream-failing step. {_STREAM_ERROR_MARKER}\n'}
     node = _make_node(
@@ -3346,14 +3863,150 @@ def test_stream_borne_failure_reason_carries_the_cause(repo: dict) -> None:
     assert 'AgentStreamError' in snapshot.read_text(encoding='utf-8')
 
 
-def test_cost_cap_guard_failure_reason_is_durable(repo: dict) -> None:
-    """A pre-launch guard failure's step row names the guard, not the agent.
+# ------ thinking cap
 
-    A cost cap with no priceable model fails every step before any agent
-    launches -- a config error, not an agent one. The step row's reason
-    carries the guard's own message (the same line the pane prints), so
-    ``node activity`` names the real cause instead of a bare ``agent error``
-    that would misattribute a launch that never happened.
+
+@pytest.mark.parametrize('detached', [False, True], ids=['continuous', 'detached'])
+def test_thinking_cap_steers_the_capped_session_once(
+    repo: dict,
+    detached: bool,
+) -> None:
+    """A thinking-only reply at the output cap ends the call and steers once.
+
+    The loop ends the capped invocation instead of letting claude
+    auto-continue, then resumes the very session the stream captured --
+    in detached mode too -- with ``STALL.md`` as the whole prompt. The
+    capped launch's row closes stopped and the steered one books its own
+    row marked ``steer``; neither is a retry, and the next step runs as
+    it always does.
+    """
+    name = 'capsteer' + ('det' if detached else '')
+    steps = {
+        '01-plan.md': f'# Plan\n\nPlanning step. {_THINKING_CAP_MARKER}\n',
+        '02-beta.md': '# Beta\n\nSecond step.\n',
+    }
+    node = _make_node(repo, name, detached=detached, sync=False, steps=steps)
+    worktree = node['worktree']
+    # bound the red run: an unended capped call hangs until the step timeout
+    assert _run(worktree, 'config', '_set', 'step_timeout=20s').returncode == 0
+    calls, result = _run_loop(repo, node, capture_name=name)
+    capture = repo['root'] / f'capture_{name}'
+
+    # the plan call capped, was ended (not orphaned), and its session resumed
+    # by a steer carrying only STALL.md; beta then ran once, unaffected
+    assert len(calls) == 3, (calls, result.stdout)
+    plan, steer, beta = calls[1], calls[2], calls[3]
+    assert 'Planning step' in plan['prompt']
+    flag, session = plan['session'].split()
+    assert flag == '--session-id'
+    pid = int((capture / 'capped_1.txt').read_text(encoding='utf-8'))
+    assert _alive_pids([pid]) == []
+    assert steer['session'] == f'--resume {session}'
+    assert _STALL_MARKER in steer['prompt']
+    assert 'Planning step' not in steer['prompt']
+    assert 'Second step' in beta['prompt']
+    assert not (capture / 'capped_2.txt').exists()
+
+    # the capped row stopped with the steer named (unpriced: the stub's capped
+    # reply carries no usage); the steer's row completed
+    rows = _step_rows(worktree, f'main.{name}')
+    assert rows == [
+        'plan/stopped/steered: thinking cap; unpriced',
+        'plan/completed/steer',
+        'beta/completed/',
+    ], result.stdout
+    iters = _query_column(
+        worktree,
+        "SELECT status || '/' || COALESCE(metadata, '') FROM iters"
+        f" WHERE node = 'main.{name}' ORDER BY rowid",
+    )
+    assert iters == ['completed/'], result.stdout
+
+
+def test_thinking_cap_after_the_steer_stalls_without_retry(repo: dict) -> None:
+    """A second cap after the steer stalls the step: no retry, parent told.
+
+    The steered resume capping too ends the step stalled -- booked like a
+    timeout (exited, with the stall reason) so even ``step_retries`` 3
+    buys no retry -- the iteration fails over to the next one as after a
+    timed-out step, and a notice on the node's outbox reaches the
+    parent's feed naming the node, step, iteration and reason.
+    """
+    steps = {
+        '01-plan.md': (
+            f'# Plan\n\nPlanning step. {_THINKING_CAP_MARKER} {_CAP_TWICE_MARKER}\n'
+        ),
+        '02-beta.md': '# Beta\n\nSecond step.\n',
+    }
+    node = _make_node(repo, 'capstall', detached=False, sync=False, steps=steps)
+    worktree = node['worktree']
+    for setting in ('step_retries=3', 'step_timeout=20s', 'max_iters=2'):
+        assert _run(worktree, 'config', '_set', setting).returncode == 0
+    calls, result = _run_loop(repo, node, capture_name='capstall')
+    capture = repo['root'] / 'capture_capstall'
+
+    # iteration 1: plan caps, the steer caps -- stalled, no retry, no beta;
+    # iteration 2: plan caps once and its steer completes, then beta runs
+    assert len(calls) == 5, (calls, result.stdout)
+    assert _STALL_MARKER in calls[2]['prompt']
+    assert 'Planning step' in calls[3]['prompt']
+    assert _STALL_MARKER in calls[4]['prompt']
+    assert 'Second step' in calls[5]['prompt']
+    pids = [
+        int((capture / f'capped_{num}.txt').read_text(encoding='utf-8'))
+        for num in (1, 2, 3)
+    ]
+    assert _alive_pids(pids) == []
+
+    # the capped rows are unpriced: the stub's capped reply carries no usage
+    rows = _step_rows(worktree, 'main.capstall')
+    stall = 'stalled: thinking cap, after a steer'
+    assert rows == [
+        'plan/stopped/steered: thinking cap; unpriced',
+        f'plan/exited/{stall}; unpriced',
+        'beta/stopped/failed on plan',
+        'plan/stopped/steered: thinking cap; unpriced',
+        'plan/completed/steer',
+        'beta/completed/',
+    ], result.stdout
+    iters = _query_column(
+        worktree,
+        "SELECT status || '/' || COALESCE(metadata, '') FROM iters"
+        " WHERE node = 'main.capstall' ORDER BY rowid",
+    )
+    assert iters == [f'failed/plan {stall}', 'completed/'], result.stdout
+
+    # the parent follows the node's outbox, so the notice is in its feed
+    feed = _run(repo['root'], 'radio', 'feed').stdout
+    notices = [line for line in feed.splitlines() if 'step stalled: plan' in line]
+    assert len(notices) == 1, feed
+    run_id = (
+        _run(
+            worktree,
+            'db',
+            '_query',
+            "SELECT run_id FROM runs WHERE node = 'main.capstall'"
+            ' ORDER BY rowid DESC LIMIT 1',
+            '--csv',
+        )
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+    sent = _run(worktree, 'radio', 'sent').stdout
+    assert f'Node main.capstall stalled on step plan at iteration {run_id}.1' in sent
+    assert 'stalled: thinking cap, after a steer' not in sent
+    assert 'thinking cap, after a steer' in sent
+
+
+def test_cost_cap_guard_failure_reason_is_durable(repo: dict) -> None:
+    """A cost cap over an unpriceable model aborts the boot naming the guard.
+
+    A cost cap with no priceable model is a config error, not an agent
+    one, so the boot aborts at preflight before any step row or agent
+    launch: the run row's reason carries the guard's own message (the
+    same line the pane prints), so ``node activity`` names the real
+    cause, and no step row exists to misattribute a launch that never
+    happened.
     """
     steps = {'01-alpha.md': '# Alpha\n\nFirst step.\n'}
     node = _make_node(
@@ -3366,26 +4019,38 @@ def test_cost_cap_guard_failure_reason_is_durable(repo: dict) -> None:
         max_cost=5.0,
     )
     worktree = node['worktree']
-    # single-attempt shape: the deterministic failure must not buy a retry
-    assert _run(worktree, 'config', '_set', 'step_retries=0').returncode == 0
     _, result = _run_loop(repo, node, capture_name='cap_no_model')
+    assert result.returncode != 0, result.stdout
+    reason = 'a cost cap requires a model for codex in 01-alpha.md'
+    assert f'Error: {reason}; set --model' in result.stderr, result.stderr
 
-    # the step row names the guard's cause, never the bare agent-error label
-    step_row = (
+    # the run row names the guard's cause, and no step row was booked
+    run_row = (
         _run(
             worktree,
             'db',
             '_query',
-            "SELECT COALESCE(metadata, '') FROM steps"
-            " WHERE node = 'main.capnomodel' AND status = 'failed'"
+            "SELECT status, COALESCE(metadata, '') FROM runs"
+            " WHERE node = 'main.capnomodel'"
             ' ORDER BY rowid DESC LIMIT 1',
             '--csv',
         )
         .stdout.strip()
         .splitlines()[-1]
     )
-    assert 'cost cap requires a model' in step_row, (step_row, result.stdout)
-    assert not step_row.startswith('agent error'), step_row
+    assert run_row == f'exited,{reason}', (run_row, result.stdout)
+    booked = (
+        _run(
+            worktree,
+            'db',
+            '_query',
+            "SELECT COUNT(*) FROM steps WHERE node = 'main.capnomodel'",
+            '--csv',
+        )
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+    assert booked == '0', booked
 
 
 def test_drain_wait_sync_failure_keeps_completed_with_note(repo: dict) -> None:
@@ -3504,6 +4169,39 @@ def _alive_pids(pids: list[int]) -> list[int]:
     return alive
 
 
+def _alive_group_pids(pgids: list[int]) -> list[int]:
+    """The pids still running in process groups ``pgids`` (zombies count as dead)."""
+    result = subprocess.run(
+        ['ps', '-A', '-o', 'pid=,pgid=,stat='],
+        capture_output=True,
+        text=True,
+    )
+    alive = []
+    for line in result.stdout.splitlines():
+        pid, pgid, stat = line.split(None, 2)
+        if int(pgid) in pgids and not stat.startswith('Z'):
+            alive.append(int(pid))
+    return alive
+
+
+def _tool_pids(capture: pathlib.Path) -> list[int]:
+    """The pids the stub's tool modes recorded, in role order."""
+    return [
+        int(path.read_text(encoding='utf-8'))
+        for path in sorted(capture.glob('tool_*.pid'))
+    ]
+
+
+def _kill_tools(capture: pathlib.Path) -> None:
+    """SIGKILL every process still carrying the capture dir in its argv.
+
+    The tool argv names its capture dir (unique per launch), so a tool that
+    never recorded its pid is found too, and a pid recycled to an unrelated
+    process is never signaled.
+    """
+    _kill_tagged(f'{capture}')
+
+
 def test_gate_teardown_reaps_full_process_group(repo: dict) -> None:
     """A launch torn down mid-gate leaves no agent-chain survivors.
 
@@ -3603,6 +4301,21 @@ def _make_node(
         _git(worktree, 'add', '-A')
         _git(worktree, 'commit', '-m', f'setup {name}')
     return {'worktree': worktree, 'node_dir': node_dir}
+
+
+def _query_column(worktree: pathlib.Path, sql: str) -> list[str]:
+    """Return a one-column ``db _query``'s values (CSV-decoded, header dropped)."""
+    out = _run(worktree, 'db', '_query', sql, '--csv').stdout
+    return [row[0] for row in csv.reader(io.StringIO(out))][1:]
+
+
+def _step_rows(worktree: pathlib.Path, branch: str) -> list[str]:
+    """Return a node's step rows, oldest first, as ``name/status/metadata``."""
+    return _query_column(
+        worktree,
+        "SELECT step_name || '/' || status || '/' || COALESCE(metadata, '')"
+        f" FROM steps WHERE node = '{branch}' ORDER BY rowid",
+    )
 
 
 def _collect_calls(capture: pathlib.Path) -> dict[int, dict[str, str]]:
@@ -3714,6 +4427,31 @@ def _resume_loop(
     cmd = _loop_cmd(worktree, '--resume')
     result = _run_reaped(cmd, cwd=f'{worktree}', env=env, timeout=180)
     return _collect_calls(capture), result
+
+
+def _run_script(
+    script: str,
+    worktree: pathlib.Path,
+    *,
+    bindir: Optional[pathlib.Path] = None,
+) -> subprocess.CompletedProcess:
+    """Run this checkout's ``_scripts/<script>`` on ``worktree``, bounded.
+
+    The scripts shell back into ``fractal``, so the hermetic env resolves it
+    to this checkout; ``bindir`` goes first on ``PATH`` to shadow a command.
+    """
+    script_path = _worktree_root() / 'fractal' / '_scripts' / script
+    env = _cli_env()
+    if bindir is not None:
+        path = env['PATH']
+        env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    return subprocess.run(
+        ['bash', f'{script_path}', f'{worktree}'],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
 
 
 def _path_without_timeout(bindir: pathlib.Path, tmp: pathlib.Path) -> str:
@@ -3918,13 +4656,16 @@ def _launch_finish_wait(
     *,
     capture_name: str,
     stub_cost: str = '0.001',
+    prelude: Optional[str] = None,
 ) -> tuple[subprocess.Popen, pathlib.Path, pathlib.Path]:
     """Start the loop for a gated finish-wait; return ``(proc, capture, log)``.
 
     Drives the loop via ``Popen`` (the finish-wait scenarios arrange conditions
     while the gated step blocks the loop) with output teed to ``log`` so the wait
-    banners are observable mid-run. The caller releases the gate
-    (``capture/gate_release``) and finalizes with ``_finish_wait_result``.
+    banners are observable mid-run. A ``prelude`` runs in the launch's shell,
+    which then execs the loop, so what it starts shares the loop's process
+    group. The caller releases the gate (``capture/gate_release``) and
+    finalizes with ``_finish_wait_result``.
     """
     root = repo['root']
     worktree = node['worktree']
@@ -3938,6 +4679,8 @@ def _launch_finish_wait(
     path = env['PATH']
     env['PATH'] = f'{bindir}{os.pathsep}{path}'
     cmd = _loop_cmd(worktree)
+    if prelude is not None:
+        cmd = ['bash', '-c', f'{prelude} exec "$@"', 'bash', *cmd]
     # tee combined output to a file (not a PIPE): the wait blocks the loop, so the
     # log must be readable mid-run; the parent closes its handle right after spawn
     # (the child keeps the dup'd fd) so nothing has to be drained to keep it alive

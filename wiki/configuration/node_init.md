@@ -47,8 +47,9 @@ exists.
   worktree. Each root must be a repo-relative subdirectory: absolute paths and
   `..` segments are refused, since they would never match the commit pipeline's
   prefix check and would brick every scoped commit. With a scope set, the node's
-  commits are limited to the scope roots (the shared `wiki/` tree and the node's
-  own `.fractal/` directory always remain in bounds).
+  commits are limited to the scope roots (the shared project wiki -- `wiki/`
+  unless the project's `.fractal/.settings.json` names another folder -- and the
+  node's own `.fractal/` directory always remain in bounds).
 - `--base` -- branch to start from instead of the parent's branch. The base is
   also the squash-merge target when the node finishes, so it must have a
   checked-out worktree in the repository -- init refuses a worktree-less base
@@ -81,7 +82,9 @@ exists.
   at init (`## Instructions` / `## Completion Requirements` present; every
   `pin:` line resolves to a commit and matches `--pin` case-blind, and a `pin:`
   spelling that is not a hex sha refuses outright; every `docket: <path>` line
-  resolves at the pin) -- stale or truncated commission seeds die at init.
+  resolves at the pin) -- stale or truncated commission seeds die at init. A
+  Jinja include with a leading `/` reads a shared file from the repo root at the
+  same commit, recorded beside the folder and never deployed.
   [[configuration/templates]] is the full reference.
 - `--include` / `--exclude` (repeatable; mutually exclusive) --
   template-relative paths to deploy or drop; a directory entry covers its
@@ -91,8 +94,10 @@ exists.
   `_partials/` and excluded outputs.
 - `--values` -- TOML inputs for seed-time Jinja rendering, overriding the
   template's optional `_template.toml` `[values]` defaults. The external file
-  names inputs at its top level; the node's generated `_template.toml` records
-  the complete resolved map. Values remain literal data, never template source.
+  names inputs at its top level or under a `[values]` table, the shape the
+  node's generated `_template.toml` records (so one node's record can seed
+  another); the record stores the complete resolved map. Values remain literal
+  data, never template source.
 - `--set KEY=VALUE` (repeatable) -- one input as a TOML literal, winning over
   `--values`: `--set 'role="reviewer"'` supplies text and `--set enabled=false`
   supplies a boolean. Lists and nested tables replace whole top-level values
@@ -161,7 +166,9 @@ Cost semantics in depth live in the `wiki/features/cost/` branch; the flags:
   there is no reserve. The reserve is not an enforced floor: it shifts the point
   where the node enters reserve mode -- the budget is treated as drained
   `reserve_budget` USD before `--max-cost` is reached, so the run winds down
-  with cleanup headroom left.
+  with cleanup headroom left. A value given here (or by a template preset)
+  records as explicit and keeps its figure when the cap later changes; the
+  default retunes with the cap (see [[configuration/config_json]]).
 
 Ceilings must be positive, and the caps must order `step <= iter <= run`. An
 explicit reserve must stay below 99% of `--max-cost`.

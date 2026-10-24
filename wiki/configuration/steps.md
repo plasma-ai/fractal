@@ -91,6 +91,8 @@ fence -- contributes nothing. The supported keys:
 - `timeout` -- this step's own time ceiling, substituting for the node's
   `step_timeout`. Step files are live-edited steering surfaces, so a malformed
   duration warns and falls back to the node value instead of crashing the loop.
+  The step's reports follow the same ceiling: its `$TIME_BUDGET`,
+  `fractal node time remaining`, and the `node list` stale flag.
 - `detached` -- in a continuous node, `true` runs this one step as a separate
   agent invocation; `false` restates the default and is a no-op. In a node
   already running detached, any `detached:` key is invalid and fails the step.

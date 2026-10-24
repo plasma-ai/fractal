@@ -28,27 +28,37 @@ def update(max_age: Optional[str] = None) -> str:
     The file is fetched to a temp path and swapped in atomically, so an
     interrupted download never leaves a corrupt cache.
 
+    An offline host (``OFFLINE_MODE=true``, see :func:`offline`) skips
+    the fetch and degrades as a failed one would.
+
     Args:
         max_age: If given (e.g. ``24h``), skip the fetch when the cache
             is newer than this duration.
 
     Returns:
         ``'fresh'`` (cache new enough, no fetch), ``'fetched'``
-        (downloaded), ``'stale'`` (fetch or cache write failed but a cache
-        exists), or ``'missing'`` (fetch or cache write failed and no cache
-        exists).
+        (downloaded), ``'stale'`` (offline, or fetch or cache write failed,
+        but a cache exists), or ``'missing'`` (offline, or fetch or cache
+        write failed, and no cache exists).
+
+    Raises:
+        ValueError: If ``max_age`` or ``OFFLINE_MODE`` is malformed.
 
     """
     # resolve pricing.json path
     cache = pathlib.Path(_PRICING_CACHE).expanduser()
-    # validate max_age up front (a malformed duration must fail regardless
-    # of cache state), then skip the fetch when the cache is still fresh
+    # validate OFFLINE_MODE and max_age up front (a malformed value must fail
+    # regardless of cache state), then skip the fetch when the cache is still
+    # fresh, or when the host is offline
+    offline_mode = offline()
     if max_age is not None:
         max_age_seconds = fractal.util.parse_duration_seconds(max_age)
         if max_age_seconds is None:
             raise ValueError(f'Invalid duration: {max_age!r}')
         if cache.exists() and time.time() - cache.stat().st_mtime < max_age_seconds:
             return 'fresh'
+    if offline_mode:
+        return 'stale' if cache.exists() else 'missing'
     # fetch to a per-process temp file, then swap in atomically; import urllib
     # locally so the http/ssl stack stays off every CLI cold-start -- only this
     # fetch needs it, and most commands (and the cache-fresh path above) never do
@@ -79,7 +89,7 @@ def update(max_age: Optional[str] = None) -> str:
         # raises socket.timeout (an OSError), but a malformed response --
         # truncated chunked body, garbage status line -- escapes urlretrieve
         # as a raw HTTPException, so the fallback must catch both classes
-        urllib.request.urlretrieve(_PRICING_URL, tmp)  # noqa: S310
+        urllib.request.urlretrieve(_PRICING_URL, tmp)
         os.replace(tmp, cache)
         # invalidate the process memo so rates() re-reads the fresh table --
         # without this the loop's per-iteration refresh is inert (a run that
@@ -97,6 +107,23 @@ def update(max_age: Optional[str] = None) -> str:
 def has_model(model: str, /) -> bool:
     """Return whether a model is present and priced in the cache."""
     return rates(model) is not None
+
+
+def offline() -> bool:
+    """Return whether ``OFFLINE_MODE`` keeps the price refresh off the network.
+
+    ``OFFLINE_MODE`` is the switch the ``wiki`` tool honors too, read
+    strictly so a typo fails rather than silently fetching.
+
+    Raises:
+        ValueError: If ``OFFLINE_MODE`` is set to anything other than
+            ``true`` or ``false`` (case-insensitive).
+
+    """
+    value = os.environ.get('OFFLINE_MODE', '').strip().lower()
+    if value not in ('true', 'false', ''):
+        raise ValueError(f'OFFLINE_MODE must be "true" or "false", got {value!r}.')
+    return value == 'true'
 
 
 def rates(model: str, /) -> Optional[dict[str, Any]]:
@@ -123,10 +150,11 @@ def rates(model: str, /) -> Optional[dict[str, Any]]:
 def _load() -> dict[str, Any]:
     """Load cached pricing data (once per process).
 
-    The cache is populated by the loop's run-start pricing refresh, but only for
-    token-priced agents (``needs_pricing``); claude's best-effort accrual reads
-    it opportunistically, so a missing or corrupt cache degrades to no pricing
-    (streams record unpriced, never crash mid-step).
+    The cache is populated by the loop's run-start pricing refresh: required
+    for token-priced agents (``needs_pricing``) and best-effort for claude's
+    accrual and settle and grok's usage fallback (``wants_pricing``), where a
+    failed fetch leaves the run going -- so a missing or corrupt cache
+    degrades to no pricing (streams record unpriced, never crash mid-step).
     """
     cache = pathlib.Path(_PRICING_CACHE).expanduser()
     try:

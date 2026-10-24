@@ -42,8 +42,13 @@ re-checks the width and descendant caps, since it returns one unsettled node to
 the tree exactly as a spawn adds one. A run that ended on its cost budget never
 re-arms silently: a bare `--continue` refuses, naming the spent and armed
 figures, until an explicit `--max-cost` rides it (applied through the parent's
-retune — see [[features/cost/budgets|budgets]]). A tree-wide pause latch makes
-any start refuse until resume.
+retune — see [[features/cost/budgets|budgets]]). A continue refused after the
+retune (at the re-arm gate, or over its re-checked config or agent) or whose
+launch fails restores the old cap. A tree-wide pause latch makes any start
+refuse until resume. A start or continue also refuses, before it changes
+anything, an effort ladder committed on the root branch that the loop's boot
+would refuse (see
+[[features/agents/models_and_effort#The effort ladder|models_and_effort]]).
 
 ## finish and stop
 
@@ -95,17 +100,26 @@ of every other signal — so a parent parked before its children can never
 drain-complete over them; it aborts the in-flight agent, and the loop exits with
 status `paused`, leaving the run and any open iteration rows open. A user-node
 pause first latches the whole tree (a `.paused` marker beside the central
-database), so even spawns and starts racing the sweep refuse.
+database), so even spawns and starts racing the sweep refuse. A reason the loop
+reserves for its own park rows (`parked`, or one starting with `via pause latch`
+or `resume preflight failed:`) is refused before anything is written, so a
+request is never read as a park (see [[features/cost/time_budgets]]).
 
 `resume` is the mirror: it fans out leaf-first (deepest first) so children
 already read `active` before their parent's drain-waits look at them. The
 relaunched loop *adopts* the open run — same budgets, same iteration count —
 re-enters the interrupted step (resuming the recorded agent session when one
 exists, else re-orienting fresh), and credits the paused span back to run and
-iteration deadlines. Resuming a node that is still parking withdraws the pending
-pause instead; if the loop already read the signal it parks anyway, and the next
-resume relaunches it. Resume refuses on a node that is not paused or pausing,
-and refuses under a paused ancestor until that ancestor is resumed first.
+iteration deadlines. If the run deadline ran out, or `max_iters` was lowered
+below the parked iteration, while the node was parked, the resumed run ends at
+its loop top and closes the adopted iteration: `failed` with `timed out` for the
+deadline, `stopped` for the cap. Resuming a node that is still parking withdraws
+the pending pause instead; if the loop already read the signal it parks anyway,
+and the next resume relaunches it. Resume refuses on a node that is not paused
+or pausing, and refuses under a paused ancestor until that ancestor is resumed
+first. It also refuses when any node it would relaunch has a stored config
+`start` would refuse or an invalid effort ladder committed on the root branch,
+naming that node; the check runs before the latch lifts or any node is touched.
 
 ## retire and unretire
 
@@ -136,7 +150,8 @@ All signal guards share one contract: reconcile crashed-but-active state first,
 check the guard, and on refusal write a `failed` event row stating the reason
 before raising. The reconcile fences its own writes: it snapshots the group
 records before probing, acts only when the status and records are unchanged from
-the judged snapshot, reaps against that snapshot alone, and re-checks its
+the judged snapshot, reaps against that snapshot alone (each recorded group's
+whole process tree, so the dead loop's agent tools die too), and re-checks its
 license under the `.worktrees` flock before stamping `exited` — so a racing
 continue's fresh boot or a flock'd kill stands the heal down. Inside a subtree
 fan-out the same refusal is recorded but skipped silently — attributed as coming

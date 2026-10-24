@@ -5,7 +5,7 @@ desc: |
   surfaces (agent, provider, root, local, project, agent config), the opt-in
   inherit surfaces, and which keys never inherit.
 created: 2026-07-21T04:48:38Z
-updated: 2026-07-21T04:48:38Z
+updated: 2026-10-24T04:34:08Z
 ---
 
 # configuration/inheritance
@@ -36,8 +36,19 @@ via `--inherit`.
   unsupported route is refused instead.
 - **`local`** -- a local parent forces the child local; a child of a local
   parent cannot opt back into pushing, and the flag is latched once set.
+- **`user_settings`** -- resolved at each agent launch rather than copied at
+  spawn: the node's own value, else the nearest ancestor's that sets one, so the
+  user node's value is the tree's default and a node's own `false` overrides an
+  ancestor's `true`.
 - **`project`** -- the child works in the parent's project unless its `--path`
   selects another sub-project.
+- **`wiki`** -- the shared project-wiki folder, immutable after init. A child in
+  its parent's project copies the parent's value (absent stays absent, meaning
+  `wiki`); a child that selects another sub-project takes that project's own
+  setting. Either way the spawn reads the setting committed on the tree's root
+  branch, never a node's checkout, and refuses when it contradicts the copied
+  value, so one project's nodes always use one folder; a changed setting reaches
+  a tree only through `fractal reset` and a re-init.
 - **Agent config directories** -- each node data directory carries a config dir
   per supported agent backend (the agent CLI's settings file plus a skills
   link), recreated at every init and gitignored. A template's `agents/<agent>/`

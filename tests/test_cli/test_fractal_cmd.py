@@ -4,15 +4,17 @@ These drive the real console script as a subprocess (the same shape as
 ``test_lifecycle``/``test_init_bootstrap``) and assert observable behavior:
 ``install`` drops the bundled skills into the per-agent skill trees (or
 symlinks them with ``--link``), ``commit --check`` gates on a dirty tree,
-``reset`` recycles the worktrees keeping the user data, and ``destroy`` tears
-the fractal down (and its confirm prompt aborts). ``install`` redirects
-``HOME`` so it touches a throwaway tree, never the real one.
+``commit`` keeps each report in the node's scratch log, ``reset`` recycles
+the worktrees keeping the user data, and ``destroy`` tears the fractal down
+(and its confirm prompt aborts). ``install`` redirects ``HOME`` so it
+touches a throwaway tree, never the real one.
 """
 
 from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 
 import pytest
@@ -20,7 +22,7 @@ import pytest
 from fractal.core.node import Node
 from tests._helpers import _git
 
-from .conftest import _run, _worktree_root
+from .conftest import _cli_env, _fractal_bin, _run, _worktree_root
 
 __all__ = [
     'test_install_project_copies_skills_into_both_agents',
@@ -31,6 +33,11 @@ __all__ = [
     'test_commit_records_the_iteration_and_clears_the_check',
     'test_commit_check_fails_on_a_dirty_worker',
     'test_commit_check_on_a_user_node_is_an_error',
+    'test_commit_logs_its_report_when_stdout_is_closed',
+    'test_commit_logs_a_failed_commits_error',
+    'test_commit_log_appends_one_entry_per_commit',
+    'test_commit_lands_when_its_report_cannot_be_logged',
+    'test_user_baseline_logs_and_never_commits_its_log',
     'test_reset_force_tears_worktrees_and_keeps_history',
     'test_destroy_all_force_tears_the_fractal_down',
     'test_destroy_aborts_when_the_prompt_is_declined',
@@ -49,6 +56,13 @@ __all__ = [
 # the skills both agents receive (fractal ships its own; wiki ships via the
 # plasma-wiki dependency, installed alongside)
 _SKILLS = ('fractal', 'wiki')
+
+# a commit report log entry's banner: the UTC instant, then the stamp -- the
+# new sha, 'no commit', or 'failed'
+_LOG_BANNER = re.compile(
+    r'^=== Commit at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \((.+)\) ===\n',
+    re.MULTILINE,
+)
 
 # cockpit stand-in for the open anchoring test: sitecustomize plants it in
 # sys.modules at subprocess startup, so the lazy ``from fractal.tui import``
@@ -207,6 +221,141 @@ def test_commit_check_on_a_user_node_is_an_error(fractal_repo: dict) -> None:
     result = _run(root, 'commit', '--check')
     assert result.returncode == 2
     assert 'Error: Cannot commit from a user node' in result.stderr
+
+
+def test_commit_logs_its_report_when_stdout_is_closed(tmp_path: pathlib.Path) -> None:
+    """A commit whose reader is gone keeps its report in ``tmp/commit.log``.
+
+    A caller's shell can die mid-commit (a redirect held by an agent tool
+    session that ended): the pipeline still lands the commit and the CLI
+    exits 0 on the broken pipe, so the report -- its warnings and held-out
+    counts -- survives only in the node's scratch log, stamped with the new
+    sha.
+    """
+    repo = _seed_repo(tmp_path / 'orphaned')
+    assert _run(repo, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
+    task = repo / '.worktrees' / 'main.task'
+    # an ignore rule eats a workspace file, so the report carries a warning
+    # and a held-out count the caller would otherwise lose
+    (task / '.gitignore').write_text('*.log\n', encoding='utf-8')
+    (task / 'eaten.log').write_text('eaten\n', encoding='utf-8')
+    (task / 'feature.txt').write_text('the work\n', encoding='utf-8')
+    # stdout is a pipe whose reader closed before the command wrote
+    reader, writer = os.pipe()
+    os.close(reader)
+    try:
+        result = subprocess.run(
+            [_fractal_bin(), 'commit', 'add feature'],
+            cwd=task,
+            stdout=writer,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_cli_env(),
+            timeout=180,
+        )
+    finally:
+        os.close(writer)
+    assert result.returncode == 0, result.stderr
+    assert 'add feature' in _git(task, 'log', '-1', '--format=%s').stdout
+    sha = _git(task, 'rev-parse', 'HEAD').stdout.strip()
+    [(stamp, report)] = _commit_log(task)
+    assert stamp == sha
+    assert 'skipped by ignore rules' in report
+    assert report.endswith('Held out: 1 path(s) ignored')
+
+
+def test_commit_logs_a_failed_commits_error(tmp_path: pathlib.Path) -> None:
+    """A failed commit logs the error it raised in place of a sha.
+
+    A lint failure carries the gate's own findings in its error text, so
+    the entry holds exactly the error the caller's stderr led with, and HEAD
+    never moved.
+    """
+    repo = _seed_repo(tmp_path / 'rejected')
+    assert _run(repo, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
+    task = repo / '.worktrees' / 'main.task'
+    lint = Node(task).node_dir / 'scripts' / 'lint.sh'
+    lint.write_text("echo 'style: tab found'\nexit 1\n", encoding='utf-8')
+    (task / 'feature.txt').write_text('the work\n', encoding='utf-8')
+    head = _git(task, 'rev-parse', 'HEAD').stdout.strip()
+    result = _run(task, 'commit', 'add feature')
+    assert result.returncode == 2
+    assert _git(task, 'rev-parse', 'HEAD').stdout.strip() == head
+    [(stamp, report)] = _commit_log(task)
+    assert stamp == 'failed'
+    assert result.stderr.startswith(f'{report}\n')
+    assert report.startswith('Error: lint.sh failed (exit 1)')
+    assert 'style: tab found' in report
+
+
+def test_commit_log_appends_one_entry_per_commit(tmp_path: pathlib.Path) -> None:
+    """Each commit appends its own entry, and the log never commits.
+
+    The second commit keeps the first's entry above its own, each entry
+    holds exactly the report its caller printed, and the log stays out of
+    history -- the second commit runs over the first's log and never stages
+    it -- and out of the tree state: ``--check``, which commits nothing and
+    logs nothing, reads clean.
+    """
+    repo = _seed_repo(tmp_path / 'appended')
+    assert _run(repo, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
+    task = repo / '.worktrees' / 'main.task'
+    expected = []
+    for name in ('first', 'second'):
+        (task / f'{name}.txt').write_text(f'{name}\n', encoding='utf-8')
+        result = _run(task, 'commit', f'add {name}')
+        assert result.returncode == 0, result.stderr
+        sha = _git(task, 'rev-parse', 'HEAD').stdout.strip()
+        expected.append((sha, result.stdout.rstrip('\n')))
+    assert _run(task, 'commit', '--check').returncode == 0
+    assert _commit_log(task) == expected
+    log = Node(task).node_dir / 'tmp' / 'commit.log'
+    relpath = log.relative_to(task).as_posix()
+    assert _git(task, 'log', '--all', '--format=%H', '--', relpath).stdout == ''
+
+
+def test_commit_lands_when_its_report_cannot_be_logged(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A log write failure costs one stderr line, never the commit."""
+    repo = _seed_repo(tmp_path / 'unlogged')
+    assert _run(repo, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
+    task = repo / '.worktrees' / 'main.task'
+    # a directory where the log file belongs fails every append
+    (Node(task).node_dir / 'tmp' / 'commit.log').mkdir(parents=True)
+    (task / 'feature.txt').write_text('the work\n', encoding='utf-8')
+    result = _run(task, 'commit', 'add feature')
+    assert result.returncode == 0, result.stderr
+    assert 'add feature' in _git(task, 'log', '-1', '--format=%s').stdout
+    warnings = [line for line in result.stderr.splitlines() if 'commit.log' in line]
+    assert len(warnings) == 1
+    assert warnings[0].startswith('Warning: ')
+
+
+def test_user_baseline_logs_and_never_commits_its_log(tmp_path: pathlib.Path) -> None:
+    """A user node's baseline logs like any commit and never commits the log.
+
+    A tracked seed stages under the work commits' estate law, so the log the
+    first baseline writes into the seed's ``tmp/`` stays out of the second
+    baseline, which carries only the wiki page beside it.
+    """
+    repo = _seed_repo(tmp_path / 'tracked')
+    assert _run(repo, 'track').returncode == 0
+    expected = []
+    for name in ('first', 'second'):
+        page = repo / 'wiki' / f'{name}.md'
+        page.write_text(f'# {name}\n', encoding='utf-8')
+        result = _run(repo, 'commit', f'configure {name}', '--init')
+        assert result.returncode == 0, result.stderr
+        sha = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        expected.append((sha, result.stdout.rstrip('\n')))
+    assert _commit_log(repo) == expected
+    # the second baseline committed its page and nothing from the seed
+    changed = _git(repo, 'show', '--name-only', '--format=', 'HEAD').stdout
+    assert changed.split() == ['wiki/second.md']
+    log = Node(repo).node_dir / 'tmp' / 'commit.log'
+    relpath = log.relative_to(repo).as_posix()
+    assert _git(repo, 'log', '--all', '--format=%H', '--', relpath).stdout == ''
 
 
 def test_reset_force_tears_worktrees_and_keeps_history(
@@ -596,6 +745,17 @@ def _ignored(repo: pathlib.Path, path: str) -> bool:
         capture_output=True,
     )
     return result.returncode == 0
+
+
+def _commit_log(task: pathlib.Path) -> list[tuple[str, str]]:
+    """Parse a node's ``tmp/commit.log`` into ``(stamp, report)`` entries."""
+    log = Node(task).node_dir / 'tmp' / 'commit.log'
+    head, *parts = _LOG_BANNER.split(log.read_text(encoding='utf-8'))
+    # every byte of the log belongs to a banner-led entry
+    assert head == ''
+    return [
+        (stamp, report.rstrip('\n')) for stamp, report in zip(parts[::2], parts[1::2])
+    ]
 
 
 def _git_repo_only(path: pathlib.Path) -> pathlib.Path:

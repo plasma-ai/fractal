@@ -8,6 +8,7 @@ __all__ = [
     'AbstractMethodError',
     'AgentStreamError',
     'DirtyWorktreeError',
+    'IndexLockedError',
 ]
 
 
@@ -60,5 +61,18 @@ class DirtyWorktreeError(RuntimeError):
     """
 
 
+class IndexLockedError(RuntimeError):
+    """Raised when another process's ``index.lock`` outlasts a git write's retry.
+
+    Distinct from a hook's rejection: the write never ran, so the commit
+    pipeline's hook recovery has nothing to re-stage, and the error carries
+    git's own message naming the lock.
+    """
+
+
 class _Abort(Exception):
     """Raised by the loop when a preflight or adoption abort ends the run (exit 1)."""
+
+
+class _ThinkingCap(Exception):
+    """Raised by the loop through the stream driver to end a thinking-capped launch."""
