@@ -574,6 +574,12 @@ class ClaudeAgent(Agent):
             argv += ['--resume', session, '--fork-session']
         else:
             argv += ['--resume', session]
+        # a node's session runs on the worktree's project and local settings
+        # and the node's own, with no MCP server it is not handed -- the
+        # user's own settings, hooks, plugins, and MCP servers stay out unless
+        # the node opts them in (user_settings, its own or an ancestor's)
+        if not self.node.user_settings_effective():
+            argv += ['--setting-sources', 'project,local', '--strict-mcp-config']
         # node settings (permissions, model, env) ride the CLI flag -- they
         # outrank worktree and user settings, and claude's config home stays
         # the user's own (auth and session storage untouched); the flag
@@ -683,16 +689,19 @@ class ClaudeAgent(Agent):
 
         Claude applies the node's ``--settings`` over the worktree's
         ``.claude/settings.local.json`` over its ``settings.json`` over
-        ``~/.claude/settings.json``; the first file naming ``key`` wins,
-        and ``None`` means none does (managed settings layers are not
-        consulted -- the resolution is best-effort).
+        ``~/.claude/settings.json`` -- the last only when the launch loads
+        the user's own settings (``user_settings``); the first file naming
+        ``key`` wins, and ``None`` means none does (managed settings layers
+        are not consulted -- the resolution is best-effort).
         """
-        for path in (
+        paths = [
             self.config_dir / self.config_file,
             self.node.worktree / '.claude' / 'settings.local.json',
             self.node.worktree / '.claude' / 'settings.json',
-            pathlib.Path.home() / '.claude' / 'settings.json',
-        ):
+        ]
+        if self.node.user_settings_effective():
+            paths.append(pathlib.Path.home() / '.claude' / 'settings.json')
+        for path in paths:
             if not path.is_file():
                 continue
             # an unreadable or malformed settings file, or one whose JSON is

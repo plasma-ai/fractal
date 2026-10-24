@@ -7,7 +7,7 @@ desc: |
   node's claude session reads, and when codex's in-turn error frames recover
   after a clean exit.
 created: 2026-07-21T05:04:16Z
-updated: 2026-10-24T04:26:34Z
+updated: 2026-10-24T04:34:08Z
 ---
 
 # features/agents/providers
@@ -111,6 +111,24 @@ does a node whose file is not a JSON object, with a warning logged: claude
 itself runs without a settings file it cannot load, so the composition keeps
 that outcome rather than refusing the launch. Claude Code cannot exclude an
 organization's managed `CLAUDE.md`.
+
+By default each launch also passes `--setting-sources project,local` and
+`--strict-mcp-config`: the session loads the worktree's project and local
+settings and the node's own (the flag's settings always load), and only the MCP
+servers it is handed -- none. The user's own settings (permissions, hooks,
+plugins, model and effort defaults), user skills, MCP servers, and the claude.ai
+connectors claude fetches for a subscription login stay out, and so do a
+project's `.mcp.json` servers, so a node runs the same on any host. The
+`user_settings` config key opts back in: the node's own value, else the nearest
+ancestor's that sets one (the user node's is the tree's default), read at each
+launch by `Node.user_settings_effective`; set, neither flag is passed, while the
+instruction excludes still apply. The settings-chain resolution behind the
+recorded model and effort defaults (`ClaudeAgent._setting`) reads the user's
+`~/.claude/settings.json` only under the same opt-in, so fractal never reports a
+default the session does not load (see [[features/agents/models_and_effort]]).
+The openrouter route rides process environment variables, not settings, so the
+setting sources leave it whole; a host that routes claude through its user
+settings' `env` needs the opt-in.
 
 ## Codex stream recovery
 

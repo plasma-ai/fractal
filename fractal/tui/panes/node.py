@@ -81,6 +81,7 @@ _CONFIG_ORDER = (
     'detached',
     'blind',
     'sealed',
+    'user_settings',
 )
 _SPOKEN_CONFIG = frozenset(
     {

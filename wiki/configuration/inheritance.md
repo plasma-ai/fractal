@@ -5,7 +5,7 @@ desc: |
   surfaces (agent, provider, root, local, project, agent config), the opt-in
   inherit surfaces, and which keys never inherit.
 created: 2026-07-21T04:48:38Z
-updated: 2026-07-21T04:48:38Z
+updated: 2026-10-24T04:34:08Z
 ---
 
 # configuration/inheritance
@@ -36,6 +36,10 @@ via `--inherit`.
   unsupported route is refused instead.
 - **`local`** -- a local parent forces the child local; a child of a local
   parent cannot opt back into pushing, and the flag is latched once set.
+- **`user_settings`** -- resolved at each agent launch rather than copied at
+  spawn: the node's own value, else the nearest ancestor's that sets one, so the
+  user node's value is the tree's default and a node's own `false` overrides an
+  ancestor's `true`.
 - **`project`** -- the child works in the parent's project unless its `--path`
   selects another sub-project.
 - **`wiki`** -- the shared project-wiki folder, immutable after init. A child in

@@ -66,6 +66,7 @@ __all__ = [
     'test_invocation_modes_build_the_pinned_argv_claude',
     'test_invocation_honors_command_model_budget_and_settings',
     'test_invocation_excludes_every_instruction_file_outside_the_worktree',
+    'test_user_settings_opt_the_session_into_the_users_own_config',
     'test_routed_invocation_redirects_the_anthropic_seam',
     'test_native_invocation_scrubs_inherited_routing_keys',
     'test_routed_parser_prices_the_result_usage_through_the_chain',
@@ -1404,6 +1405,62 @@ def test_invocation_excludes_every_instruction_file_outside_the_worktree(
         assert not _excluded(file, excludes), file
 
 
+@pytest.mark.parametrize(
+    argnames=('tree', 'own', 'isolated'),
+    argvalues=[
+        # unset on the node and the tree: the session runs isolated
+        pytest.param(None, None, True, id='default'),
+        # the user node's value is the tree's default
+        pytest.param(True, None, False, id='tree-opts-in'),
+        # the node's own value wins over the tree's
+        pytest.param(True, False, True, id='node-opts-out'),
+        pytest.param(None, True, False, id='node-opts-in'),
+    ],
+)
+def test_user_settings_opt_the_session_into_the_users_own_config(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tree: Optional[bool],
+    own: Optional[bool],
+    isolated: bool,
+) -> None:
+    """A node's session loads the user's own settings and MCP servers on opt-in.
+
+    By default a launch loads only the project and local setting sources
+    and no MCP server it is not handed, and the settings-chain defaults
+    skip the user's own file to match; ``user_settings`` on the node, else
+    on its nearest ancestor that sets it, opts both back in. The
+    instruction excludes apply either way.
+    """
+    child = _child_node(node_with_db, 'kid')
+    node_with_db.config.set('user_settings', tree)
+    child.config.set('user_settings', own)
+    # the user's own settings name a default model
+    home = tmp_path / 'home'
+    (home / '.claude').mkdir(parents=True)
+    (home / '.claude' / 'settings.json').write_text(
+        json.dumps({'model': 'from-home'}),
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('HOME', str(home))
+    backend = ClaudeAgent(child, 'claude')
+    invocation = backend.invocation('hi')
+    argv = invocation.argv
+    # an isolated session loads the project and local sources alone, and
+    # only the MCP servers it is handed (none)
+    sources = None
+    if '--setting-sources' in argv:
+        sources = argv[argv.index('--setting-sources') + 1]
+    assert sources == ('project,local' if isolated else None)
+    assert ('--strict-mcp-config' in argv) is isolated
+    # the settings-chain default agrees with the sources the launch loads
+    assert backend.config_model() == (None if isolated else 'from-home')
+    # the instruction excludes apply either way
+    excludes = _settings(invocation)['claudeMdExcludes']
+    assert _excluded(home / '.claude' / 'CLAUDE.md', excludes)
+
+
 def test_routed_invocation_redirects_the_anthropic_seam(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -1427,6 +1484,8 @@ def test_routed_invocation_redirects_the_anthropic_seam(
     assert routed.env['ANTHROPIC_MODEL'] == 'anthropic/claude-sonnet-4.6'
     # the base environment spreads underneath the injected keys
     assert routed.env['PATH'] == os.environ['PATH']
+    # the route rides env alone, so the isolated setting sources leave it whole
+    assert routed.argv[routed.argv.index('--setting-sources') + 1] == 'project,local'
     # an explicit model drops the pin and rides the argv as usual
     priced = backend.invocation('hi', model='anthropic/claude-haiku-4.5')
     assert 'ANTHROPIC_MODEL' not in priced.env
@@ -1790,10 +1849,12 @@ def test_config_defaults_walk_the_settings_chain(
     node = node_with_db
     backend = ClaudeAgent(node, 'claude')
     default = getattr(backend, verb)
-    # isolate the chain's tail from the real user home
+    # isolate the chain's tail from the real user home, which joins the
+    # chain on the opt-in that loads it
     home = tmp_path / 'home'
     (home / '.claude').mkdir(parents=True)
     monkeypatch.setattr(pathlib.Path, 'home', lambda: home)
+    node.config.set('user_settings', True)
     assert default() is None
     # the home settings back the chain
     (home / '.claude' / 'settings.json').write_text(

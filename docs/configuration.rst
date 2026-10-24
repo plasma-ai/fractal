@@ -6,11 +6,12 @@ the node's data directory that holds the node's entire run configuration:
 agent selection, budgets, timeouts, pacing, and mode flags. The file is the
 live source of truth: the loop reads it from disk at every access, so the
 re-read keys — the cost caps, ``max_iters``, ``iter_timeout``,
-``step_timeout``, ``wait``, ``interval``, ``sleep``, ``scope``, ``local``, and
-``sealed`` — can be changed while a node runs (see `When edits take effect`_
-for each key's boundary). This page is the complete key reference;
-:doc:`/guide/loop` describes how the loop enforces the budget and timeout
-keys, and :doc:`/guide/plans` covers the per-step override surface.
+``step_timeout``, ``wait``, ``interval``, ``sleep``, ``scope``, ``local``,
+``sealed``, and ``user_settings`` — can be changed while a node runs (see
+`When edits take effect`_ for each key's boundary). This page is the
+complete key reference; :doc:`/guide/loop` describes how the loop enforces
+the budget and timeout keys, and :doc:`/guide/plans` covers the per-step
+override surface.
 
 Where ``config.json`` lives
 ---------------------------
@@ -24,9 +25,9 @@ Each node's config sits inside its data directory:
   database.
 
 ``fractal node init`` writes every key in the schema except ``user``,
-``clone_dirs``, and ``wiki`` (written only when the tree names a project-wiki
-folder), storing unset keys as JSON ``null``. A freshly created node
-titled "Build the parser" looks like:
+``clone_dirs``, ``user_settings``, and ``wiki`` (written only when the tree
+names a project-wiki folder), storing unset keys as JSON ``null``. A freshly
+created node titled "Build the parser" looks like:
 
 .. code-block:: json
 
@@ -204,6 +205,9 @@ silently no-ops. Per key:
      - The next child spawn (read from the user node's file per spawn).
    * - ``sealed``
      - The next radio read.
+   * - ``user_settings``
+     - The next agent launch, which reads it from the node and its
+       ancestors.
    * - ``blind``
      - Setting it lands at the next ``start`` (which sweeps a blind node's
        subscriptions — a ``resume`` relaunch does not) and at the next child
@@ -350,6 +354,21 @@ Booleans
        which the sealed seat itself may not run) — the hold mechanism for
        verifier isolation. Takes effect at the next radio read; an
        operator shell is never held.
+   * - ``user_settings``
+     - ``null`` → ``false``; resolved from the ancestors
+     - Let the node's agent sessions load the user's own agent
+       configuration. Unset or ``false``, a ``claude`` session loads only
+       the worktree's project and local settings and the node's own
+       ``settings.json``, and no MCP server: the user's settings
+       (permissions, hooks, plugins, model and effort defaults), skills,
+       MCP servers, and claude.ai connectors stay out, and so do a
+       project's ``.mcp.json`` servers. ``true`` loads them as a plain
+       ``claude`` session does. Resolved at each launch from the node's own
+       value, else the nearest ancestor's that sets one, so ``fractal node
+       config set user_settings=true`` on the user node (from the main
+       checkout) sets the tree's default; no ``node init`` flag sets it.
+       The instruction-file excludes apply either way (see
+       :doc:`/guide/agents`).
 
 Integer caps
 ~~~~~~~~~~~~
@@ -476,10 +495,12 @@ for the child; either way the key is immutable after init); ``wiki`` is
 inherited by a child in its parent's project and read from the selected
 project's own settings file otherwise (see `The project wiki folder`_);
 ``agent`` and ``provider`` resolve through the nearest ancestor that sets
-them; a ``local`` parent forces ``local`` children. A spawn with
-``--template`` fills the budget, limit, duration, model, and mode keys its
-flags left unset from the template's ``config.json`` preset — a flag wins over
-the preset, and the preset beats an inherited value (see :doc:`/cli/node`).
+them; a ``local`` parent forces ``local`` children; ``user_settings`` resolves
+at each agent launch, not at spawn, from the node itself or else the nearest
+ancestor that sets it. A spawn with ``--template`` fills the budget, limit,
+duration, model, and mode keys its flags left unset from the template's
+``config.json`` preset — a flag wins over the preset, and the preset beats an
+inherited value (see :doc:`/cli/node`).
 Everything else defaults fresh unless the spawn passes ``--inherit config``,
 which copies the parent's *preference* keys — ``model``, ``effort``, ``sync``,
 ``detached``, ``iter_timeout``, ``step_timeout``, ``step_retries``,

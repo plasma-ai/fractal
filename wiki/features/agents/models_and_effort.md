@@ -6,7 +6,7 @@ desc: |
   the model its own configuration defaults to, and how the served model is
   recorded off the stream.
 created: 2026-07-21T05:04:16Z
-updated: 2026-07-21T05:04:16Z
+updated: 2026-10-24T04:34:08Z
 ---
 
 # features/agents/models_and_effort
@@ -84,9 +84,12 @@ the drop check reads as unknown rather than as a match. Each backend resolves
 its configured model from its own vendor config, best-effort — an unreadable or
 malformed file simply names no model:
 
-- claude walks its settings chain (the node agent dir's local settings over its
-  `settings.json`, then the user's `~/.claude/settings.json`); the first file
-  naming a model wins.
+- claude walks its settings chain (the node's own settings file, then the
+  worktree's `.claude/settings.local.json` and `.claude/settings.json`, then the
+  user's `~/.claude/settings.json` only when the node loads the user's own
+  settings -- see
+  [[features/agents/providers#Claude session isolation|providers]]); the first
+  file naming a model wins.
 - codex reads the top-level model from its `config.toml`.
 - grok reads its `config.toml` default, which lives under a models table rather
   than a top-level key.

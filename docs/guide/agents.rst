@@ -176,12 +176,27 @@ each of them. A node's session reads only its worktree's own instruction
 files, never the main checkout's, a parent directory's, or the user's; a
 node with no ``settings.json`` of its own passes the excludes alone. Claude
 Code cannot exclude an organization's managed ``CLAUDE.md``, which still
-loads. ``claude`` reports its own
-USD spend; on a resumed session the figure counts on from the total Claude
-Code saved for the session, which fractal takes off, so each step books its
-own spend. It is the only backend that enforces the per-step budget cap
-in-flight (the loop passes ``--max-budget-usd``; a budget stop is a clean
-stop, not a failure). Supports the ``openrouter`` route.
+loads.
+
+By default each launch also passes ``--setting-sources project,local`` and
+``--strict-mcp-config``, so a node's session loads the worktree's project
+and local settings and the node's own, and no MCP server. The user's own
+settings (``~/.claude/settings.json``: permissions, hooks, plugins, model
+and effort defaults), user skills, MCP servers, claude.ai connectors, and a
+project's ``.mcp.json`` servers stay out, and a node runs the same on any
+host. The model and effort defaults fractal records for a step read the
+same sources. A host whose nodes need the user's configuration (an
+``apiKeyHelper`` or a provider ``env`` in the user's settings, say) sets
+the ``user_settings`` config key, which drops both flags (see
+:doc:`/configuration`), or moves what nodes need into the station's
+``agents/claude/settings.json``.
+
+``claude`` reports its own USD spend; on a resumed session the figure
+counts on from the total Claude Code saved for the session, which fractal
+takes off, so each step books its own spend. It is the only backend that
+enforces the per-step budget cap in-flight (the loop passes
+``--max-budget-usd``; a budget stop is a clean stop, not a failure).
+Supports the ``openrouter`` route.
 
 codex
 ~~~~~

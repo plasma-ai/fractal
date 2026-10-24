@@ -7181,6 +7181,25 @@ class Node:
                 return provider
         return None
 
+    def user_settings_effective(self: Node) -> bool:
+        """Return whether the node's agent loads the user's own agent config.
+
+        The node's own ``user_settings``, else the nearest ancestor's that
+        sets one (the user node's is the tree's default) -- read at each
+        launch, so a change lands on the next one.
+
+        Returns:
+            Whether the node's agent sessions load the user's own settings
+            and MCP servers; ``False`` when no node up the chain sets it.
+
+        """
+        # a set false is a value of its own, so only an unset key defers
+        for ancestor in self._self_and_ancestors():
+            user_settings = ancestor.config.get('user_settings')
+            if user_settings is not None:
+                return user_settings
+        return False
+
     def _mark_active_killed(
         self: Node,
         *,
