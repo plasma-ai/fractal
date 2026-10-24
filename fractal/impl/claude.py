@@ -72,6 +72,23 @@ _UNAVAILABLE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# the instruction files claude loads from each directory above its working
+# directory, as claudeMdExcludes globs relative to that directory
+_ANCESTOR_INSTRUCTIONS = (
+    'CLAUDE.md',
+    'CLAUDE.local.md',
+    '.claude/CLAUDE.md',
+    '.claude/rules/**',
+    'AGENTS.md',
+    '.claude/AGENTS.md',
+)
+
+# the instruction files claude loads from the user's config home, likewise
+_USER_INSTRUCTIONS = (
+    'CLAUDE.md',
+    'rules/**',
+)
+
 # the openrouter route authenticates on the key alone
 _NO_KEY = (
     'OPENROUTER_API_KEY is not set\n'
@@ -559,11 +576,10 @@ class ClaudeAgent(Agent):
             argv += ['--resume', session]
         # node settings (permissions, model, env) ride the CLI flag -- they
         # outrank worktree and user settings, and claude's config home stays
-        # the user's own (auth and session storage untouched); the root node
-        # seeds none, so a root chat runs on plain user defaults
-        settings = self.config_dir / self.config_file
-        if settings.is_file():
-            argv += ['--settings', f'{settings}']
+        # the user's own (auth and session storage untouched); the flag
+        # carries them composed with the instruction excludes as JSON, so the
+        # node's file on disk stays as its author wrote it
+        argv += ['--settings', json.dumps(self._settings())]
         # a '--' sentinel ends option parsing (claude's CLI uses commander),
         # so a message whose first char is '-' ('-1 on that', '--continue
         # looks right') is the message, never mistaken for a flag that fails
@@ -612,6 +628,47 @@ class ClaudeAgent(Agent):
             env=env,
             session=session,
         )
+
+    def _settings(self: ClaudeAgent) -> dict[str, Any]:
+        """Compose the settings a launch passes: the node's file and excludes.
+
+        Claude loads the instruction files (``CLAUDE.md`` and its kin) of
+        every directory above its working directory and of the user's
+        config home; a node's session keeps only its worktree's own, so
+        each of those paths joins the ``claudeMdExcludes`` the node's file
+        lists. A node with no settings file of its own (the root node seeds
+        none) passes the excludes alone, and so does one whose file cannot
+        be read as a JSON object, logging why -- claude, too, runs without
+        a settings file it cannot load.
+        """
+        # read the node's own settings, a boundary file its author edits
+        settings: dict[str, Any] = {}
+        path = self.config_dir / self.config_file
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, json.JSONDecodeError):
+                loaded = None
+            if isinstance(loaded, dict):
+                settings = loaded
+            else:
+                self.log(
+                    message=f'node settings not loaded: {path} does not hold'
+                    ' a JSON object',
+                    level=logging.WARNING,
+                )
+        excludes = settings.get('claudeMdExcludes')
+        if not isinstance(excludes, list):
+            excludes = []
+        # exclude the user's instruction files (under the config home claude
+        # itself reads) and those of every directory above the worktree --
+        # its real path, the one claude walks up from
+        home = os.environ.get('CLAUDE_CONFIG_DIR')
+        config_dir = pathlib.Path(home) if home else pathlib.Path.home() / '.claude'
+        excludes += [f'{config_dir / name}' for name in _USER_INSTRUCTIONS]
+        for parent in self.node.worktree.parents:
+            excludes += [f'{parent / name}' for name in _ANCESTOR_INSTRUCTIONS]
+        return {**settings, 'claudeMdExcludes': excludes}
 
     def _config_model(self: ClaudeAgent) -> Optional[str]:
         """Resolve the model claude's own settings chain defaults to."""

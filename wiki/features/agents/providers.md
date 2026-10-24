@@ -3,10 +3,11 @@ name: features/agents/providers
 desc: |
   The supported agent backends, the registry in the core agent module that
   resolves a base command to its backend class, the provider routes a backend
-  may expose beside its vendor-native endpoint, and when codex's in-turn error
-  frames recover after a clean exit.
+  may expose beside its vendor-native endpoint, which instruction files a
+  node's claude session reads, and when codex's in-turn error frames recover
+  after a clean exit.
 created: 2026-07-21T05:04:16Z
-updated: 2026-07-21T05:04:16Z
+updated: 2026-10-24T04:26:34Z
 ---
 
 # features/agents/providers
@@ -88,6 +89,28 @@ computes from the authoritative frames only.
 The route a node actually runs is configuration: the `provider` config key
 carries the node's effective route, alongside `agent`, `model`, and `effort`
 (see [[features/agents/models_and_effort]]).
+
+## Claude session isolation
+
+A node's claude session reads only its worktree's own instruction files. Claude
+Code loads the instruction files of every directory above its working directory
+(`CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `.claude/rules/`, and
+`AGENTS.md` when no `CLAUDE.md` is found) and the user's own `CLAUDE.md` and
+rules from its config home. On a host whose repos sit under a directory with its
+own `CLAUDE.md` (the operator's instructions to their own agents), every node
+would otherwise follow those instructions beside its charter.
+
+So each launch passes the node's `settings.json` through the `--settings` flag
+as JSON, composed with a `claudeMdExcludes` list: the node file's own excludes,
+the user's files under the config home claude reads (`CLAUDE_CONFIG_DIR`, else
+`~/.claude`), then every such path in each directory from the worktree's parent
+up to `/`. The worktree's own files still load, since none of its paths sits
+above it. The node's file on disk is never rewritten (it is the station's or the
+operator's), and a node with no file of its own passes the excludes alone. So
+does a node whose file is not a JSON object, with a warning logged: claude
+itself runs without a settings file it cannot load, so the composition keeps
+that outcome rather than refusing the launch. Claude Code cannot exclude an
+organization's managed `CLAUDE.md`.
 
 ## Codex stream recovery
 

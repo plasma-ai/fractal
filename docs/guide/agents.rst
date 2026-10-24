@@ -166,7 +166,17 @@ authenticated. ``claude`` runs on the user's own config home
 (``~/.claude``, or ``$CLAUDE_CONFIG_DIR``) — fractal never touches its
 auth or session storage. The node's ``settings.json`` rides the
 ``--settings`` flag and outranks worktree and user settings, so per-node
-permissions, model, and environment live there. ``claude`` reports its own
+permissions, model, and environment live there. Each launch passes the
+file composed with a ``claudeMdExcludes`` list and leaves the file itself as
+written: Claude Code loads the instruction files (``CLAUDE.md``,
+``CLAUDE.local.md``, ``.claude/CLAUDE.md``, ``.claude/rules/``, and
+``AGENTS.md``) of every directory above its working directory and the
+user's own ``CLAUDE.md`` and rules in its config home, and the list excludes
+each of them. A node's session reads only its worktree's own instruction
+files, never the main checkout's, a parent directory's, or the user's; a
+node with no ``settings.json`` of its own passes the excludes alone. Claude
+Code cannot exclude an organization's managed ``CLAUDE.md``, which still
+loads. ``claude`` reports its own
 USD spend; on a resumed session the figure counts on from the total Claude
 Code saved for the session, which fractal takes off, so each step books its
 own spend. It is the only backend that enforces the per-step budget cap

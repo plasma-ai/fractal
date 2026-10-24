@@ -4,7 +4,7 @@ desc: |
   Agent providers and routes: the supported agent backends, model and
   effort overrides, and how a new provider slots in.
 created: 2026-07-21T04:35:35Z
-updated: 2026-09-20T03:01:00Z
+updated: 2026-10-24T04:26:34Z
 ---
 
 # features/agents
@@ -24,7 +24,8 @@ defaults to, and how the served model is recorded off the stream.
 [[features/agents/providers|providers]]: The supported agent backends, the
 registry in the core agent module that resolves a base command to its backend
 class, the provider routes a backend may expose beside its vendor-native
-endpoint, and when codex's in-turn error frames recover after a clean exit.
+endpoint, which instruction files a node's claude session reads, and when
+codex's in-turn error frames recover after a clean exit.
 
 ***
 
@@ -33,8 +34,9 @@ one base-class contract in `fractal/core/agent.py`, with one backend module per
 provider in `fractal/impl/`.
 
 - [[features/agents/providers]] — the five supported backends, the registry that
-  resolves a base command to its backend class, capability declarations, and the
-  provider routes (openrouter) beside the vendor-native endpoints.
+  resolves a base command to its backend class, capability declarations, the
+  provider routes (openrouter) beside the vendor-native endpoints, and what a
+  node's claude session loads from outside its worktree.
 - [[features/agents/models_and_effort]] — where model and reasoning-effort
   overrides come from (node config keys and per-invocation overrides), each
   backend's CLI spelling of them, the configured-model fallback, and model

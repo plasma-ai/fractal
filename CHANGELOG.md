@@ -7,6 +7,16 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Changed
+
+- A node's Claude session reads only its worktree's own instruction files. Each
+  launch passes the node's `settings.json` composed with a `claudeMdExcludes`
+  list naming the `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`,
+  `.claude/rules/`, and `AGENTS.md` files of every directory above the worktree
+  and the user's own `CLAUDE.md` and rules, so the main checkout's, a parent
+  directory's, and the user's instructions stay out of the session. The node's
+  file on disk stays as written, and a node with none passes the excludes alone.
+
 ## [1.4.0] - 2026-10-23
 
 ### Breaking
