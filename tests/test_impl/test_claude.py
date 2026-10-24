@@ -10,11 +10,13 @@ the config-home transcript layout. Stream-level cases drive the base
 from __future__ import annotations
 
 import datetime as dt
+import fnmatch
 import json
 import logging
 import os
 import pathlib
 import re
+import subprocess
 import uuid
 from typing import Any, Optional
 
@@ -22,6 +24,7 @@ import pytest
 
 from fractal.cli.utils import StreamRenderer
 from fractal.core import pricing
+from fractal.core.agent import Invocation
 from fractal.core.event import Event
 from fractal.core.node import Node
 from fractal.impl import claude
@@ -62,6 +65,8 @@ __all__ = [
     'test_stream_survives_missing_pricing_cache',
     'test_invocation_modes_build_the_pinned_argv_claude',
     'test_invocation_honors_command_model_budget_and_settings',
+    'test_invocation_excludes_every_instruction_file_outside_the_worktree',
+    'test_user_settings_opt_the_session_into_the_users_own_config',
     'test_routed_invocation_redirects_the_anthropic_seam',
     'test_native_invocation_scrubs_inherited_routing_keys',
     'test_routed_parser_prices_the_result_usage_through_the_chain',
@@ -99,6 +104,13 @@ _PRICING = {
         'cache_read_input_token_cost': 3e-7,
         'cache_creation_input_token_cost': 3.75e-6,
     },
+}
+
+# a node's own claude settings: keys of its own beside excludes of its own
+_NODE_SETTINGS = {
+    'model': 'best',
+    'permissions': {'defaultMode': 'bypassPermissions'},
+    'claudeMdExcludes': ['/elsewhere/CLAUDE.md'],
 }
 
 # per-call usage fixtures (Anthropic convention: buckets are disjoint;
@@ -1288,10 +1300,10 @@ def test_invocation_honors_command_model_budget_and_settings(
     """Extra command words splice in; flags gate on their facts."""
     node = node_with_db
     backend = ClaudeAgent(node, 'claude --foo')
-    # no node settings file yet -- the flag must not point at a missing file
+    # no node settings file yet -- the flag carries the instruction excludes alone
     bare = backend.invocation('hi', model='claude-opus-4-8', budget=2.5, effort='high')
     assert bare.argv[:2] == ('claude', '--foo')
-    assert '--settings' not in bare.argv
+    assert list(_settings(bare)) == ['claudeMdExcludes']
     assert bare.argv[bare.argv.index('--model') + 1] == 'claude-opus-4-8'
     assert bare.argv[bare.argv.index('--max-budget-usd') + 1] == '2.5'
     # the effort rides the --effort flag alone -- never the spawn env, which
@@ -1301,11 +1313,152 @@ def test_invocation_honors_command_model_budget_and_settings(
     # the seeded node settings ride the CLI flag once the file exists
     settings = node.node_dir / '.claude' / 'settings.json'
     settings.parent.mkdir()
-    settings.write_text('{}\n', encoding='utf-8')
+    settings.write_text(json.dumps({'model': 'best'}), encoding='utf-8')
     seeded = backend.invocation('hi')
-    assert seeded.argv[seeded.argv.index('--settings') + 1] == str(settings)
+    assert _settings(seeded)['model'] == 'best'
     # an effort-less launch carries no effort flag
     assert '--effort' not in seeded.argv
+
+
+@pytest.mark.parametrize(
+    argnames=('node_file', 'own', 'config_home'),
+    argvalues=[
+        # a node with no settings file of its own passes the excludes alone,
+        # and the user's instruction files sit in the home's .claude
+        pytest.param(None, {}, None, id='no-node-file'),
+        # a node's file keeps its own keys and excludes; an operator's
+        # CLAUDE_CONFIG_DIR moves the user's instruction files
+        pytest.param(
+            json.dumps(_NODE_SETTINGS),
+            _NODE_SETTINGS,
+            'claude-home',
+            id='node-file',
+        ),
+        # a file claude could not load carries nothing, as in claude itself
+        pytest.param('not json\n', {}, None, id='malformed-node-file'),
+        pytest.param('[]\n', {}, None, id='non-object-node-file'),
+    ],
+)
+def test_invocation_excludes_every_instruction_file_outside_the_worktree(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    node_file: Optional[str],
+    own: dict[str, Any],
+    config_home: Optional[str],
+) -> None:
+    """A launch excludes the instruction files above its worktree and the user's.
+
+    Claude loads the CLAUDE.md files (and their kin) of every directory
+    above its working directory and of the user's config home; a node's
+    session keeps only its worktree's own. The node's settings file rides
+    the flag composed with the excludes, and stays as written on disk.
+    """
+    repo = node_with_db.worktree
+    child = _child_node(node_with_db, 'kid')
+    # isolate the user's config home from the real one
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    user_dir = tmp_path / 'home' / '.claude'
+    if config_home is not None:
+        user_dir = tmp_path / config_home
+        monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(user_dir))
+    path = child.node_dir / '.claude' / 'settings.json'
+    if node_file is not None:
+        path.parent.mkdir()
+        path.write_text(node_file, encoding='utf-8')
+    settings = _settings(ClaudeAgent(child, 'claude').invocation('hi'))
+    # the node's own keys and excludes ride through; its file is untouched
+    own = dict(own)
+    own_excludes = own.pop('claudeMdExcludes', [])
+    excludes = settings.pop('claudeMdExcludes')
+    assert excludes[: len(own_excludes)] == own_excludes
+    assert settings == own
+    if node_file is not None:
+        assert path.read_text(encoding='utf-8') == node_file
+    # every instruction file above the worktree, and the user's, is excluded
+    outside = [
+        user_dir / 'CLAUDE.md',
+        user_dir / 'rules' / 'style.md',
+        repo / 'CLAUDE.md',
+        repo / 'CLAUDE.local.md',
+        repo / '.claude' / 'CLAUDE.md',
+        repo / '.claude' / 'rules' / 'nested' / 'style.md',
+        repo / 'AGENTS.md',
+        repo / '.claude' / 'AGENTS.md',
+        repo / '.worktrees' / 'CLAUDE.md',
+        repo.parent / 'CLAUDE.md',
+        pathlib.Path('/CLAUDE.md'),
+    ]
+    for file in outside:
+        assert _excluded(file, excludes), file
+    # the worktree's own instruction files still load
+    worktree = child.worktree
+    inside = [
+        worktree / 'CLAUDE.md',
+        worktree / 'CLAUDE.local.md',
+        worktree / '.claude' / 'CLAUDE.md',
+        worktree / '.claude' / 'rules' / 'style.md',
+        worktree / 'AGENTS.md',
+        worktree / 'src' / 'CLAUDE.md',
+    ]
+    for file in inside:
+        assert not _excluded(file, excludes), file
+
+
+@pytest.mark.parametrize(
+    argnames=('tree', 'own', 'isolated'),
+    argvalues=[
+        # unset on the node and the tree: the session runs isolated
+        pytest.param(None, None, True, id='default'),
+        # the user node's value is the tree's default
+        pytest.param(True, None, False, id='tree-opts-in'),
+        # the node's own value wins over the tree's
+        pytest.param(True, False, True, id='node-opts-out'),
+        pytest.param(None, True, False, id='node-opts-in'),
+    ],
+)
+def test_user_settings_opt_the_session_into_the_users_own_config(
+    node_with_db: Node,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tree: Optional[bool],
+    own: Optional[bool],
+    isolated: bool,
+) -> None:
+    """A node's session loads the user's own settings and MCP servers on opt-in.
+
+    By default a launch loads only the project and local setting sources
+    and no MCP server it is not handed, and the settings-chain defaults
+    skip the user's own file to match; ``user_settings`` on the node, else
+    on its nearest ancestor that sets it, opts both back in. The
+    instruction excludes apply either way.
+    """
+    child = _child_node(node_with_db, 'kid')
+    node_with_db.config.set('user_settings', tree)
+    child.config.set('user_settings', own)
+    # the user's own settings name a default model
+    home = tmp_path / 'home'
+    (home / '.claude').mkdir(parents=True)
+    (home / '.claude' / 'settings.json').write_text(
+        json.dumps({'model': 'from-home'}),
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('HOME', str(home))
+    backend = ClaudeAgent(child, 'claude')
+    invocation = backend.invocation('hi')
+    argv = invocation.argv
+    # an isolated session loads the project and local sources alone, and
+    # only the MCP servers it is handed (none)
+    sources = None
+    if '--setting-sources' in argv:
+        sources = argv[argv.index('--setting-sources') + 1]
+    assert sources == ('project,local' if isolated else None)
+    assert ('--strict-mcp-config' in argv) is isolated
+    # the settings-chain default agrees with the sources the launch loads
+    assert backend.config_model() == (None if isolated else 'from-home')
+    # the instruction excludes apply either way
+    excludes = _settings(invocation)['claudeMdExcludes']
+    assert _excluded(home / '.claude' / 'CLAUDE.md', excludes)
 
 
 def test_routed_invocation_redirects_the_anthropic_seam(
@@ -1331,6 +1484,8 @@ def test_routed_invocation_redirects_the_anthropic_seam(
     assert routed.env['ANTHROPIC_MODEL'] == 'anthropic/claude-sonnet-4.6'
     # the base environment spreads underneath the injected keys
     assert routed.env['PATH'] == os.environ['PATH']
+    # the route rides env alone, so the isolated setting sources leave it whole
+    assert routed.argv[routed.argv.index('--setting-sources') + 1] == 'project,local'
     # an explicit model drops the pin and rides the argv as usual
     priced = backend.invocation('hi', model='anthropic/claude-haiku-4.5')
     assert 'ANTHROPIC_MODEL' not in priced.env
@@ -1694,10 +1849,12 @@ def test_config_defaults_walk_the_settings_chain(
     node = node_with_db
     backend = ClaudeAgent(node, 'claude')
     default = getattr(backend, verb)
-    # isolate the chain's tail from the real user home
+    # isolate the chain's tail from the real user home, which joins the
+    # chain on the opt-in that loads it
     home = tmp_path / 'home'
     (home / '.claude').mkdir(parents=True)
     monkeypatch.setattr(pathlib.Path, 'home', lambda: home)
+    node.config.set('user_settings', True)
     assert default() is None
     # the home settings back the chain
     (home / '.claude' / 'settings.json').write_text(
@@ -2860,6 +3017,34 @@ def _settling(
         transcript.parent.mkdir(parents=True)
         transcript.write_text(content, encoding='utf-8')
     return backend, step_id
+
+
+def _child_node(root: Node, name: str) -> Node:
+    """Return a child node of ``root`` with its own worktree under the repo."""
+    branch = f'{root.branch}.{name}'
+    worktree = root.worktree / '.worktrees' / branch
+    subprocess.run(
+        ['git', 'worktree', 'add', '-b', branch, f'{worktree}', root.branch],
+        cwd=root.worktree,
+        capture_output=True,
+        check=True,
+    )
+    node_dir = worktree / '.fractal' / branch
+    node_dir.mkdir(parents=True)
+    config = {'project': '.', 'root': root.branch, 'agent': 'claude'}
+    (node_dir / 'config.json').write_text(json.dumps(config), encoding='utf-8')
+    return Node(worktree)
+
+
+def _settings(invocation: Invocation) -> dict[str, Any]:
+    """Return the settings a claude launch passes on its ``--settings`` flag."""
+    assert '--settings' in invocation.argv
+    return json.loads(invocation.argv[invocation.argv.index('--settings') + 1])
+
+
+def _excluded(file: pathlib.Path, excludes: list[str]) -> bool:
+    """Return whether a ``claudeMdExcludes`` glob matches ``file``."""
+    return any(fnmatch.fnmatchcase(f'{file}', pattern) for pattern in excludes)
 
 
 def _feed(parser: ClaudeParser, line: str) -> list[Any]:

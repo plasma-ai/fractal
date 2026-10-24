@@ -5,7 +5,7 @@ desc: |
   sets it, which keys are immutable, and the surfaces for reading and
   retuning configuration after init.
 created: 2026-07-21T04:48:38Z
-updated: 2026-07-21T04:48:38Z
+updated: 2026-10-24T04:34:08Z
 ---
 
 # configuration/config_json
@@ -91,6 +91,14 @@ Boolean keys (must be JSON `true`/`false`/`null`):
   listings, refused `radio read`/`save`/`unsave`/`react`/`reply`) until an
   operator or the parent unseals it; the sealed seat cannot clear the key
   itself. Default: false.
+- `user_settings` -- let the node's agent sessions load the user's own agent
+  configuration: for claude, the user setting source (permissions, hooks,
+  plugins, model and effort defaults, skills) and every MCP server, claude.ai
+  connectors included. Resolved at each launch from the node's own value, else
+  the nearest ancestor's that sets one, so the user node's value is the tree's
+  default; not settable by flag (set it with
+  `fractal node config set user_settings=true`). Default: false (see
+  [[features/agents/providers#Claude session isolation|providers]]).
 
 Integer cap keys (non-negative; `max_iters` strictly positive):
 
@@ -189,11 +197,12 @@ gate; `iter_timeout`/`step_timeout`/`wait` at the next iteration;
 (`max_cost`, `max_iter_cost`, `max_step_cost`, `reserve_budget`) at the next
 iteration's pricing and live at every budget probe, so a cap granted
 mid-iteration reaches the very next probe; `scope`/`local` per commit;
-`clone_dirs` at the next child spawn; `sealed` at the next radio read; `blind`
-at the next start and the next child spawn; and the spawn limits (`max_depth`,
-`max_children`, `max_descendants`) at once for the spawn gate, which reads them
-from `config.json` at every spawn, and at the next step's prompt and
-environment. The boot-pinned set -- `timeout`, `agent`, `provider`, `model`,
-`effort`, `detached`, `sync`, `meta`, `step_retries`, `step_retry_backoff` --
-reaches the next start or resume, never a run in flight. A malformed mid-run
-edit warns and keeps the prior value rather than crashing the run.
+`clone_dirs` at the next child spawn; `sealed` at the next radio read;
+`user_settings` at the next agent launch; `blind` at the next start and the next
+child spawn; and the spawn limits (`max_depth`, `max_children`,
+`max_descendants`) at once for the spawn gate, which reads them from
+`config.json` at every spawn, and at the next step's prompt and environment. The
+boot-pinned set -- `timeout`, `agent`, `provider`, `model`, `effort`,
+`detached`, `sync`, `meta`, `step_retries`, `step_retry_backoff` -- reaches the
+next start or resume, never a run in flight. A malformed mid-run edit warns and
+keeps the prior value rather than crashing the run.

@@ -3646,8 +3646,9 @@ def test_agent_runs_from_worktree_root_cwd(repo: dict) -> None:
     The charter tells every node to work in the worktree, so a bare relative
     write must land in the deliverable tree -- never inside ``.fractal/``,
     where the merge's seed strip would silently drop it. The node's claude
-    settings arrive via the ``--settings`` flag, and claude's config home is
-    never overridden -- auth and session storage stay the user's own.
+    settings arrive via the ``--settings`` flag (with the instruction
+    excludes beside them), and claude's config home is never overridden --
+    auth and session storage stay the user's own.
     """
     node = _make_node(repo, 'agentcwd', detached=False, sync=False)
     # launch from the node dir -- the ambient CWD must not leak into the agent
@@ -3659,11 +3660,14 @@ def test_agent_runs_from_worktree_root_cwd(repo: dict) -> None:
     )
     assert calls, result.stdout
     worktree = node['worktree'].resolve()
-    settings = node['node_dir'] / '.claude' / 'settings.json'
+    path = node['node_dir'] / '.claude' / 'settings.json'
+    seeded = json.loads(path.read_text(encoding='utf-8'))
     for call in calls.values():
         assert pathlib.Path(call['cwd']).resolve() == worktree, result.stdout
         assert call['claude_config'] == '', result.stdout
-        assert pathlib.Path(call['settings']) == settings, result.stdout
+        settings = json.loads(call['settings'])
+        assert settings.pop('claudeMdExcludes'), result.stdout
+        assert settings == seeded, result.stdout
 
 
 def test_run_completes_when_max_iters_reached(repo: dict) -> None:

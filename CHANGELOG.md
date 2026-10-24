@@ -7,6 +7,38 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Breaking
+
+- A node's Claude session loads the worktree's project and local settings, the
+  node's own `settings.json`, and no MCP server, and none of the instruction
+  files above its worktree or in the user's config home (see Changed). The
+  user's own settings (`~/.claude/settings.json`: permissions, hooks, plugins,
+  model and effort defaults), user skills, MCP servers, claude.ai connectors,
+  and a project's `.mcp.json` servers stay out of every node. A host whose nodes
+  rely on them, such as an `apiKeyHelper` or a provider `env` in the user's
+  settings, runs `fractal node config set user_settings=true` from the main
+  checkout to opt the whole tree back in, or moves what nodes need into the
+  station's `agents/claude/settings.json`. Instructions a node needs belong in
+  the project's own `CLAUDE.md` or the node's charter.
+
+### Changed
+
+- A node's Claude session reads only its worktree's own instruction files. Each
+  launch passes the node's `settings.json` composed with a `claudeMdExcludes`
+  list naming the `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`,
+  `.claude/rules/`, and `AGENTS.md` files of every directory above the worktree
+  and the user's own `CLAUDE.md` and rules, so the main checkout's, a parent
+  directory's, and the user's instructions stay out of the session. The node's
+  file on disk stays as written, and a node with none passes the excludes alone.
+- A node's Claude session loads only the project and local setting sources and
+  the MCP servers it is handed: each launch passes
+  `--setting-sources project,local` and `--strict-mcp-config`. The
+  `user_settings` config key opts a node back into the user's own settings and
+  MCP servers; it resolves at each launch from the node, else its nearest
+  ancestor that sets it, so the user node's value is the tree's default. The
+  model and effort defaults fractal records for a step read the same setting
+  sources the session loads.
+
 ## [1.4.0] - 2026-10-23
 
 ### Breaking
