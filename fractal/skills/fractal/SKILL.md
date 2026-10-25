@@ -97,7 +97,9 @@ continue (a continue re-arms the cap at start, not init).
 - **`max-step-cost`**: per-step cost ceiling in USD (warn-only when
   unenforceable)
 - **`reserve-budget`**: budget reserved for cleanup; USD or N% of `max-cost`
-  (default: 10%)
+  (default: 10%, which follows the cap when it changes); an explicit reserve —
+  this flag, a template preset, or `config set` — keeps its figure when the cap
+  changes, so pass `--reserve-budget` again to change it with the cap
 - **`sync`**: enable (default) or disable radio sync before each step
 - **`detached`**: run each step as a separate agent session (default: one
   continuous session)
@@ -109,15 +111,17 @@ continue (a continue re-arms the cap at start, not init).
 
 **Template authoring** — put prose and Jinja expressions in `NODE.md`, steps,
 and included fragments such as `_partials/foundations.md`. Includes read the
-same committed template bundle and cannot reach sibling templates. Values are
-data: strings containing `{{...}}` are never rendered again, and `$VAR` stays
-for runtime rendering. The template's `_template.toml` supplies defaults; the
-node's generated `_template.toml` records complete inputs and the source commit.
-Parent edits to the rendered charter are ordinary text edits. Editing recorded
-inputs is not a live update: `node diff` and bare `node reseed` replay them,
-while an explicit `reseed --ref` or `--template` adds defaults only for missing
-keys. Reseed preserves `NODE.md`, config, and memory, so charter drift can
-remain.
+same committed template bundle; to share one file across templates, include it
+by a literal name from the repo root (`{% include '/campaign/DOCTRINE.md' %}`):
+it reads at the template's commit and never deploys. Values are data: strings
+containing `{{...}}` are never rendered again, and `$VAR` stays for runtime
+rendering. The template's `_template.toml` supplies defaults; the node's
+generated `_template.toml` records complete inputs, the source commit, and each
+shared file's blob id. Parent edits to the rendered charter are ordinary text
+edits. Editing recorded inputs is not a live update: `node diff` and bare
+`node reseed` replay them, while an explicit `reseed --ref` or `--template` adds
+defaults only for missing keys. Reseed preserves `NODE.md`, config, and memory,
+so charter drift can remain.
 
 **Start** — `fractal node start` just launches; all run parameters come from
 `config.json`. A `max_cost` in `config.json` must be positive if set; a missing
@@ -135,7 +139,9 @@ remain.
   forbids spawns and re-arms from it and tells every seat it is draining
   (`_DRAIN`)
 - **`--max-cost`**: with `--continue`, re-arm the cost cap for the new run;
-  required when the last run ended on its budget
+  required when the last run ended on its budget. It is the one run parameter
+  `start` takes: iterations re-arm from `config.json` (each run counts from 1),
+  so set `max_iters` with `fractal node config set` before the `--continue`
 
 After reading the directive, print, in this order:
 
@@ -238,15 +244,16 @@ Determine the node's state and proceed accordingly:
    without asking (every command here is idempotent, so re-runs are safe):
 
    1. `fractal init <path> --agent=<agent>` — writes the root node data
-      (`.fractal/`) and project wiki (`wiki/`); a no-op if the root already
-      exists (re-run to update the stored `--agent`). For a monorepo sub-project
-      `<path>` these nest under it (`<path>/.fractal/`, `<path>/wiki/`), not the
-      repo root. `--agent` sets the default agent that spawned nodes inherit; if
-      the user didn't specify one, default to `--agent=claude` if you are
-      Claude, `--agent=codex` if you are Codex, `--agent=grok` if you are Grok,
-      `--agent=opencode` if you are opencode, or `--agent=omp` if you are Oh My
-      Pi. `--provider` sets the default provider route the same way (e.g.
-      `openrouter` routes claude or codex through OpenRouter on
+      (`.fractal/`) and project wiki (`wiki/`, or the folder the project's
+      settings file names — see below); a no-op if the root already exists
+      (re-run to update the stored `--agent`). For a monorepo sub-project
+      `<path>` these nest under it (`<path>/.fractal/`, its wiki folder), not
+      the repo root. `--agent` sets the default agent that spawned nodes
+      inherit; if the user didn't specify one, default to `--agent=claude` if
+      you are Claude, `--agent=codex` if you are Codex, `--agent=grok` if you
+      are Grok, `--agent=opencode` if you are opencode, or `--agent=omp` if you
+      are Oh My Pi. `--provider` sets the default provider route the same way
+      (e.g. `openrouter` routes claude or codex through OpenRouter on
       `OPENROUTER_API_KEY`; agents without routes ignore it, and omitting it
       means each agent's own endpoint). Route mechanics to know: an inherited
       route is cleared per node with `fractal node config set provider=null`;
@@ -264,28 +271,30 @@ Determine the node's state and proceed accordingly:
       if you intend to pass additional options, confirm with the user first. If
       it fails, stop and report the error.
 
-The project `wiki/` is **git-tracked** (as are node-branch seeds) — never add it
-to `.gitignore`. The root node's own `.fractal/` is **git-ignored on the
-top-level branch** by default, keeping it out of your main history; run
-`fractal track` to commit it there too and `fractal untrack` to revert — both
-toggle only the ignore and print the follow-up git command, never touching the
-index. Fractal manages this automatically: its runtime artifacts (worktrees, the
-central database, status, agent logs) ride the repo-local `.git/info/exclude`,
-and the top-level `.fractal/<branch>/` hides itself with its own ignore file —
-the committed `.gitignore` is never touched. Keep your own ignore patterns
-anchored (`/artifacts/`, not `artifacts/`), or they also match — and silently
-hide — same-named subtrees at any depth, such as a node's committable
-`.fractal/<node>/artifacts/`.
+The project wiki is **git-tracked** (as are node-branch seeds) — never add it to
+`.gitignore`. The root node's own `.fractal/` is **git-ignored on the top-level
+branch** by default, keeping it out of your main history; run `fractal track` to
+commit it there too and `fractal untrack` to revert — both toggle only the
+ignore and print the follow-up git command, never touching the index. Fractal
+manages this automatically: its runtime artifacts (worktrees, the central
+database, status, agent logs) ride the repo-local `.git/info/exclude`, and the
+top-level `.fractal/<branch>/` hides itself with its own ignore file — the
+committed `.gitignore` is never touched. Keep your own ignore patterns anchored
+(`/plans/`, not `plans/`), or they also match — and silently hide — same-named
+subtrees at any depth, such as a node's committable `.fractal/<node>/plans/`.
 
-`fractal init` also wires the wiki merge driver: the committed `.gitattributes`
-assigns `merge=wiki` to the generated wiki `_index.md` files, while the driver
-itself lives in repo-local git config, so merges of branches carrying wiki pages
-auto-resolve the generated index sections. Local config does not survive a clone
-— on a fresh clone the attribute is present but the driver is not, and
-`_index.md` merges fall back to git's default and may conflict on generated
-content; run `wiki config --path=wiki` (or `--path=<path>/wiki` for a
-sub-project) to register it (verify with `git config --get merge.wiki.driver`) —
-`fractal init` only wires it when it creates the wiki.
+`fractal init` also wires the wiki merge driver: the committed repo-root
+`.gitattributes` assigns `merge=wiki` to the generated wiki `_index.md` files
+(`**/_index.md merge=wiki`) and, from a wiki tool with a page driver, the wiki's
+own `.gitattributes` assigns it to wiki pages (`*.md merge=wiki`), while the
+driver itself lives in repo-local git config, so merges of branches carrying
+wiki pages auto-resolve the generated sections. Local config does not survive a
+clone — on a fresh clone the attributes are present but the driver is not, and
+wiki merges fall back to git's default and may conflict on generated content;
+run `wiki config --path=wiki` (or `--path=<path>/wiki` for a sub-project, with
+the configured folder in place of `wiki`) to register it (verify with
+`git config --get merge.wiki.driver`) — `fractal init` only wires it when it
+creates the wiki.
 
 The output includes the project directory (worktree root) and the node data
 directory. Read these from the output to use in later steps (e.g.
@@ -293,8 +302,23 @@ directory. Read these from the output to use in later steps (e.g.
 
 If the output includes Obsidian plugin instructions, relay them to the user —
 installing the listed plugin(s) and running `wiki config --path=<path>` on the
-project wiki (`wiki/`) or memory wiki (`<node_dir>/memory`) lets them browse in
-Obsidian (optional).
+project wiki or memory wiki (`<node_dir>/memory`) lets them browse in Obsidian
+(optional).
+
+The shared project wiki — the one folder every node may commit to regardless of
+its scope — is `wiki/` by default. A project whose `wiki/` holds other content
+names a different folder in a committed `.fractal/.settings.json` (or
+`<path>/.fractal/.settings.json` for a sub-project), under its `wiki` key:
+`{"wiki": "docs"}`. The value is a folder relative to the project: never
+absolute, never `.` or `null`, with no `..`, no `.fractal`, `.worktrees`, or
+`.git` component, and written canonically (`docs`, not `./docs/`). Write the
+file before `fractal init`, which reads it and fixes the folder for the tree;
+every node in the project inherits it, and a bad value fails init. The baseline
+commit refuses a file naming another folder than the one init recorded, and a
+node spawn refuses when the root branch's committed file does. To change the
+folder of an existing tree, commit the new setting, run `fractal reset <root>`
+so the tree has no nodes, re-run `fractal init`, and commit the baseline with
+`--init`.
 
 ### Step 2: Define the node
 
@@ -514,13 +538,14 @@ Once the node is running, briefly explain how to interact with it:
   the brake holds until `fractal resume`). Paused state is durable: it survives
   a reboot or a filesystem copy of the repo to another machine. A paused node
   holds its spawn slot and blocks its parent's finish-drain; only `resume`,
-  `kill`, and `chat` act on it (ask a paused node what it was doing —
-  `chat --current` forks the interrupted claude, grok, opencode, or omp session,
-  and the TUI's chat does so by default; a codex node gets a fresh session).
-  Note the distinction: `resume` continues a *paused* run in place, while
-  `start --continue` opens a *fresh* run (worktree restored — uncommitted
-  project files need `--clean`, and a budget-ended run refuses without an
-  explicit `--max-cost`) on a stopped/exited node.
+  `kill`, `chat`, and `merge` (committed work only; the node stays paused) act
+  on it (ask a paused node what it was doing — `chat --current` forks the
+  interrupted claude, grok, opencode, or omp session, and the TUI's chat does so
+  by default; a codex node gets a fresh session). Note the distinction: `resume`
+  continues a *paused* run in place, while `start --continue` opens a *fresh*
+  run (worktree restored — uncommitted project files need `--clean`, and a
+  budget-ended run refuses without an explicit `--max-cost`) on a stopped/exited
+  node.
 
 - **Worktree:** The node runs in a git worktree at
   `<repo>/.worktrees/<branch>/`. The user's repo is untouched. When done, from

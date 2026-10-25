@@ -80,19 +80,29 @@ Display decorations
 ~~~~~~~~~~~~~~~~~~~
 
 ``fractal node status`` composes the bare status with a qualifier in
-parentheses — ``active (pausing)``, ``exited (<reason>)`` — while
-``fractal node list`` keeps its ``status`` column bare and carries the same
-qualifier in a separate ``detail`` column, with a typed ``end_reason`` column
+parentheses — ``idle (starting)``, ``active (pausing)``,
+``exited (<reason>)`` — while ``fractal node list`` keeps its ``status``
+column bare and carries the same qualifier in a separate ``detail`` column,
+with a typed ``end_reason`` column
 (``goal_met``, ``run_exhausted``, ``final_iteration_failed``, ``cost_budget``,
-``timeout``, ``setup_abort``, ``other``, or empty — ``null`` in ``--json``
+``timeout``, ``setup_abort``, ``crashed``, ``other``, or empty — ``null`` in
+``--json``
 — when nothing is recorded) beside it. Both are display-only — the stored
 status stays bare, and ``list --status`` filters match the bare ``status``
 column. Several qualifiers can stand at once, ``;``-joined:
 
+- ``idle (starting)`` — the boot window: ``start`` has launched the loop and
+  its runtime is live, but the loop has not yet stamped ``active`` after
+  preflight. The status stays ``idle``; the listing marks the row with
+  ``starting`` (``true`` only here, ``null`` when the listing could not
+  look), and ``--live`` reads the row as ``active`` with ``detail``
+  ``starting``.
 - ``active (pausing)`` / ``active (stopping)`` / ``active (finishing)`` — a
   pause, stop, or finish signal is pending on an active node.
-- ``exited (<reason>)`` — the latest run row recorded why it ended (a
-  reconciliation-healed crash records no reason and stays bare).
+- ``exited (<reason>)`` — the latest run row recorded why it ended; a crash
+  healed by reconciliation reads ``exited (crashed: loop runtime gone, healed
+  by reconcile)`` with ``end_reason`` ``crashed``, whether a later read healed
+  it or the next boot closed its stranded rows.
 - ``completed (run exhausted: Reached max iterations (N))`` — the run landed
   ``completed`` by running out its iteration cap with a clean final
   iteration, not by a goal-met finish.
@@ -113,7 +123,9 @@ column. Several qualifiers can stand at once, ``;``-joined:
   the latest run advanced with no recorded row.
 - ``PAUSED: billing`` composes the same way, on ``active`` nodes only — the
   newest launches carry the dead-credits signature (three or more instant,
-  zero-cost failures) and the loop's billing breaker is backing off.
+  zero-cost failures that the loop did not judge provider outages, none of
+  them a step refused before its launch) and the loop's billing breaker is
+  backing off.
 
 Transitions at a glance
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -196,7 +208,8 @@ detached tmux session, or in an independent process group with
    * - ``--continue``
      - Re-arm a settled node (``completed``, ``stopped``, ``exited``, or
        ``killed``) for further iterations. The launch restores the worktree
-       and the loop opens a fresh run.
+       (leaving it as found when a git operation is in progress there, for
+       the first step's prompt to name) and the loop opens a fresh run.
    * - ``--clean``
      - Requires ``--continue``. Acknowledges that the continue's worktree
        restore discards uncommitted project files; without it a dirty
@@ -239,12 +252,12 @@ the command line instead of inside a dying tmux pane. Start also refuses:
   tree-wide latch);
 - a launch from inside a draining run — a seat of a ``--continue --drain``
   run, detected by the ``_DRAIN`` export, the run's durable ``drain``
-  signal, or the seat's recorded process group ("Cannot start a node from
-  a draining run (--drain forbids re-arms)"); ``node init`` (a spawn, or a
-  whole new tree via ``fractal init``), ``node update``, and
-  ``node resume`` refuse the same way. The guard binds the acting seat, not
-  the target — an operator's ``node resume`` of a parked drain run
-  relaunches it, and the relaunch keeps draining;
+  signal, or descent from the seat's recorded agent invocation ("Cannot
+  start a node from a draining run (--drain forbids re-arms)");
+  ``node init`` (a spawn, or a whole new tree via ``fractal init``),
+  ``node update``, and ``node resume`` refuse the same way. The guard
+  binds the acting seat, not the target — an operator's ``node resume``
+  of a parked drain run relaunches it, and the relaunch keeps draining;
 - a fresh start when a foreign tmux session already holds this node's
   session name (another fractal sharing the repository basename — rename a
   repository directory, never kill the foreign session); a headless fresh
@@ -337,7 +350,11 @@ left it. A node still parking — ``active`` with a pending pause signal —
 gets its pause withdrawn instead, so the live loop never parks. Resume
 refuses a target that is not paused (and not parking), and a target under a
 still-paused ancestor or the tree-wide latch — resume the latching node
-instead, which relaunches the subtree with it.
+instead, which relaunches the subtree with it. Before it changes anything,
+resume also runs start's config re-validation and effort-ladder check on
+every node it would relaunch, and refuses naming the first node that
+fails, so a ``config.json`` hand-edited while the node was paused fails at
+the command line, not in the relaunched loop.
 
 ``fractal resume [name] [--path <dir>]`` is the tree-wide release: it lifts
 the root latch first (new starts and spawns become legal immediately),
@@ -390,14 +407,68 @@ open. The node's status is ``paused`` and its tmux session is gone — **no
 session while parked is normal**, and crash reconciliation deliberately
 never touches a paused node.
 
+The abort takes the agent's whole process tree, not just its process group:
+agent CLIs run tool commands in groups (or sessions) of their own, and every
+one still linked to the agent dies with it. ``kill`` and a step deadline reap
+the same way. Anything still alive after the forced kill is named in the
+command's output. A git operation the abort left unfinished in the worktree —
+a merge, a rebase, an ``index.lock`` — is named too, so it is finished or
+aborted before the node is merged; the resumed step's prompt names it as
+well. An agent that pauses its own node aborts nothing: its step
+finishes with every tool it started, and the loop parks at its next
+checkpoint. Only if the first read of the process table fails does the
+abort fall back to TERMing every recorded group except the caller's own, so a
+self-pause from a tool shell in a group of its own then aborts its own step.
+
+A step that ends normally ends no process: any background job outlives its
+step unless the agent ends it. The loop reaps only a step it cuts short — a
+step deadline, the no-progress watchdog, a stream failure, or the crash heal —
+and that reap lands while the step still runs, so it reaches every process
+still linked to the agent. It misses an orphan outside the agent's session: a
+process that left the session and whose parent has since exited, so no parent
+chain leads back to the agent. That covers a double-forked daemon and a job an
+earlier tool call backgrounded under a session leader that has since exited
+(``validate.sh &`` under a ``setsid`` shell that already returned). A job that
+a finished step left behind is outside every later reap. ``pause`` with a step
+in flight and ``kill`` with a recorded process group name such a job in their
+sweep of the node's worktree: any process working there that is not a node's
+loop is reported but left running, each line naming its node. An orphan
+working elsewhere is not named at all. End such a job by hand.
+
 While parked, a node:
 
-- accepts only ``resume``, ``kill``, and ``node chat`` — ``start``,
-  ``merge``, ``delete``, ``retire``, and ``node init --reset`` all refuse
+- accepts only ``resume``, ``kill``, ``node chat``, and ``node merge`` —
+  ``start``, ``delete``, ``retire``, and ``node init --reset`` all refuse
   over it;
 - still holds its spawn slot against the width and descendant caps;
 - blocks its ancestors' finish-drains (a parent cannot drain-complete over a
   parked child).
+
+Landing a paused node
+~~~~~~~~~~~~~~~~~~~~~
+
+``fractal node merge <node>`` on a paused node lands its *committed* work in
+its merge target and leaves it ``paused``: its run, iteration, and step rows
+are untouched, so ``fractal node resume`` adopts the same run afterwards. The
+frozen step's uncommitted work stays in the node's worktree. A step frozen
+inside a git operation — a merge, squash merge, cherry-pick, or revert
+stopped on a conflict, a rebase stopped part-way, or the ``index.lock`` of a
+git command still running or killed — refuses the merge before anything
+changes: finish or abort the operation, by resuming the node or by hand in
+its worktree, and merge again. The merge-base advance carries the frozen state
+the way ``git checkout`` moves a branch; if the advance would change a path
+the node holds dirty or staged, or write over an untracked or ignored file,
+the whole merge refuses and names the paths, and a failure after the squash
+commit, or an interrupt before the node's branch moves, rolls back both the
+target and the node and exits 1 (a ``--continue`` keeps the operator's
+resolution staged for the re-run, and a file something else wrote in the
+node's worktree during the merge is left as found and named); an interrupt
+once the node's branch has moved lands the merge and exits 0, since the branch
+moves only after the node's worktree update succeeded. The target must still
+be settled (a depth-1 node lands into its user branch even during a tree-wide
+pause); a live node, or a child landing into a live or paused parent, still
+refuses. ``--message`` sets the squash commit's text, so
+a descriptive message needs no amend (an amended squash orphans the advance).
 
 The pause latch
 ~~~~~~~~~~~~~~~
@@ -429,9 +500,16 @@ What resuming restores
 A resumed loop **adopts its open run**: the same budgets and iteration
 count, with the interrupted step re-entered — resuming the recorded agent
 session when one exists, re-orienting fresh otherwise (session continuity is
-best-effort, not guaranteed). The pause and resume events are instants, and
-the paused span between them is credited back to the run and
-iteration deadlines, so parking a node does not burn its timeouts.
+best-effort, not guaranteed). The span from the moment the loop parks to the
+resume is credited back to the run and iteration deadlines, so parking a node
+does not burn its timeouts. The span starts at the park, not at the pause
+request: a step that works on past the request (an agent pausing its own node
+finishes its step first) is charged as working time, and a pause withdrawn
+before the loop parks credits nothing. A resumed run that ends before
+re-entering the parked iteration — its run deadline ran out, or ``max_iters``
+was lowered below that iteration, while it was parked — closes the iteration
+as the run ends: ``failed`` with ``timed out`` for the deadline, ``stopped``
+for the cap.
 
 If the resume races a loop that is still parking, the relaunch refuses with
 "the loop is still running or parking" and tells you to retry once it exits —

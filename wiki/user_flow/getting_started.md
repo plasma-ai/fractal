@@ -63,8 +63,9 @@ What the operator decides here:
 - **One fractal per branch.** A branch maps to a single project; a second init
   on the same branch for a different sub-project is refused.
 
-Init also scaffolds the project wiki (`wiki/`) — the shared knowledge base nodes
-read and grow — and leaves the user node's data directory git-ignored by default
+Init also scaffolds the project wiki (`wiki/`, or the folder the project's
+`.fractal/.settings.json` names) — the shared knowledge base nodes read and grow
+— and leaves the user node's data directory git-ignored by default
 (`fractal track` / `fractal untrack` toggle that).
 
 ## Create a node: `fractal node init`
@@ -89,8 +90,8 @@ ones every operator should decide consciously:
 - `--max-depth`, `--max-children`, `--max-descendants` — whether the node may
   spawn children, and how large its subtree may grow. All zero makes a leaf;
   anything more makes a manager.
-- `--scope` — the subdirectories the node may commit to (the shared `wiki/` is
-  always allowed).
+- `--scope` — the subdirectories the node may commit to (the shared project wiki
+  is always allowed).
 - `--agent`, `--model`, `--effort` — who does the thinking.
 - `--base` — the branch to fork from and later squash-merge back into, when it
   isn't the dotted parent.

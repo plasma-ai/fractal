@@ -3,12 +3,13 @@
 The driver splits each ``_index.md`` at the first ``***``. Above it, the
 regenerated frontmatter keys (``name``/``updated``) normalize to ours while
 the authored keys get a real three-way merge, and the link block resolves to
-the UNION of both sides' rows -- ours' layout wins and rows present only in
-theirs are appended above the closing ``***``, deduplicated, so a merge never
-silently drops one side's additions (the next ``wiki update`` re-sorts the
-block and prunes whatever rows went stale). The block *below* (hand-written
-content) is a real three-way merge via ``git merge-file``. The driver
-recombines the halves and exits nonzero when either merge left conflicts.
+the UNION of both sides' rows, deduplicated, less each row the base had that
+one side deleted while the other left it alone -- so a merge never silently
+drops one side's additions and never resurrects one side's deletions. A clean
+merge then carries its rows in the order ``wiki update`` writes them, so the
+merged index is current as merged. The block *below* (hand-written content)
+is a real three-way merge via ``git merge-file``. The driver recombines the
+halves and exits nonzero when either merge left conflicts.
 
 These tests drive both real ``git merge`` scenarios -- with the driver wired
 exactly as the repo configures it -- and direct invocations on crafted
@@ -52,39 +53,43 @@ def test_clean_merge_unions_above_and_merges_below(
 ) -> None:
     """A clean merge unions the link rows and three-way-merges below.
 
-    Ours and theirs regenerate different link blocks (above); theirs also appends
-    a line below. The result must be byte-identical to ours' above plus theirs'
-    unique row appended above the closing ``***`` plus the three-way-merged
-    below -- proving the recombination introduces no drift and no side's
-    addition is dropped.
+    Ours adds a row, theirs adds another and deletes one ours left alone, and
+    theirs also appends a line below. The merged link block must hold exactly
+    the merged rows -- both additions once each, the deletion kept, each row
+    in sorted order -- above the three-way-merged below, proving no side's
+    addition is dropped and no side's deletion rides back in. The row spacing
+    is the wiki's own rendering, which the real-cycle test below checks
+    against ``wiki update`` itself.
     """
     below_base = 'Manual line 1.\nManual line 2.\n'
     below_theirs = 'Manual line 1.\nManual line 2.\nTheirs line 3.\n'
     result = _three_way_merge(
         tmp_path / 'repo',
-        base=_index(('[[a|a]]: alpha',), below_base),
-        ours=_index(('[[a|a]]: alpha', '[[c|c]]: gamma'), below_base),
+        base=_index(('[[a|a]]: alpha', '[[d|d]]: delta'), below_base),
+        ours=_index(
+            ('[[a|a]]: alpha', '[[c|c]]: gamma', '[[d|d]]: delta'),
+            below_base,
+        ),
         theirs=_index(('[[a|a]]: alpha', '[[b|b]]: beta'), below_theirs),
     )
-    expected = _index(('[[a|a]]: alpha', '[[c|c]]: gamma'), below_theirs)
-    expected = expected.replace('***\n', '[[b|b]]: beta\n\n***\n')
     assert result.returncode == 0
     assert not result.unmerged
-    assert result.text == expected
-    # the shared row deduplicates: the union appends only theirs' unique row
-    assert result.text.count('[[a|a]]: alpha') == 1
+    above, _, below = result.text.partition('\n***\n')
+    rows = [line for line in above.splitlines() if line.startswith('[[')]
+    assert rows == ['[[a|a]]: alpha', '[[b|b]]: beta', '[[c|c]]: gamma']
+    assert below == below_theirs
 
 
 def test_above_unions_divergent_link_blocks(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Divergent link blocks union -- ours' layout first; below still merges.
+    """Divergent link blocks union in update's order; below still merges.
 
     The separator sits at a different line number in each version (different link
     counts), yet the below content is extracted per-file and merged correctly:
-    ours' unique link survives in place, theirs' unique link is appended after
-    it (the union never drops a side's addition), and theirs' below addition
-    is picked up.
+    ours' unique link and theirs' unique link both survive (the union never
+    drops a side's addition), theirs' sorts into place ahead of ours' rather
+    than trailing it, and theirs' below addition is picked up.
     """
     result = _three_way_merge(
         tmp_path / 'repo',
@@ -96,8 +101,12 @@ def test_above_unions_divergent_link_blocks(
     assert not result.unmerged
     assert '[[c|c]]: gamma' in result.text  # ours' above kept
     assert result.text.count('[[b|b]]: beta') == 1  # theirs' row unioned once
-    # ours' layout leads; theirs' unique row rides appended after it
-    assert result.text.index('[[c|c]]: gamma') < result.text.index('[[b|b]]: beta')
+    # the rows land in update's sorted order, not ours' layout first
+    assert (
+        result.text.index('[[a|a]]: alpha')
+        < result.text.index('[[b|b]]: beta')
+        < result.text.index('[[c|c]]: gamma')
+    )
     assert 'Note B.' in result.text  # theirs' below merged in
 
 
@@ -154,8 +163,7 @@ def test_empty_index_unions_links(tmp_path: pathlib.Path) -> None:
 
     Empty wiki/memory indexes end with ``***`` and nothing after it. The below
     merge of three empty bodies is clean, and the link union carries both
-    sides' rows -- ours first, theirs' unique row appended (``wiki update``
-    re-sorts and prunes post-merge).
+    sides' rows.
     """
     result = _three_way_merge(
         tmp_path / 'repo',
@@ -321,26 +329,28 @@ def test_stray_separator_in_frontmatter_still_splits_above(
 
     The split skips the leading ``--- ... ---`` block before searching for
     ``^***$``, so a stray ``***`` in a multi-line ``desc`` is ignored and the
-    real link block still merges as the above region -- ours' link in place,
-    theirs' unioned in once -- rather than leaking through a mistaken "below"
-    merge (which would conflict or duplicate the shared body).
+    real link block still merges as the above region -- the shared base link
+    kept, each side's added link unioned in once -- rather than leaking
+    through a mistaken "below" merge (which would conflict or duplicate the
+    shared body).
     """
 
-    def stray(link: str, below: str) -> str:
+    def stray(links: str, below: str) -> str:
         # a literal-block desc whose body holds a bare *** above the real one
         return (
             '---\nname: w\ndesc: |\n  line1\n***\n  line2\n---\n\n# w\n\n'
-            f'{link}\n\n***\n{below}'
+            f'{links}\n\n***\n{below}'
         )
 
     returncode, text = _run_driver(
         tmp_path,
-        ours=stray('[[a|a]]: alpha', 'Shared note.\n'),
-        base=stray('[[a|a]]: alpha', 'Shared note.\n'),
-        theirs=stray('[[b|b]]: beta', 'Shared note.\n'),
+        ours=stray('[[c|c]]: gamma\n[[a|a]]: alpha', 'Shared note.\n'),
+        base=stray('[[c|c]]: gamma', 'Shared note.\n'),
+        theirs=stray('[[c|c]]: gamma\n[[b|b]]: beta', 'Shared note.\n'),
     )
     assert returncode == 0  # identical below -> clean merge
-    assert '[[a|a]]: alpha' in text  # ours' link kept in place
+    assert text.count('[[c|c]]: gamma') == 1  # the shared base link kept
+    assert text.count('[[a|a]]: alpha') == 1  # ours' link kept
     assert text.count('[[b|b]]: beta') == 1  # theirs' link unioned, not leaked
     assert text.count('Shared note.') == 1  # the below region merged intact
 
@@ -413,13 +423,13 @@ def test_union_above_carries_both_links_and_update_prunes_stale_rows(
     """The union carries both sides' links at merge time; update settles them.
 
     The driver unions the link rows, so a link only *theirs* added survives
-    the merge of an ``_index.md`` directly -- no restore step is load-bearing
-    anymore. The link block stays a *derived view*: the post-merge
-    ``wiki update`` re-sorts the unioned rows and prunes whatever rows went
-    stale (a deleted page's row no longer rides merges back in -- the
-    resurrection class). This drives the real cycle: ours and theirs each add
-    a distinct page, the merged index carries both links, and after deleting
-    a page its row is pruned by the next update.
+    the merge of an ``_index.md`` directly. The link block stays a *derived
+    view*: the post-merge ``wiki update`` regenerates it from the merged
+    filesystem and prunes whatever rows went stale, so a deleted page's row
+    cannot ride a later merge back in. This drives the real cycle: ours and
+    theirs each add a distinct page, the merged index carries both links and
+    is already current as merged (``wiki update --check`` finds nothing to
+    rewrite), and after deleting a page its row is pruned by the next update.
     """
     # fresh repo with the index driver wired
     repo = tmp_path / 'repo'
@@ -431,7 +441,7 @@ def test_union_above_carries_both_links_and_update_prunes_stale_rows(
     _wiki(
         wiki_dir,
         'init',
-        '--settings={"naming": {"validate": ["ascii", "identifier"]}}',
+        '--settings={"naming": {"validate": ["ascii", "identifier"], "allow": "."}}',
     )
     (wiki_dir / 'a.md').write_text('# a\n\nAlpha.\n', encoding='utf-8')
     _wiki(wiki_dir, 'update')
@@ -462,7 +472,15 @@ def test_union_above_carries_both_links_and_update_prunes_stale_rows(
     assert merged.count('[[b|b]]') == 1  # theirs' link unioned once
     assert '[[c|c]]' in merged  # ours' link kept
     assert (wiki_dir / 'b.md').is_file()
-    # the post-merge wiki update re-sorts the unioned block from ground truth
+    # each side only added a page, so the clean merge is current as merged
+    check = subprocess.run(
+        ['wiki', 'update', '--check', '--path', f'{wiki_dir}'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check.returncode == 0, (check.stdout, check.stderr)
+    # the post-merge wiki update regenerates the block from ground truth
     _wiki(wiki_dir, 'update')
     settled = index.read_text(encoding='utf-8')
     assert '[[a|a]]' in settled

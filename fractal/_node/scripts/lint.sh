@@ -14,10 +14,11 @@ SKILLS_DIR="$NODE_DIR/skills"
 MEMORY_DIR="$NODE_DIR/memory"
 
 PROJECT="$(fractal config _get project --path="$WORKTREE_DIR" 2>/dev/null || echo ".")"
+WIKI="$(fractal config _get wiki --path="$WORKTREE_DIR" 2>/dev/null || true)"
 if [[ "$PROJECT" == "." ]]; then
-    WIKI_DIR="$WORKTREE_DIR/wiki"
+    WIKI_DIR="$WORKTREE_DIR/${WIKI:-wiki}"
 else
-    WIKI_DIR="$WORKTREE_DIR/$PROJECT/wiki"
+    WIKI_DIR="$WORKTREE_DIR/$PROJECT/${WIKI:-wiki}"
 fi
 
 if [[ -d "$SKILLS_DIR" ]]; then

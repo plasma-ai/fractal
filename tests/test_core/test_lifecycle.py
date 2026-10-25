@@ -8,25 +8,39 @@ merge-to-parent semantics.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import fcntl
+import json
 import os
 import pathlib
 import signal
 import subprocess
 import threading
 import time
-from typing import NoReturn, Optional
+from collections.abc import Iterator
+from typing import Any, NoReturn, Optional
 
 import pytest
 
 import fractal.core.node
 import fractal.core.worktree
-from fractal.constants import HEADLESS_FILE, HEADLESS_LOG, LOCK_FILE, PGID_FILE
+from fractal.constants import (
+    HEADLESS_FILE,
+    HEADLESS_LOG,
+    LOCK_FILE,
+    PGID_FILE,
+)
 from fractal.core.node import Node
-from tests._helpers import _git, _stub_run_script
+from tests._helpers import (
+    _commit_template,
+    _files,
+    _git,
+    _stub_run_script,
+)
 
 from .conftest import (
     _active_run,
+    _make_git_repo,
     _parse_project_dir,
     _record_step_cost,
     _resolve_branch,
@@ -58,6 +72,8 @@ __all__ = [
     'test_start_continue_re_arms_after_drained_run',
     'test_start_continue_refuses_after_budget_end',
     'test_start_continue_rolls_back_retune_on_refusal_or_failed_launch',
+    'test_start_continue_rolls_back_retune_on_a_refused_launch_config',
+    'test_start_continue_max_cost_retunes_only_a_default_reserve',
     'test_start_without_max_cost_warns_and_runs',
     'test_start_continue_reconciles_crashed_active',
     'test_finish_rejects_non_active',
@@ -107,10 +123,12 @@ __all__ = [
     'test_merge_excludes_merged_node_seed',
     'test_merge_excludes_subproject_node_seed',
     'test_merge_refreshes_parent_wiki_indexes',
+    'test_merge_into_a_plain_base_refreshes_the_configured_wiki',
     'test_merge_restores_parent_when_index_refresh_fails',
     'test_merge_refuses_when_parent_worktree_is_dirty',
     'test_merge_ignore_scope_lands_an_out_of_scope_squash',
     'test_merge_refuses_settled_child_into_a_running_target',
+    'test_merge_refuses_a_target_that_went_live_while_it_waited',
     'test_merge_event_survives_child_delete',
     'test_meta_node_scope_is_spelled_from_its_own_project',
     'test_meta_init_refuses_a_target_project_with_whitespace',
@@ -884,6 +902,89 @@ def test_start_continue_rolls_back_retune_on_refusal_or_failed_launch(
     assert child.config.get('max_cost') is None
     assert child.db.read('nodes', where={'node': child.branch})[0]['max_cost'] is None
     assert child.status() == 'exited'
+
+
+@pytest.mark.parametrize(
+    argnames=('edit', 'refusal'),
+    argvalues=[
+        # a hand-edited duration with no unit, which the loop cannot parse
+        pytest.param({'timeout': '10'}, 'timeout must be a duration', id='config'),
+        # a hand-edited agent the registry does not know
+        pytest.param({'agent': 'cluade'}, "Unsupported agent: 'cluade'", id='agent'),
+    ],
+)
+def test_start_continue_rolls_back_retune_on_a_refused_launch_config(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: dict[str, str],
+    refusal: str,
+) -> None:
+    """A continue refused over its launch config never keeps a ``--max-cost`` retune.
+
+    Start re-checks the config and the agent the loop reads, since the
+    documented steering path edits ``config.json`` by hand. Those checks
+    read the retuned cap, so a refusal there rolls the retune back like
+    the re-arm gate's: the old cap stays in the child's config and
+    registry row, and nothing launches.
+    """
+    _, child = _spawn_parent_child(git_repo, monkeypatch)
+    # land the child's run on its budget so the continue requires --max-cost
+    run_id = _active_run(child)
+    _record_step_cost(child, run_id=run_id, cost=0.20)
+    child.record.run_end(run_id=run_id, status='exited', exit_code=0)
+    child.status_set('exited')
+    for key, value in edit.items():
+        child.config.set(key, value)
+    run_scripts = _stub_run_script(monkeypatch, child)
+    with pytest.raises(ValueError, match=refusal):
+        child.start(continue_run=True, clean=True, max_cost=0.5)
+    assert run_scripts == []
+    assert child.config.get('max_cost') is None
+    assert child.db.read('nodes', where={'node': child.branch})[0]['max_cost'] is None
+    assert child.status() == 'exited'
+
+
+@pytest.mark.parametrize(
+    argnames=('preset', 'reserve_budget', 'expected'),
+    argvalues=[
+        # init's own default fraction of the preset cap tracks the new cap
+        pytest.param({'max_cost': 4}, None, 0.8, id='default'),
+        # a flag or preset reserve at exactly that fraction stays put
+        pytest.param({'max_cost': 4}, '10%', 0.4, id='flag'),
+        pytest.param({'max_cost': 4, 'reserve_budget': 0.4}, None, 0.4, id='preset'),
+    ],
+)
+def test_start_continue_max_cost_retunes_only_a_default_reserve(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preset: dict[str, float],
+    reserve_budget: Optional[str],
+    expected: float,
+) -> None:
+    """A continue's ``max_cost`` retunes a default reserve and leaves an explicit one.
+
+    The continue retunes through the parent like ``node update``, so it
+    obeys the same rule: init's default reserve tracks the new cap, while a
+    reserve set by flag or template preset keeps its figure, even one equal
+    to the default fraction of the old cap.
+    """
+    Node(git_repo).init(agent='claude', user=True)
+    _commit_template(
+        git_repo,
+        'templates/funded',
+        {'config.json': json.dumps(preset) + '\n'},
+    )
+    template = f'{git_repo}/templates/funded'
+    Node(git_repo).init(name='kid', template=template, reserve_budget=reserve_budget)
+    child = Node(git_repo / '.worktrees' / 'main.kid')
+    assert child.config.get('reserve_budget') == 0.4
+    # continue a settled child under a doubled cap
+    child.status_set('completed')
+    run_scripts = _stub_run_script(monkeypatch, child)
+    child.start(continue_run=True, clean=True, max_cost=8.0)
+    assert run_scripts
+    assert child.config.get('max_cost') == 8.0
+    assert child.config.get('reserve_budget') == expected
 
 
 def test_start_without_max_cost_warns_and_runs(
@@ -2122,39 +2223,90 @@ def test_merge_excludes_subproject_node_seed(git_repo: pathlib.Path) -> None:
     assert 'Nothing to merge' in output
 
 
-def test_merge_refreshes_parent_wiki_indexes(git_repo: pathlib.Path) -> None:
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_merge_refreshes_parent_wiki_indexes(tmp_path: pathlib.Path, wiki: str) -> None:
     """The squash-merge folds regenerated wiki indexes into the merge commit.
 
-    The ``_index.md`` merge driver keeps ours per link block, dropping the
-    merged branch's link rows, so ``merge.sh`` runs ``wiki update`` on the
-    parent's tracked wikis after the squash and stages the refreshed bytes --
-    the merge commit carries current indexes and leaves the parent clean.
-    The staging covers only what the refresh owns: an operator's untracked
-    draft under the parent wiki never rides the merge commit.
+    The ``_index.md`` merge driver's link block need not be the form ``wiki
+    update`` writes, so ``merge.sh`` runs ``wiki update`` on the parent's
+    tracked wikis after the squash and stages the refreshed bytes -- the merge
+    commit carries current indexes and leaves the parent clean. The refresh
+    reads the disk, so an operator's untracked draft under the project wiki
+    would be indexed into the commit: the merge refuses it by name and
+    restores the parent, and lands once the draft moves aside. The project
+    wiki is the configured folder, whatever its name: a corpus at ``wiki/``
+    beside a ``docs`` project wiki keeps its stale index.
     """
+    git_repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
     project_dir, _ = _init_and_commit(git_repo, 'feature')
-    # an untracked operator draft in the parent wiki (outside the refresh)
-    (git_repo / 'wiki' / 'draft.txt').write_text('operator scratch\n', encoding='utf-8')
+    corpus = _files(git_repo / 'wiki')
     # the child commits a wiki page, leaving the generated index stale
-    (project_dir / 'wiki' / 'topic.md').write_text(
+    (project_dir / wiki / 'topic.md').write_text(
         '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
         encoding='utf-8',
     )
-    _git(project_dir, 'add', 'wiki/topic.md')
+    _git(project_dir, 'add', f'{wiki}/topic.md')
     _git(project_dir, 'commit', '-m', 'add topic page')
+    # an untracked operator draft in the parent wiki refuses the merge...
+    draft = git_repo / wiki / 'draft.txt'
+    draft.write_text('operator scratch\n', encoding='utf-8')
+    pre_head = _git(git_repo, 'rev-parse', 'HEAD').stdout.strip()
+    with pytest.raises(RuntimeError, match=f'{wiki}/draft.txt'):
+        Node(project_dir).merge()
+    # ...restoring the parent with the draft untouched
+    assert _git(git_repo, 'rev-parse', 'HEAD').stdout.strip() == pre_head
+    assert draft.read_text(encoding='utf-8') == 'operator scratch\n'
 
-    # squash-merge into the parent (main)
+    # moved aside, the draft no longer blocks the squash-merge into main
+    draft.rename(git_repo / 'draft.txt')
     Node(project_dir).merge()
 
     # the merge commit carries the regenerated index row for the new page...
-    index = _git(git_repo, 'show', 'main:wiki/_index.md').stdout
+    index = _git(git_repo, 'show', f'main:{wiki}/_index.md').stdout
     assert '[[topic' in index
-    # ...the untracked parent draft stayed out of the merge commit...
-    tracked = _git(git_repo, 'ls-files', 'wiki/draft.txt').stdout
-    assert tracked.strip() == ''
-    # ...and the refresh left no residue beyond the draft
+    # ...and the refresh left no residue beyond the moved draft
     status = _git(git_repo, 'status', '--porcelain').stdout
-    assert status.strip() == '?? wiki/draft.txt'
+    assert status.strip() == '?? draft.txt'
+    # a corpus beside the configured wiki kept its bytes
+    if wiki != 'wiki':
+        assert _files(git_repo / 'wiki') == corpus
+
+
+def test_merge_into_a_plain_base_refreshes_the_configured_wiki(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A merge into a ``--base`` branch that is no node refreshes the tree's folder.
+
+    Such a target has no config to name the project wiki, so the merging
+    node names it: the merge commit carries the refreshed ``docs/`` index,
+    and the corpus at ``wiki/`` -- whose stale index a refresh would
+    rewrite, and stage past the footprint check -- keeps its bytes.
+    """
+    git_repo = _make_git_repo(tmp_path / 'repo', wiki='docs')
+    user = Node(git_repo)
+    user.init(agent='claude', user=True)
+    release = tmp_path / 'release'
+    _git(git_repo, 'worktree', 'add', '-q', '-b', 'release', f'{release}')
+    output = user.init(name='rel', base='release')
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    corpus = _files(release / 'wiki')
+    # the node commits a project-wiki page, leaving the generated index stale
+    (project_dir / 'docs' / 'topic.md').write_text(
+        '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(project_dir, 'add', 'docs/topic.md')
+    _git(project_dir, 'commit', '-m', 'add topic page')
+
+    Node(project_dir).merge()
+
+    index = _git(release, 'show', 'release:docs/_index.md').stdout
+    assert '[[topic' in index
+    assert _files(release / 'wiki') == corpus
+    status = _git(release, 'status', '--porcelain').stdout
+    assert status.strip() == ''
 
 
 def test_merge_restores_parent_when_index_refresh_fails(
@@ -2297,6 +2449,63 @@ def test_merge_refuses_settled_child_into_a_running_target(
     output, _ = child.merge()
     assert 'Squash-merged' in output
     assert (parent_wt / 'work.txt').is_file()
+
+
+@pytest.mark.parametrize(
+    argnames=('status', 'refusal'),
+    argvalues=[
+        pytest.param(
+            'active',
+            'Cannot merge into active target main.parent. Stop or kill it first.',
+            id='active',
+        ),
+        pytest.param(
+            'paused',
+            'Cannot merge into paused target main.parent. Resume or kill it first.',
+            id='paused',
+        ),
+    ],
+)
+def test_merge_refuses_a_target_that_went_live_while_it_waited(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    refusal: str,
+) -> None:
+    """A target that leaves its settled status while the merge waits refuses it.
+
+    The merge checks its target before it queues on the repo's merge lock,
+    and a re-armed target's boot takes that same lock for its ``active``
+    stamp, so the target can go live while the merge waits. Once the merge
+    holds the lock it reads the target again: one that went active or
+    paused refuses the merge, its worktree untouched.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    parent_wt = git_repo / '.worktrees' / 'main.parent'
+    child_wt = git_repo / '.worktrees' / 'main.parent.kid'
+    # the child settles with committed work, and so does the target
+    (child_wt / 'work.txt').write_text('child work\n', encoding='utf-8')
+    _git(child_wt, 'add', 'work.txt')
+    _git(child_wt, 'commit', '-m', 'child work')
+    child.status_set('completed')
+    parent.status_set('stopped')
+    real_merge_lock = fractal.core.worktree.merge_lock
+
+    @contextlib.contextmanager
+    def raced_merge_lock(repo_dir: pathlib.Path, **kwargs: Any) -> Iterator[None]:
+        # the target's boot goes live after the merge's first target check,
+        # before its acquisition of the lock: the window the merge waits in
+        parent.status_set(status)
+        with real_merge_lock(repo_dir, **kwargs):
+            yield
+
+    monkeypatch.setattr('fractal.core.worktree.merge_lock', raced_merge_lock)
+    with pytest.raises(RuntimeError) as refused:
+        child.merge()
+
+    assert f'{refused.value}' == refusal
+    # the refusal never touched the target's worktree
+    assert not (parent_wt / 'work.txt').exists()
 
 
 def test_merge_event_survives_child_delete(git_repo: pathlib.Path) -> None:

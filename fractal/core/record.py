@@ -8,7 +8,7 @@ import typing
 from typing import Any, Optional
 
 import fractal.util
-from fractal.constants import EVENTS, STATUSES
+from fractal.constants import CRASH_REASON, EVENTS, STATUSES
 from fractal.typing import Row
 
 if typing.TYPE_CHECKING:
@@ -291,11 +291,12 @@ class Record:
 
         """
         # reconcile a crashed loop's stranded rows: stamp every still-open
-        # row exited (first-writer-wins, so a clean end's rows are untouched);
-        # the close and the insert share one transaction
+        # row exited, the run naming the crash like the reconcile heal does
+        # (first-writer-wins, so a clean end's rows are untouched); the close
+        # and the insert share one transaction
         branch = self._node.branch
         with self.db.transaction() as connection:
-            self.close_open('exited', connection=connection)
+            self.close_open('exited', metadata=CRASH_REASON, connection=connection)
             # create the new active run with the node's default agent and
             # armed cost cap, linked to the parent's active run (NULL at root
             # / when the parent is idle); the start instant is captured after
@@ -678,6 +679,48 @@ class Record:
         data = {'agent': agent, 'model': model, 'session': session}
         self.db.update(data, 'steps', where={'step_id': step_id})
 
+    def step_effort(
+        self: Record,
+        *,
+        step_id: int,
+        effort: str,
+    ) -> None:
+        """Record the effort a step's launch was handed.
+
+        Stamped by the loop at launch, so the row names it even when the
+        stream never opens; the agent and served model arrive from the
+        stream through :meth:`step_session`.
+
+        Args:
+            step_id: Step to update.
+            effort: The effort setting the invocation was given (the
+                step's own ``effort:`` or the node's).
+
+        """
+        self.db.update({'effort': effort}, 'steps', where={'step_id': step_id})
+
+    def step_timeout(
+        self: Record,
+        *,
+        step_id: int,
+        seconds: int,
+    ) -> None:
+        """Record the ceiling a step's launch enforces.
+
+        Stamped by the loop as each launch resolves it, so every reader of
+        the step's limit answers with the ceiling the loop enforces, even
+        after its step file is edited mid-iteration (the loop reads step
+        files once per iteration).
+
+        Args:
+            step_id: Step to update.
+            seconds: The launch's effective ceiling in whole seconds (the
+                step's own ``timeout:`` or the node's ``step_timeout``),
+                ``-1`` when it has none.
+
+        """
+        self.db.update({'timeout': seconds}, 'steps', where={'step_id': step_id})
+
     def step_end(
         self: Record,
         *,
@@ -685,6 +728,7 @@ class Record:
         status: str,
         exit_code: int,
         metadata: Optional[str] = None,
+        partly_unpriced: bool = False,
     ) -> int:
         """End a step.
 
@@ -701,6 +745,15 @@ class Record:
         step". Cost stays NULL (``Cost.unpriced`` discloses the gap count);
         a flush that lands later strips the marker.
 
+        A launch whose record leaves part of its spend out (a reply cut
+        off, or a result figure refused) books the spend recorded: when a
+        figure stands, its end appends ``partly unpriced`` instead, at any
+        terminal (``Cost.partly_unpriced`` discloses the count). A row with
+        no figure is not partly priced: its end appends ``unpriced``, at
+        any terminal, since the launch spent with nothing recorded. A later
+        flush never strips the ``partly unpriced`` marker, since the missing
+        part stays unpriced.
+
         Args:
             step_id: Step to end.
             status: Final status.
@@ -708,6 +761,8 @@ class Record:
             metadata: Optional short, fractal-owned failure reason (e.g.
                 ``timed out``/``agent error``) for visibility in ``node
                 activity``; the metadata column is left untouched when ``None``.
+            partly_unpriced: Whether the launch's record leaves part of
+                its spend out.
 
         Returns:
             Rows transitioned -- 0 when another writer already closed it.
@@ -727,12 +782,22 @@ class Record:
         if metadata is not None:
             data['metadata'] = metadata
         # mark an abnormal end unpriced when the stream opened but no usage
-        # flushed -- burn happened with no recorded figure
-        if status != 'completed':
+        # flushed -- burn happened with no recorded figure, as it did on any
+        # launch whose record leaves spend out and holds none; a figure whose
+        # launch's record leaves part of its spend out is partly unpriced
+        if status != 'completed' or partly_unpriced:
             rows = self.db.read('steps', where={'step_id': step_id, 'ended_at': None})
-            if rows and rows[0]['cost'] is None and rows[0]['session'] is not None:
-                reason = metadata if metadata is not None else rows[0]['metadata']
-                data['metadata'] = f'{reason}; unpriced' if reason else 'unpriced'
+            if rows:
+                row = rows[0]
+                marker = None
+                if row['cost'] is not None:
+                    if partly_unpriced:
+                        marker = 'partly unpriced'
+                elif row['session'] is not None:
+                    marker = 'unpriced'
+                if marker is not None:
+                    reason = metadata if metadata is not None else row['metadata']
+                    data['metadata'] = f'{reason}; {marker}' if reason else marker
         return self._fenced(
             data=data,
             table='steps',
@@ -1180,7 +1245,9 @@ class Record:
         point-in-time events, each carrying its run/iter/step lineage. The
         LEFT JOINs add the display numbers the surrogate ids stand for --
         the iteration-relative ``step`` number, ``step_name``, and the
-        run-relative ``iter``.
+        run-relative ``iter`` -- and the step's own ``agent``, served
+        ``model``, and launch ``effort``, read from the step row rather
+        than the view so an existing database needs no rebuild.
 
         Args:
             limit: Maximum rows to return.
@@ -1191,6 +1258,7 @@ class Record:
         """
         query = (
             'SELECT a.*, s.step AS step, s.step_name AS step_name,'
+            ' s.agent AS agent, s.model AS model, s.effort AS effort,'
             ' i.iter AS iter'
             ' FROM activity a'
             ' LEFT JOIN steps s ON a.step_id = s.step_id'

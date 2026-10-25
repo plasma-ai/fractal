@@ -202,9 +202,9 @@ def test_seeded_skills_do_not_deny_wiki_walk_up() -> None:
     """Seeded skill docs must not deny the wiki CLI's walk-up resolution.
 
     A bare wiki command resolves the enclosing wiki by walking up from
-    the cwd, else ``{cwd}/wiki`` -- from a node's cwd the project wiki at
-    best and never memory, which is why the seeded wiki skill demands an
-    explicit ``--path``. A doc claiming the CLI "does not walk up"
+    the cwd, else ``{cwd}/wiki`` -- from a node's cwd not necessarily the
+    project wiki and never memory, which is why the seeded wiki skill
+    demands an explicit ``--path``. A doc claiming the CLI "does not walk up"
     misstates that mechanism and hides the wrong-wiki hazard, and ships
     verbatim to every new node.
     """

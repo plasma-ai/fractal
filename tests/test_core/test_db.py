@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 
 import pytest
 
+from fractal.core import db
 from fractal.core.db import Database
 
 __all__ = [
     'test_schema_tables_exist',
     'test_init_stamps_schema_version',
+    'test_connect_lifts_an_older_database',
+    'test_two_writers_lift_the_same_database_once',
+    'test_failed_lift_leaves_the_database_at_its_version',
     'test_activity_start_rows_snapshot_the_launch',
     'test_init_is_idempotent_on_a_populated_db',
     'test_crud_workflow_round_trips_rows',
@@ -41,6 +48,42 @@ _NODE = 'main'
 def _run(**extra: object) -> dict:
     """A minimal valid ``runs`` row (override or extend via ``extra``)."""
     return {'node': _NODE, 'status': 'active', 'started_at': _STARTED, **extra}
+
+
+def _version(database: Database) -> int:
+    """Return the stamped schema version, read without lifting it."""
+    connection = sqlite3.connect(f'file:{database.path}?mode=ro', uri=True)
+    try:
+        version, *_ = connection.execute('PRAGMA user_version').fetchone()
+    finally:
+        connection.close()
+    return version
+
+
+def _step_columns(database: Database) -> list[str]:
+    """Return the ``steps`` table's column names, read without lifting."""
+    connection = sqlite3.connect(f'file:{database.path}?mode=ro', uri=True)
+    try:
+        return [row[1] for row in connection.execute('PRAGMA table_info(steps)')]
+    finally:
+        connection.close()
+
+
+def _downgrade(database: Database, version: int = 1) -> None:
+    """Put a current database back at ``version``, dropping the columns it predates.
+
+    Version 1 predates the step row's ``effort`` and ``timeout`` columns,
+    version 2 only its ``timeout`` column.
+    """
+    columns = ['effort', 'timeout'] if version == 1 else ['timeout']
+    connection = sqlite3.connect(f'{database.path}')
+    try:
+        for column in columns:
+            connection.execute(f'ALTER TABLE steps DROP COLUMN {column}')
+        connection.execute(f'PRAGMA user_version = {version}')
+        connection.commit()
+    finally:
+        connection.close()
 
 
 # ------ schema and init
@@ -77,17 +120,122 @@ def test_schema_tables_exist(database: Database) -> None:
 
 
 def test_init_stamps_schema_version(database: Database) -> None:
-    """A fresh database carries schema version 1.
+    """A fresh database carries the current schema version.
 
-    ``init`` stamps ``PRAGMA user_version`` so a future migration
-    mechanism can key on the stored version.
+    ``init`` stamps ``PRAGMA user_version`` so the version step on connect
+    can tell an older database from a current one.
     """
+    assert _version(database) == db._SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    argnames=('version', 'added'),
+    argvalues=[(1, ['effort', 'timeout']), (2, ['timeout'])],
+    ids=['version-1', 'version-2'],
+)
+def test_connect_lifts_an_older_database(
+    database: Database,
+    version: int,
+    added: list[str],
+) -> None:
+    """A database stamped at an older version gains the later step columns on connect.
+
+    Each step past the stamp runs in turn: the step row's ``effort``
+    column lifts version 1, its ``timeout`` column version 2. The lift
+    happens on the first handle of either mode, a second handle finds
+    nothing to do, and a column already present (a database altered out
+    of band) is stamped past rather than refused.
+    """
+    current = db._SCHEMA_VERSION
+    _downgrade(database, version)
+    assert not set(added) & set(_step_columns(database))
+    # a read-only handle lifts it like a writable one
+    database.connect(read_only=True).close()
+    assert _version(database) == current
+    assert set(added) <= set(_step_columns(database))
+    # a lifted database is left alone
+    database.connect().close()
+    assert _version(database) == current
+    # a column added out of band is stamped past
+    _downgrade(database, version)
     connection = database.connect(read_only=True)
+    connection.close()
+    assert _version(database) == current
+    connection = sqlite3.connect(f'{database.path}')
+    connection.execute(f'PRAGMA user_version = {version}')
+    connection.commit()
+    connection.close()
+    database.connect().close()
+    assert _version(database) == current
+    assert [name for name in _step_columns(database) if name in added] == added
+
+
+def test_two_writers_lift_the_same_database_once(database: Database) -> None:
+    """Two processes opening a version-1 database at once both succeed.
+
+    The step runs inside an immediate transaction, so the writers serialize
+    on the lock and the second re-reads the version under it: one column
+    per step, one stamp each, no error from either side.
+    """
+    _downgrade(database)
+    code = (
+        'import sys\n'
+        'from fractal.core.db import Database\n'
+        'Database(sys.argv[1], sys.argv[2]).connect().close()\n'
+    )
+    command = [sys.executable, '-c', code, f'{database.path}', f'{database._schema}']
+    writers = [
+        subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        for _ in range(2)
+    ]
+    outcomes = []
+    for writer in writers:
+        try:
+            outcome = writer.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            # each writer is a single leaf process, so a pid kill reaps it fully
+            writer.kill()
+            outcome = writer.communicate()
+        outcomes.append(outcome)
+    assert [writer.returncode for writer in writers] == [0, 0], outcomes
+    assert _version(database) == db._SCHEMA_VERSION
+    added = ['effort', 'timeout']
+    assert [name for name in _step_columns(database) if name in added] == added
+
+
+def test_failed_lift_leaves_the_database_at_its_version(
+    database: Database,
+) -> None:
+    """A step that cannot run leaves the database readable at its old version.
+
+    A writable handle reports the failure; a read-only handle reads the
+    schema it finds. Neither half-stamps: the version stays 1 until a
+    later handle lifts it.
+    """
+    run_id = database.write(_run(), 'runs')
+    _downgrade(database)
+    # a read-only file refuses the write the lift needs
+    os.chmod(database.path, 0o444)
     try:
-        version, *_ = connection.execute('PRAGMA user_version').fetchone()
+        with pytest.raises(sqlite3.OperationalError):
+            database.connect().close()
+        assert _version(database) == 1
+        assert 'effort' not in _step_columns(database)
+        # a read-only handle reads at version 1 rather than failing
+        assert [row['run_id'] for row in database.read('runs')] == [run_id]
+        assert _version(database) == 1
     finally:
-        connection.close()
-    assert version == 1
+        # sidecars SQLite recreates while the file is read-only inherit its
+        # mode, so they are restored with it
+        for suffix in ('', '-wal', '-shm'):
+            sidecar = database.path.with_name(database.path.name + suffix)
+            if sidecar.exists():
+                os.chmod(sidecar, 0o644)
+    # the next writable handle lifts it
+    database.connect().close()
+    assert _version(database) == db._SCHEMA_VERSION
 
 
 def test_activity_start_rows_snapshot_the_launch(database: Database) -> None:

@@ -17,7 +17,10 @@ Paths:
 Do all your work in `$WORKTREE_DIR` -- your code, memory, plans, and the project
 wiki all live under it. `$REPO_DIR` is the main repo's separate working tree:
 never write there, but read source inputs from it when needed (e.g. git-ignored
-materials that exist only there, not in worktrees).
+materials that exist only there, not in worktrees). Name your own files through
+`$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR`, with scratch in `$NODE_DIR/tmp/`:
+file tools resolve relative paths against the worktree root, and a path there is
+the project, not your node.
 
 State:
 
@@ -129,12 +132,12 @@ Common commands:
   child exits on budget with its owned work unfinished, decide out loud: raise
   its cap and `--continue` it, or absorb the work -- absorbing a deliverable a
   child owns needs explicit justification. Give children enough resources (e.g.
-  `$MAX_DEPTH`, `$MAX_CHILDREN`, `$MAX_DESCENDANTS`) to be managers themselves
-  when the task warrants it.
+  `--max-depth`, `--max-children`, `--max-descendants`) to be managers
+  themselves when the task warrants it.
 - **Scope.** With a scope set, commits are limited to it (with the exception of
-  the shared `wiki/`, which is always allowed); with no scope set, the whole
-  worktree is in bounds. COMMIT rejects out-of-scope files -- fix before
-  retrying.
+  the shared project wiki (`$WIKI_DIR`), which is always allowed); with no scope
+  set, the whole worktree is in bounds. COMMIT rejects out-of-scope files -- fix
+  before retrying.
 - **Deliverables.** Ship your work where a reader would look for it: edits to
   existing files happen in place (never mirrored into a parallel copy), and new
   artifacts land at the paths your Instructions name -- or, when they name none,
@@ -189,11 +192,17 @@ Execute ONLY the current step's instructions (below). The sections above are
 context -- do not act on them directly. Do the step's work, then stop; the next
 step runs automatically. Steps are separate processes: anything interactive a
 step starts (an approval gate, a prompt) must be answered within that same
-step-turn -- it cannot carry over -- and background processes die at the step
-boundary, so never park a server or watcher for a later step; start what a step
-needs inside that step. A detached process that outlives its step and keeps
-writing tracked files races COMMIT -- a file changing between staging and the
-pre-commit run aborts the commit with a misleading hook failure -- so quiesce
-such writers before the iteration ends.
+step-turn -- it cannot carry over. Never park a server or watcher for a later
+step; start what a step needs inside that step. A step's normal end ends no
+process: every background job you start outlives the step unless you end it, so
+end each one before the step ends. The loop reaps only a step it cuts short (a
+deadline, a stall, a stream failure, a crash heal), and that reap misses any job
+that has left your session and lost its parent (a double fork, or a job
+backgrounded by a `setsid` shell that has since exited). A job a finished step
+left behind is outside every later reap: a pause or kill may name it, when it
+works in your worktree, but leaves it running. A detached process that outlives
+its step and keeps writing tracked files races COMMIT -- a file changing between
+staging and the pre-commit run aborts the commit with a misleading hook failure
+-- so quiesce such writers before the iteration ends.
 
 ______________________________________________________________________

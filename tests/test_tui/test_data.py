@@ -18,6 +18,7 @@ import pytest
 
 import fractal.core.agent
 from fractal.cli.utils import resolve_node
+from fractal.constants import STEER_REASON_PREFIX
 from fractal.core.node import Node
 from fractal.impl.claude import ClaudeAgent
 from fractal.tui.data import TuiData, display_name_of
@@ -35,6 +36,11 @@ __all__ = [
     'test_active_card_streams_live_state',
     'test_settled_card_is_a_time_machine',
     'test_six_cap_matrix',
+    'test_step_cap_is_the_displayed_steps_own_timeout',
+    'test_step_cap_survives_an_unusable_step_file',
+    'test_step_cap_tells_same_named_step_files_apart',
+    'test_step_cap_reads_a_database_it_cannot_lift',
+    'test_step_clock_carries_the_steer_charge',
     'test_step_denominator_scopes_to_each_run',
     'test_measures_tolerate_a_numeric_config_duration',
     'test_measures_tolerate_a_string_cost_cap',
@@ -351,6 +357,222 @@ def test_six_cap_matrix(builder: SnapshotBuilder) -> None:
         1.0,
         5.0,
     )
+
+
+def _displayed_step_cap(
+    pair_tree: pathlib.Path,
+    names: tuple[str, ...],
+    *,
+    recorded: Optional[int] = None,
+) -> Optional[float]:
+    """Run ``names`` as one iteration of ``main.alpha``; return the card's step cap.
+
+    Each name opens the next numbered step row, every one settled but the
+    last, which stays active and is the step the card displays; with
+    ``recorded``, its launch recorded that ceiling on the row.
+    """
+    alpha = Node(pair_tree / '.worktrees' / 'main.alpha')
+    with deterministic_core() as clock:
+        clock.at(600.0)
+        run_id = alpha.record.run_start()
+        iter_id = alpha.record.iter_start(run_id=run_id, iter=1)
+        for number, name in enumerate(names, 1):
+            step_id = alpha.record.step_start(
+                iter_id=iter_id,
+                run_id=run_id,
+                step=number,
+                step_name=name,
+            )
+            if number < len(names):
+                alpha.record.step_end(step_id=step_id, status='completed', exit_code=0)
+        if recorded is not None:
+            alpha.record.step_timeout(step_id=step_id, seconds=recorded)
+    alpha.status_set('active')
+    data = TuiData(resolve_node(pair_tree))
+    builder = SnapshotBuilder(data, NodePoller(data.db_dir), now=lambda: NOW_EPOCH)
+    return builder.build('main.alpha').measures['cap_step_s']
+
+
+@pytest.mark.parametrize(
+    argnames=('frontmatter', 'recorded', 'cap'),
+    argvalues=[
+        ('', None, 600.0),
+        ('---\ntimeout: 30m\n---\n', None, 1800.0),
+        ('---\ntimeout: soon\n---\n', None, 600.0),
+        ('', 1800, 1800.0),
+        ('---\ntimeout: 30m\n---\n', -1, None),
+    ],
+    ids=[
+        'node-step-timeout',
+        'own-timeout',
+        'malformed',
+        'recorded',
+        'recorded-unbounded',
+    ],
+)
+def test_step_cap_is_the_displayed_steps_own_timeout(
+    pair_tree: pathlib.Path,
+    frontmatter: str,
+    recorded: Optional[int],
+    cap: Optional[float],
+) -> None:
+    """The step time cap is the displayed step's effective ceiling.
+
+    A step file's ``timeout:`` line substitutes for the node's
+    ``step_timeout`` at launch, so the card's step cap shows it; a step
+    without one keeps the node value, as does one whose line does not
+    parse -- the launch falls back to the node value the same way. The
+    launch records the ceiling it enforces on its row (``-1`` for none),
+    and a recorded row shows that one, whatever its file says since.
+    """
+    alpha = Node(pair_tree / '.worktrees' / 'main.alpha')
+    alpha.config.set('step_timeout', '10m')
+    steps_dir = alpha.node_dir / 'steps'
+    for existing in steps_dir.glob('*.md'):
+        existing.unlink()
+    (steps_dir / '01-EXECUTE.md').write_text(
+        f'{frontmatter}# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
+    assert _displayed_step_cap(pair_tree, ('EXECUTE',), recorded=recorded) == cap
+
+
+@pytest.mark.parametrize(
+    argnames='damage',
+    argvalues=[
+        lambda path: path.unlink(),
+        lambda path: path.chmod(0),
+        lambda path: path.write_bytes(b'---\ntimeout: 30m\n---\n\xff'),
+    ],
+    ids=['vanished', 'unreadable', 'undecodable'],
+)
+def test_step_cap_survives_an_unusable_step_file(
+    pair_tree: pathlib.Path,
+    damage: Callable[[pathlib.Path], object],
+) -> None:
+    """A step file the build cannot use shows the node value, never a crash.
+
+    Step files are live-edited, so the displayed step's file can be gone,
+    unreadable, or undecodable when the cockpit builds; each falls back to
+    the node's ``step_timeout`` rather than failing the whole build.
+    """
+    alpha = Node(pair_tree / '.worktrees' / 'main.alpha')
+    alpha.config.set('step_timeout', '10m')
+    steps_dir = alpha.node_dir / 'steps'
+    for existing in steps_dir.glob('*.md'):
+        existing.unlink()
+    path = steps_dir / '01-EXECUTE.md'
+    path.write_text('---\ntimeout: 30m\n---\n# EXECUTE\n', encoding='utf-8')
+    damage(path)
+    assert _displayed_step_cap(pair_tree, ('EXECUTE',)) == 600.0
+
+
+def test_step_cap_tells_same_named_step_files_apart(pair_tree: pathlib.Path) -> None:
+    """The displayed step's cap comes from the same-named file it ran.
+
+    Two step files carry the name ``EXECUTE`` (30m and 1h); the displayed
+    row is the iteration's second ``EXECUTE``, so its cap is the second
+    file's 1h, never the first file of the name.
+    """
+    alpha = Node(pair_tree / '.worktrees' / 'main.alpha')
+    alpha.config.set('step_timeout', '10m')
+    steps_dir = alpha.node_dir / 'steps'
+    for existing in steps_dir.glob('*.md'):
+        existing.unlink()
+    timeouts = {'01-EXECUTE.md': '30m', '03-EXECUTE.md': '1h'}
+    for name in ('01-EXECUTE.md', '02-PLAN.md', '03-EXECUTE.md'):
+        frontmatter = ''
+        if name in timeouts:
+            frontmatter = f'---\ntimeout: {timeouts[name]}\n---\n'
+        (steps_dir / name).write_text(f'{frontmatter}# step\n', encoding='utf-8')
+    names = ('EXECUTE', 'PLAN', 'EXECUTE')
+    assert _displayed_step_cap(pair_tree, names) == 3600.0
+
+
+def test_step_cap_reads_a_database_it_cannot_lift(pair_tree: pathlib.Path) -> None:
+    """A cockpit denied the lift to the recorded-ceiling column still builds.
+
+    A write-denied reader reads the schema it finds, so on a database
+    stamped before the step row's ``timeout`` column the displayed row
+    reads as unrecorded and its step file's own ``timeout:`` shows.
+    """
+    alpha = Node(pair_tree / '.worktrees' / 'main.alpha')
+    alpha.config.set('step_timeout', '10m')
+    steps_dir = alpha.node_dir / 'steps'
+    for existing in steps_dir.glob('*.md'):
+        existing.unlink()
+    (steps_dir / '01-EXECUTE.md').write_text(
+        '---\ntimeout: 30m\n---\n# EXECUTE\n',
+        encoding='utf-8',
+    )
+    assert _displayed_step_cap(pair_tree, ('EXECUTE',)) == 1800.0
+    # stamp the database before the column, then deny the cockpit writes
+    connection = sqlite3.connect(f'{alpha.db.path}')
+    try:
+        connection.execute('ALTER TABLE steps DROP COLUMN timeout')
+        connection.execute('PRAGMA user_version = 2')
+        connection.commit()
+    finally:
+        connection.close()
+    alpha.db.path.chmod(0o444)
+    data = TuiData(resolve_node(pair_tree))
+    builder = SnapshotBuilder(data, NodePoller(data.db_dir), now=lambda: NOW_EPOCH)
+    assert builder.build('main.alpha').measures['cap_step_s'] == 1800.0
+
+
+@pytest.mark.parametrize(
+    argnames=('status', 'metadata', 'charged'),
+    argvalues=[
+        ('stopped', f'{STEER_REASON_PREFIX}no action for 30 minutes', 600.0),
+        ('failed', 'agent error (exit 1)', 0.0),
+    ],
+    ids=['steer', 'retry'],
+)
+def test_step_clock_carries_the_steer_charge(
+    pair_tree: pathlib.Path,
+    status: str,
+    metadata: str,
+    charged: float,
+) -> None:
+    """A steered step's clock runs from its stuck launch, against the same cap.
+
+    The loop charges the stuck launch's span against the steered launch's
+    ceiling, so the card's step clock (baked and re-ticked) carries it too;
+    a retry arms a fresh deadline and counts from its own row.
+    """
+    alpha = Node(pair_tree / '.worktrees' / 'main.alpha')
+    with deterministic_core() as clock:
+        clock.at(1000.0)
+        run_id = alpha.record.run_start()
+        iter_id = alpha.record.iter_start(run_id=run_id, iter=1)
+        first_id = alpha.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=1,
+            step_name='EXECUTE',
+        )
+        # the first launch ran 600s, then closed
+        clock.at(400.0)
+        alpha.record.step_end(
+            step_id=first_id,
+            status=status,
+            exit_code=0,
+            metadata=metadata,
+        )
+        clock.at(100.0)
+        alpha.record.step_start(
+            iter_id=iter_id,
+            run_id=run_id,
+            step=1,
+            step_name='EXECUTE',
+        )
+    alpha.status_set('active')
+    data = TuiData(resolve_node(pair_tree))
+    builder = SnapshotBuilder(data, NodePoller(data.db_dir), now=lambda: NOW_EPOCH)
+    measures = builder.build('main.alpha').measures
+    # the open row started 700s before the pinned clock
+    assert measures['elapsed_step'] == pytest.approx(700.0 + charged)
+    assert NOW_EPOCH - measures['started_step'] == pytest.approx(700.0 + charged)
 
 
 def test_step_denominator_scopes_to_each_run(pair_tree: pathlib.Path) -> None:

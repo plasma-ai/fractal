@@ -10,49 +10,139 @@ launches with stubbed agents -- lives in ``test_cli/test_run_modes.py``.
 
 from __future__ import annotations
 
+import contextlib
+import copy
+import dataclasses
+import io
+import itertools
 import json
 import logging
 import os
 import pathlib
+import re
+import shlex
 import signal
 import sqlite3
 import subprocess
+import sys
+import threading
 import time
-from collections.abc import Callable, Iterator
+import urllib.request
+from collections.abc import Callable, Collection, Iterator
 from typing import Any, Optional
 
 import pytest
 
-from fractal.constants import PGID_FILE, SOCKET_FILE, STEP_PGID_FILE
-from fractal.core import pricing, worktree
-from fractal.core.agent import StreamEvent
+import fractal.util
+import fractal.util.process
+from fractal.constants import (
+    MERGE_LOCK_FILE,
+    PAUSE_ABORT_FILE,
+    PGID_FILE,
+    SOCKET_FILE,
+    STEP_PGID_FILE,
+    WORKTREES_FOLDER,
+)
+from fractal.core import agent as agent_module, loop as loop_module, pricing, worktree
+from fractal.core.agent import Agent, Invocation, Settlement, StreamEvent, StreamResult
 from fractal.core.event import Event
 from fractal.core.loop import Loop, Step, StepResult, _models_match
 from fractal.core.node import Node
-from fractal.exceptions import _Abort
+from fractal.exceptions import AgentStreamError, _Abort
 from fractal.impl import codex
 from fractal.impl.claude import ClaudeAgent
 from fractal.impl.codex import CodexAgent
-from tests._helpers import _age_run, _past_timestamp, _stub_run_script
+from fractal.impl.grok import GrokAgent
+from fractal.impl.opencode import OpencodeAgent
+from tests._helpers import (
+    _LOCK_HOLDER,
+    _age_run,
+    _await_ready,
+    _git,
+    _past_timestamp,
+    _stub_run_script,
+)
+from tests.test_impl.rollouts import spawning_thread
 
 from ._agents import SampleAgent
 from .conftest import _record_step_cost, _spawn_parent_child
+from .streams import claude_background_wait
 
 __all__ = [
     'test_step_load_parses_strict_flat_scalar_frontmatter',
     'test_duration_validation_mirrors_the_launch_contract',
     'test_step_timeout_frontmatter_substitutes_at_launch',
+    'test_time_budget_renders_each_steps_effective_timeout',
+    'test_step_limit_reports_the_ceiling_its_launch_enforces',
     'test_malformed_midrun_retune_warns_and_keeps_the_previous_value',
     'test_provider_frontmatter_rebinds_the_boot_agent',
     'test_agent_env_publishes_node_branch',
     'test_agent_env_inherits_headless_launches',
+    'test_worktree_processes_inherit_no_virtual_env',
+    'test_midrun_limit_edits_reach_the_next_step_env',
+    'test_step_env_and_prompt_share_one_config_read',
     'test_boot_records_the_tmux_socket_for_the_reconcile_probe',
     'test_boot_gate_vets_the_recorded_group',
+    'test_boot_waits_for_a_running_merge',
+    'test_a_failed_active_stamp_names_the_status_the_node_keeps',
     'test_continue_restore_lands_config_all_or_nothing',
     'test_continue_cleanup_excludes_runtime_dirt',
+    'test_continue_cleanup_discards_staged_project_changes',
     'test_stream_fault_attributes_to_the_stream_side',
+    'test_agent_borne_stream_error_keeps_the_exit_code',
+    'test_a_dead_stream_reaps_the_tree_and_spares_the_index_lock',
+    'test_a_broken_reap_still_kills_the_step_group',
+    'test_no_progress_steers_then_stalls_without_retry',
+    'test_no_progress_clock_pauses_while_a_tool_runs',
+    'test_thinking_never_resets_the_no_progress_clock',
+    'test_long_think_that_ends_in_an_action_is_not_stuck',
+    'test_thinking_cap_then_no_progress_stalls_the_step',
+    'test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session',
+    'test_thinking_cap_steers_one_effort_lower',
+    'test_lowered_effort_ends_with_the_steer',
+    'test_cap_at_the_floor_steers_at_the_same_effort',
+    'test_idle_watchdog_steer_keeps_the_effort',
+    'test_lowered_steer_that_caps_again_stalls',
+    'test_claude_step_in_a_codex_node_steers_on_the_claude_ladder',
+    'test_project_settings_override_the_ladder',
+    'test_invalid_effort_setting_fails_boot',
+    'test_launch_verbs_refuse_an_invalid_effort_ladder',
+    'test_tree_resume_refuses_an_invalid_effort_ladder',
+    'test_a_ladder_broken_after_the_launch_check_aborts_the_boot',
+    'test_resume_refuses_an_invalid_config',
+    'test_tree_resume_refuses_a_descendants_invalid_config',
+    'test_a_config_broken_after_the_resume_check_aborts_the_boot',
+    'test_a_broken_agent_hook_file_aborts_the_boot',
+    'test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer',
+    'test_the_steer_runs_on_what_the_stuck_launch_left',
+    'test_a_capped_or_idle_sync_runs_to_its_result',
+    'test_idle_clock_holds_while_the_agent_waits',
+    'test_idle_clock_fires_on_a_silent_agent',
+    'test_deadline_reap_reports_on_stderr',
+    'test_a_reaped_tool_is_gone_before_the_next_launch',
+    'test_steered_launch_reports_the_deadline_it_runs_under',
+    'test_launch_stamps_the_effort_on_the_step_row',
     'test_agent_stderr_tolerates_non_utf8_output',
     'test_launch_prices_the_step_from_the_finish_frame',
+    'test_killed_claude_launch_prices_from_its_transcript',
+    'test_killed_wake_up_after_a_result_prices_from_the_transcript',
+    'test_background_spend_after_the_result_is_booked',
+    'test_streamed_background_spend_is_booked_once',
+    'test_unreadable_record_marks_the_killed_step',
+    'test_cut_off_mid_reply_books_recorded_spend_partly_unpriced',
+    'test_kill_during_a_tool_call_is_fully_priced',
+    'test_structured_output_result_ends_a_sub_agent_whole',
+    'test_partial_record_before_the_result_leaves_its_figure_whole',
+    'test_capped_reply_books_the_stream_usage',
+    'test_killed_claude_launch_without_a_transcript_stays_unpriced',
+    'test_killed_launch_settles_after_dropping_its_group_handle',
+    'test_a_settle_never_lowers_the_streamed_figure',
+    'test_a_failed_settle_leaves_the_killed_launch_as_booked',
+    'test_a_failed_settle_marks_sub_agent_spend_after_the_result',
+    'test_every_kill_prices_the_launch_from_its_transcript',
+    'test_resumed_launch_books_only_its_own_spend',
+    'test_unsettled_result_figure_books_the_launch_record_instead',
+    'test_failed_codex_attempts_count_toward_the_cap',
     'test_agent_launch_failure_books_a_failed_step',
     'test_setup_tolerates_non_utf8_output',
     'test_unsupported_provider_frontmatter_refuses_the_step',
@@ -62,6 +152,12 @@ __all__ = [
     'test_preflight_abort_honors_a_kill_that_reaped_the_probe',
     'test_boot_reaps_an_orphaned_probe_group',
     'test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model',
+    'test_boot_refreshes_a_day_old_price_table_for_claude_and_grok_steps',
+    'test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds',
+    'test_token_priced_boot_serves_the_cached_table_offline',
+    'test_a_malformed_offline_mode_aborts_the_boot',
+    'test_preflight_logs_what_a_passed_probe_spent',
+    'test_preflight_refuses_a_cap_over_an_unpriced_model',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -69,7 +165,9 @@ __all__ = [
     'test_budget_skipped_steps_record_knowable_zero',
     'test_run_remaining_floors_at_zero_without_a_last_reading',
     'test_soft_cap_warning_fires_once_for_unbraked_caps',
+    'test_soft_cap_warning_counts_step_timeouts',
     'test_step_budget_reserve_window_floors_at_remaining',
+    'test_no_budget_margin_for_unseen_spend',
     'test_boundary_checks_read_live_caps',
     'test_unpriced_spend_under_caps_warns_once',
     'test_priced_first_step_never_reads_as_untracked',
@@ -81,6 +179,7 @@ __all__ = [
     'test_pending_finish_between_iterations_starts_none',
     'test_run_records_step_attribution_matrix',
     'test_step_timeout_reason_names_step_and_limit',
+    'test_steered_timeout_names_the_step_ceiling',
     'test_deadline_expired_before_launch_keeps_the_plain_reason',
     'test_step_failure_books_never_run_steps_and_a_described_backstop',
     'test_sync_timeout_save_carries_the_reason_body',
@@ -88,6 +187,7 @@ __all__ = [
     'test_retry_of_an_approval_gated_step_re_arms_the_gate',
     'test_step_retries_zero_disables_the_retry',
     'test_pause_during_retry_backoff_parks',
+    'test_signal_before_the_steer_parks_or_abandons_it',
     'test_ceiling_trip_during_retry_backoff_abandons_the_retry',
     'test_finish_during_retry_backoff_interrupts_the_wait',
     'test_models_match_admits_pin_forms_and_flags_variants',
@@ -95,12 +195,14 @@ __all__ = [
     'test_slow_approval_sync_never_hides_a_real_drop',
     'test_failed_drop_redispatch_keeps_the_failure',
     'test_spent_deadline_abandons_the_drop_redispatch',
+    'test_each_attempt_earns_its_own_steer',
     'test_err_snapshots_keep_every_attempts_diagnosis',
     'test_run_end_drain_outlives_the_closed_iterations_deadline',
     'test_before_last_step_drain_uses_the_run_wall_not_the_iter_deadline',
     'test_finalize_terminal_cascade_matrix',
     'test_iteration_gap_alarm_fires_and_stays_quiet',
     'test_billing_breaker_does_not_arm_on_non_billing_failures',
+    'test_unpriced_model_refusals_never_read_as_billing',
     'test_sealed_seat_gets_no_inbox_digest',
     'test_iter_timeout_live_re_read_bounds_the_next_iteration',
     'test_killed_before_boot_stands_the_loop_down',
@@ -109,14 +211,32 @@ __all__ = [
     'test_stop_mid_step_lets_the_seat_complete',
     'test_billing_failures_back_off_exponentially_and_a_success_clears',
     'test_billing_gate_holds_the_sync_launch_and_counts_it',
+    'test_billing_gate_holds_a_sync_less_step_once',
     'test_interrupted_billing_gate_books_the_consumed_steps',
+    'test_provider_unavailable_retries_back_off_exponentially_to_the_cap',
+    'test_a_success_resets_the_provider_unavailable_backoff',
+    'test_non_provider_failures_keep_the_fixed_backoff',
+    'test_a_fast_outage_never_arms_the_billing_breaker',
+    'test_the_census_reads_the_loops_outage_verdict',
+    'test_the_census_skips_steps_refused_before_launch',
+    'test_an_outage_past_the_retries_holds_the_next_launch',
+    'test_an_interrupted_outage_hold_books_the_consumed_steps',
+    'test_the_outage_streak_moves_only_on_what_launches_say',
+    'test_retry_waits_end_at_the_run_deadline',
+    'test_launch_reads_the_provider_outage_off_the_result_frame',
+    'test_launch_reads_the_provider_outage_off_error_frames_and_stderr',
     'test_rejected_retunes_warn_once_not_every_iteration',
     'test_pacing_retunes_take_effect_at_the_next_sleep',
     'test_resumed_seats_get_the_inbox_re_read',
     'test_digest_renders_mail_as_inert_data',
+    'test_a_leftover_git_operation_joins_every_launch_prompt_beneath_the_charter',
+    'test_continue_leaves_a_pending_merge_for_the_agent',
+    'test_a_clean_worktree_launch_prompt_carries_no_notice',
     'test_drain_survives_a_pause_and_resume',
     'test_drain_guards_survive_an_env_scrub',
     'test_drain_guards_survive_a_worktree_scrub',
+    'test_drain_lineage_recognizes_the_seat_commands',
+    'test_drain_lineage_survives_an_unreadable_process_table',
     'test_drain_run_blocks_spawns_and_re_arms',
     'test_census_distinguishes_run_exhausted_from_done_conditions',
     'test_timeout_void_force_commit_is_loud',
@@ -134,13 +254,20 @@ __all__ = [
     'test_resume_preflight_abort_recredits_the_reparked_wait',
     'test_resume_adopt_with_no_open_run_records_exited',
     'test_resume_anchors_run_deadline_on_credited_remaining',
+    'test_resume_ended_before_reentry_closes_the_adopted_iteration',
     'test_interval_defaults_iter_timeout_but_honors_a_tighter_one',
     'test_stop_during_the_inter_iteration_sleep_ends_the_run',
 ]
 
 
 class MockLoop(Loop):
-    """Loop double: canned launch results, no preflight, no subprocesses."""
+    """Loop double: canned launch results, no preflight, no subprocesses.
+
+    The double reads the run parameters at construction, as a boot does,
+    so a test can drive the loop's parts without booting it; ``run()``
+    reads them again at its boot, and a config (or agent hook file) that
+    read refuses is left for that boot to abort on.
+    """
 
     def __init__(
         self: MockLoop,
@@ -150,6 +277,8 @@ class MockLoop(Loop):
     ) -> None:
         """Initialize ``MockLoop``."""
         super().__init__(node, **kwargs)
+        with contextlib.suppress(ValueError, RuntimeError):
+            self._read_run_parameters()
         self.results = list(results or [])
         self.launched: list[str] = []
 
@@ -224,6 +353,446 @@ class TrackingLoop(MockLoop):
         return event
 
 
+# the live background-wait capture's frames, its session as the stand-in's SID
+_BACKGROUND_WAIT = [
+    json.loads(line.replace('@SESSION@', 'SID')) for line in claude_background_wait
+]
+
+# claude stream-json frames for the scripted stand-in (SID: the
+# launch's session); a thinking block's start holds the clock until
+# the block completes, while thinking deltas alone are never an action
+_INIT = {'type': 'system', 'subtype': 'init', 'session_id': 'SID'}
+_TOOL_START = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_start',
+        'content_block': {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TOOL_RESULT = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'ok'}],
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TOOL_FRAME = {
+    'type': 'assistant',
+    'message': {
+        'id': 'msg_1',
+        'role': 'assistant',
+        'content': [{'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash', 'input': {}}],
+        'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+# a second call of the same reply, run in parallel with the first, and its result
+_SECOND_TOOL_FRAME = {
+    'type': 'assistant',
+    'message': {
+        'id': 'msg_1',
+        'role': 'assistant',
+        'content': [{'type': 'tool_use', 'id': 'toolu_2', 'name': 'Bash', 'input': {}}],
+        'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_SECOND_TOOL_RESULT = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_2', 'content': 'ok'}],
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_MESSAGE_START = {
+    'type': 'stream_event',
+    'event': {'type': 'message_start', 'message': {'id': 'msg_2', 'content': []}},
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TASK_NOTICE = {
+    'type': 'system',
+    'subtype': 'task_notification',
+    'task_id': 'bbmyfxbaq',
+    'status': 'completed',
+    'session_id': 'SID',
+}
+_API_RETRY = {
+    'type': 'system',
+    'subtype': 'api_retry',
+    'retry_delay_ms': 3000,
+    'session_id': 'SID',
+}
+_THINKING = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_delta',
+        'delta': {'type': 'thinking_delta', 'thinking': 'hmm'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_START = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_start',
+        'index': 0,
+        'content_block': {'type': 'thinking', 'thinking': '', 'signature': ''},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_STOP = {
+    'type': 'stream_event',
+    'event': {'type': 'content_block_stop', 'index': 0},
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_TEXT = {
+    'type': 'stream_event',
+    'event': {
+        'type': 'content_block_delta',
+        'delta': {'type': 'text_delta', 'text': 'Done.'},
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+_THINKING_REPLY = {
+    'type': 'assistant',
+    'message': {
+        'id': 'msg_1',
+        'role': 'assistant',
+        'content': [{'type': 'thinking', 'thinking': '', 'signature': 'CAQS'}],
+        'stop_reason': None,
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+# the API's own stop of a reply cut at the output cap
+_MAX_TOKENS = {
+    'type': 'stream_event',
+    'event': {'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens'}},
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+}
+# claude's output-cap continuation, verbatim from a real transcript
+_CONTINUATION_TEXT = (
+    'Output token limit hit. Resume directly \u2014 no apology, no recap of what'
+    ' you were doing. Pick up mid-thought if that is where the cut happened.'
+    ' Break remaining work into smaller pieces.'
+)
+_CONTINUATION = {
+    'type': 'user',
+    'message': {
+        'role': 'user',
+        'content': [{'type': 'text', 'text': _CONTINUATION_TEXT}],
+    },
+    'parent_tool_use_id': None,
+    'session_id': 'SID',
+    'isSynthetic': True,
+}
+_RESULT = {
+    'type': 'result',
+    'subtype': 'success',
+    'session_id': 'SID',
+    'total_cost_usd': 0.001,
+    'num_turns': 1,
+    'duration_ms': 1,
+}
+
+# codex exec --json frames for the scripted stand-in: a thread and its turn
+# opening, and the disconnect codex retries behind `Reconnecting... k/N`
+_CODEX_OPEN = [
+    {'type': 'thread.started', 'thread_id': 'thr-1'},
+    {'type': 'turn.started'},
+]
+_CODEX_DISCONNECT = 'stream disconnected before completion: error sending request'
+
+
+# rates for the transcript-priced launch: every claude bucket distinct, and a
+# sub-agent model at its own rates
+_CLAUDE_PRICING = {
+    'claude-fable-5': {
+        'input_cost_per_token': 3e-6,
+        'output_cost_per_token': 1.5e-5,
+        'cache_read_input_token_cost': 3e-7,
+        'cache_creation_input_token_cost': 3.75e-6,
+    },
+    'claude-haiku-5': {
+        'input_cost_per_token': 1e-6,
+        'output_cost_per_token': 5e-6,
+    },
+}
+# the rate each claude usage bucket prices at
+_RATE_KEYS = {
+    'input_tokens': 'input_cost_per_token',
+    'output_tokens': 'output_cost_per_token',
+    'cache_read_input_tokens': 'cache_read_input_token_cost',
+    'cache_creation_input_tokens': 'cache_creation_input_token_cost',
+}
+
+# one live claude session's saved totals across continuous steps: each
+# launch's result frame named the session's total so far, and the launch's
+# own spend is the growth
+_SAVED_TOTALS = (0.5483, 0.6520, 0.7091, 0.7663)
+
+
+def _echo(frame: dict[str, Any]) -> str:
+    """Return the shell command printing one stream frame as a line."""
+    return f"printf '%s\\n' '{json.dumps(frame)}'"
+
+
+def _claude_script(*parts: Any) -> str:
+    """Join frames (printed) and raw shell commands into one stand-in script."""
+    return '; '.join(_echo(part) if isinstance(part, dict) else part for part in parts)
+
+
+class ScriptedClaude(ClaudeAgent):
+    """The real claude backend and parser over a scripted bash stand-in.
+
+    Each launch runs the next script in place of ``claude`` (``SID`` in it
+    becomes the launch's session), in the production spawn shape: its own
+    process group, a text stdout pipe; its argv and the env it was handed
+    are kept. Each launch first opens the session's transcript, as claude
+    does, and appends its next batch of ``transcripts`` entries to it, or
+    to a sub-agent's own transcript beside it for an entry naming one
+    (``subagent``), stamped at the spawn unless an entry carries its own
+    stamp; a ``None`` batch is a launch whose record never reached disk.
+    Every settled cost flush is kept with its finality.
+    """
+
+    def __init__(
+        self: ScriptedClaude,
+        node: Node,
+        scripts: list[str],
+        transcripts: Optional[list[Optional[list[dict[str, Any]]]]] = None,
+    ) -> None:
+        """Initialize ``ScriptedClaude``."""
+        super().__init__(node, 'claude')
+        self.scripts = list(scripts)
+        self.transcripts = list(transcripts or [])
+        self.argvs: list[tuple[str, ...]] = []
+        self.envs: list[dict[str, Optional[str]]] = []
+        self.spawned: list[subprocess.Popen] = []
+        self.flushed: list[tuple[float, bool]] = []
+
+    def __deepcopy__(self: ScriptedClaude, memo: dict[int, Any]) -> ScriptedClaude:
+        """Share the stand-in: event payloads copy their source, not processes."""
+        return self
+
+    def _spawn(
+        self: ScriptedClaude,
+        invocation: Any,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Run the next script, recording the launch's argv and env."""
+        self.argvs.append(invocation.argv)
+        self.envs.append(dict(invocation.env or {}))
+        batch = self.transcripts.pop(0) if self.transcripts else []
+        if batch is not None:
+            path = self._transcript(f'{invocation.session}')
+            assert path is not None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+            now = fractal.util.time.utc_now()
+            for entry in batch:
+                line = {'timestamp': now, **entry}
+                # claude keeps each sub-agent's replies in a file of its own
+                subagent = line.pop('subagent', None)
+                target = path
+                if subagent is not None:
+                    side = path.with_suffix('') / 'subagents'
+                    target = side / f'agent-{subagent}.jsonl'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open('a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(line) + '\n')
+        script = self.scripts.pop(0).replace('SID', f'{invocation.session}')
+        process = subprocess.Popen(
+            ['bash', '-c', script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            **kwargs,
+        )
+        self.spawned.append(process)
+        return process
+
+    def on_record_cost(self: ScriptedClaude, *args: Any, **kwargs: Any) -> Event:
+        """Keep the settled figure and its finality alongside the ledger write."""
+        event = super().on_record_cost(*args, **kwargs)
+        self.flushed.append((event.cost, event.final))
+        return event
+
+
+class ScriptedLoop(MockLoop):
+    """Mock loop running the REAL launch over a scripted agent."""
+
+    def __init__(self: ScriptedLoop, node: Node, agent: Agent) -> None:
+        """Initialize ``ScriptedLoop``."""
+        super().__init__(node)
+        self.agent = agent
+
+    def _launch(
+        self: ScriptedLoop, step: Step, prompt: str, **kwargs: Any
+    ) -> StepResult:
+        """Launch the scripted agent through the base ``Loop._launch``."""
+        kwargs['agent'] = self.agent
+        return Loop._launch(self, step, prompt, **kwargs)
+
+
+class PaidLoop(MockLoop):
+    """Mock loop whose every launch spends, so no failure reads as billing."""
+
+    def _launch(self: PaidLoop, step: Step, prompt: str, **kwargs: Any) -> StepResult:
+        """Pop the next scripted outcome and stamp a real spend on its row."""
+        result = super()._launch(step, prompt, **kwargs)
+        self.node.record.step_cost(step_id=self._step_id, cost=0.5)
+        return result
+
+
+class FaultingAgent(SampleAgent):
+    """A backend whose stream reader dies after one frame, its agent still live.
+
+    Each launch runs ``script`` in the production spawn shape (its own
+    session, stderr to the capture); the stream reads one line, then
+    raises a fractal-side fault, so the launch must reap a live tree.
+    """
+
+    def __init__(self: FaultingAgent, node: Node, script: str) -> None:
+        """Initialize ``FaultingAgent``."""
+        super().__init__(node)
+        self.script = script
+        self.spawned: list[subprocess.Popen] = []
+
+    def __deepcopy__(self: FaultingAgent, memo: dict[int, Any]) -> FaultingAgent:
+        """Share the stand-in: event payloads copy their source, not processes."""
+        return self
+
+    def _spawn(
+        self: FaultingAgent,
+        invocation: Any,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Run the script, keeping its process."""
+        process = subprocess.Popen(
+            ['bash', '-c', self.script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            **kwargs,
+        )
+        self.spawned.append(process)
+        return process
+
+    def stream(self: FaultingAgent, lines: Any, **kwargs: Any) -> Any:
+        """Read one frame, then raise a fractal-side fault."""
+        lines.readline()
+        raise ValueError('parser boom')
+
+
+class ScriptedCodex(CodexAgent):
+    """The real codex backend and parser over a scripted bash stand-in.
+
+    Each launch runs the next script in place of ``codex``, in the
+    production spawn shape, without capturing a rollout window, so its
+    failed launches stay unpriced.
+    """
+
+    def __init__(self: ScriptedCodex, node: Node, scripts: list[str]) -> None:
+        """Initialize ``ScriptedCodex``."""
+        super().__init__(node, 'codex')
+        self.scripts = list(scripts)
+        self.spawned: list[subprocess.Popen] = []
+
+    def __deepcopy__(self: ScriptedCodex, memo: dict[int, Any]) -> ScriptedCodex:
+        """Share the stand-in: event payloads copy their source, not processes."""
+        return self
+
+    def _spawn(
+        self: ScriptedCodex,
+        invocation: Any,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Run the next script."""
+        process = subprocess.Popen(
+            ['bash', '-c', self.scripts.pop(0)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            **kwargs,
+        )
+        self.spawned.append(process)
+        return process
+
+
+class RolloutCodex(CodexAgent):
+    """The real codex backend over a stand-in that writes its rollout.
+
+    Each launch spawns through the backend's own hook, so the rollout
+    window is captured before it as for codex; the stand-in appends its
+    next batch of rollout records to ``thread``'s dated rollout under the
+    node's codex home, prints its stdout frames, and exits 1.
+    """
+
+    def __init__(
+        self: RolloutCodex,
+        node: Node,
+        thread: str,
+        launches: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]],
+    ) -> None:
+        """Initialize ``RolloutCodex``."""
+        super().__init__(node, 'codex')
+        self.rollout = (
+            self.config_dir
+            / 'sessions/2026/09/15'
+            / f'rollout-2026-09-15T17-51-25-{thread}.jsonl'
+        )
+        self.launches = list(launches)
+        self.spawned: list[subprocess.Popen] = []
+
+    def __deepcopy__(self: RolloutCodex, memo: dict[int, Any]) -> RolloutCodex:
+        """Share the stand-in: event payloads copy their source, not processes."""
+        return self
+
+    def _spawn(
+        self: RolloutCodex,
+        invocation: Any,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        """Run the next launch in place of ``codex``, its window captured first."""
+        records, frames = self.launches.pop(0)
+        # stage the batch beside the sessions tree, outside the window's glob
+        staged = self.config_dir / f'launch-{len(self.spawned)}.jsonl'
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text(
+            ''.join(json.dumps(record) + '\n' for record in records),
+            encoding='utf-8',
+        )
+        script = '; '.join(
+            [
+                f'mkdir -p {shlex.quote(str(self.rollout.parent))}',
+                f'cat {shlex.quote(str(staged))} >> {shlex.quote(str(self.rollout))}',
+                *(_echo(frame) for frame in frames),
+                'exit 1',
+            ]
+        )
+        stand_in = dataclasses.replace(invocation, argv=('bash', '-c', script))
+        process = super()._spawn(stand_in, **kwargs)
+        self.spawned.append(process)
+        return process
+
+
 @pytest.fixture
 def loop_node(node_with_db: Node) -> Node:
     """Return a DB-backed node with the seed files a loop reads at boot."""
@@ -272,6 +841,67 @@ def hung_probe(
             pass
         process.wait(timeout=5)
         process.stdout.close()
+
+
+@pytest.fixture
+def scripted_claude(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> Iterator[Callable[..., ScriptedClaude]]:
+    """Yield a ``ScriptedClaude`` factory on a 1s no-progress clock; reap after.
+
+    Each step runs under a 10s ceiling, so a launch the loop fails to end
+    still ends. Claude's config home is a throwaway, so pricing a killed
+    launch from its transcript never reads the operator's.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', f'{tmp_path / "claude-home"}')
+    # NOTE: a real 1s clock -- the stand-ins' frames come from a live
+    #   subprocess no fake clock can drive, so a case that checks the clock
+    #   holds needs its first waiting frame within 1s of the spawn; bash
+    #   prints it in milliseconds, wide margin for CPU contention under -n auto
+    monkeypatch.setattr(loop_module, '_NO_PROGRESS_SECONDS', 1)
+    _configure(loop_node, step_timeout='10s', step_retries=3)
+    loop_node.radio.init()
+    agents: list[ScriptedClaude] = []
+
+    def make(
+        scripts: list[str],
+        transcripts: Optional[list[list[dict[str, Any]]]] = None,
+    ) -> ScriptedClaude:
+        agent = ScriptedClaude(loop_node, scripts, transcripts)
+        agents.append(agent)
+        return agent
+
+    yield make
+    # each stand-in led its own group: sweep whatever a launch left behind
+    for agent in agents:
+        for process in agent.spawned:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            process.stdout.close()
+
+
+@pytest.fixture
+def price_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> Iterator[pathlib.Path]:
+    """Yield a temp pricing-cache path, resetting the process cache around it.
+
+    The session runs offline; a test on this cache drives the online
+    refresh, stubbing the fetch.
+    """
+    path = tmp_path / 'pricing.json'
+    monkeypatch.setattr(pricing, '_PRICING_CACHE', str(path))
+    monkeypatch.setenv('OFFLINE_MODE', 'false')
+    pricing._load.cache_clear()
+    yield path
+    pricing._load.cache_clear()
 
 
 # ------ step parsing and discovery
@@ -328,14 +958,19 @@ def test_step_load_parses_strict_flat_scalar_frontmatter(
 )
 def test_duration_validation_mirrors_the_launch_contract(
     loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
     key: str,
     value: str,
     match: str,
 ) -> None:
-    """A malformed or sub-second duration refuses the launch with its key."""
+    """A malformed or sub-second duration aborts the boot on record, naming its key."""
+    monkeypatch.setenv('_NODE', '')
     _configure(loop_node, **{key: value})
-    with pytest.raises(ValueError, match=match):
-        MockLoop(loop_node)
+    assert MockLoop(loop_node).run() == 1
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    assert match in run['metadata']
 
 
 def test_step_timeout_frontmatter_substitutes_at_launch(
@@ -376,6 +1011,96 @@ def test_step_timeout_frontmatter_substitutes_at_launch(
     err = capsys.readouterr().err
     assert 'Warning:' in err
     assert '02-EXECUTE.md' in err
+
+
+def test_time_budget_renders_each_steps_effective_timeout(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``$TIME_BUDGET`` names the ceiling each step's launch enforces.
+
+    A step's ``timeout:`` line substitutes for the node's ``step_timeout``
+    at launch, so that step's prompt and env budget against it; the next
+    step, carrying none, budgets against the node value again.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _configure(loop_node, max_iters=1, step_timeout='2h', sync=False)
+    (loop_node.node_dir / 'NODE.md').write_text(
+        '# Charter\n\nTime budget: $TIME_BUDGET\n',
+        encoding='utf-8',
+    )
+    _seed_steps(loop_node, ['01-PLAN.md', '02-EXECUTE.md'])
+    (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+        '---\ntimeout: 6h\n---\n# PLAN\n\nWork.\n', encoding='utf-8'
+    )
+
+    class RecordingLoop(MockLoop):
+        """Mock loop recording each launch's env and prompt."""
+
+        def __init__(self: RecordingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``RecordingLoop``."""
+            super().__init__(node, **kwargs)
+            self.seen: list[tuple[dict[str, str], str]] = []
+
+        def _launch(
+            self: RecordingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the launch env and prompt."""
+            self.seen.append((self._agent_env(self._step_label), prompt))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = RecordingLoop(loop_node)
+    assert loop.run() == 0
+    for (env, prompt), budget in zip(loop.seen, ['6h/step', '2h/step'], strict=True):
+        assert f'Time budget: {budget}' in prompt
+        assert env['TIME_BUDGET'] == budget
+
+
+def test_step_limit_reports_the_ceiling_its_launch_enforces(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step file edited mid-iteration leaves the step's reported ceiling.
+
+    The loop reads step files once per iteration, so an edit landing
+    mid-iteration changes the file but not the ceiling the step runs
+    under. Each launch records that ceiling on its row, so a reader
+    outside the seat -- with no ``STEP_ID`` of its own -- reports the
+    enforced 6h, never the file's 1h.
+    """
+    monkeypatch.setenv('_NODE', '')
+    steps_dir = loop_node.node_dir / 'steps'
+    (steps_dir / '02-EXECUTE.md').write_text(
+        '---\ntimeout: 6h\n---\n# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
+
+    class EditingLoop(MockLoop):
+        """Mock loop whose PLAN launch shortens EXECUTE's timeout on disk."""
+
+        def __init__(self: EditingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``EditingLoop``."""
+            super().__init__(node, **kwargs)
+            self.reported: list[tuple[Optional[float], int]] = []
+
+        def _launch(
+            self: EditingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Edit EXECUTE's file during PLAN; record EXECUTE's reported limit."""
+            if step.name == 'PLAN':
+                (steps_dir / '02-EXECUTE.md').write_text(
+                    '---\ntimeout: 1h\n---\n# EXECUTE\n\nWork.\n',
+                    encoding='utf-8',
+                )
+            else:
+                limit = self.node.time.limit('step')
+                self.reported.append((limit, self._step_timeout_effective))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = EditingLoop(loop_node)
+    assert loop.run() == 0
+    # the reader outside the seat agrees with the ceiling the loop enforces
+    assert loop.reported == [(21600.0, 21600)]
 
 
 @pytest.mark.parametrize(
@@ -527,6 +1252,219 @@ def test_agent_env_inherits_headless_launches(
     loop = MockLoop(loop_node)
     expected = 'true' if headless else 'false'
     assert loop._agent_env('work')['FRACTAL_HEADLESS'] == expected
+
+
+def test_worktree_processes_inherit_no_virtual_env(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Setup and every step's agent run without the loop's ``VIRTUAL_ENV``.
+
+    An inherited ``VIRTUAL_ENV`` names the launching project's venv, never
+    the node worktree's, so each ``uv run`` there would warn that it does
+    not match the project environment; the venv's bin stays first on
+    ``PATH``, so the installation's CLIs still resolve.
+    """
+    monkeypatch.setenv('_NODE', '')
+    venv = tmp_path / 'repo' / '.venv'
+    monkeypatch.setenv('VIRTUAL_ENV', f'{venv}')
+    monkeypatch.setenv('PATH', f'{venv / "bin"}{os.pathsep}{os.environ["PATH"]}')
+    # each worktree process appends the env it runs under to its own record
+    setup_record = tmp_path / 'setup.jsonl'
+    agent_record = tmp_path / 'agent.jsonl'
+    dump = (
+        'import json, os, sys; '
+        'open(sys.argv[1], "a").write(json.dumps(dict(os.environ)) + "\\n")'
+    )
+    scripts = loop_node.node_dir / 'scripts'
+    scripts.mkdir(exist_ok=True)
+    (scripts / 'setup.sh').write_text(
+        f'#!/bin/bash\n{shlex.join([sys.executable, "-c", dump, f"{setup_record}"])}\n',
+        encoding='utf-8',
+    )
+
+    class EnvAgent(SampleAgent):
+        """A backend whose launch records its env and exits clean."""
+
+        def _spawn(
+            self: EnvAgent, invocation: Invocation, **kwargs: Any
+        ) -> subprocess.Popen:
+            """Run the env dump through the real spawn."""
+            argv = (sys.executable, '-c', dump, f'{agent_record}')
+            return super()._spawn(
+                dataclasses.replace(invocation, argv=argv),
+                **kwargs,
+            )
+
+        def stream(self: EnvAgent, stdout: Any, **kwargs: Any) -> Any:
+            """Drain to EOF and report an empty, costless stream."""
+            for _ in stdout:
+                pass
+            kwargs['process'].wait()
+            return StreamResult(session=None, model=None, cost=None)
+
+    class EnvLoop(MockLoop):
+        """Mock loop that runs the real setup.sh and launch."""
+
+        _run_setup = Loop._run_setup
+
+        def _launch(
+            self: EnvLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Run the base launch with the env-recording agent."""
+            kwargs['agent'] = EnvAgent(self.node)
+            return Loop._launch(self, step, prompt, **kwargs)
+
+    assert EnvLoop(loop_node).run() == 0
+    # every recorded process saw no venv and the venv's bin leading PATH
+    for record in (setup_record, agent_record):
+        lines = record.read_text(encoding='utf-8').splitlines()
+        seen = {
+            (env.get('VIRTUAL_ENV'), env['PATH'].split(os.pathsep)[0])
+            for env in map(json.loads, lines)
+        }
+        assert seen == {(None, f'{venv / "bin"}')}
+
+
+@pytest.mark.parametrize(
+    argnames='detached',
+    argvalues=[True, False],
+    ids=['fresh-session', 'resumed-session'],
+)
+def test_midrun_limit_edits_reach_the_next_step_env(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    detached: bool,
+) -> None:
+    """A mid-run limit edit reaches the next launch's env; mode flags stay pinned.
+
+    The real launch hands each agent the env its own prompt rendered,
+    whether the step mints a fresh session (detached) or resumes the
+    iteration's continuous one, so every edited limit reaches the agent's
+    environment and prompt alike, while ``DETACHED_MODE``/``META_MODE``/
+    ``META_TARGET`` keep their boot values.
+    """
+    names = (
+        'MAX_DEPTH',
+        'MAX_CHILDREN',
+        'MAX_DESCENDANTS',
+        'TIME_BUDGET',
+        'COST_BUDGET',
+    )
+    charter = ''.join(f'{name}=${name}\n' for name in names)
+    (loop_node.node_dir / 'NODE.md').write_text(
+        f'# Charter\n\n{charter}meta [$META_TARGET]\n',
+        encoding='utf-8',
+    )
+    _configure(loop_node, max_children=4, max_descendants=4, detached=detached)
+    agent = scripted_claude([_claude_script(_INIT, _RESULT)] * 2)
+
+    class EditingLoop(ScriptedLoop):
+        """Scripted loop the operator retunes once its first launch ends."""
+
+        def _launch(
+            self: EditingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Launch, then retune the limits and the mode keys after the first."""
+            result = super()._launch(step, prompt, **kwargs)
+            if len(agent.envs) == 1:
+                _configure(
+                    self.node,
+                    max_depth=3,
+                    max_children=8,
+                    max_descendants=8,
+                    detached=not detached,
+                    meta='edited-target',
+                )
+            return result
+
+    EditingLoop(loop_node, agent).run()
+    first, argv = agent.argvs
+    boot, env = agent.envs
+    prompt = argv[-1]
+    # the boot launch carried the boot limits, an unset cap as -1
+    assert boot['MAX_CHILDREN'] == '4'
+    assert boot['MAX_DEPTH'] == '-1'
+    # the later launch resumed the first one's session only in continuous mode
+    session = first[first.index('--session-id') + 1]
+    if detached:
+        assert argv[argv.index('--session-id') + 1] != session
+    else:
+        assert argv[argv.index('--resume') + 1] == session
+    # every edited limit reached the env, and every variable the prompt
+    # rendered reached it with the same value
+    edited = (env['MAX_DEPTH'], env['MAX_CHILDREN'], env['MAX_DESCENDANTS'])
+    assert edited == ('3', '8', '8')
+    for name in names:
+        assert f'{name}={env[name]}\n' in prompt
+    # the mode flags kept their boot values
+    assert env['DETACHED_MODE'] == ('true' if detached else 'false')
+    assert env['META_MODE'] == 'false'
+    assert env['META_TARGET'] == ''
+    assert 'meta []' in prompt
+
+
+@pytest.mark.parametrize(
+    argnames='edit',
+    argvalues=['retune', 'torn'],
+)
+def test_step_env_and_prompt_share_one_config_read(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: str,
+) -> None:
+    """A step's env carries the variables its own prompt rendered.
+
+    The step reads the config once, inside the prompt build's guard: an
+    edit landing between the prompt build and the spawn cannot split the
+    env from the prompt, and a torn ``config.json`` at that moment never
+    reaches the spawn, where a failed read would take the whole run down.
+    """
+    monkeypatch.setenv('_NODE', '')
+    (loop_node.node_dir / 'NODE.md').write_text(
+        '# Charter\n\nSpawn at most $MAX_CHILDREN.\n',
+        encoding='utf-8',
+    )
+    _configure(loop_node, max_children=4)
+    config = loop_node.node_dir / 'config.json'
+    intact = config.read_text(encoding='utf-8')
+
+    class EditingLoop(MockLoop):
+        """Mock loop editing the config between EXECUTE's prompt build and spawn."""
+
+        def __init__(self: EditingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``EditingLoop``."""
+            super().__init__(node, **kwargs)
+            self.seen: list[tuple[dict[str, str], str]] = []
+
+        def _build_step_prompt(self: EditingLoop, step: Step) -> str:
+            """Build the prompt, then retune or tear the config under it."""
+            prompt = super()._build_step_prompt(step)
+            if step.name == 'EXECUTE':
+                if edit == 'retune':
+                    _configure(self.node, max_children=8)
+                else:
+                    config.write_text('{"max_children": ', encoding='utf-8')
+            return prompt
+
+        def _launch(
+            self: EditingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the launch env and prompt, mending a torn config after."""
+            try:
+                self.seen.append((self._agent_env(self._step_label), prompt))
+            finally:
+                if edit == 'torn':
+                    config.write_text(intact, encoding='utf-8')
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = EditingLoop(loop_node)
+    assert loop.run() == 0
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+    # each env names the limit its own prompt rendered
+    for env, prompt in loop.seen:
+        assert f'Spawn at most {env["MAX_CHILDREN"]}.' in prompt
 
 
 @pytest.mark.parametrize(
@@ -742,6 +1680,154 @@ def test_boot_gate_vets_the_recorded_group(
             leader.wait()
 
 
+@pytest.mark.parametrize(
+    argnames='boot',
+    argvalues=['start', 'continue', 'resume'],
+)
+def test_boot_waits_for_a_running_merge(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    boot: str,
+) -> None:
+    """A booting loop goes live only once a running merge lets go.
+
+    A merge refuses only an active node, and its advance can rewrite any
+    other node's worktree -- carrying a paused node's frozen state, resetting
+    an idle or settled one -- so every boot takes the repo's merge lock around
+    its continue clean-up and its active stamp. While another process holds
+    that lock the boot says once that it waits, and the node keeps its
+    status and its worktree and launches no step; once the lock is released
+    the boot stamps active and the steps run.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    # a fresh start boots idle, a continue boots re-armed idle over the
+    # dirt its clean-up discards, and a resume boots paused over the run
+    # the pause left open
+    readme = node.worktree / 'README.md'
+    if boot == 'continue':
+        readme.write_text('left by the last run\n', encoding='utf-8')
+    if boot == 'resume':
+        node.status_set('active')
+        node.record.run_start()
+        node.status_set('paused')
+    status = node.status()
+    content = readme.read_text(encoding='utf-8')
+    launched_as: list[str] = []
+
+    class _Recording(MockLoop):
+        """Note the node's status at each launch."""
+
+        def _launch(
+            self: _Recording, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            launched_as.append(self.node.status())
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = _Recording(node, continue_=boot == 'continue', resume=boot == 'resume')
+    codes: list[int] = []
+
+    def _boot() -> None:
+        codes.append(loop.run())
+
+    booter = threading.Thread(target=_boot)
+    lock_file = node.repo_dir / WORKTREES_FOLDER / MERGE_LOCK_FILE
+    lock_file.parent.mkdir(exist_ok=True)
+    ready = tmp_path_factory.mktemp('merge_lock') / 'holder_ready'
+    holder = subprocess.Popen(
+        [sys.executable, '-c', _LOCK_HOLDER, f'{lock_file}', f'{ready}']
+    )
+    notice = 'Waiting for a running merge to finish...'
+    # the boot prints into a buffer the polls read without truncating, so no
+    # line the boot thread writes between two reads is lost
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        try:
+            _await_ready(ready, proc=holder, deadline=time.monotonic() + 10)
+            booter.start()
+            # the notice prints just before the boot blocks on the held lock
+            deadline = time.monotonic() + 60
+            while notice not in output.getvalue() and booter.is_alive():
+                assert time.monotonic() < deadline, 'the boot never reached the lock'
+                time.sleep(0.02)
+            assert notice in output.getvalue(), 'the boot ran on without the lock'
+            # nothing went live, launched, or touched the worktree meanwhile
+            assert node.status() == status
+            assert loop.launched == []
+            assert readme.read_text(encoding='utf-8') == content
+            # the holder dies, the kernel releases the lock, and the boot
+            # launches its first step on the active node
+            holder.kill()
+            holder.wait(timeout=5)
+            deadline = time.monotonic() + 60
+            while not launched_as and booter.is_alive():
+                assert time.monotonic() < deadline, 'the boot never launched a step'
+                time.sleep(0.02)
+            assert launched_as, 'the boot ended without launching a step'
+            assert launched_as[0] == 'active'
+            booter.join(timeout=60)
+            assert not booter.is_alive(), 'the run never ended'
+        finally:
+            # the holder is a single leaf process, so a pid kill reaps it fully
+            if holder.poll() is None:
+                holder.kill()
+                holder.wait()
+            if booter.is_alive():
+                booter.join(timeout=60)
+
+    # every step ran on the active node with no second wait, and a
+    # continue's clean-up discarded the last run's dirt
+    assert codes == [0]
+    assert set(launched_as) == {'active'}
+    assert output.getvalue().count(notice) == 1
+    assert readme.read_text(encoding='utf-8') == '# test\n'
+
+
+@pytest.mark.parametrize(
+    argnames=('boot', 'kept', 'live'),
+    argvalues=[
+        ('start', 'idle (starting)', '--live still reads it active'),
+        ('resume', 'paused', '--live reads it paused too'),
+    ],
+)
+def test_a_failed_active_stamp_names_the_status_the_node_keeps(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    boot: str,
+    kept: str,
+    live: str,
+) -> None:
+    """A boot whose active stamp fails says which status the node keeps.
+
+    The stamp is guarded so a transient failure never aborts the run, and
+    nothing re-stamps a missed one: a start keeps its ``idle``, which the
+    boot-window rule reads as ``active`` under ``--live``, while a resume
+    keeps the ``paused`` the pause left, which no reading relabels.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    if boot == 'resume':
+        node.status_set('active')
+        node.record.run_start()
+        node.status_set('paused')
+    status_set = node.status_set
+
+    def _refuse_active(status: str, *args: Any, **kwargs: Any) -> None:
+        if status == 'active':
+            raise OSError('status write refused')
+        status_set(status, *args, **kwargs)
+
+    monkeypatch.setattr(node, 'status_set', _refuse_active)
+    loop = MockLoop(node, resume=boot == 'resume')
+    loop.run()
+    out = capsys.readouterr().out
+    banner = next(line for line in out.splitlines() if 'Active stamp failed' in line)
+    assert f'the node reads {kept} for this run' in banner
+    assert live in banner
+
+
 def test_continue_restore_lands_config_all_or_nothing(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -831,8 +1917,7 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
     loop._clean_worktree()
     assert _git('rev-parse', 'HEAD') == head
     # operator git surgery commits cleanly: a staged rename and a staged
-    # deletion are already fully staged, so the cleanup must not re-name
-    # their gone paths to the add
+    # deletion ride the operator-edit commit, gone paths and all
     _git('mv', f'{node.node_dir / "note.md"}', f'{node.node_dir / "moved.md"}')
     _git('rm', '-q', f'{node.node_dir / "config.json"}')
     loop._clean_worktree()
@@ -842,6 +1927,97 @@ def test_continue_cleanup_excludes_runtime_dirt(node_with_db: Node) -> None:
     # the staged deletion committed: config.json's row is gone from the
     # index (nothing on disk to back up, so the config restore skips too)
     assert 'config.json' not in tracked
+
+
+@pytest.mark.parametrize(
+    argnames=('wrote', 'staging', 'carried'),
+    argvalues=[
+        # an edit to a tracked project file
+        pytest.param('README.md', ['add', 'README.md'], [], id='modified'),
+        # a new project file
+        pytest.param('added.md', ['add', 'added.md'], [], id='added'),
+        # a new project file the project ignores, force-added
+        pytest.param(
+            '.venv/added.py',
+            ['add', '-f', '.venv/added.py'],
+            [],
+            id='forced',
+        ),
+        # a deleted project file
+        pytest.param(None, ['rm', '-q', 'README.md'], [], id='deleted'),
+        # a rename inside the project
+        pytest.param(None, ['mv', 'README.md', 'moved.md'], [], id='renamed'),
+        # a rename into the node folder: its node-folder side is an operator
+        # edit, its project side is not
+        pytest.param(
+            None,
+            ['mv', 'README.md', '{node}/moved.md'],
+            ['{node}/moved.md'],
+            id='moved_in',
+        ),
+        # a rename out of the node folder, split the same way
+        pytest.param(
+            None,
+            ['mv', '{node}/NODE.md', 'moved.md'],
+            ['{node}/NODE.md'],
+            id='moved_out',
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    argnames='steered',
+    argvalues=[
+        pytest.param(False, id='unsteered'),
+        pytest.param(True, id='steered'),
+    ],
+)
+def test_continue_cleanup_discards_staged_project_changes(
+    node_with_db: Node,
+    wrote: Optional[str],
+    staging: list[str],
+    carried: list[str],
+    steered: bool,
+) -> None:
+    """The continue cleanup commits node-folder edits alone and discards the rest.
+
+    A continued node starts from its last committed state plus the
+    operator's node-folder edits, so a project change the operator staged is
+    discarded like an unstaged one and never rides the operator-edit commit,
+    whose files are the node folder's alone. A staged rename across the node
+    folder's edge splits the same way: its node-folder side is committed and
+    its project side discarded.
+    """
+    node = node_with_db
+    repo = node.worktree
+    prefix = node.node_dir.relative_to(repo).as_posix()
+    # the node folder committed, as an initialized node's is
+    (node.node_dir / 'NODE.md').write_text('# Charter\n', encoding='utf-8')
+    _git(repo, 'add', prefix)
+    _git(repo, 'commit', '-q', '-m', 'seed')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    # the operator's staged project change, and their steering note
+    if wrote is not None:
+        path = repo / wrote
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('staged\n', encoding='utf-8')
+    _git(repo, *[arg.format(node=prefix) for arg in staging])
+    committed = [path.format(node=prefix) for path in carried]
+    if steered:
+        (node.node_dir / 'note.md').write_text('steer\n', encoding='utf-8')
+        committed.append(f'{prefix}/note.md')
+    MockLoop(node)._clean_worktree()
+    # nothing the operator left, staged or not, outlives the clean
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+    assert status == ''
+    assert (repo / 'README.md').read_text(encoding='utf-8') == '# test\n'
+    # the operator-edit commit carries the node folder's edits alone, and
+    # without any there is no commit
+    if not committed:
+        assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+        return
+    assert _git(repo, 'rev-parse', 'HEAD~').stdout == head
+    cmd = ['diff-tree', '-r', '--name-only', '--no-commit-id', 'HEAD']
+    assert sorted(_git(repo, *cmd).stdout.split()) == sorted(committed)
 
 
 def test_stream_fault_attributes_to_the_stream_side(
@@ -910,6 +2086,1275 @@ def test_stream_fault_attributes_to_the_stream_side(
         and 'agent error' not in (result.reason or '')
         for result in loop.launch_results
     ), [result.reason for result in loop.launch_results]
+
+
+def test_agent_borne_stream_error_keeps_the_exit_code(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error named on the stream before a non-zero exit names the exit code.
+
+    The exit status is the agent's authoritative verdict and the stream text
+    its explanation, so the step reason leads with the real code, then the
+    stream detail, then the stderr tail -- never the bare stream label that
+    reads as a clean-exit failure.
+    """
+    monkeypatch.setenv('_NODE', '')
+
+    class ErrorFrameAgent(SampleAgent):
+        """A backend that names an error on its stream, then exits 3 with stderr."""
+
+        def spawn(
+            self: ErrorFrameAgent,
+            invocation: Any,
+            *,
+            start_new_session: bool = True,
+            stderr: Any = None,
+        ) -> subprocess.Popen:
+            """Exit 3 with a diagnosis line on stderr."""
+            return subprocess.Popen(
+                ['sh', '-c', 'echo stub crashed >&2; exit 3'],
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                start_new_session=start_new_session,
+            )
+
+        def stream(self: ErrorFrameAgent, stdout: Any, **kwargs: Any) -> Any:
+            """Drain to EOF, wait as ``finish_stream`` does, then report the error."""
+            for _ in stdout:
+                pass
+            kwargs['process'].wait()
+            raise AgentStreamError('sample reported an error: quota exhausted')
+
+    class ErrorFrameLoop(MockLoop):
+        """Mock loop that swaps in the error-frame agent for the real launch."""
+
+        def _launch(
+            self: ErrorFrameLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Run the REAL launch so the attribution executes."""
+            kwargs['agent'] = ErrorFrameAgent(self.node)
+            return Loop._launch(self, step, prompt, **kwargs)
+
+    loop = ErrorFrameLoop(loop_node)
+    assert loop.run() == 0
+    # the real exit code leads; the stream detail and the stderr tail follow
+    # (the row's own markers -- retry, unpriced -- trail the reason)
+    step = loop_node.db.read('steps', where={'step': 1})[0]
+    assert step['status'] == 'failed'
+    assert (step['metadata'] or '').startswith(
+        'agent error (exit 3): sample reported an error: quota exhausted; stub crashed'
+    )
+
+
+def test_a_dead_stream_reaps_the_tree_and_spares_the_index_lock(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A dead stream reader ends the agent's tools with a grace for git's lock.
+
+    The reap TERMs the whole tree, a tool in a session of its own
+    included, and waits a short grace, so a tool caught holding
+    ``.git/index.lock`` drops it and the failure path's backstop commit
+    lands; a group-only signal or an immediate KILL would leave the lock
+    behind and the save would fail.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=0)
+    git_path = subprocess.run(
+        ['git', 'rev-parse', '--git-path', 'index.lock'],
+        cwd=loop_node.worktree,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lock = loop_node.worktree / git_path.stdout.strip()
+    # a tool in a session of its own holding the index lock until its TERM
+    tool = tmp_path / 'tool.py'
+    tool.write_text(
+        'import os, pathlib, signal, sys, time\n'
+        'lock, pid = (pathlib.Path(arg) for arg in sys.argv[1:])\n'
+        'os.setsid()\n'
+        'def drop(*_):\n'
+        '    lock.unlink()\n'
+        '    sys.exit(0)\n'
+        'signal.signal(signal.SIGTERM, drop)\n'
+        'lock.touch()\n'
+        'pid.write_text(f"{os.getpid()}\\n")\n'
+        'time.sleep(60)\n',
+        encoding='utf-8',
+    )
+    pid_file = tmp_path / 'tool.pid'
+    # the stand-in waits up to 10s for the tool's pid, then breaks the stream
+    agent = FaultingAgent(
+        loop_node,
+        f'{sys.executable} {tool} {lock} {pid_file} >/dev/null 2>&1 &'
+        f' for _ in $(seq 200); do [ -s {pid_file} ] && break; sleep 0.05; done;'
+        " echo '{}'; exec sleep 30",
+    )
+    # leave real uncommitted work for the backstop sweep to save
+    (loop_node.worktree / 'partial.txt').write_text('half-done\n', encoding='utf-8')
+    loop = ScriptedLoop(loop_node, agent)
+    try:
+        loop.run()
+    finally:
+        # the tool left the stand-in's group, so a broken reap leaves it running
+        try:
+            os.kill(int(pid_file.read_text(encoding='utf-8')), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+    # the tool is gone (or a zombie awaiting its reaper), its lock with it
+    pid = pid_file.read_text(encoding='utf-8').strip()
+    state = subprocess.run(
+        ['ps', '-o', 'stat=', '-p', pid],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert state.stdout.strip()[:1] in ('', 'Z'), state.stdout
+    assert not lock.exists()
+    assert _step_rows(loop_node) == [
+        'PLAN/failed/stream error: ValueError: parser boom; unpriced'
+    ]
+    log = subprocess.run(
+        ['git', '-C', f'{loop_node.worktree}', 'log', '-1', '--format=%s'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subject = f'{loop_node.branch}: iteration {loop._run_id}.1 (failed on PLAN)'
+    assert log.stdout.strip() == subject
+
+
+@pytest.mark.parametrize(
+    argnames=('kill', 'row'),
+    argvalues=[
+        pytest.param('deadline', 'PLAN/exited/timed out; unpriced', id='deadline'),
+        pytest.param(
+            'stream error',
+            'PLAN/failed/stream error: ValueError: parser boom; unpriced',
+            id='stream-error',
+        ),
+    ],
+)
+def test_a_broken_reap_still_kills_the_step_group(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    kill: str,
+    row: str,
+) -> None:
+    """A process-tree reap that raises still lands its kill on the step group.
+
+    The walk reads the process table and can fail; the deadline or the
+    dead stream must still end the agent, so the launch KILLs the group
+    it recorded and warns that the tree went unwalked.
+    """
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=0)
+
+    def _reap(*args: Any, **kwargs: Any) -> Any:
+        raise OSError('ps unavailable')
+
+    monkeypatch.setattr('fractal.util.process.reap', _reap)
+    if kill == 'deadline':
+        _configure(loop_node, step_timeout='1s')
+        # the open call holds the idle clock, so only the deadline ends it
+        agent = scripted_claude([_claude_script(_INIT, _TOOL_START, 'exec sleep 30')])
+    else:
+        agent = FaultingAgent(loop_node, "echo '{}'; exec sleep 30")
+    ScriptedLoop(loop_node, agent).run()
+    (process,) = agent.spawned
+    assert process.returncode == -signal.SIGKILL
+    assert _step_rows(loop_node) == [row]
+    err = capsys.readouterr().err
+    assert 'Warning: process-tree reap failed (ps unavailable)' in err
+
+
+# ------ no-progress watchdog
+
+
+def test_no_progress_steers_then_stalls_without_retry(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """An agent idle past the clock is steered once, then stalls unretried.
+
+    After its tool result the agent goes silent: the watchdog ends it and
+    the step resumes the same session with ``STALL.md``. The steered
+    launch goes silent too, so the step stalls -- no retry even with
+    ``step_retries`` 3 -- the next step never runs, and the parent's feed
+    (the node's outbox) names the node, step, iteration and trigger.
+    """
+    silent = _claude_script(_INIT, _TOOL_START, _TOOL_RESULT, 'exec sleep 30')
+    agent = scripted_claude([silent, _claude_script(_INIT, 'exec sleep 30')])
+    loop = ScriptedLoop(loop_node, agent)
+    loop.run()
+
+    # two launches, the second resuming the first's session on STALL.md
+    first, steer = agent.argvs
+    session = first[first.index('--session-id') + 1]
+    assert steer[steer.index('--resume') + 1] == session
+    assert 'went too long without an action' in steer[-1]
+    assert all(process.poll() is not None for process in agent.spawned)
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/exited/stalled: no action for 1s, after a steer; unpriced',
+        'EXECUTE/stopped/failed on PLAN',
+    ]
+    sent = loop_node.radio.sent(channel='outbox')
+    (notice,) = [row for row in sent if row['subject'] == 'step stalled: PLAN']
+    assert f'Node {loop_node.branch} stalled on step PLAN' in notice['data']
+    assert 'no action for 1s' in notice['data']
+
+
+def test_no_progress_clock_pauses_while_a_tool_runs(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A tool running past the clock is the agent waiting, never idling."""
+    tool = _claude_script(_INIT, _TOOL_START, 'sleep 3', _TOOL_RESULT, _TEXT, _RESULT)
+    agent = scripted_claude([tool, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+
+
+def test_thinking_never_resets_the_no_progress_clock(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """Thinking deltas streaming past the clock still read as no action."""
+    thinking = _claude_script(
+        _INIT, f'for _ in $(seq 30); do {_echo(_THINKING)}; sleep 0.2; done'
+    )
+    agent = scripted_claude(
+        [
+            thinking,
+            _claude_script(_INIT, _TEXT, _RESULT),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 3
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+
+
+def test_long_think_that_ends_in_an_action_is_not_stuck(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A thinking block open past the clock holds it until the block completes.
+
+    The stream shows nothing of a think in progress, so the clock restarts
+    from the block's own frame, and the reply goes on to act.
+    """
+    thought = json.loads(json.dumps(_THINKING_REPLY))
+    thought['message']['id'] = _MESSAGE_START['event']['message']['id']
+    script = _claude_script(
+        _INIT,
+        _MESSAGE_START,
+        _THINKING_START,
+        'sleep 3',
+        thought,
+        _THINKING_STOP,
+        _TOOL_START,
+        _TOOL_RESULT,
+        _TEXT,
+        _RESULT,
+    )
+    agent = scripted_claude([script, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+
+
+def test_thinking_cap_then_no_progress_stalls_the_step(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """Either trigger after the steer stalls the step, named by the second."""
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    agent = scripted_claude([capped, _claude_script(_INIT, 'exec sleep 30')])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/exited/stalled: no action for 1s, after a steer; unpriced',
+        'EXECUTE/stopped/failed on PLAN',
+    ]
+
+
+def test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A thinking cap on a stream that named no session still steers its launch.
+
+    The launch minted the session it ran on, so the steer resumes that
+    one with ``STALL.md``, as the watchdog's steer does -- never the full
+    step prompt as if no launch had stuck.
+    """
+    anonymous = [
+        {key: value for key, value in frame.items() if key != 'session_id'}
+        for frame in (_THINKING_REPLY, _CONTINUATION)
+    ]
+    capped = _claude_script(*anonymous, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    first, steer, _ = agent.argvs
+    session = first[first.index('--session-id') + 1]
+    assert steer[steer.index('--resume') + 1] == session
+    assert 'ran out of room while still thinking' in steer[-1]
+
+
+@pytest.mark.parametrize(
+    argnames=('source', 'effort', 'lowered'),
+    argvalues=[
+        pytest.param('step', 'max', 'xhigh', id='frontmatter'),
+        pytest.param('node', 'xhigh', 'high', id='node'),
+        pytest.param('agent', 'xhigh', 'high', id='agent-default'),
+    ],
+)
+def test_thinking_cap_steers_one_effort_lower(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    capsys: pytest.CaptureFixture[str],
+    source: str,
+    effort: str,
+    lowered: str,
+) -> None:
+    """A thinking-capped step's steer relaunches one effort level lower.
+
+    The step's effort is its own ``effort:``, else the node's, else the
+    agent's configured default. The steer resumes the capped session at
+    the next level down and its row records that level, while the capped
+    row and the steering banner read as for any steer.
+    """
+    if source == 'step':
+        step = loop_node.node_dir / 'steps' / '01-PLAN.md'
+        step.write_text(f'---\neffort: {effort}\n---\n# PLAN\n', encoding='utf-8')
+    elif source == 'node':
+        _configure(loop_node, effort=effort)
+    else:
+        settings = loop_node.node_dir / '.claude' / 'settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'effortLevel': effort}), encoding='utf-8')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    first, steer, _ = agent.argvs
+    # the agent applies its own default itself, so only a pin rides the flag
+    pinned = None if source == 'agent' else effort
+    assert _effort(first) == pinned
+    assert _effort(steer) == lowered
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
+    ]
+    assert _step_efforts(loop_node)[:2] == [pinned, lowered]
+    out = capsys.readouterr().out
+    assert '(PLAN): thinking cap; steering (' in out
+    assert f'\n  (effort {effort} -> {lowered} for the steer)\n' in out
+
+
+def test_lowered_effort_ends_with_the_steer(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """The lowered level lasts for the steer alone.
+
+    The next step, and the capped step's next iteration, run at the
+    step's own effort again.
+    """
+    _configure(loop_node, effort='max', max_iters=2)
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    done = [_claude_script(_INIT, _RESULT) for _ in range(4)]
+    agent = scripted_claude([capped, *done])
+    ScriptedLoop(loop_node, agent).run()
+    efforts = ['max', 'xhigh', 'max', 'max', 'max']
+    assert [_effort(argv) for argv in agent.argvs] == efforts
+    assert _step_efforts(loop_node) == efforts
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+        'PLAN/completed/',
+        'EXECUTE/completed/',
+    ]
+
+
+@pytest.mark.parametrize('effort', ['high', 'medium', 'turbo'])
+def test_cap_at_the_floor_steers_at_the_same_effort(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    capsys: pytest.CaptureFixture[str],
+    effort: str,
+) -> None:
+    """A capped step at or below the floor, or off the ladder, steers unchanged.
+
+    The floor means never lower than it, not never steer: the steer
+    relaunches at the step's own effort, as for any steer.
+    """
+    _configure(loop_node, effort=effort)
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert [_effort(argv) for argv in agent.argvs] == [effort] * 3
+    assert _step_efforts(loop_node) == [effort] * 3
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
+    ]
+    assert '(effort ' not in capsys.readouterr().out
+
+
+def test_idle_watchdog_steer_keeps_the_effort(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A launch the no-action watchdog ends steers at the step's own effort."""
+    _configure(loop_node, effort='max')
+    silent = _claude_script(_INIT, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([silent, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert [_effort(argv) for argv in agent.argvs] == ['max'] * 3
+    assert _step_efforts(loop_node) == ['max'] * 3
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/completed/steer',
+    ]
+    assert '(effort ' not in capsys.readouterr().out
+
+
+def test_lowered_steer_that_caps_again_stalls(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A lowered steer that caps again stalls the step, with no third launch."""
+    _configure(loop_node, effort='max')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    agent = scripted_claude([capped, capped])
+    ScriptedLoop(loop_node, agent).run()
+    assert [_effort(argv) for argv in agent.argvs] == ['max', 'xhigh']
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/exited/stalled: thinking cap, after a steer; unpriced',
+        'EXECUTE/stopped/failed on PLAN',
+    ]
+
+
+def test_claude_step_in_a_codex_node_steers_on_the_claude_ladder(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A Claude step in a Codex node lowers on Claude's ladder, not the node's.
+
+    Codex declares no ladder, but the capped step runs Claude through its
+    own ``agent:`` frontmatter, so its ``xhigh`` steer relaunches at
+    ``high``.
+    """
+    # the step's agent must be installed; a stand-in binary satisfies the
+    # check, and the scripted agent runs every launch
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'claude').write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+    (bindir / 'claude').chmod(0o755)
+    monkeypatch.setenv('PATH', f'{bindir}{os.pathsep}{os.environ["PATH"]}')
+    _configure(loop_node, agent='codex')
+    step = loop_node.node_dir / 'steps' / '01-PLAN.md'
+    content = '---\nagent: claude\neffort: xhigh\n---\n# PLAN\n'
+    step.write_text(content, encoding='utf-8')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    first, steer, _ = agent.argvs
+    assert _effort(first) == 'xhigh'
+    assert _effort(steer) == 'high'
+    assert _step_efforts(loop_node)[:2] == ['xhigh', 'high']
+    assert _step_rows(loop_node)[:2] == [
+        'PLAN/stopped/steered: thinking cap; unpriced',
+        'PLAN/completed/steer',
+    ]
+
+
+def test_project_settings_override_the_ladder(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """The root branch's committed settings set an agent's ladder for the run.
+
+    The loop reads the ladder at boot from the settings file as committed
+    on the tree's root branch, so neither an uncommitted edit nor a commit
+    landing after the boot changes the run's ladder. Here the project's
+    ladder lowers ``high`` (the agent's own floor) to ``low``.
+    """
+    _configure(loop_node, effort='high')
+    ladder = {'levels': ['low', 'high', 'max'], 'floor': 'low'}
+    _commit_settings(loop_node, {'effort_ladder': {'claude': ladder}})
+    settings = loop_node.worktree / '.fractal' / '.settings.json'
+    unchanged = {'effort_ladder': {'claude': {**ladder, 'floor': 'high'}}}
+    settings.write_text(json.dumps(unchanged), encoding='utf-8')
+    capped = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([capped, resumed, _claude_script(_INIT, _RESULT)])
+
+    class _Recommitting(ScriptedLoop):
+        """Commit the edited ladder on the root branch as the first step launches."""
+
+        def _launch(
+            self: _Recommitting, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            if not agent.argvs:
+                _commit_settings(loop_node, unchanged)
+            return super()._launch(step, prompt, **kwargs)
+
+    _Recommitting(loop_node, agent).run()
+    assert [_effort(argv) for argv in agent.argvs] == ['high', 'low', 'high']
+    assert _step_efforts(loop_node) == ['high', 'low', 'high']
+
+
+@pytest.mark.parametrize(
+    argnames=('ladders', 'match'),
+    argvalues=[
+        pytest.param(['high'], 'map agent names', id='not-an-object'),
+        pytest.param({'claude': {'levels': ['high']}}, 'exactly', id='no-floor'),
+        pytest.param(
+            {'claude': {'levels': ['high'], 'floor': 'high', 'ceiling': 'max'}},
+            'exactly',
+            id='extra-key',
+        ),
+        pytest.param(
+            {'claude': {'levels': 'high', 'floor': 'high'}},
+            'non-empty strings',
+            id='levels-string',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['high', ''], 'floor': 'high'}},
+            'non-empty strings',
+            id='empty-level',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['high', 'high'], 'floor': 'high'}},
+            'unique',
+            id='duplicate',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['high'], 'floor': 'max'}},
+            'one of its levels',
+            id='floor-off-ladder',
+        ),
+        pytest.param(
+            {'claude': {'levels': [], 'floor': 'high'}},
+            'one of its levels',
+            id='no-levels',
+        ),
+        pytest.param(
+            {'Claude': {'levels': ['high', 'max'], 'floor': 'high'}},
+            'no registered agent',
+            id='misspelled-agent',
+        ),
+        pytest.param(
+            {'claude': {'levels': ['max', 'xhigh', 'high'], 'floor': 'max'}},
+            'lowest first',
+            id='highest-first',
+        ),
+    ],
+)
+def test_invalid_effort_setting_fails_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    ladders: Any,
+    match: str,
+) -> None:
+    """An invalid committed effort ladder aborts the loop's boot, naming the file.
+
+    Beyond its shape, a ladder must name a registered agent, and a ladder
+    built only from levels its agent declares must list them in the
+    agent's own order, lowest first -- a misspelled name would otherwise
+    keep the default ladder, and a reversed one would raise the effort.
+    The abort lands on record: the node reads ``exited`` and a closed run
+    row carries the reason.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _commit_settings(loop_node, {'effort_ladder': ladders})
+    loop = MockLoop(loop_node)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    assert re.search(match, run['metadata'])
+    assert '.fractal/.settings.json' in run['metadata']
+    assert loop_node.branch in run['metadata']
+
+
+# a committed ladder naming no registered agent (a misspelled claude)
+_MISSPELLED_LADDER = {
+    'effort_ladder': {'cluade': {'levels': ['low', 'high'], 'floor': 'low'}},
+}
+
+
+@pytest.mark.parametrize('launch', ['start', 'continue', 'resume'])
+def test_launch_verbs_refuse_an_invalid_effort_ladder(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    launch: str,
+) -> None:
+    """A start, continue, or resume refuses a bad committed ladder up front.
+
+    The loop's boot aborts on a bad ladder, so each verb runs the boot's
+    own check before it changes anything: the refusal names the setting
+    and its fault, no launch script runs, and the node's status, its
+    rows, and a paused run's credit span are as the verb found them.
+    """
+    node = loop_node
+    _ready_for_launch(node, launch)
+    _commit_settings(node, _MISSPELLED_LADDER)
+    status = node.status()
+    runs = node.db.read('runs')
+    events = node.db.read('events')
+    run_scripts = _stub_run_script(monkeypatch, node)
+    refusal = (
+        r'"effort_ladder\.cluade" in \.fractal/\.settings\.json on .+'
+        r' names no registered agent'
+    )
+    with pytest.raises(ValueError, match=refusal):
+        _launch_verb(node, launch)
+    assert run_scripts == []
+    assert node.status() == status
+    # the event rows hold the pause credit span a resume event would close
+    assert node.db.read('runs') == runs
+    assert node.db.read('events') == events
+
+
+def test_tree_resume_refuses_an_invalid_effort_ladder(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree-wide resume refuses a bad ladder before it releases the tree.
+
+    Every parked loop the resume relaunches reads the ladder at boot, so
+    the refusal lands before the tree's pause latch lifts or any node
+    relaunches.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    user = Node(git_repo)
+    run_scripts = _stub_run_script(monkeypatch, Node)
+    user.pause(reason='brake')
+    # both loops park (simulated -- the loops are stubbed here)
+    parent.status_set('paused')
+    child.status_set('paused')
+    _commit_settings(user, _MISSPELLED_LADDER)
+    events = user.db.read('events')
+    run_scripts.clear()
+    with pytest.raises(ValueError, match='names no registered agent'):
+        user.resume()
+    assert run_scripts == []
+    assert child.pause_latched(tree_only=True) == user.branch
+    assert (parent.status(), child.status()) == ('paused', 'paused')
+    assert user.db.read('events') == events
+
+
+@pytest.mark.parametrize(
+    argnames=('launch', 'status'),
+    argvalues=[
+        pytest.param('start', 'exited', id='start'),
+        pytest.param('continue', 'exited', id='continue'),
+        pytest.param('resume', 'paused', id='resume'),
+    ],
+)
+def test_a_ladder_broken_after_the_launch_check_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    launch: str,
+    status: str,
+) -> None:
+    """A ladder committed bad after the verb's check aborts the boot on record.
+
+    The boot reads the ladder under the preflight abort, so the fault
+    never dies unrecorded with the pane: a start or continue lands
+    ``exited`` with the reason on a closed run row (the status a continue
+    retries from), and a resume stays paused with its run open and the
+    pause credit span, which its resume event closed, open again.
+    """
+    node = loop_node
+    monkeypatch.setenv('_NODE', '')
+    _ready_for_launch(node, launch)
+    _stub_run_script(monkeypatch, node)
+    _launch_verb(node, launch)
+    _commit_settings(node, _MISSPELLED_LADDER)
+    loop = MockLoop(node, continue_=launch == 'continue', resume=launch == 'resume')
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert node.status() == status
+    run = node.record.runs(limit=1)[0]
+    if launch == 'resume':
+        assert run['ended_at'] is None
+        events = node.db.read('events', where={'run_id': run['run_id']})
+        events.sort(key=lambda event: event['event_id'])
+        credit = [event for event in events if event['event'] in ('pause', 'resume')]
+        assert [event['event'] for event in credit] == ['pause', 'resume', 'pause']
+        assert '"effort_ladder.cluade"' in credit[-1]['metadata']
+    else:
+        assert run['status'] == 'exited'
+        assert '"effort_ladder.cluade"' in run['metadata']
+
+
+# config.json values a hand edit can break, each with the fault both the
+# launch check and the boot name
+_BAD_CONFIGS = [
+    pytest.param(
+        {'step_timeout': 'soon'},
+        'step_timeout must be a duration with a unit suffix',
+        id='malformed-duration',
+    ),
+    pytest.param(
+        {'max_iter_cost': 2.0},
+        'max_iter_cost requires max_cost',
+        id='iter-cap-without-ceiling',
+    ),
+    pytest.param(
+        {'interval': '10m', 'sleep': '1m'},
+        'interval and (--)?sleep are mutually exclusive',
+        id='rival-pacing',
+    ),
+    pytest.param(
+        {'agent': 'cluade'},
+        "Unsupported agent: 'cluade'",
+        id='unknown-agent',
+    ),
+    pytest.param({'agent': None}, 'No agent configured', id='no-agent'),
+]
+
+
+@pytest.mark.parametrize(('config', 'match'), _BAD_CONFIGS)
+def test_resume_refuses_an_invalid_config(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, Any],
+    match: str,
+) -> None:
+    """A resume refuses a config edited while paused, before it acts.
+
+    The relaunched loop's boot aborts on the config ``start`` re-checks,
+    so a resume runs the same check first: the refusal names the node and
+    the fault, no launch script runs, and the node's status, its rows,
+    and its paused run's credit span are as the resume found them.
+    """
+    node = loop_node
+    _ready_for_launch(node, 'resume')
+    _configure(node, **config)
+    status = node.status()
+    runs = node.db.read('runs')
+    events = node.db.read('events')
+    run_scripts = _stub_run_script(monkeypatch, node)
+    with pytest.raises(ValueError, match=f'Cannot resume {node.branch}: {match}'):
+        node.resume()
+    assert run_scripts == []
+    assert node.status() == status
+    # the event rows hold the pause credit span a resume event would close
+    assert node.db.read('runs') == runs
+    assert node.db.read('events') == events
+
+
+def test_tree_resume_refuses_a_descendants_invalid_config(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree-wide resume refuses one parked node's bad config, naming it.
+
+    The check covers every node the resume would relaunch, and lands
+    before the tree's pause latch lifts or any node relaunches.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    user = Node(git_repo)
+    run_scripts = _stub_run_script(monkeypatch, Node)
+    user.pause(reason='brake')
+    # both loops park (simulated -- the loops are stubbed here)
+    parent.status_set('paused')
+    child.status_set('paused')
+    _configure(child, step_timeout='soon')
+    events = user.db.read('events')
+    run_scripts.clear()
+    with pytest.raises(ValueError, match=f'Cannot resume {child.branch}: step_timeout'):
+        user.resume()
+    assert run_scripts == []
+    assert child.pause_latched(tree_only=True) == user.branch
+    assert (parent.status(), child.status()) == ('paused', 'paused')
+    assert user.db.read('events') == events
+
+
+@pytest.mark.parametrize(('config', 'match'), _BAD_CONFIGS)
+def test_a_config_broken_after_the_resume_check_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, Any],
+    match: str,
+) -> None:
+    """A config broken after the resume's check aborts the boot on record.
+
+    The boot reads the config under the preflight abort, so the fault
+    never dies unrecorded with the pane: the node stays paused with its
+    run open, and the pause credit span its resume event closed is open
+    again, carrying the fault.
+    """
+    node = loop_node
+    monkeypatch.setenv('_NODE', '')
+    _ready_for_launch(node, 'resume')
+    _stub_run_script(monkeypatch, node)
+    node.resume()
+    _configure(node, **config)
+    loop = MockLoop(node, resume=True)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert node.status() == 'paused'
+    run = node.record.runs(limit=1)[0]
+    assert run['ended_at'] is None
+    events = node.db.read('events', where={'run_id': run['run_id']})
+    events.sort(key=lambda event: event['event_id'])
+    credit = [event for event in events if event['event'] in ('pause', 'resume')]
+    assert [event['event'] for event in credit] == ['pause', 'resume', 'pause']
+    assert re.search(match, credit[-1]['metadata'])
+
+
+def test_a_broken_agent_hook_file_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom-agent hook file that fails to load aborts the boot on record.
+
+    The tree's ``agents.py`` loads at the boot's first agent resolve, and
+    a file this environment cannot import fails naming itself, so the
+    fault lands like a bad config value: the node reads ``exited`` and a
+    closed run row carries the reason, never a crash with nothing
+    recorded. The recorded reason names the file relative to the repo
+    root, as all persisted data does.
+    """
+    monkeypatch.setenv('_NODE', '')
+    # the hook file loads once per tree per process, as in a fresh boot
+    monkeypatch.setattr(agent_module, '_LOADED', {})
+    hook = loop_node.db.path.parent / 'agents.py'
+    hook.write_text('import fractal_missing_backend\n', encoding='utf-8')
+    loop = MockLoop(loop_node)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    relative = hook.relative_to(loop_node.repo_dir)
+    assert run['metadata'] == f"{relative}: No module named 'fractal_missing_backend'"
+    assert f'{loop_node.repo_dir}' not in run['metadata']
+
+
+@pytest.mark.parametrize(
+    argnames='trigger',
+    argvalues=['no progress', 'thinking cap'],
+)
+def test_a_pause_marker_racing_a_stuck_launch_parks_without_a_steer(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    trigger: str,
+) -> None:
+    """A pause marker landing as the loop ends a stuck launch parks the step.
+
+    The durable marker is the pause a racing resume can no longer
+    withdraw: with no signal left for the steer to poll, only the stuck
+    outcome's own check of the marker keeps the steer from relaunching
+    over the pause, whichever trigger ended the launch.
+    """
+    marker = loop_node.node_dir / PAUSE_ABORT_FILE
+    if trigger == 'no progress':
+        stuck = _claude_script(_INIT, f'touch {marker}', 'exec sleep 30')
+    else:
+        # the agent exits 0 on the cap's TERM, so the check every failed
+        # launch makes never sees the marker
+        stuck = _claude_script(
+            _INIT,
+            _THINKING_REPLY,
+            f'touch {marker}',
+            "trap 'exit 0' TERM",
+            _CONTINUATION,
+            'sleep 30 & wait',
+        )
+    agent = scripted_claude([stuck, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 1
+    assert _step_rows(loop_node) == ['PLAN/paused/unpriced']
+    assert loop_node.status() == 'paused'
+
+
+def test_the_steer_runs_on_what_the_stuck_launch_left(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """The steer is charged the stuck launch's seconds against the step ceiling.
+
+    The step's own timeout counts from the attempt's first launch, so a
+    launch stuck after about 5 of its 8 seconds leaves the steer about 3,
+    never a fresh 8.
+    """
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_timeout='8s')
+    # a tool holds the idle clock for 4s, then the agent goes silent until
+    # the watchdog ends it about 1s later
+    stuck = _claude_script(_INIT, _TOOL_START, 'sleep 4', _TOOL_RESULT, 'exec sleep 30')
+    # the steer's open call holds the idle clock, so only its ceiling ends it
+    steer = _claude_script(_INIT, _TOOL_START, 'exec sleep 30')
+    agent = scripted_claude([stuck, steer])
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/exited/timed out; steer; unpriced',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    steered = max(rows, key=lambda row: row['step_id'])
+    span = fractal.util.time.elapsed(steered['started_at'])
+    span -= fractal.util.time.elapsed(steered['ended_at'])
+    # NOTE: real clocks under parallel load -- the steer's ceiling is the
+    #   ~3s the stuck launch left, a fresh one 8s; 6s splits them with 2x
+    #   margin over the remainder
+    assert span < 6
+
+
+def test_a_capped_or_idle_sync_runs_to_its_result(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A SYNC is never ended at a thinking cap or by the watchdog.
+
+    SYNC runs as its own unsteered step, and a stuck SYNC has no booking
+    of its own: ended early, it would read completed while its call never
+    finished. A capped reply that then idles past the clock still runs to
+    its result, priced by it.
+    """
+    _configure(loop_node, sync=True)
+    sync = _claude_script(_INIT, _THINKING_REPLY, _CONTINUATION, 'sleep 2', _RESULT)
+    work = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([sync, work, sync, work])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 4
+    assert _step_rows(loop_node) == [
+        'SYNC/completed/',
+        'PLAN/completed/',
+        'SYNC/completed/',
+        'EXECUTE/completed/',
+    ]
+    # a SYNC the loop ended would book no cost of its own
+    rows = loop_node.db.read('steps', where={'step_name': 'SYNC'})
+    assert [row['cost'] for row in rows] == [_RESULT['total_cost_usd']] * 2
+
+
+@pytest.mark.parametrize(
+    argnames='script',
+    argvalues=[
+        # the live capture: the agent backgrounds a command and ends its turn
+        # (a result), claude waits, then a task notice wakes it to finish
+        pytest.param(
+            _claude_script(*_BACKGROUND_WAIT[:18], 'sleep 3', *_BACKGROUND_WAIT[18:]),
+            id='background-wait',
+        ),
+        # a tool call seen only on its assistant frame (no partial messages)
+        pytest.param(
+            _claude_script(_INIT, _TOOL_FRAME, 'sleep 3', _TOOL_RESULT, _RESULT),
+            id='assistant-frame-tool',
+        ),
+        # one reply's parallel calls: the first result lands while the
+        # second tool still runs
+        pytest.param(
+            _claude_script(
+                _INIT,
+                _TOOL_FRAME,
+                _SECOND_TOOL_FRAME,
+                _TOOL_RESULT,
+                'sleep 3',
+                _SECOND_TOOL_RESULT,
+                _RESULT,
+            ),
+            id='parallel-calls',
+        ),
+        # an API retry's backoff is no time of the agent's
+        pytest.param(
+            _claude_script(_INIT, _API_RETRY, 'sleep 2', _TEXT, _RESULT),
+            id='api-retry',
+        ),
+        # a background task's notice landing while the agent's own tool runs
+        # is no wake-up: the agent never ended its turn
+        pytest.param(
+            _claude_script(
+                _INIT, _TOOL_START, _TASK_NOTICE, 'sleep 3', _TOOL_RESULT, _RESULT
+            ),
+            id='notice-mid-tool',
+        ),
+    ],
+)
+def test_idle_clock_holds_while_the_agent_waits(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    script: str,
+) -> None:
+    """Waiting on a tool, background work, or a retry is never idling."""
+    agent = scripted_claude([script, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 2
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+
+
+@pytest.mark.parametrize(
+    argnames='script',
+    argvalues=[
+        # silent from its launch
+        pytest.param(_claude_script(_INIT, 'exec sleep 30'), id='launch'),
+        # a call left unanswered when a new reply starts holds no pause
+        pytest.param(
+            _claude_script(_INIT, _TOOL_START, _MESSAGE_START, 'exec sleep 30'),
+            id='unanswered-call',
+        ),
+    ],
+)
+def test_idle_clock_fires_on_a_silent_agent(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    script: str,
+) -> None:
+    """An agent holding control in silence past the clock is steered."""
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([script, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    assert len(agent.argvs) == 3
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+
+
+def test_deadline_reap_reports_on_stderr(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A deadline's reap names what it left on stderr, never on stdout.
+
+    Stdout carries the step's transcript and the reap's notes are
+    advisories: the idle clock ends a silent agent through a reap that
+    reports a spared group, and the note lands on stderr.
+    """
+    spared = 4242
+
+    def reap(roots: Collection[int], **kwargs: Any) -> fractal.util.process.Reaped:
+        # end the silent agent, then report a spared group as a real reap would
+        for root in roots:
+            os.killpg(root, signal.SIGKILL)
+        return fractal.util.process.Reaped(spared=(spared,))
+
+    monkeypatch.setattr(fractal.util.process, 'reap', reap)
+    silent = _claude_script(_INIT, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([silent, resumed, _claude_script(_INIT, _RESULT)])
+    ScriptedLoop(loop_node, agent).run()
+    captured = capsys.readouterr()
+    note = f"Note: spared process group {spared} (another node's loop)"
+    assert note in captured.err, captured.out
+    assert note not in captured.out
+
+
+@pytest.mark.parametrize(
+    argnames=('trigger', 'rows'),
+    argvalues=[
+        # the step deadline times the launch out; the next iteration relaunches
+        pytest.param(
+            'deadline',
+            ['PLAN/exited/timed out; unpriced', 'PLAN/completed/'],
+            id='deadline',
+        ),
+        # the watchdog ends the silent launch; the steer relaunches
+        pytest.param(
+            'watchdog',
+            [
+                'PLAN/stopped/steered: no action for 1s; unpriced',
+                'PLAN/completed/steer',
+            ],
+            id='watchdog',
+        ),
+    ],
+)
+def test_a_reaped_tool_is_gone_before_the_next_launch(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    trigger: str,
+    rows: list[str],
+) -> None:
+    """A launch the loop ended is booked only once its reap has finished.
+
+    The deadline and the watchdog reap the tree on threads of their own,
+    and a tool that ignores TERM lives out the reap's grace: the next
+    launch must find it KILLed, never still running beside it.
+    """
+    monkeypatch.setattr(loop_module, '_KILL_GRACE_SECONDS', 5.0)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    if trigger == 'deadline':
+        _configure(loop_node, max_iters=2, step_timeout='3s')
+    # a tool in a session of its own that ignores TERM, ready once its pid lands
+    tool = tmp_path / 'tool.py'
+    tool.write_text(
+        'import os, pathlib, signal, sys, time\n'
+        'os.setsid()\n'
+        'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+        'pathlib.Path(sys.argv[1]).write_text(f"{os.getpid()}\\n")\n'
+        'time.sleep(60)\n',
+        encoding='utf-8',
+    )
+    pid_file = tmp_path / 'tool.pid'
+    check_file = tmp_path / 'check'
+    start = (
+        f'{sys.executable} {tool} {pid_file} >/dev/null 2>&1 &'
+        f' while [ ! -s {pid_file} ]; do sleep 0.05; done'
+    )
+    # the open call holds the idle clock until the tool is ready; the deadline
+    # then ends the call, the watchdog the silence after its result
+    if trigger == 'deadline':
+        stuck = _claude_script(_INIT, _TOOL_START, start, 'exec sleep 30')
+    else:
+        stuck = _claude_script(_INIT, _TOOL_START, start, _TOOL_RESULT, 'exec sleep 30')
+    probe = _claude_script(
+        f'if ps -o stat= -p "$(cat {pid_file})" | grep -qv Z;'
+        f' then echo alive; else echo dead; fi > {check_file}',
+        _INIT,
+        _RESULT,
+    )
+    agent = scripted_claude([stuck, probe])
+    try:
+        ScriptedLoop(loop_node, agent).run()
+    finally:
+        # the tool left the stand-in's group, so the fixture's sweep misses it
+        try:
+            os.kill(int(pid_file.read_text(encoding='utf-8')), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+    assert _step_rows(loop_node) == rows
+    assert check_file.read_text(encoding='utf-8') == 'dead\n'
+
+
+def test_steered_launch_reports_the_deadline_it_runs_under(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+) -> None:
+    """A steered relaunch's step countdown matches the deadline the loop arms.
+
+    The loop charges the stuck launch's span against the steered launch's
+    ceiling, and ``time remaining`` finds that span by the reason the steer
+    closed the stuck row with -- so the countdown the steered launch reads
+    is the deadline it runs under, never a fresh ceiling.
+    """
+    # a no-progress clock long enough to give the stuck launch a span
+    monkeypatch.setattr(loop_module, '_NO_PROGRESS_SECONDS', 3)
+    silent = _claude_script(_INIT, _TOOL_START, _TOOL_RESULT, 'exec sleep 30')
+    resumed = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude([silent, resumed, _claude_script(_INIT, _RESULT)])
+
+    class ReportingLoop(ScriptedLoop):
+        """Scripted loop recording each launch's countdown and armed deadline."""
+
+        def __init__(self: ReportingLoop, node: Node, agent: ScriptedClaude) -> None:
+            """Initialize ``ReportingLoop``."""
+            super().__init__(node, agent)
+            self.seen: list[tuple[Optional[float], int]] = []
+
+        def _launch(
+            self: ReportingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the step's time remaining and armed limit, then launch."""
+            remaining = self.node.time.remaining(scope='step')
+            self.seen.append((remaining, self._step_limit_seconds))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = ReportingLoop(loop_node, agent)
+    loop.run()
+    # the stuck PLAN launch, its steered relaunch, then EXECUTE
+    assert len(agent.argvs) == 3
+    remaining, armed = loop.seen[1]
+    assert remaining is not None
+    # both carry the stuck launch's span (the armed deadline in whole
+    # seconds); a countdown missing it reads the whole span over
+    assert armed - 2 <= remaining <= armed + 1
+
+
+def test_launch_stamps_the_effort_on_the_step_row(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch records the effort it hands the invocation on its step row.
+
+    The stream names the agent and model later; the effort is the loop's
+    own fact, stamped beside the session before the spawn, so a launch
+    whose stream never opens still leaves the row attributable. A node
+    with no effort set leaves the column blank.
+    """
+    monkeypatch.setenv('_NODE', '')
+
+    class QuietAgent(SampleAgent):
+        """A backend whose launch exits clean with an empty stream."""
+
+        def spawn(
+            self: QuietAgent,
+            invocation: Any,
+            *,
+            start_new_session: bool = True,
+            stderr: Any = None,
+        ) -> subprocess.Popen:
+            """Exit 0 at once."""
+            return subprocess.Popen(
+                ['sh', '-c', 'exit 0'],
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                start_new_session=start_new_session,
+            )
+
+        def stream(self: QuietAgent, stdout: Any, **kwargs: Any) -> Any:
+            """Drain to EOF and report an empty, costless stream."""
+            for _ in stdout:
+                pass
+            kwargs['process'].wait()
+            return StreamResult(session=None, model=None, cost=None)
+
+    class QuietLoop(MockLoop):
+        """Mock loop that runs the REAL launch with the quiet agent."""
+
+        def _launch(
+            self: QuietLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Run the base launch so the stamp executes."""
+            kwargs['agent'] = QuietAgent(self.node)
+            return Loop._launch(self, step, prompt, **kwargs)
+
+    _configure(loop_node, effort='high')
+    assert QuietLoop(loop_node).run() == 0
+    efforts = [row['effort'] for row in loop_node.db.read('steps')]
+    assert efforts == ['high', 'high']
+    # no effort anywhere: the column stays blank
+    _configure(loop_node, effort='')
+    assert QuietLoop(loop_node).run() == 0
+    assert loop_node.db.read('steps', limit=1)[0]['effort'] is None
 
 
 def test_agent_stderr_tolerates_non_utf8_output(
@@ -1023,6 +3468,1080 @@ def test_launch_prices_the_step_from_the_finish_frame(
     # the step completed and the finish frame's figure is its recorded cost
     step = loop_node.db.read('steps', where={'step': 1})[0]
     assert (step['status'], step['cost']) == ('completed', pytest.approx(cost))
+
+
+def test_killed_claude_launch_prices_from_its_transcript(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch killed before its result frame books its transcripts' usage.
+
+    The stalled PLAN launch's stream priced each reply from its first
+    frame; claude's session transcript holds each reply's final usage --
+    split across lines that grow -- and a sub-agent's own transcript
+    beside it holds that agent's reply at its own model, so the step books
+    their sum as an estimate. Entries stamped outside the launch window
+    stay out of the sum, and so does a reply at an unpriced model, which
+    marks the step partly unpriced. The steered relaunch, whose result
+    frame names its cost, keeps that figure over its own transcript
+    entries.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    # the reply's first frame on the stream, then the transcript's lines
+    first = {
+        'input_tokens': 100,
+        'cache_read_input_tokens': 10_000,
+        'output_tokens': 10,
+    }
+    grown = {**first, 'output_tokens': 400}
+    final = {**first, 'output_tokens': 900}
+    second = {'input_tokens': 50, 'output_tokens': 300}
+    sidechain = {'input_tokens': 2_000, 'output_tokens': 700}
+    outside = {'output_tokens': 50_000}
+    killed = [
+        _assistant_entry('msg_old', outside, timestamp='2020-01-01T00:00:00.000Z'),
+        _assistant_entry('msg_a', first),
+        _assistant_entry('msg_a', grown),
+        _assistant_entry('msg_a', final),
+        _assistant_entry('msg_b', second),
+        _assistant_entry('msg_b', second),
+        _assistant_entry(
+            message_id='msg_side',
+            usage=sidechain,
+            model='claude-haiku-5',
+            isSidechain=True,
+            subagent='x',
+        ),
+        _assistant_entry('msg_mystery', outside, model='mystery-model'),
+        _assistant_entry('msg_late', outside, timestamp='2999-01-01T00:00:00.000Z'),
+    ]
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', first),
+        _assistant_frame('msg_b', second),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[killed, [_assistant_entry('msg_c', outside)], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+
+    # each reply's final usage, the sub-agent's at its own model's rates
+    settled = _price(final) + _price(second) + _price(sidechain, 'claude-haiku-5')
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; partly unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == [
+        pytest.approx(settled),
+        _RESULT['total_cost_usd'],
+        _RESULT['total_cost_usd'],
+    ]
+    # the settled figure is an estimate; the result frames are authoritative
+    assert agent.flushed[-3:] == [
+        (pytest.approx(settled), False),
+        (_RESULT['total_cost_usd'], True),
+        (_RESULT['total_cost_usd'], True),
+    ]
+
+
+def test_killed_wake_up_after_a_result_prices_from_the_transcript(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch killed in a wake-up after its turn's result still settles.
+
+    Claude Code outlives a turn's result while background work runs, then
+    wakes the agent for a new reply that spends past the figure the result
+    settled; killed inside that reply, the launch books its transcript's
+    sum as an estimate.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    # the reply's first frame on the stream, then the transcript's lines
+    first = {'input_tokens': 100, 'output_tokens': 10}
+    final = {**first, 'output_tokens': 900}
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_1', first),
+        _RESULT,
+        _TASK_NOTICE,
+        _MESSAGE_START,
+        _assistant_frame('msg_2', first),
+        'exec sleep 30',
+    )
+    written = [
+        _assistant_entry('msg_1', first),
+        _assistant_entry('msg_2', first),
+        _assistant_entry('msg_2', final),
+    ]
+    agent = scripted_claude(
+        [stalled, _claude_script(_INIT, _RESULT), _claude_script(_INIT, _RESULT)],
+        [written],
+    )
+    ScriptedLoop(loop_node, agent).run()
+
+    settled = (100 * 3e-6 + 10 * 1.5e-5) + (100 * 3e-6 + 900 * 1.5e-5)
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == [
+        pytest.approx(settled),
+        _RESULT['total_cost_usd'],
+        _RESULT['total_cost_usd'],
+    ]
+    # the settled figure is an estimate; the result frames are authoritative
+    assert agent.flushed[-3:] == [
+        (pytest.approx(settled), False),
+        (_RESULT['total_cost_usd'], True),
+        (_RESULT['total_cost_usd'], True),
+    ]
+
+
+@pytest.mark.parametrize(
+    argnames=('end', 'outcome'),
+    argvalues=[
+        pytest.param('exit 0', 'PLAN/completed/', id='exit-0'),
+        pytest.param('exit 3', 'PLAN/failed/agent error (exit 3)', id='non-zero'),
+        pytest.param('exec sleep 30', 'PLAN/exited/timed out', id='deadline'),
+    ],
+)
+def test_background_spend_after_the_result_is_booked(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    end: str,
+    outcome: str,
+) -> None:
+    """Spend completing after the result frame adds to the figure it named.
+
+    Claude Code outlives its result while a background sub-agent runs, and
+    counts a reply's cost when the reply completes, so a reply its
+    transcripts complete after the result lies past that figure. However
+    the process then ends -- cleanly, failing, or at the deadline -- the
+    step books the result's figure plus that reply. The reply completed
+    before the result is already in its figure and adds nothing.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='3s', step_retries=0)
+    before = {'input_tokens': 100, 'output_tokens': 900}
+    background = {'input_tokens': 2_000, 'output_tokens': 700}
+    # the background agent's workflow transcript, under the launch's session
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    flow = session.with_suffix('') / 'subagents' / 'workflows' / 'wf_1'
+    reply = _assistant_entry(
+        message_id='msg_late',
+        usage=background,
+        model='claude-haiku-5',
+        isSidechain=True,
+    )
+    script = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', before),
+        _RESULT,
+        # the result reaches the loop before the background reply completes
+        'sleep 1',
+        _append_entry(flow / 'agent-w.jsonl', reply),
+        end,
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', before)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    booked = min(rows, key=lambda row: row['step_id'])
+    late = _price(background, 'claude-haiku-5')
+    assert booked['cost'] == pytest.approx(_RESULT['total_cost_usd'] + late)
+
+
+@pytest.mark.parametrize(
+    argnames=('end', 'outcome'),
+    argvalues=[
+        pytest.param('exit 0', 'PLAN/completed/', id='exit-0'),
+        pytest.param('exec sleep 30', 'PLAN/exited/timed out', id='deadline'),
+    ],
+)
+def test_streamed_background_spend_is_booked_once(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    end: str,
+    outcome: str,
+) -> None:
+    """A background reply both streamed and transcribed after the result counts once.
+
+    Claude streams a background sub-agent's reply after the result frame
+    as well as writing it to the sub-agent's transcript. The transcript is
+    the one source for spend past the result, so the step books the
+    result's figure plus that reply, never the reply twice.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='3s', step_retries=0)
+    background = {'input_tokens': 2_000, 'output_tokens': 700}
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    flow = session.with_suffix('') / 'subagents' / 'workflows' / 'wf_1'
+    reply = _assistant_entry(
+        message_id='msg_late',
+        usage=background,
+        model='claude-haiku-5',
+        isSidechain=True,
+    )
+    streamed = _assistant_frame('msg_late', background)
+    streamed['message']['model'] = 'claude-haiku-5'
+    streamed['parent_tool_use_id'] = 'toolu_bg'
+    before = {'input_tokens': 100, 'output_tokens': 900}
+    script = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', before),
+        _RESULT,
+        # the result reaches the loop before the background reply completes
+        'sleep 1',
+        _append_entry(flow / 'agent-w.jsonl', reply),
+        streamed,
+        end,
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', before)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    booked = min(rows, key=lambda row: row['step_id'])
+    late = _price(background, 'claude-haiku-5')
+    assert booked['cost'] == pytest.approx(_RESULT['total_cost_usd'] + late)
+
+
+@pytest.mark.parametrize(
+    argnames=('record', 'streamed'),
+    argvalues=[
+        # claude's record never reached disk
+        pytest.param('no transcript', True, id='no-transcript'),
+        # a reply's output count is wire noise
+        pytest.param('malformed entry', True, id='malformed-entry'),
+        # no record, and the stream flushed no estimate either
+        pytest.param('no transcript', False, id='no-transcript-no-estimate'),
+    ],
+)
+def test_unreadable_record_marks_the_killed_step(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    record: str,
+    streamed: bool,
+) -> None:
+    """A killed launch whose record the settle cannot read whole is partly unpriced.
+
+    With no transcript, the step keeps the stream's estimate, which leaves
+    out whatever the record would have added. A count that is not a
+    number prices as nothing rather than failing the settle. Either way
+    the row says its figure is partial; with no estimate either, the row
+    holds no figure and is unpriced. The pane's warning names the row's
+    marker.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    first = {'input_tokens': 100, 'output_tokens': 1}
+    frames: list[Any] = [_INIT]
+    if streamed:
+        frames.append(_assistant_frame('msg_a', first))
+    stalled = _claude_script(*frames, 'exec sleep 30')
+    finished = _claude_script(_INIT, _RESULT)
+    transcripts: list[Optional[list[dict[str, Any]]]] = [None]
+    if record == 'malformed entry':
+        noisy = {'input_tokens': 100, 'output_tokens': '900'}
+        transcripts = [[_assistant_entry('msg_a', noisy)], [], []]
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=transcripts,
+    )
+    ScriptedLoop(loop_node, agent).run()
+    marker = 'partly unpriced' if streamed else 'unpriced'
+    assert _step_rows(loop_node)[0] == (
+        f'PLAN/stopped/steered: no action for 1s; {marker}'
+    )
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    if streamed:
+        assert killed['cost'] == pytest.approx(_price(first))
+    else:
+        assert killed['cost'] is None
+    err = capsys.readouterr().err
+    assert (
+        "Warning: part of the launch's spend is missing from its record; its"
+        f' step books the spend recorded ({marker})'
+    ) in err
+
+
+@pytest.mark.parametrize(
+    argnames='cut',
+    argvalues=[
+        # the reply's request was in flight after a tool result
+        pytest.param('tool result', id='tool-result'),
+        # the reply was written before it completed
+        pytest.param('unfinished reply', id='unfinished-reply'),
+        # a sub-agent's reply was in flight
+        pytest.param('sub-agent', id='sub-agent'),
+    ],
+)
+def test_cut_off_mid_reply_books_recorded_spend_partly_unpriced(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    cut: str,
+) -> None:
+    """A launch killed inside a reply books what was recorded, marked partly unpriced.
+
+    No record holds the cut reply's spend, so the step books the replies
+    its transcripts recorded, with no estimate for the cut one, and its
+    row says the figure is partial -- whichever transcript the cut reply
+    belonged to. A cost flush landing after the close keeps the marker,
+    since the cut reply stays unpriced. The pane warns.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    called = {'input_tokens': 100, 'output_tokens': 900}
+    side = {'input_tokens': 2_000, 'output_tokens': 700}
+    if cut == 'tool result':
+        killed = [
+            _assistant_entry('msg_a', called, stop_reason='tool_use'),
+            _user_entry(),
+        ]
+        recorded = _price(called)
+    elif cut == 'unfinished reply':
+        killed = [_assistant_entry('msg_a', called, stop_reason=None)]
+        recorded = _price(called)
+    else:
+        killed = [
+            _assistant_entry('msg_a', called),
+            _assistant_entry(
+                message_id='msg_side',
+                usage=side,
+                model='claude-haiku-5',
+                stop_reason='tool_use',
+                isSidechain=True,
+                subagent='x',
+            ),
+            _user_entry(isSidechain=True, subagent='x'),
+        ]
+        recorded = _price(called) + _price(side, 'claude-haiku-5')
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1}),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[killed, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; partly unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed_row = min(rows, key=lambda row: row['step_id'])
+    assert killed_row['cost'] == pytest.approx(recorded)
+    # a late flush leaves the marker standing
+    loop_node.record.step_cost(step_id=killed_row['step_id'], cost=recorded)
+    assert _step_rows(loop_node)[0].endswith('; partly unpriced')
+    err = capsys.readouterr().err
+    assert "Warning: part of the launch's spend is missing from its record" in err
+
+
+def test_kill_during_a_tool_call_is_fully_priced(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch killed while a tool runs books its replies, with no marker.
+
+    Its last reply called the tool and completed, so its transcript holds
+    every reply the launch paid for, and the ledger reads the figure as
+    whole.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, step_timeout='1s')
+    first = {'input_tokens': 100, 'output_tokens': 900}
+    called = {'input_tokens': 300, 'output_tokens': 50}
+    written = [
+        _assistant_entry('msg_a', first, stop_reason='tool_use'),
+        _user_entry(),
+        _assistant_entry('msg_b', called, stop_reason='tool_use'),
+    ]
+    # the open call holds the idle clock, so only the deadline ends it
+    script = _claude_script(_INIT, _TOOL_START, 'exec sleep 30')
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[written, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first_row, *_ = _step_rows(loop_node)
+    assert first_row == 'PLAN/exited/timed out'
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(first) + _price(called))
+    assert loop_node.cost.partly_unpriced(run_id=killed['run_id']) == 0
+
+
+def test_structured_output_result_ends_a_sub_agent_whole(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow sub-agent ending on its StructuredOutput result is whole.
+
+    A workflow agent finishes by calling ``StructuredOutput`` and stopping
+    once the call's result comes back, so its transcript ends on that
+    result with no reply after it. In a killed launch that is otherwise
+    whole, the step books every reply with no marker.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    main = {'input_tokens': 100, 'output_tokens': 900}
+    side = {'input_tokens': 2_000, 'output_tokens': 700}
+    output = _assistant_entry(
+        message_id='msg_side',
+        usage=side,
+        model='claude-haiku-5',
+        stop_reason='tool_use',
+        isSidechain=True,
+        subagent='x',
+    )
+    output['message']['content'] = [
+        {'type': 'tool_use', 'id': 'toolu_out', 'name': 'StructuredOutput', 'input': {}}
+    ]
+    answered = _user_entry(isSidechain=True, subagent='x')
+    answered['message']['content'][0]['tool_use_id'] = 'toolu_out'
+    killed = [_assistant_entry('msg_a', main), output, answered]
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1}),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[killed, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node)[0] == 'PLAN/stopped/steered: no action for 1s'
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed_row = min(rows, key=lambda row: row['step_id'])
+    booked = _price(main) + _price(side, 'claude-haiku-5')
+    assert killed_row['cost'] == pytest.approx(booked)
+
+
+def test_partial_record_before_the_result_leaves_its_figure_whole(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A partial line written before the result frame marks nothing.
+
+    A completed sub-agent's last line can be written mid-stream, with no
+    stop reason and a partial usage. When it lands before the result
+    frame, the result's figure already covers that spend, so the
+    completed launch books its result with no marker and no warning.
+    """
+    written = [
+        _assistant_entry('msg_a', {'input_tokens': 100, 'output_tokens': 900}),
+        _assistant_entry(
+            message_id='msg_side',
+            usage={'input_tokens': 2_000, 'output_tokens': 4},
+            model='claude-haiku-5',
+            stop_reason=None,
+            isSidechain=True,
+            subagent='x',
+        ),
+    ]
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[finished, finished],
+        transcripts=[written, []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == ['PLAN/completed/', 'EXECUTE/completed/']
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    first = min(rows, key=lambda row: row['step_id'])
+    assert first['cost'] == _RESULT['total_cost_usd']
+    assert 'Warning: a reply' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('delta_usage', 'outcome'),
+    argvalues=[
+        # the closing delta reported the reply's final output
+        pytest.param(
+            {'output_tokens': 128_000},
+            'PLAN/stopped/steered: thinking cap',
+            id='recorded',
+        ),
+        # an older stream's delta reports none: the reply stays unpriced
+        pytest.param(
+            None,
+            'PLAN/stopped/steered: thinking cap; partly unpriced',
+            id='unrecorded',
+        ),
+    ],
+)
+def test_capped_reply_books_the_stream_usage(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    delta_usage: Optional[dict[str, int]],
+    outcome: str,
+) -> None:
+    """A reply the loop ends at the output cap books the stream's own usage.
+
+    The kill at the cap can beat claude's write of the capped reply, so
+    its transcript ends on the tool result the reply answered. The stream
+    recorded the reply's final usage -- its start's input buckets and its
+    closing delta's output -- so the step books it with the transcript's
+    replies and reads as whole. With no usage on the delta, nothing
+    recorded the reply, and the step is partly unpriced.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    called = {'input_tokens': 100, 'output_tokens': 900}
+    started = {'input_tokens': 2, 'cache_read_input_tokens': 10_000, 'output_tokens': 1}
+    reply = {
+        'id': 'msg_cap',
+        'model': 'claude-fable-5',
+        'content': [],
+        'usage': started,
+    }
+    stop: dict[str, Any] = {
+        'type': 'message_delta',
+        'delta': {'stop_reason': 'max_tokens'},
+    }
+    if delta_usage is not None:
+        stop['usage'] = delta_usage
+    capped = _claude_script(
+        _INIT,
+        _stream_frame({'type': 'message_start', 'message': reply}),
+        _assistant_frame('msg_cap', started),
+        _stream_frame(stop),
+        'exec sleep 30',
+    )
+    written = [
+        _assistant_entry('msg_a', called, stop_reason='tool_use'),
+        _user_entry(),
+    ]
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[capped, finished, finished],
+        transcripts=[written, [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    booked = _price(called)
+    if delta_usage is not None:
+        booked += _price({**started, **delta_usage})
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(booked)
+
+
+def test_killed_claude_launch_without_a_transcript_stays_unpriced(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A killed launch with no transcript stays NULL and logs why, once."""
+    caplog.set_level(logging.WARNING)
+    agent = scripted_claude(
+        [
+            _claude_script(_INIT, 'exec sleep 30'),
+            _claude_script(_INIT, _RESULT),
+            _claude_script(_INIT, _RESULT),
+        ],
+        [None],
+    )
+    ScriptedLoop(loop_node, agent).run()
+
+    assert (
+        _step_rows(loop_node)[0] == 'PLAN/stopped/steered: no action for 1s; unpriced'
+    )
+    stalled = agent.argvs[0]
+    session = stalled[stalled.index('--session-id') + 1]
+    unpriced = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith('launch unpriced')
+    ]
+    # only the killed launch's settle finds no transcript: the steer opens one
+    reason = f'launch unpriced: no transcript for session {session}'
+    assert unpriced.count(reason) == 1
+
+
+def test_killed_launch_settles_after_dropping_its_group_handle(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A killed launch is priced only once ``.step_pgid`` is gone.
+
+    Pricing reads the whole transcript, and a pause or kill landing
+    meanwhile signals whatever group the handle names -- by then a dead
+    group, whose id the OS may already have recycled.
+    """
+    agent = scripted_claude(
+        [
+            _claude_script(_INIT, 'exec sleep 30'),
+            _claude_script(_INIT, _RESULT),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+    handles: list[bool] = []
+    settle = agent._settle_cost
+
+    def _settle_cost(session: str, **kwargs: Any) -> Settlement:
+        handles.append((loop_node.node_dir / STEP_PGID_FILE).exists())
+        return settle(session, **kwargs)
+
+    monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
+    ScriptedLoop(loop_node, agent).run()
+    # a settle per launch: the one the watchdog ended, then the two whose
+    # results it checks for spend past them
+    assert handles == [False, False, False]
+
+
+def test_a_settle_never_lowers_the_streamed_figure(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed estimate above the transcript's sum stands, with no flush over it.
+
+    Both figures undercount a killed launch, so the higher is the closer:
+    the settle leaves a stream figure above its transcript sum on the row
+    and books nothing after it.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    streamed = {'input_tokens': 1_000, 'output_tokens': 2_000}
+    written = {'input_tokens': 100, 'output_tokens': 200}
+    stalled = _claude_script(
+        _INIT,
+        _assistant_frame('msg_a', streamed),
+        'exec sleep 30',
+    )
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[stalled, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', written)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(streamed))
+    # the stream's own flush is the killed launch's last figure
+    assert agent.flushed == [
+        (pytest.approx(_price(streamed)), False),
+        (_RESULT['total_cost_usd'], True),
+        (_RESULT['total_cost_usd'], True),
+    ]
+
+
+def test_a_failed_settle_leaves_the_killed_launch_as_booked(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A settle that raises leaves the killed launch's figure, marked partial.
+
+    Pricing reads a file the provider writes, so it can fail in ways the
+    hook does not foresee: the launch keeps its outcome and its stream's
+    estimate, which leaves out whatever the settle would have added, the
+    run goes on, and the pane says what went unpriced. A launch whose
+    result named its figure stays whole.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    first = {'input_tokens': 100, 'output_tokens': 1}
+    agent = scripted_claude(
+        [
+            _claude_script(_INIT, _assistant_frame('msg_a', first), 'exec sleep 30'),
+            _claude_script(_INIT, _RESULT),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+
+    def _settle_cost(session: str, **kwargs: Any) -> Settlement:
+        raise OSError('transcript gone')
+
+    monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: no action for 1s; partly unpriced',
+        'PLAN/completed/steer',
+        'EXECUTE/completed/',
+    ]
+    err = capsys.readouterr().err
+    assert 'Warning: pricing the ended launch failed (transcript gone)' in err
+
+
+def test_a_failed_settle_marks_sub_agent_spend_after_the_result(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A settle that raises marks a launch whose sub-agent ran past its result.
+
+    The stream leaves a sub-agent's spend after the result to the settle,
+    so a settle that fails leaves spend the stream saw out of the figure.
+    The pane warns.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    background = {'input_tokens': 2_000, 'output_tokens': 700}
+    streamed = _assistant_frame('msg_late', background)
+    streamed['parent_tool_use_id'] = 'toolu_bg'
+    agent = scripted_claude(
+        [
+            _claude_script(_INIT, _RESULT, streamed),
+            _claude_script(_INIT, _RESULT),
+        ]
+    )
+
+    def _settle_cost(session: str, **kwargs: Any) -> Settlement:
+        raise OSError('transcript gone')
+
+    monkeypatch.setattr(agent, '_settle_cost', _settle_cost)
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == [
+        'PLAN/completed/partly unpriced',
+        'EXECUTE/completed/',
+    ]
+    err = capsys.readouterr().err
+    assert "Warning: part of the launch's spend is missing from its record" in err
+
+
+@pytest.mark.parametrize(
+    argnames=('kill', 'outcome'),
+    argvalues=[
+        # the cap ends the launch from inside the stream reader: no result
+        pytest.param('thinking cap', 'PLAN/stopped/steered: thinking cap', id='cap'),
+        # a deadline and a pause end a drained stream short of its result
+        pytest.param('deadline', 'PLAN/exited/timed out', id='deadline'),
+        pytest.param('pause', 'PLAN/paused/', id='pause'),
+    ],
+)
+def test_every_kill_prices_the_launch_from_its_transcript(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    kill: str,
+    outcome: str,
+) -> None:
+    """A launch ended by a cap, a deadline, or a pause books its transcript's sum.
+
+    The thinking cap ends the launch from inside the stream reader, so the
+    stream yields no result at all; a deadline or a pause ends a drained
+    stream that never saw its result frame. Each launch settles alike.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    usage = {'input_tokens': 100, 'output_tokens': 900}
+    if kill == 'thinking cap':
+        script = _claude_script(_INIT, _THINKING_REPLY, _MAX_TOKENS, 'exec sleep 30')
+    elif kill == 'deadline':
+        _configure(loop_node, step_timeout='1s')
+        # the open call holds the idle clock, so only the deadline ends it
+        script = _claude_script(_INIT, _TOOL_START, 'exec sleep 30')
+    else:
+        marker = loop_node.node_dir / PAUSE_ABORT_FILE
+        script = _claude_script(_INIT, f'touch {marker}', 'kill -TERM $$')
+    finished = _claude_script(_INIT, _RESULT)
+    agent = scripted_claude(
+        scripts=[script, finished, finished],
+        transcripts=[[_assistant_entry('msg_a', usage)], [], []],
+    )
+    ScriptedLoop(loop_node, agent).run()
+    first, *_ = _step_rows(loop_node)
+    assert first == outcome
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    killed = min(rows, key=lambda row: row['step_id'])
+    assert killed['cost'] == pytest.approx(_price(usage))
+
+
+@pytest.mark.parametrize(
+    argnames=('mode', 'saves', 'outcomes'),
+    argvalues=[
+        # a second step continues the first's session
+        pytest.param(
+            'continuous',
+            True,
+            ['PLAN/completed/', 'EXECUTE/completed/'],
+            id='continuous',
+        ),
+        # a SYNC before each step continues the session too
+        pytest.param(
+            'sync',
+            True,
+            [
+                'SYNC/completed/',
+                'PLAN/completed/',
+                'SYNC/completed/',
+                'EXECUTE/completed/',
+            ],
+            id='sync',
+        ),
+        # a resumed step stalls, and its steer resumes the session again
+        pytest.param(
+            'steer',
+            True,
+            [
+                'PLAN/completed/',
+                'EXECUTE/stopped/steered: no action for 1s',
+                'EXECUTE/completed/steer',
+            ],
+            id='steer',
+        ),
+        # an older claude saves no total, so each result is the launch's own
+        pytest.param(
+            'continuous',
+            False,
+            ['PLAN/completed/', 'EXECUTE/completed/'],
+            id='no-saved-total',
+        ),
+    ],
+)
+def test_resumed_launch_books_only_its_own_spend(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    saves: bool,
+    outcomes: list[str],
+) -> None:
+    """A launch resuming a Claude session books its own spend, not the session's.
+
+    Claude Code saves a session's running total to its transcript as each
+    launch exits, and a resume counts on from it, so a result frame names
+    the session's total so far. Each step books that figure less the total
+    saved before its launch: the first launch books its result whole, and
+    a continuous step, a steer and a SYNC that resume book their growth --
+    no running total reaches the ledger. A resumed launch killed before its
+    result is priced from its own transcript window, as any killed launch
+    is. With no saved total, each result names the launch's own spend and
+    books whole.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    _configure(loop_node, sync=mode == 'sync')
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    totals = _SAVED_TOTALS[: len(outcomes)]
+    spends = [totals[0], *(late - early for early, late in itertools.pairwise(totals))]
+    # each result names the session's total so far when claude saves one at
+    # exit, else the launch's own spend
+    scripts = []
+    for total, spend in zip(totals, spends):
+        if saves:
+            result = {**_RESULT, 'total_cost_usd': total}
+            saved = _save_cost_state(session, total)
+            scripts.append(_claude_script(_INIT, result, saved))
+        else:
+            scripts.append(_claude_script(_INIT, {**_RESULT, 'total_cost_usd': spend}))
+    transcripts = None
+    if mode == 'steer':
+        # the resumed step stalls after one reply, its total so far saved
+        reply = {'input_tokens': 100, 'output_tokens': 900}
+        scripts[1] = _claude_script(
+            _INIT,
+            _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1}),
+            _save_cost_state(session, totals[1]),
+            'exec sleep 30',
+        )
+        transcripts = [[], [_assistant_entry('msg_a', reply)], []]
+        spends[1] = _price(reply)
+    agent = scripted_claude(scripts, transcripts)
+    ScriptedLoop(loop_node, agent).run()
+    assert _step_rows(loop_node) == outcomes
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == pytest.approx(spends)
+    # every result figure flushed as the launch's own spend
+    results = [
+        spend for spend, outcome in zip(spends, outcomes) if 'stopped' not in outcome
+    ]
+    assert [cost for cost, final in agent.flushed if final] == pytest.approx(results)
+
+
+@pytest.mark.parametrize(
+    argnames=('saved', 'figure', 'priced'),
+    argvalues=[
+        # a zeroed result frame names less than the session saved
+        pytest.param(_SAVED_TOTALS[0], 0.0, True, id='below-the-saved-total'),
+        # the saved total is no number
+        pytest.param(f'{_SAVED_TOTALS[0]}', _SAVED_TOTALS[1], True, id='unreadable'),
+        # the session's transcript is nowhere to be found
+        pytest.param(None, _SAVED_TOTALS[1], True, id='no-transcript'),
+        # a zeroed result frame, and a transcript that prices nothing either
+        pytest.param(_SAVED_TOTALS[0], 0.0, False, id='nothing-priced'),
+    ],
+)
+def test_unsettled_result_figure_books_the_launch_record_instead(
+    loop_node: Node,
+    scripted_claude: Callable[..., ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    saved: Any,
+    figure: float,
+    priced: bool,
+) -> None:
+    """A resumed launch's result figure its saved total cannot settle is refused.
+
+    With the session's saved total unreadable, its transcript not found
+    (claude resumes only from one, so fractal has lost track of it), or the
+    total above the figure the result names, the figure is never booked,
+    whole or less the total: the step books what its own transcript window
+    prices, as a killed launch does, marked partly unpriced. A window that
+    prices nothing leaves the completed step's cost unknown, marked
+    unpriced and counted as such. The pane's warning names the row's
+    marker.
+    """
+    monkeypatch.setattr(pricing, '_load', lambda: _CLAUDE_PRICING)
+    session = ClaudeAgent(loop_node, 'claude')._transcript('SID')
+    assert session is not None
+    first = [_INIT, {**_RESULT, 'total_cost_usd': _SAVED_TOTALS[0]}]
+    # the first launch's record reaches disk with its saved total, or not at all
+    opened: Optional[list[dict[str, Any]]] = None
+    if saved is not None:
+        first.append(_save_cost_state(session, saved))
+        opened = []
+    # the resumed launch streams its reply's first frame, then the result
+    reply = {'input_tokens': 100, 'output_tokens': 900}
+    frames: list[Any] = [_INIT]
+    written: list[dict[str, Any]] = []
+    if priced:
+        frames.append(
+            _assistant_frame('msg_a', {'input_tokens': 100, 'output_tokens': 1})
+        )
+        written.append(_assistant_entry('msg_a', reply))
+    resumed = _claude_script(*frames, {**_RESULT, 'total_cost_usd': figure})
+    agent = scripted_claude([_claude_script(*first), resumed], [opened, written])
+    ScriptedLoop(loop_node, agent).run()
+    marker = 'partly unpriced' if priced else 'unpriced'
+    assert _step_rows(loop_node) == ['PLAN/completed/', f'EXECUTE/completed/{marker}']
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    resumed_row = max(rows, key=lambda row: row['step_id'])
+    if priced:
+        assert resumed_row['cost'] == pytest.approx(_price(reply))
+    else:
+        assert resumed_row['cost'] is None
+        assert loop_node.cost.unpriced(run_id=resumed_row['run_id']) == 1
+    # only the first launch's result figure ever reached the ledger
+    assert [cost for cost, final in agent.flushed if final] == [_SAVED_TOTALS[0]]
+    err = capsys.readouterr().err
+    assert (
+        "Warning: the launch's result figure could not be settled against its"
+        " session's earlier spend; its step books the spend recorded"
+        f' ({marker})'
+    ) in err
+
+
+def test_failed_codex_attempts_count_toward_the_cap(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Each attempt codex refuses at capacity books its spend before the retry.
+
+    The refusal lands after two paid responses, so the attempt's stream
+    closes unpriced while its rollout's counter grew: the launch's settle
+    books that growth before the loop weighs the retry. The retry resumes
+    the thread and books only its own growth, and the two attempts together
+    spend the run's cap, so the backoff before a third ends the run instead
+    of buying it.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    model = next(
+        record['payload']['model']
+        for record in spawning_thread
+        if record['type'] == 'turn_context'
+    )
+    rates = {
+        'input_cost_per_token': 1e-5,
+        'cache_read_input_token_cost': 1e-6,
+        'output_cost_per_token': 5e-5,
+    }
+    monkeypatch.setattr(pricing, '_load', lambda: {model: rates})
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, agent='codex', model=model, max_cost=0.15, step_retries=2)
+    # each attempt runs the captured turn through its second response and the
+    # tool result codex sends on its third request, which codex refuses at
+    # capacity; the retry's counter carries on from the first attempt's
+    thread = spawning_thread[0]['payload']['id']
+    second = [
+        index
+        for index, record in enumerate(spawning_thread)
+        if record['type'] == 'token_usage_record'
+    ][1]
+    result = next(
+        index
+        for index in range(second, len(spawning_thread))
+        if spawning_thread[index]['payload'].get('type') == 'function_call_output'
+    )
+    paid = copy.deepcopy(spawning_thread[: result + 1])
+    spent = paid[second]['payload']['thread_token_usage']
+    retry = copy.deepcopy(paid[1:])
+    for record in retry:
+        if record['type'] == 'token_usage_record':
+            counter = record['payload']['thread_token_usage']
+            record['payload']['thread_token_usage'] = {
+                key: count + spent[key] for key, count in counter.items()
+            }
+    message = 'Selected model is at capacity. Please try a different model.'
+    refusal = {'type': 'event_msg', 'payload': {'type': 'error', 'message': message}}
+    frames = [
+        {'type': 'thread.started', 'thread_id': thread},
+        {'type': 'turn.started'},
+        {'type': 'error', 'message': message},
+    ]
+    launches = [
+        ([*paid, refusal], frames),
+        ([*retry, refusal], frames),
+        ([refusal], frames),
+    ]
+    agent = RolloutCodex(loop_node, thread, launches)
+    ScriptedLoop(loop_node, agent).run()
+    out = capsys.readouterr().out
+    # both attempts booked the growth of the counter they ran past
+    attempt = (
+        (spent['input_tokens'] - spent['cached_input_tokens'])
+        * rates['input_cost_per_token']
+        + spent['cached_input_tokens'] * rates['cache_read_input_token_cost']
+        + spent['output_tokens'] * rates['output_cost_per_token']
+    )
+    rows = loop_node.db.read('steps', where={'node': loop_node.branch})
+    costs = [row['cost'] for row in sorted(rows, key=lambda row: row['step_id'])]
+    assert costs == pytest.approx([attempt, attempt])
+    assert loop_node.cost.spent() == pytest.approx(2 * attempt)
+    # a refusal is whole, and the spent cap bought no third attempt
+    assert all('unpriced' not in row for row in _step_rows(loop_node))
+    assert len(agent.spawned) == 2
+    assert 'Subtree cost budget reached' in out
 
 
 def test_agent_launch_failure_books_a_failed_step(
@@ -1192,6 +4711,7 @@ def test_preflight_probe_rides_the_step_marker(
     # for scheduler lag under the parallel suite
     monkeypatch.setattr(codex, '_PREFLIGHT_GRACE', 2)
     loop = Loop(loop_node)
+    loop._read_run_parameters()
     # `sh` stands in for the codex binary, routed to a probe that never answers
     monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
     spawned = hung_probe(loop)
@@ -1253,6 +4773,7 @@ def test_preflight_abort_honors_a_kill_that_reaped_the_probe(
         run_id = loop_node.record.run_start()
         loop_node.status_set('paused')
     loop = Loop(loop_node, resume=resume)
+    loop._read_run_parameters()
     # `sh` stands in for the codex binary, routed to a probe that never answers
     monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
     spawned = hung_probe(loop)
@@ -1361,6 +4882,7 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
     """
     _configure(loop_node, agent='codex')
     loop = Loop(loop_node)
+    loop._read_run_parameters()
     # `sh` stands in for the codex binary; with no model there is no probe
     monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
     refreshed: list[Optional[str]] = []
@@ -1373,6 +4895,297 @@ def test_preflight_refreshes_pricing_for_a_token_priced_agent_without_a_model(
     loop._preflight()
     assert refreshed == [None]
     assert 'will not be tracked' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('agents', 'wants'),
+    argvalues=[
+        pytest.param(('claude', None), True, id='claude_node_agent'),
+        pytest.param(('opencode', 'claude'), True, id='claude_step_agent'),
+        pytest.param(('grok', None), True, id='grok_node_agent'),
+        pytest.param(('opencode', 'grok'), True, id='grok_step_agent'),
+        pytest.param(('opencode', None), False, id='neither'),
+    ],
+)
+@pytest.mark.parametrize(
+    argnames=('age', 'stale'),
+    argvalues=[
+        pytest.param(None, True, id='missing'),
+        pytest.param(2 * 86400, True, id='stale'),
+        pytest.param(60, False, id='fresh'),
+    ],
+)
+def test_boot_refreshes_a_day_old_price_table_for_claude_and_grok_steps(
+    loop_node: Node,
+    price_cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    agents: tuple[str, Optional[str]],
+    wants: bool,
+    age: Optional[int],
+    stale: bool,
+) -> None:
+    """A run with a native claude or a grok step refreshes a missing or day-old table.
+
+    A claude launch that ends without its own result figure (killed,
+    capped, paused, or with the figure refused) is priced from its
+    transcript at the table's rates, and a grok stream that reports no
+    cost is priced from its usage, so the boot fetches the table once
+    when none is cached or the cache is over a day old, whether the step
+    runs on the node's agent or a step file's ``agent:``. A fresher cache
+    serves as-is, and a run whose agents all report their own cost and
+    price nothing never fetches.
+    """
+    node_agent, step_agent = agents
+    _configure(loop_node, agent=node_agent)
+    if step_agent is not None:
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            f'---\nagent: {step_agent}\n---\n# PLAN\n\nWork.\n', encoding='utf-8'
+        )
+    # the cache sits `age` seconds old, or is absent
+    if age is not None:
+        price_cache.write_text('{}', encoding='utf-8')
+        stamp = time.time() - age
+        os.utime(price_cache, (stamp, stamp))
+    fetched: list[str] = []
+
+    def retrieve(url: str, filename: str) -> None:
+        fetched.append(url)
+        pathlib.Path(filename).write_text(json.dumps(_CLAUDE_PRICING), encoding='utf-8')
+
+    monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
+    loop = Loop(loop_node)
+    loop._read_run_parameters()
+    # `sh` stands in for the node agent's binary; no backend probes
+    backends = {'claude': ClaudeAgent, 'grok': GrokAgent, 'opencode': OpencodeAgent}
+    monkeypatch.setattr(loop, '_agent', backends[node_agent](loop_node, 'sh'))
+    loop._preflight()
+    if wants and stale:
+        # one fetch, and the settle's rates read the fetched table
+        assert fetched == [pricing._PRICING_URL]
+        assert pricing.rates('claude-fable-5') == _CLAUDE_PRICING['claude-fable-5']
+    else:
+        assert fetched == []
+    assert 'Warning:' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    argnames=('cached', 'warning'),
+    argvalues=[
+        pytest.param(
+            True,
+            'Warning: could not refresh pricing; using cached pricing.json.',
+            id='stale',
+        ),
+        pytest.param(
+            False,
+            'Warning: could not fetch pricing and no cached pricing.json exists;',
+            id='missing',
+        ),
+    ],
+)
+def test_failed_price_refresh_for_a_claude_step_warns_and_the_run_proceeds(
+    loop_node: Node,
+    price_cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    cached: bool,
+    warning: str,
+) -> None:
+    """A claude run whose price refresh fails warns once at boot and runs.
+
+    A native claude launch still books its own result figure, so a fetch
+    that fails costs only the transcript settle its rates: unlike a
+    token-priced run, which cannot price anything without a table, the
+    boot warns once, whether a day-old cache serves or none exists, and
+    every iteration launches without fetching again.
+    """
+    _configure(loop_node, max_iters=2)
+    if cached:
+        price_cache.write_text('{}', encoding='utf-8')
+        stamp = time.time() - 2 * 86400
+        os.utime(price_cache, (stamp, stamp))
+    attempts: list[str] = []
+
+    def retrieve(url: str, filename: str) -> None:
+        attempts.append(url)
+        raise OSError('offline')
+
+    monkeypatch.setattr(urllib.request, 'urlretrieve', retrieve)
+
+    class BootLoop(MockLoop):
+        """Mock loop that runs the REAL preflight."""
+
+        def _preflight(self: BootLoop) -> None:
+            """Run the base preflight so the boot's refresh executes."""
+            # `sh` stands in for the claude binary; native claude runs no
+            # probe (set after the boot's run-parameter read resolves the
+            # agent)
+            self._agent = ClaudeAgent(loop_node, 'sh')
+            Loop._preflight(self)
+
+    loop = BootLoop(loop_node)
+    assert loop.run() == 0
+    # one attempt and one warning at boot, and both iterations ran both steps
+    assert attempts == [pricing._PRICING_URL]
+    assert capsys.readouterr().err.count(warning) == 1
+    assert len(loop.launched) == 4
+
+
+def test_token_priced_boot_serves_the_cached_table_offline(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A codex boot under the suite's ``OFFLINE_MODE`` never fetches the table.
+
+    Online, a token-priced boot refreshes the price table on every start;
+    offline, as the whole suite runs, it skips the fetch, warns once that
+    it serves the cached table, and goes on. The session's fetch refusal
+    fails the test by name if the boot reaches the network.
+    """
+    _configure(loop_node, agent='codex')
+    loop = Loop(loop_node)
+    loop._read_run_parameters()
+    # `sh` stands in for the codex binary; with no model there is no probe
+    monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+    loop._preflight()
+    warning = 'Warning: could not refresh pricing; using cached pricing.json.'
+    assert capsys.readouterr().err.count(warning) == 1
+
+
+def test_a_malformed_offline_mode_aborts_the_boot(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``OFFLINE_MODE`` neither ``true`` nor ``false`` aborts the boot on record.
+
+    The price refresh reads the switch, so the boot checks it with the run
+    parameters: the node reads ``exited`` and a closed run row names the
+    fault, rather than the refresh raising before the run row exists.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setenv('OFFLINE_MODE', 'yes')
+    loop = MockLoop(loop_node)
+    assert loop.run() == 1
+    assert loop.launched == []
+    assert loop_node.status() == 'exited'
+    run = loop_node.record.runs(limit=1)[0]
+    assert run['status'] == 'exited'
+    assert 'OFFLINE_MODE must be "true" or "false"' in run['metadata']
+
+
+def test_preflight_logs_what_a_passed_probe_spent(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A passed probe's spend is named on the loop's log and in its events.
+
+    The probe runs before any step row exists and counts toward no cap,
+    so the banner and a ``preflight`` event carrying the same line are
+    the record of what it cost: the usage the probe's stream reports,
+    priced at the model's rates. The event rides no run, since none is
+    open yet, and no cost, so the caps still leave the probe out.
+    """
+    _configure(loop_node, agent='codex', model='gpt-5-codex')
+    loop = Loop(loop_node)
+    loop._read_run_parameters()
+    # `sh` stands in for the codex binary, routed to a probe that answers
+    # with one complete turn
+    monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+    monkeypatch.setattr(pricing, 'update', lambda max_age=None: 'fresh')
+    rates = {'input_cost_per_token': 1e-5, 'output_cost_per_token': 5e-5}
+    monkeypatch.setattr(pricing, '_load', lambda: {'gpt-5-codex': rates})
+    frames = [
+        {'type': 'thread.started', 'thread_id': 'probe'},
+        {'type': 'turn.started'},
+        {'type': 'turn.completed', 'usage': {'input_tokens': 100, 'output_tokens': 10}},
+    ]
+    script = '; '.join(f"printf '%s\\n' '{json.dumps(frame)}'" for frame in frames)
+
+    def fake_spawn(invocation: Any, **kwargs: Any) -> subprocess.Popen:
+        return subprocess.Popen(
+            ['sh', '-c', script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            **kwargs,
+        )
+
+    monkeypatch.setattr(loop._agent, '_spawn', fake_spawn)
+    loop._preflight()
+    summary = (
+        "codex probe passed for model 'gpt-5-codex': 110 tokens, $0.0015,"
+        ' outside the ledger'
+    )
+    assert f'=== Preflight: {summary} ===' in capsys.readouterr().out
+    (event,) = loop_node.record.events(event='preflight')
+    assert (event['status'], event['metadata']) == ('completed', summary)
+    assert event['run_id'] is None
+
+
+def test_preflight_refuses_a_cap_over_an_unpriced_model(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Armed caps abort the boot when a step's model cannot be priced.
+
+    Refused at launch instead, each step's instant zero-cost failure
+    would read as a billing outage; judging every token-priced step's
+    effective model at preflight aborts once, before the run row
+    commits and before the paid probe, naming the step and the gap: no
+    model anywhere names the requirement, an unpriced model names the
+    entry gap, and a priced model boots.
+    """
+    _configure(loop_node, agent='codex', max_cost=5.0)
+    monkeypatch.setattr(pricing, 'update', lambda max_age=None: 'fresh')
+    rates = {'input_cost_per_token': 1e-5, 'output_cost_per_token': 5e-5}
+    monkeypatch.setattr(pricing, '_load', lambda: {'gpt-5-codex': rates})
+    probes: list[str] = []
+
+    def boot() -> Loop:
+        loop = Loop(loop_node)
+        loop._read_run_parameters()
+        # `sh` stands in for the codex binary; a probe that runs answers
+        # with a clean exit and is counted
+        monkeypatch.setattr(loop, '_agent', CodexAgent(loop_node, 'sh'))
+
+        def fake_spawn(invocation: Any, **kwargs: Any) -> subprocess.Popen:
+            probes.append(invocation.argv[invocation.argv.index('-m') + 1])
+            return subprocess.Popen(
+                ['sh', '-c', 'exit 0'],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                text=True,
+                errors='replace',
+                **kwargs,
+            )
+
+        monkeypatch.setattr(loop._agent, '_spawn', fake_spawn)
+        return loop
+
+    # no model anywhere: the cap requires one before any launch
+    with pytest.raises(_Abort):
+        boot()._preflight()
+    reason = 'a cost cap requires a model for codex in 01-PLAN.md'
+    assert loop_node.record.runs(limit=1)[0]['metadata'] == reason
+    assert loop_node.status() == 'exited'
+    assert f'Error: {reason}' in capsys.readouterr().err
+    # an unpriced model refuses naming the entry gap, still without a probe
+    _configure(loop_node, model='mystery-model')
+    with pytest.raises(_Abort):
+        boot()._preflight()
+    reason = "cost cap set but model 'mystery-model' (01-PLAN.md) has no pricing entry"
+    assert loop_node.record.runs(limit=1)[0]['metadata'] == reason
+    assert reason in capsys.readouterr().err
+    assert probes == []
+    # a priced model boots, through the probe
+    _configure(loop_node, model='gpt-5-codex')
+    boot()._preflight()
+    assert probes == ['gpt-5-codex']
 
 
 # ------ boot latch
@@ -1576,9 +5389,10 @@ def test_soft_cap_warning_fires_once_for_unbraked_caps(
     node = loop_node
     monkeypatch.setattr(MockLoop, '_preflight', lambda self: None)
     # force the flag off on the backend class before construction, so the
-    # warning rides its production call site (the end of ``__init__``)
+    # warning rides its production call site (the end of the run-parameter
+    # read, which the double makes at construction)
     monkeypatch.setattr(ClaudeAgent, 'enforces_budget', False)
-    # capped, non-enforcing, no timeouts: construction warns
+    # capped, non-enforcing, no timeouts: the read warns
     _configure(node, max_cost=10.0)
     loop = MockLoop(node)
     out = capsys.readouterr().out
@@ -1591,6 +5405,52 @@ def test_soft_cap_warning_fires_once_for_unbraked_caps(
     _configure(node, max_cost=10.0, step_timeout='30s')
     MockLoop(node)
     assert 'overshoot' not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    argnames=('timeouts', 'sync', 'warns'),
+    argvalues=[
+        (('6h', '4h'), False, False),
+        (('6h', None), False, True),
+        (('6h', '4h'), True, True),
+        (('soon', '4h'), False, True),
+    ],
+    ids=[
+        'every-step-bounded',
+        'one-step-unbounded',
+        'sync-unbounded',
+        'malformed-step',
+    ],
+)
+def test_soft_cap_warning_counts_step_timeouts(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    timeouts: tuple[Optional[str], ...],
+    sync: bool,
+    warns: bool,
+) -> None:
+    """A step's own ``timeout:`` brakes that step; the warning needs every launch braked.
+
+    With no run/iter timeout and no node ``step_timeout``, each step file's
+    ``timeout:`` line still bounds its own launch, so steps that all carry
+    one leave no runaway exposure; a step without one, or the SYNC step
+    (which runs on the node value), still does, as does a step whose line
+    does not parse (its launch falls back to the node value).
+    """
+    node = loop_node
+    monkeypatch.setattr(MockLoop, '_preflight', lambda self: None)
+    monkeypatch.setattr(ClaudeAgent, 'enforces_budget', False)
+    _configure(node, max_cost=10.0, sync=sync)
+    names = [f'{index:02d}-STEP{index}.md' for index in range(1, len(timeouts) + 1)]
+    _seed_steps(node, names)
+    for name, timeout in zip(names, timeouts, strict=True):
+        if timeout is not None:
+            (node.node_dir / 'steps' / name).write_text(
+                f'---\ntimeout: {timeout}\n---\n# {name}\n', encoding='utf-8'
+            )
+    MockLoop(node)
+    assert ('overshoot' in capsys.readouterr().out) is warns
 
 
 def test_step_budget_reserve_window_floors_at_remaining(loop_node: Node) -> None:
@@ -1607,6 +5467,47 @@ def test_step_budget_reserve_window_floors_at_remaining(loop_node: Node) -> None
     # a fully drained budget yields a non-positive leash: the step is skipped
     _record_step_cost(node, run_id=loop._run_id, cost=0.5, iter=2)
     assert loop._step_budget() <= 0
+
+
+def test_no_budget_margin_for_unseen_spend(loop_node: Node) -> None:
+    """The step leash holds back only the configured reserve.
+
+    A step whose record left part of a reply out booked less than it
+    spent, and a NULL-cost step booked nothing, but the engine cannot see
+    how much either missed: the remaining budget is the cap minus the
+    recorded spend, and the leash is that minus the reserve, never minus a
+    guessed margin.
+    """
+    node = loop_node
+    _configure(node, max_cost=10.0, reserve_budget=1.0)
+    loop = MockLoop(node)
+    loop._read_cost_caps()
+    loop._run_id = node.record.run_start()
+    iter_id = node.record.iter_start(run_id=loop._run_id, iter=1)
+    cut, killed = (
+        node.record.step_start(
+            iter_id=iter_id,
+            run_id=loop._run_id,
+            step=step,
+            step_name='PLAN',
+        )
+        for step in (1, 2)
+    )
+    node.record.step_session('claude', step_id=cut, model=None, session='s-1')
+    node.record.step_cost(step_id=cut, cost=2.0)
+    node.record.step_end(
+        step_id=cut,
+        status='stopped',
+        exit_code=0,
+        metadata='steered: thinking cap',
+        partly_unpriced=True,
+    )
+    node.record.step_session('claude', step_id=killed, model=None, session='s-2')
+    node.record.step_end(step_id=killed, status='exited', exit_code=124)
+    assert node.cost.partly_unpriced(run_id=loop._run_id) == 1
+    assert node.cost.unpriced(run_id=loop._run_id) == 1
+    assert loop._run_remaining() == pytest.approx(8.0)
+    assert loop._step_budget() == pytest.approx(7.0)
 
 
 def test_boundary_checks_read_live_caps(loop_node: Node) -> None:
@@ -2112,9 +6013,16 @@ def test_run_records_step_attribution_matrix(
     assert (step['status'], step['exit_code'], step['metadata']) == row
 
 
+@pytest.mark.parametrize(
+    argnames=('frontmatter', 'limit'),
+    argvalues=[('', '30s'), ('---\ntimeout: 45s\n---\n', '45s')],
+    ids=['node-step-timeout', 'own-timeout'],
+)
 def test_step_timeout_reason_names_step_and_limit(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
+    frontmatter: str,
+    limit: str,
 ) -> None:
     """A step deadline overrun names the step and its effective ceiling.
 
@@ -2122,18 +6030,78 @@ def test_step_timeout_reason_names_step_and_limit(
     column already names the step) while the iteration row carries the
     enriched ``<step> timed out (<limit>)`` label -- and the run still ends
     ``exited`` with the run-qualified timeout reason: a timeout on the
-    final iteration is never relabeled ``completed``.
+    final iteration is never relabeled ``completed``. The run reason names
+    the configured walls (the node's ``step_timeout``), never the last
+    step's own ``timeout:``.
     """
     monkeypatch.setenv('_NODE', '')
     _configure(loop_node, step_timeout='30s')
+    (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+        f'{frontmatter}# PLAN\n\nWork.\n', encoding='utf-8'
+    )
     timeout = StepResult(status='timed out', exit_code=124)
     loop = MockLoop(loop_node, results=[timeout])
     assert loop.run() == 0
     iteration = loop_node.db.read('iters', where={'node': loop_node.branch})[0]
-    assert iteration['metadata'] == 'PLAN timed out (30s)'
+    assert iteration['metadata'] == f'PLAN timed out ({limit})'
     run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert (run['status'], run['exit_code']) == ('exited', 1)
     assert run['metadata'] == f'Timed out at iteration {loop._run_id}.1 (30s/step)'
+
+
+@pytest.mark.parametrize(
+    argnames=('stuck_seconds', 'launches'),
+    argvalues=[
+        # the steer runs on the seconds the stuck launch left, and spends them
+        pytest.param(2, 2, id='remainder'),
+        # the stuck launch spent the whole ceiling: the steer never launches
+        pytest.param(30, 1, id='spent'),
+    ],
+)
+def test_steered_timeout_names_the_step_ceiling(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    stuck_seconds: int,
+    launches: int,
+) -> None:
+    """A steer's timeout names the step's own ceiling, never what was left of it.
+
+    The steer is charged the stuck launch's seconds, so it runs on the
+    remainder of the step's timeout -- or not at all when none is left --
+    but the iteration reason names the ceiling the step was given, as an
+    unsteered timeout does.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_timeout='30s')
+    # the stuck launch runs the loop's clock forward
+    elapsed = [0.0]
+    monotonic = time.monotonic
+
+    def _monotonic() -> float:
+        return monotonic() + elapsed[0]
+
+    monkeypatch.setattr('fractal.core.loop.time.monotonic', _monotonic)
+
+    class StuckLoop(MockLoop):
+        """Mock loop whose first launch takes ``stuck_seconds``."""
+
+        def _launch(self: StuckLoop, *args: Any, **kwargs: Any) -> StepResult:
+            if not self.launched:
+                elapsed[0] += stuck_seconds
+            return super()._launch(*args, **kwargs)
+
+    stuck = StepResult(status='stuck', exit_code=1, reason='thinking cap', session='s1')
+    timeout = StepResult(status='timed out', exit_code=124)
+    loop = StuckLoop(loop_node, results=[stuck, timeout])
+    assert loop.run() == 0
+    assert len(loop.launched) == launches
+    assert _step_rows(loop_node) == [
+        'PLAN/stopped/steered: thinking cap',
+        'PLAN/exited/timed out; steer',
+    ]
+    iteration = loop_node.db.read('iters', where={'node': loop_node.branch})[0]
+    assert iteration['metadata'] == 'PLAN timed out (30s)'
 
 
 def test_deadline_expired_before_launch_keeps_the_plain_reason(
@@ -2369,6 +6337,73 @@ def test_pause_during_retry_backoff_parks(
     # the backoff detected the pause: a single attempt, then the park
     assert loop.launched == ['step 1 of 1 (PLAN)']
     assert loop_node.status() == 'paused'
+
+
+@pytest.mark.parametrize(
+    argnames=('signal', 'status', 'row'),
+    argvalues=[
+        # a pause parks with the stuck row closed; resume re-enters the step
+        pytest.param(
+            'pause',
+            'paused',
+            'PLAN/stopped/thinking cap; paused before the steer',
+            id='pause',
+        ),
+        # a stop abandons the steer to the failure path, like a retry
+        pytest.param(
+            'stop',
+            'stopped',
+            'PLAN/failed/thinking cap; steer abandoned',
+            id='stop',
+        ),
+        # so does a finish
+        pytest.param(
+            'finish',
+            'completed',
+            'PLAN/failed/thinking cap; steer abandoned',
+            id='finish',
+        ),
+        # and a subtree ceiling the stuck launch spent past, whose own poll
+        # sends the budget finish (no signal set beforehand)
+        pytest.param(
+            None,
+            'exited',
+            'PLAN/failed/thinking cap; steer abandoned',
+            id='ceiling',
+        ),
+    ],
+)
+def test_signal_before_the_steer_parks_or_abandons_it(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    signal: Optional[str],
+    status: str,
+    row: str,
+) -> None:
+    """A signal landing with a stuck launch buys no steer, as with a retry."""
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retry_backoff='1s')
+    if signal is None:
+        _configure(loop_node, max_cost=5.0)
+
+    class SignalingLoop(MockLoop):
+        """Mock loop whose stuck launch lands beside a signal or a spent ceiling."""
+
+        def _launch(self: SignalingLoop, *args: Any, **kwargs: Any) -> StepResult:
+            if signal is None:
+                self.node.record.step_cost(step_id=self._step_id, cost=6.0)
+            else:
+                self.node.record.signal_set(signal, 'operator')
+            return super()._launch(*args, **kwargs)
+
+    stuck = StepResult(status='stuck', exit_code=1, reason='thinking cap', session='s1')
+    loop = SignalingLoop(loop_node, results=[stuck])
+    assert loop.run() == 0
+    # one launch, no steer: the signal won
+    assert loop.launched == ['step 1 of 1 (PLAN)']
+    assert loop_node.status() == status
+    assert _step_rows(loop_node) == [row]
 
 
 def test_ceiling_trip_during_retry_backoff_abandons_the_retry(
@@ -2651,14 +6686,15 @@ def test_failed_drop_redispatch_keeps_the_failure(
 def test_spent_deadline_abandons_the_drop_redispatch(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A drop past the iteration deadline fails without a re-dispatch.
 
     The re-dispatch's own launch pre-check would only convert the
     completed work into a timed-out failure, so a spent deadline buys no
-    second launch -- but the pin is still law: the unresolved drop books
-    the step (and iteration) failed with the drop named, never a clean
-    completion off wrong-model output.
+    second launch, nor the backoff before one -- but the pin is still
+    law: the unresolved drop books the step (and iteration) failed with
+    the drop named, never a clean completion off wrong-model output.
     """
     monkeypatch.setenv('_NODE', '')
     _seed_steps(loop_node, ['01-PLAN.md'])
@@ -2666,19 +6702,27 @@ def test_spent_deadline_abandons_the_drop_redispatch(
         '---\nmodel: pinned-model\n---\n# PLAN\n\nWork.\n',
         encoding='utf-8',
     )
-    _configure(loop_node, iter_timeout='1s')
+    wall = 60 * 60
+    _configure(loop_node, iter_timeout=f'{wall}s')
+    # the launch runs a fake clock past the iteration deadline: the loop arms
+    # the deadline in whole seconds, so a short real one can be spent by a
+    # second boundary before the launch ever starts
+    real = time.time
+    overrun: list[float] = []
+    monkeypatch.setattr('fractal.core.loop.time.time', lambda: real() + sum(overrun))
 
     class OverrunningLoop(ServingLoop):
         """Mock loop whose launch completes past the iteration deadline."""
 
         def _launch(self: OverrunningLoop, *args: Any, **kwargs: Any) -> StepResult:
-            time.sleep(1.2)
+            overrun.append(wall + 1)
             return super()._launch(*args, **kwargs)
 
     loop = OverrunningLoop(loop_node, serves=['dropped-model'])
     assert loop.run() == 0
-    # the spent deadline bought no re-dispatch
+    # the spent deadline bought no re-dispatch, nor the backoff before one
     assert loop.launched == ['step 1 of 1 (PLAN)']
+    assert 'retrying after model drop' not in capsys.readouterr().out
     row = loop_node.db.read('steps', where={'step_name': 'PLAN'})[0]
     assert (row['status'], row['metadata']) == (
         'completed',
@@ -2692,6 +6736,69 @@ def test_spent_deadline_abandons_the_drop_redispatch(
         iter_row['metadata'] or ''
     )
     assert 'model drop' in loop_node.status_detail()
+
+
+@pytest.mark.parametrize(
+    argnames=('redispatch', 'rows'),
+    argvalues=[
+        # a failure retry: the steer inside the retry attempt carries its mark
+        pytest.param(
+            'retry',
+            [
+                'PLAN/stopped/steered: thinking cap',
+                'PLAN/failed/agent error (exit 2); steer',
+                'PLAN/stopped/steered: thinking cap; retry',
+                'PLAN/completed/steer; retry',
+            ],
+            id='retry',
+        ),
+        # a model-drop re-dispatch, outside the retry allowance
+        pytest.param(
+            'drop',
+            [
+                'PLAN/stopped/steered: thinking cap',
+                'PLAN/completed/model drop (served dropped-model); steer',
+                'PLAN/stopped/steered: thinking cap',
+                'PLAN/completed/steer',
+            ],
+            id='drop',
+        ),
+    ],
+)
+def test_each_attempt_earns_its_own_steer(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    redispatch: str,
+    rows: list[str],
+) -> None:
+    """A retry or a drop re-dispatch starts an attempt with a steer of its own.
+
+    The steer is one per attempt: a launch stuck again after a failure
+    retry or a model-drop re-dispatch is steered once more, never stalled
+    on the earlier attempt's steer.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=1, step_retry_backoff='1s')
+    stuck = StepResult(status='stuck', exit_code=1, reason='thinking cap', session='s1')
+    done = StepResult(status='completed')
+    if redispatch == 'retry':
+        failure = StepResult(
+            status='failed',
+            exit_code=2,
+            reason='agent error (exit 2)',
+        )
+        loop = MockLoop(loop_node, results=[stuck, failure, stuck, done])
+    else:
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            '---\nmodel: pinned-model\n---\n# PLAN\n\nWork.\n',
+            encoding='utf-8',
+        )
+        serves = [None, 'dropped-model', None, None]
+        loop = ServingLoop(loop_node, results=[stuck, done, stuck, done], serves=serves)
+    assert loop.run() == 0
+    assert _step_rows(loop_node) == rows
 
 
 # ------ launch diagnostics
@@ -2735,6 +6842,7 @@ def test_err_snapshots_keep_every_attempts_diagnosis(loop_node: Node) -> None:
 
         name = 'claude'
         enforces_budget = False
+        reports_progress = False
 
         def __init__(
             self: MockAgent, err_path: pathlib.Path, diagnoses: list[str]
@@ -2760,8 +6868,13 @@ def test_err_snapshots_keep_every_attempts_diagnosis(loop_node: Node) -> None:
             """Drain nothing and report an empty stream outcome."""
             return MockResult()
 
+        def unavailable(self: MockAgent, detail: str) -> bool:
+            """Name no provider outage."""
+            return False
+
     node = loop_node
     loop = Loop(node)
+    loop._read_run_parameters()
     loop._run_id = node.record.run_start()
     loop._iter = 1
     step = Step(node.node_dir / 'steps' / '01-PLAN.md', number=1)
@@ -3121,7 +7234,11 @@ def test_billing_breaker_does_not_arm_on_non_billing_failures(
     loop = MockLoop(loop_node)
     loop._run_id = loop_node.record.run_start()
     instant = StepResult(status='failed', exit_code=1)
-    # known-bad (the outage shape): instant, zero-cost, ordinary failure
+    # known-good: a step refused before its launch bought no inference
+    assert loop._billing_failure(instant, 0) is False
+    # known-bad (the outage shape): instant, zero-cost, ordinary failure of
+    # a launch that was bought
+    loop._step_launched = True
     assert loop._billing_failure(instant, 0) is True
     # known-good: a cannot-exec launch is a broken binary, not dead credits
     assert loop._billing_failure(StepResult(status='failed', exit_code=127), 0) is False
@@ -3138,6 +7255,42 @@ def test_billing_breaker_does_not_arm_on_non_billing_failures(
     loop_node.record.step_cost(step_id=step_id, cost=0.42)
     loop._step_id = step_id
     assert loop._billing_failure(instant, 0) is False
+
+
+def test_unpriced_model_refusals_never_read_as_billing(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Three cap refusals over an unpriced model leave the breaker disarmed.
+
+    A capped step whose model the price table cannot price is refused
+    before any launch: instant and zero-cost like a credit refusal, but
+    nothing was bought, so a streak of them must not read as the billing
+    outage and park the node behind the breaker's clock.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    monkeypatch.setattr(pricing, '_load', lambda: {})
+    node = loop_node
+    # a token-priced agent under a cap: each iteration's first step is refused
+    # and ends it, so four iterations are four refusals, past the breaker's
+    # three
+    _configure(
+        node,
+        agent='codex',
+        max_cost=5.0,
+        model='mystery/model',
+        max_iters=4,
+        step_retries=0,
+    )
+    loop = MockLoop(node)
+    loop.run()
+    assert loop.launched == []
+    captured = capsys.readouterr()
+    assert captured.err.count('has no pricing entry') >= 3
+    assert 'PAUSED: billing' not in captured.out
+    assert 'billing breaker' not in captured.out
 
 
 def test_sealed_seat_gets_no_inbox_digest(
@@ -3437,6 +7590,37 @@ def test_billing_gate_holds_the_sync_launch_and_counts_it(
     assert len(loop.launched) == 6
 
 
+def test_billing_gate_holds_a_sync_less_step_once(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """With no SYNC, the armed breaker holds the step's launch once.
+
+    The gate re-reads the breaker after the before-step SYNC, since that
+    SYNC is a launch that may have just armed or extended it. With no SYNC
+    the breaker is the one the hold ahead of it already waited out, so a
+    second hold would only double the wait before the probe.
+    """
+    monkeypatch.setenv('_NODE', '')
+    sleeps: list[float] = []
+    monkeypatch.setattr('fractal.core.loop.time.sleep', sleeps.append)
+    monkeypatch.setattr(loop_module, '_BILLING_BACKOFF_BASE_SECONDS', 3)
+    node = loop_node
+    _seed_steps(node, ['01-PLAN.md'])
+    # retries off: three iterations of one billing-shaped failure each arm
+    # the breaker, so iteration 4 opens at the gate's wait
+    _configure(node, max_iters=4, step_retries=0)
+    loop = MockLoop(node, results=[StepResult(status='failed', exit_code=1)] * 3)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    # one hold of the base wait, then the probe launch clears the breaker
+    assert out.count('PAUSED: billing') == 1
+    assert sleeps == [1] * 3
+    assert '=== billing breaker cleared (a call succeeded) ===' in out
+    assert len(loop.launched) == 4
+
+
 def test_interrupted_billing_gate_books_the_consumed_steps(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -3482,6 +7666,481 @@ def test_interrupted_billing_gate_books_the_consumed_steps(
     run = node.db.read('runs', where={'run_id': loop._run_id})[0]
     assert run['status'] == 'exited'
     assert 'budget' in run['metadata']
+
+
+def test_provider_unavailable_retries_back_off_exponentially_to_the_cap(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Consecutive provider outages double the retry wait up to the cap.
+
+    An overloaded or erroring API outlasts a fixed backoff: the defaults
+    burn every retry inside one outage. Each consecutive failure the
+    backend names as its provider being unavailable doubles the wait from
+    ``step_retry_backoff``, the cap bounds it, and ``step_retries`` still
+    bounds the attempts (scaled down: a 1s backoff under a 4s cap).
+    """
+    monkeypatch.setenv('_NODE', '')
+    sleeps: list[float] = []
+    monkeypatch.setattr('fractal.core.loop.time.sleep', sleeps.append)
+    monkeypatch.setattr(loop_module, '_UNAVAILABLE_BACKOFF_CAP_SECONDS', 4)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=4, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    loop = PaidLoop(loop_node, results=[outage] * 5)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    waits = re.findall(r'retrying in (.*) ---', out)
+    assert waits == [
+        '1s (provider unavailable)',
+        '2s (provider unavailable)',
+        '4s (provider unavailable)',
+        '4s (provider unavailable)',
+    ]
+    # the announced waits are the waits slept, and the attempts stay bounded
+    assert len(sleeps) == 1 + 2 + 4 + 4
+    assert len(loop.launched) == 5
+
+
+def test_a_success_resets_the_provider_unavailable_backoff(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A completed launch ends the outage: the next one waits the base again.
+
+    The streak spans steps and iterations, since an outage belongs to the
+    provider, not to one step -- so only a success may clear it, or a
+    recovered provider would leave every later failure on the outage's
+    longest wait.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, max_iters=2, step_retries=2, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    done = StepResult(status='completed')
+    loop = PaidLoop(loop_node, results=[outage, outage, done, outage, done])
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [
+        '1s (provider unavailable)',
+        '2s (provider unavailable)',
+        '1s (provider unavailable)',
+    ]
+
+
+def test_non_provider_failures_keep_the_fixed_backoff(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A failure the backend does not name an outage retries on the fixed backoff.
+
+    An agent or tool error is work that failed, not weather to wait out,
+    and consecutive means consecutive: one mid-outage breaks the streak,
+    so the next outage starts over from the base.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=4, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    error = StepResult(status='failed', exit_code=1, reason='agent error (exit 1)')
+    loop = PaidLoop(loop_node, results=[outage, outage, error, error, outage])
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [
+        '1s (provider unavailable)',
+        '2s (provider unavailable)',
+        '1s',
+        '1s',
+    ]
+
+
+def test_a_fast_outage_never_arms_the_billing_breaker(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A named outage paces as an outage, however instant and unpriced.
+
+    An outage refusal can die in seconds at no cost -- the billing
+    breaker's dead-credits signature -- but it is the provider's weather,
+    not the account's credits: the outage streak paces it and names it,
+    and no ``PAUSED: billing`` sends the operator to check credits.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=3, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    # nothing spends, so every failure is instant and zero-cost
+    loop = MockLoop(loop_node, results=[outage] * 4)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [
+        '1s (provider unavailable)',
+        '2s (provider unavailable)',
+        '4s (provider unavailable)',
+    ]
+    assert 'PAUSED: billing' not in out
+
+
+@pytest.mark.parametrize(
+    argnames=('unavailable', 'billing'),
+    argvalues=[(True, False), (False, True)],
+    ids=['outage', 'dead-credits'],
+)
+def test_the_census_reads_the_loops_outage_verdict(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    unavailable: bool,
+    billing: bool,
+) -> None:
+    """The node listing's billing flag follows the loop's outage verdict.
+
+    Three instant unpriced failures carry the dead-credits signature on
+    their rows alone, so the failed row records the verdict when the
+    agent named its provider unavailable: an outage never shows
+    ``PAUSED: billing`` in ``node list``, and the same failures without
+    the verdict still do.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=2, step_retry_backoff='1s')
+    failure = StepResult(
+        status='failed',
+        exit_code=1,
+        reason='agent error (exit 1): API Error: 529 overloaded',
+        unavailable=unavailable,
+    )
+    loop = MockLoop(loop_node, results=[failure] * 3)
+    assert loop.run() == 0
+    # the census reads an active node's newest launches
+    loop_node.status_set('active')
+    assert ('PAUSED: billing' in loop_node.status_detail()) == billing
+
+
+@pytest.mark.parametrize(
+    argnames=('refused', 'billing'),
+    argvalues=[(None, True), ('step', False), ('sync', False)],
+    ids=['dead-credits', 'step-refused', 'sync-refused'],
+)
+def test_the_census_skips_steps_refused_before_launch(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    refused: Optional[str],
+    billing: bool,
+) -> None:
+    """The node listing's billing flag never counts a launch the loop refused.
+
+    A step refused before its launch books a failed, instant, zero-cost
+    row -- the dead-credits signature on its row alone -- but bought no
+    inference, so the loop's breaker never counts it and the row records
+    the refusal: a run of refused work steps, or refused SYNCs between
+    dead launches, never shows ``PAUSED: billing`` in ``node list``,
+    while three instant zero-cost launch failures still do.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, max_iters=3, sync=refused == 'sync', step_retries=0)
+    # a route the agent lacks refuses the step at dispatch, before any launch
+    route = '---\nprovider: bogus\n---\n'
+    if refused == 'step':
+        (loop_node.node_dir / 'steps' / '01-PLAN.md').write_text(
+            f'{route}# PLAN\n\nWork.\n', encoding='utf-8'
+        )
+    failure = StepResult(status='failed', exit_code=1, reason='agent error (exit 1)')
+    loop = MockLoop(loop_node, results=[failure] * 3)
+    if refused == 'sync':
+        # the SYNC mode doc is the installed package's own, so a copy carries
+        # the route
+        sync_file = tmp_path / 'SYNC.md'
+        body = loop._sync_file.read_text(encoding='utf-8')
+        sync_file.write_text(f'{route}{body}', encoding='utf-8')
+        loop._sync_file = sync_file
+    assert loop.run() == 0
+    # the census reads an active node's newest launches
+    loop_node.status_set('active')
+    assert ('PAUSED: billing' in loop_node.status_detail()) == billing
+
+
+def test_an_outage_past_the_retries_holds_the_next_launch(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """An outage that outlasts a step's retries still paces the next launch.
+
+    The failed iteration's successor holds its first launch on the outage
+    streak's doubling clock -- with no retries at all, the only pacing an
+    outage gets -- and a completed launch clears the streak, so the
+    iteration after it launches at once.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, max_iters=4, step_retries=0, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    loop = PaidLoop(loop_node, results=[outage, outage])
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    # the hold each iteration waited before its launch, if any
+    iterations = re.split(r'=== Iteration \d+ of \d+ at ', out)[1:]
+    holds = [re.findall(r'probing again in (\d+s)', text) for text in iterations]
+    assert holds == [[], ['1s'], ['2s'], []]
+    assert len(loop.launched) == 4
+
+
+def test_an_interrupted_outage_hold_books_the_consumed_steps(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop landing during an outage hold books the steps it consumed.
+
+    The hold guards a step's first launch, step 1 included, so its
+    interrupt would otherwise close an iteration with no step rows at
+    all: the gated step and the never-run tail book ``stopped`` rows
+    naming the hold, and the iteration closes ``stopped``.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _configure(loop_node, max_iters=2, step_retries=0)
+
+    def _stop_mid_wait(seconds: float) -> None:
+        loop_node.record.signal_set('stop', 'operator')
+
+    monkeypatch.setattr('fractal.core.loop.time.sleep', _stop_mid_wait)
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    loop = PaidLoop(loop_node, results=[outage])
+    assert loop.run() == 0
+    assert loop.launched == ['step 1 of 2 (PLAN)']
+    assert _step_rows(loop_node) == [
+        'PLAN/failed/provider unavailable: agent error',
+        'EXECUTE/stopped/failed on PLAN',
+        'PLAN/stopped/outage gate interrupted',
+        'EXECUTE/stopped/outage gate interrupted',
+    ]
+    iteration = loop_node.db.read('iters', where={'iter': 2})[0]
+    assert (iteration['status'], iteration['exit_code']) == ('stopped', 0)
+
+
+@pytest.mark.parametrize(
+    argnames=('case', 'waits', 'holds'),
+    argvalues=[
+        # a configured backoff above the cap still holds
+        pytest.param('floor', ['8s (provider unavailable)'] * 2, [], id='floor'),
+        # a SYNC's outage extends the streak: its step's first launch holds
+        # and its retry waits twice the base
+        pytest.param('sync', ['2s (provider unavailable)'], ['1s'], id='sync'),
+        # a timed-out launch breaks the streak
+        pytest.param('timeout', ['1s (provider unavailable)'] * 2, [], id='timeout'),
+        # a budget-skipped launch bought nothing and leaves it standing
+        pytest.param(
+            'skip',
+            ['1s (provider unavailable)', '2s (provider unavailable)'],
+            ['1s'],
+            id='skip',
+        ),
+    ],
+)
+def test_the_outage_streak_moves_only_on_what_launches_say(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    case: str,
+    waits: list[str],
+    holds: list[str],
+) -> None:
+    """The outage wait floors at the backoff, and only launches move its streak.
+
+    The streak counts every launch, a before-step SYNC included; a
+    failure that names no outage, a timeout among them, breaks it; a step
+    skipped over budget bought no launch, so it leaves the streak
+    standing for the next step's hold and retry.
+    """
+    monkeypatch.setenv('_NODE', '')
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, step_retries=1, step_retry_backoff='1s')
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    if case == 'floor':
+        monkeypatch.setattr(loop_module, '_UNAVAILABLE_BACKOFF_CAP_SECONDS', 4)
+        _configure(loop_node, step_retries=2, step_retry_backoff='8s')
+        results = [outage] * 3
+    elif case == 'sync':
+        _configure(loop_node, sync=True)
+        results = [outage, outage]
+    elif case == 'timeout':
+        _configure(loop_node, max_iters=2)
+        results = [outage, StepResult(status='timed out', exit_code=124), outage]
+    else:
+        _seed_steps(loop_node, ['01-PLAN.md', '02-EXECUTE.md'])
+        results = [outage, StepResult(status='skipped', exit_code=125), outage]
+    loop = PaidLoop(loop_node, results=results)
+    assert loop.run() == 0
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == waits
+    assert re.findall(r'probing again in (\d+s)', out) == holds
+
+
+def test_retry_waits_end_at_the_run_deadline(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry's wait stops at the run deadline instead of sleeping past it.
+
+    An outage doubles the wait up to an hour, so an unbounded wait could
+    overrun ``--timeout`` by the whole cap: the wait ends at the deadline
+    and the next attempt books the timeout there.
+    """
+    monkeypatch.setenv('_NODE', '')
+    _seed_steps(loop_node, ['01-PLAN.md'])
+    _configure(loop_node, timeout='5s', step_retries=3, step_retry_backoff='4s')
+    # the waits run a fake clock forward
+    slept: list[float] = []
+    started = time.time()
+    monkeypatch.setattr('fractal.core.loop.time.time', lambda: started + sum(slept))
+    monkeypatch.setattr('fractal.core.loop.time.sleep', slept.append)
+    outage = StepResult(status='failed', exit_code=1, unavailable=True)
+    loop = PaidLoop(loop_node, results=[outage] * 3)
+    assert loop.run() == 0
+    assert sum(slept) <= 5
+    run = loop_node.db.read('runs', where={'run_id': loop._run_id})[0]
+    assert run['status'] == 'exited'
+    assert run['metadata'].startswith(f'Timed out at iteration {loop._run_id}.1')
+
+
+@pytest.mark.parametrize(
+    argnames=('result', 'wait'),
+    argvalues=[
+        pytest.param(
+            'API Error: 529 {"type":"error","error":{"type":"overloaded_error",'
+            '"message":"Overloaded"}}',
+            '1s (provider unavailable)',
+            id='overloaded',
+        ),
+        pytest.param(
+            'API Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
+            '"message":"prompt is too long"}}',
+            '1s',
+            id='agent-error',
+        ),
+    ],
+)
+def test_launch_reads_the_provider_outage_off_the_result_frame(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    result: str,
+    wait: str,
+) -> None:
+    """The real launch hands the backend what the failed launch said.
+
+    Claude names a spent API retry only on its failed result frame, never
+    on stderr, so the launch must carry that frame's detail to the
+    backend's classifier for the retry to wait out the outage.
+    """
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    frame = {
+        'type': 'result',
+        'subtype': 'success',
+        'is_error': True,
+        'result': result,
+        'session_id': 'SID',
+    }
+    script = _claude_script(_INIT, frame, 'exit 1')
+    agent = scripted_claude([script, script])
+    _configure(loop_node, step_retries=1, step_retry_backoff='1s')
+    ScriptedLoop(loop_node, agent).run()
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [wait]
+
+
+@pytest.mark.parametrize(
+    argnames=('backend', 'frames', 'stderr', 'wait'),
+    argvalues=[
+        # codex reconnects until it gives up: an outage
+        pytest.param(
+            'codex',
+            [
+                *_CODEX_OPEN,
+                *(
+                    {
+                        'type': 'error',
+                        'message': f'Reconnecting... {attempt}/5 ({_CODEX_DISCONNECT})',
+                    }
+                    for attempt in range(1, 6)
+                ),
+                {'type': 'error', 'message': _CODEX_DISCONNECT},
+            ],
+            '',
+            '1s (provider unavailable)',
+            id='codex-give-up',
+        ),
+        # a reconnect codex recovered from, then a request it refused
+        pytest.param(
+            'codex',
+            [
+                *_CODEX_OPEN,
+                {
+                    'type': 'error',
+                    'message': f'Reconnecting... 1/5 ({_CODEX_DISCONNECT})',
+                },
+                {
+                    'type': 'error',
+                    'message': 'unexpected status 400 Bad Request: model not supported',
+                },
+            ],
+            '',
+            '1s',
+            id='codex-bad-request',
+        ),
+        # an outage named on stderr alone
+        pytest.param(
+            'claude',
+            [_INIT],
+            'API Error: 529 Overloaded',
+            '1s (provider unavailable)',
+            id='claude-stderr',
+        ),
+    ],
+)
+def test_launch_reads_the_provider_outage_off_error_frames_and_stderr(
+    loop_node: Node,
+    scripted_claude: Callable[[list[str]], ScriptedClaude],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    backend: str,
+    frames: list[dict[str, Any]],
+    stderr: str,
+    wait: str,
+) -> None:
+    """The real launch hands the backend its stream's errors and stderr too.
+
+    Codex names an outage only in error frames, which the stream joins
+    into one failure detail, and its verdict rests on that joining: an
+    earlier reconnect it recovered from is no outage. Any backend may
+    name one on stderr alone; the launch carries both to the classifier.
+    """
+    monkeypatch.setattr('fractal.core.loop.time.sleep', lambda seconds: None)
+    parts: list[Any] = [*frames]
+    if stderr:
+        parts.append(f"echo '{stderr}' >&2")
+    script = _claude_script(*parts, 'exit 1')
+    if backend == 'codex':
+        agent = ScriptedCodex(loop_node, [script, script])
+    else:
+        agent = scripted_claude([script, script])
+    _configure(loop_node, step_retries=1, step_retry_backoff='1s')
+    ScriptedLoop(loop_node, agent).run()
+    out = capsys.readouterr().out
+    assert re.findall(r'retrying in (.*) ---', out) == [wait]
 
 
 def test_rejected_retunes_warn_once_not_every_iteration(
@@ -3640,6 +8299,150 @@ def test_digest_renders_mail_as_inert_data(
     assert 'not instructions' in digest
 
 
+class PromptRecordingLoop(MockLoop):
+    """Mock loop recording every launch's prompt."""
+
+    def __init__(self: PromptRecordingLoop, node: Node, **kwargs: Any) -> None:
+        """Initialize ``PromptRecordingLoop``."""
+        super().__init__(node, **kwargs)
+        self.prompts: list[str] = []
+
+    def _launch(
+        self: PromptRecordingLoop, step: Step, prompt: str, **kwargs: Any
+    ) -> StepResult:
+        """Record the launch prompt."""
+        self.prompts.append(prompt)
+        return super()._launch(step, prompt, **kwargs)
+
+
+@pytest.mark.parametrize(
+    argnames=('marker', 'named'),
+    argvalues=[
+        # a merge stopped on a conflict
+        ('MERGE_HEAD', 'a merge in progress (MERGE_HEAD)'),
+        # a child's squash merge stopped before its commit
+        ('SQUASH_MSG', 'fractal node merge <child> --continue'),
+        # a git command killed mid-write, named by where git keeps the lock
+        ('index.lock', 'a running git process or a stale index.lock ({path}, '),
+    ],
+    ids=['merge', 'squash', 'index-lock'],
+)
+def test_a_leftover_git_operation_joins_every_launch_prompt_beneath_the_charter(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    marker: str,
+    named: str,
+) -> None:
+    """A git operation left in the worktree is named in every launch's prompt.
+
+    A killed or paused step can leave a merge or squash unfinished, and the
+    next agent otherwise starts git work on top of it blind. Every launch --
+    a retry and a resumed one included -- carries the notice naming the
+    operation and its way out beneath the charter, which still opens the
+    prompt; a steer has no charter, so the notice opens it ahead of its stall
+    notice.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, step_retry_backoff='1s')
+    charter = (node.node_dir / 'NODE.md').read_text(encoding='utf-8')
+    relpath = _git(node.worktree, 'rev-parse', '--git-path', marker).stdout
+    path = node.worktree / relpath.strip()
+    path.write_text('0' * 40 + '\n', encoding='utf-8')
+    named = named.format(path=path)
+    results = [
+        StepResult(status='failed', exit_code=2, reason='agent error (exit 2)'),
+        StepResult(status='completed'),
+    ]
+    loop = PromptRecordingLoop(node, results=results)
+    assert loop.run() == 0
+    # the failed launch, its retry, and the next step
+    assert len(loop.prompts) == 3
+    for prompt in loop.prompts:
+        assert prompt.startswith(charter)
+        assert named in prompt[prompt.index('## Git Pending Mode') :]
+    # a resumed launch carries the notice beside its resume mode
+    loop._resume_mode = True
+    prompt = loop._build_step_prompt(loop._discover_steps()[0])
+    assert prompt.startswith(charter)
+    assert named in prompt[prompt.index('## Git Pending Mode') :]
+    assert '## Resume Mode' in prompt
+    # a steer's prompt is the stall notice alone, opened by the notice
+    loop._resume_mode = False
+    loop._steer_session = 'SID'
+    prompt = loop._build_step_prompt(loop._discover_steps()[0])
+    assert prompt.startswith('## Git Pending Mode')
+    assert named in prompt[: prompt.index('## Stall Mode')]
+    assert charter not in prompt
+
+
+@pytest.mark.parametrize('conflicted', [False, True], ids=['staged', 'conflicted'])
+def test_continue_leaves_a_pending_merge_for_the_agent(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    conflicted: bool,
+) -> None:
+    """A continue over a merge in progress leaves it for the agent's prompt.
+
+    The continue commits operator edits under the node folder and then
+    restores the worktree; over a staged merge that commit would silently
+    finish the merge, and over a conflicted one git refuses it and boot
+    crashes. The continue leaves the worktree as found, says so, and the
+    first prompt names the merge.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    repo = node.worktree
+    # a side branch changing a shared file, and on a conflict the same file here
+    (repo / 'shared.txt').write_text('base\n', encoding='utf-8')
+    _git(repo, 'add', 'shared.txt')
+    _git(repo, 'commit', '-q', '-m', 'add shared')
+    _git(repo, 'checkout', '-q', '-b', 'side')
+    (repo / 'shared.txt').write_text('side\n', encoding='utf-8')
+    _git(repo, 'commit', '-q', '-am', 'side edit')
+    _git(repo, 'checkout', '-q', '-')
+    if conflicted:
+        (repo / 'shared.txt').write_text('main\n', encoding='utf-8')
+        _git(repo, 'commit', '-q', '-am', 'main edit')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    merge = subprocess.run(
+        ['git', '-C', f'{repo}', 'merge', '--no-commit', '--no-ff', 'side'],
+        capture_output=True,
+        text=True,
+    )
+    assert (merge.returncode != 0) is conflicted
+    # an operator edit under the node folder arms the continue's commit
+    (node.node_dir / 'note.md').write_text('steer\n', encoding='utf-8')
+    loop = PromptRecordingLoop(node, continue_=True)
+    assert loop.run() == 0
+    # the merge is neither committed nor discarded
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    merge_head = _git(repo, 'rev-parse', '--git-path', 'MERGE_HEAD').stdout
+    assert (repo / merge_head.strip()).is_file()
+    # nothing is unstaged or removed either
+    staged = _git(repo, 'diff', '--cached', '--name-only').stdout
+    assert staged.split() == ['shared.txt']
+    assert (node.node_dir / 'note.md').read_text(encoding='utf-8') == 'steer\n'
+    assert 'skipped the operator-edit commit and the clean' in capsys.readouterr().out
+    assert '## Git Pending Mode' in loop.prompts[0]
+    assert 'a merge in progress (MERGE_HEAD)' in loop.prompts[0]
+
+
+def test_a_clean_worktree_launch_prompt_carries_no_notice(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean worktree's launch prompt is the charter and the step alone."""
+    monkeypatch.setenv('_NODE', '')
+    loop = PromptRecordingLoop(loop_node)
+    assert loop.run() == 0
+    assert loop.prompts == [
+        f'# Charter\n\nDo the work.\n\n# {name}\n\nWork.\n'
+        for name in ['01-PLAN.md', '02-EXECUTE.md']
+    ]
+
+
 def test_drain_survives_a_pause_and_resume(
     loop_node: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -3727,18 +8530,18 @@ def test_drain_guards_survive_a_worktree_scrub(
     falls back to the node owning the working directory, so a seat that
     steps into a SIBLING worktree resolves to a real but WRONG node the
     drain never binds, and one that steps outside every worktree resolves
-    to no node at all -- which failed open. Neither is a lie the seat can
-    tell about its process group: the loop makes each agent invocation
-    its own group leader and records the id, so the tree can ask which of
-    its draining runs owns this process. A caller in some other group --
-    an operator's own shell -- is unaffected.
+    to no node at all, which alone would fail open. Neither is a lie the
+    seat can tell about its lineage: the loop records each agent
+    invocation, so the tree can ask which of its draining runs this
+    process descends from or shares a session with. A caller outside
+    every seat's lineage -- an operator's own shell -- is unaffected.
     """
     parent, child = _spawn_parent_child(git_repo, monkeypatch)
     child.record.signal_set('drain', 'continue --drain')
-    # this process stands in for the draining seat's agent invocation: the
-    # group the loop records is the one the seat runs its commands from
+    # this process's session leader stands in for the draining seat's
+    # recorded agent, so this process reads as one of the seat's commands
     step_pgid = child.node_dir / STEP_PGID_FILE
-    step_pgid.write_text(f'{os.getpgid(0)}\n', encoding='utf-8')
+    step_pgid.write_text(f'{os.getsid(0)}\n', encoding='utf-8')
     monkeypatch.delenv('_DRAIN', raising=False)
     monkeypatch.delenv('_NODE', raising=False)
     # the seat works from a sibling worktree: a real but wrong actor
@@ -3753,8 +8556,8 @@ def test_drain_guards_survive_a_worktree_scrub(
     # guard's, so the pin cannot pass on somebody else's error
     for name in ('main.parent.escapee', 'main.escapee2'):
         assert not (git_repo / '.worktrees' / name).exists(), name
-    # an operator acting while the same drain runs is in another group, so
-    # the tree's spawn doors stay open to them
+    # an operator acting while the same drain runs is neither below the
+    # recorded agent nor in its session, so the spawn doors stay open
     operator = subprocess.Popen(['sleep', '300'], start_new_session=True)
     try:
         step_pgid.write_text(f'{operator.pid}\n', encoding='utf-8')
@@ -3763,6 +8566,149 @@ def test_drain_guards_survive_a_worktree_scrub(
     finally:
         os.killpg(operator.pid, signal.SIGKILL)
         operator.wait()
+
+
+@pytest.mark.parametrize(
+    argnames='case',
+    argvalues=['own-group', 'own-session', 'orphan-in-session'],
+    ids=['own-group', 'own-session', 'orphan-in-session'],
+)
+def test_drain_lineage_recognizes_the_seat_commands(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """A seat's command is the seat in each shape an agent CLI runs it in.
+
+    Agent CLIs run each shell command in a process group of its own, so its
+    group never names the recorded agent invocation, and Claude Code runs it
+    in a session of its own, so its session does not either -- but the
+    command descends from the agent. A command whose parent exited before it
+    asks is out of that tree, yet while it stays in the agent's session it
+    is still the seat. A real session leader stands in for the agent,
+    recorded as the draining run's step group, and runs the check in each
+    shape; a process in an unrelated session, outside the leader's tree,
+    gets no.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    child.record.signal_set('drain', 'continue --drain')
+    # the check records its pid before anything else (it leads a group of
+    # its own in every shape, out of reach of the leader's group), confirms
+    # the shape its case names, then asks the lineage question
+    check_pid = tmp_path / 'check.pid'
+    check = (
+        'import os, pathlib, sys, time\n'
+        'pathlib.Path(sys.argv[3]).write_text(f"{os.getpid()}\\n")\n'
+        'case, repo = sys.argv[1:3]\n'
+        'if case == "own-group":\n'
+        '    assert os.getpgid(0) != os.getsid(0)\n'
+        'elif case == "own-session":\n'
+        '    assert os.getsid(0) == os.getpid()\n'
+        'else:\n'
+        '    starter = int(sys.argv[4])\n'
+        '    deadline = time.monotonic() + 30\n'
+        '    while os.getppid() == starter and time.monotonic() < deadline:\n'
+        '        time.sleep(0.01)\n'
+        '    assert os.getppid() != starter\n'
+        'from fractal.core.node import Node\n'
+        'print(Node(repo).drain_lineage())\n'
+    )
+    # the leader waits for its record, starts the command the way the case's
+    # agent CLI runs one, and relays the answer once the check closes its
+    # output -- so the leader outlives the question in every shape
+    leader_script = (
+        'import subprocess, sys\n'
+        'sys.stdin.readline()\n'
+        'mode, *argv = sys.argv[1:]\n'
+        'result = subprocess.run(\n'
+        '    argv,\n'
+        '    stdout=subprocess.PIPE,\n'
+        '    text=True,\n'
+        '    check=True,\n'
+        '    process_group=0 if mode == "group" else None,\n'
+        '    start_new_session=mode == "session",\n'
+        ')\n'
+        'print(result.stdout, end="")\n'
+    )
+    if case == 'own-group':
+        # a CLI that keeps the agent's session: a group of its own
+        launch = ['group']
+    elif case == 'own-session':
+        # Claude Code: a session of its own
+        launch = ['session']
+    else:
+        # an intermediate in the agent's session starts the check
+        # in a group of its own and exits at once, so the check
+        # asks from the agent's session but outside its tree
+        intermediate = (
+            'import os, subprocess, sys\n'
+            'subprocess.Popen([*sys.argv[1:], f"{os.getpid()}"], process_group=0)\n'
+        )
+        launch = ['inherit', sys.executable, '-c', intermediate]
+    command = [sys.executable, '-c', check, case, f'{git_repo}', f'{check_pid}']
+    leader = subprocess.Popen(
+        [sys.executable, '-c', leader_script, *launch, *command],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        step_pgid = child.node_dir / STEP_PGID_FILE
+        step_pgid.write_text(f'{leader.pid}\n', encoding='utf-8')
+        # this test process sits in an unrelated session, outside its tree
+        assert not parent.drain_lineage()
+        stdout, stderr = leader.communicate(input='\n', timeout=60)
+        assert leader.returncode == 0, stderr
+        assert stdout.strip() == 'True', stderr
+    finally:
+        # kill the check's group, then the leader's -- the check leads a
+        # group of its own, which the leader's group kill never reaches
+        groups = []
+        if check_pid.exists():
+            groups.append(int(check_pid.read_text(encoding='utf-8')))
+        groups.append(leader.pid)
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if leader.returncode is None:
+            leader.communicate()
+
+
+@pytest.mark.parametrize(
+    argnames='error',
+    argvalues=[
+        pytest.param(OSError('ps cannot run'), id='cannot-run'),
+        pytest.param(RuntimeError("ps failed (exit 1): ''"), id='fails'),
+    ],
+)
+def test_drain_lineage_survives_an_unreadable_process_table(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    """A failed process-table read leaves the session to answer alone.
+
+    The ancestry walk reads the whole process table through ``ps``; when
+    ``ps`` cannot run or exits non-zero, the check still answers rather
+    than raising, and a caller in the recorded agent's session is still
+    the seat.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    child.record.signal_set('drain', 'continue --drain')
+    # this process's session leader stands in for the draining seat's agent
+    step_pgid = child.node_dir / STEP_PGID_FILE
+    step_pgid.write_text(f'{os.getsid(0)}\n', encoding='utf-8')
+
+    def unreadable() -> dict[int, Any]:
+        raise error
+
+    monkeypatch.setattr('fractal.util.process.snapshot', unreadable)
+    assert parent.drain_lineage() is True
 
 
 def test_drain_run_blocks_spawns_and_re_arms(
@@ -3936,8 +8882,8 @@ def test_pending_finish_carries_to_the_continued_run(
         def _descendants_active(self: _TornDrain) -> bool:
             return True
 
+    _configure(node, wait='1s')
     torn = _TornDrain(node)
-    torn._wait_seconds = 1
     assert torn.run() == 0
     run = node.record.runs(limit=1)[0]
     assert run['status'] == 'stopped'
@@ -3996,8 +8942,8 @@ def test_stop_during_finish_drain_books_stopped(
         def _descendants_active(self: _StopMidDrain) -> bool:
             return True
 
+    _configure(loop_node, wait='1s')
     loop = _StopMidDrain(loop_node)
-    loop._wait_seconds = 1
     assert loop.run() == 0
     # the drain interrupted before the last step -- only the first launched
     assert len(loop.launched) == 1
@@ -4429,15 +9375,25 @@ def test_resume_preflight_abort_recredits_the_reparked_wait(
     ``pause`` event) so ``_pause_credit`` keeps crediting the re-parked wait.
     """
     node = node_with_db
+    node.config.set('timeout', '10m')
     node.status_set('active')
     run_id = node.record.run_start()
+    _age_run(node, run_id, 300.0)
     node.status_set('paused')
-    # the original pause opens a credit span; the failed resume's completed
-    # event (stamped by Node._resume before the loop boots) closes it
-    pause_id = node.record.event_start('pause')
-    node.record.event_end(event_id=pause_id, status='completed')
-    resume_id = node.record.event_start('resume')
-    node.record.event_end(event_id=resume_id, status='completed')
+    # the loop's park opens a credit span (200s ago); the failed resume's
+    # completed event (stamped by Node._resume before the loop boots) closes
+    # it (150s ago)
+    for event, metadata, seconds_ago in (
+        ('pause', 'parked', 200.0),
+        ('resume', '', 150.0),
+    ):
+        event_id = node.record.event_start(event, metadata=metadata)
+        node.record.event_end(event_id=event_id, status='completed')
+        node.db.update(
+            data={'created_at': _past_timestamp(seconds_ago)},
+            table='events',
+            where={'event_id': event_id},
+        )
     loop = MockLoop(node, resume=True)
     with pytest.raises(_Abort):
         loop._abort_preflight('OPENROUTER_API_KEY is not set')
@@ -4447,6 +9403,15 @@ def test_resume_preflight_abort_recredits_the_reparked_wait(
     events.sort(key=lambda e: e['event_id'])
     credit_seq = [e['event'] for e in events if e['event'] in ('pause', 'resume')]
     assert credit_seq == ['pause', 'resume', 'pause']
+    # the re-parked wait is credited: 600 - (300 elapsed - (50 + 100) parked)
+    node.db.update(
+        data={'created_at': _past_timestamp(100.0)},
+        table='events',
+        where={'event_id': events[-1]['event_id']},
+    )
+    remaining = node.time.remaining(scope='run', run_id=run_id)
+    assert remaining is not None
+    assert 440.0 < remaining <= 451.0
     # and the node is still paused with its run adoptable (unchanged)
     assert node.status() == 'paused'
     assert node.db.read('runs', where={'run_id': run_id})[0]['ended_at'] is None
@@ -4495,9 +9460,12 @@ def test_resume_anchors_run_deadline_on_credited_remaining(
     node.status_set('active')
     run_id = node.record.run_start()
     _age_run(node, run_id, 300.0)
-    # a closed 180s pause span (240s ago -> 60s ago) credits 180s back
-    for event, seconds_ago in (('pause', 240.0), ('resume', 60.0)):
-        event_id = node.record.event_start(event, run_id=run_id)
+    # a closed 180s park span (240s ago -> 60s ago) credits 180s back
+    for event, metadata, seconds_ago in (
+        ('pause', 'parked', 240.0),
+        ('resume', '', 60.0),
+    ):
+        event_id = node.record.event_start(event, metadata=metadata, run_id=run_id)
         node.record.event_end(event_id=event_id, status='completed')
         node.db.update(
             data={'created_at': _past_timestamp(seconds_ago)},
@@ -4517,6 +9485,80 @@ def test_resume_anchors_run_deadline_on_credited_remaining(
     # 600 - (300 elapsed - 180 credit) = 480 remaining, credited -- not the
     # full 600 (re-armed) nor 300 (uncredited)
     assert 465 <= loop._run_end_epoch - before <= 485
+
+
+@pytest.mark.parametrize(
+    argnames=('retune', 'closed', 'reason'),
+    argvalues=[
+        # the run's wall clock ran out while the node was parked
+        pytest.param(
+            {'timeout': '10m'},
+            ('failed', 1, 'timed out'),
+            'Timed out at iteration {run_id}.2 ',
+            id='run-timeout',
+        ),
+        # max_iters was lowered below the parked iteration
+        pytest.param(
+            {'max_iters': 1},
+            ('stopped', 0, ''),
+            'Reached max iterations (1)',
+            id='max-iters',
+        ),
+    ],
+)
+def test_resume_ended_before_reentry_closes_the_adopted_iteration(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    retune: dict[str, Any],
+    closed: tuple[str, int, str],
+    reason: str,
+) -> None:
+    """A resume whose run ends at the loop top closes the iteration it adopted.
+
+    Pause parks with the iteration row open for the resume to re-enter. A
+    run deadline spent while parked, or ``max_iters`` lowered below the
+    parked iteration, ends the resumed run before that re-entry -- so the
+    run's end closes the adopted iteration too, instead of leaving it
+    active until the next run start heals it as a crash, and the exit
+    reason names that iteration.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, max_iters=3)
+
+    class _Parking(MockLoop):
+        """Park in iteration 2 after its first step, as a pause does."""
+
+        def _launch(
+            self: _Parking, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            if len(self.launched) == 2:
+                self.node.record.signal_set('pause', 'operator')
+            return super()._launch(step, prompt, **kwargs)
+
+    parked = _Parking(node)
+    assert parked.run() == 0
+    assert node.status() == 'paused'
+    run_id = parked._run_id
+    [adopted] = node.db.read('iters', where={'run_id': run_id, 'ended_at': None})
+    assert adopted['iter'] == 2
+    # the parked run is old, which spends a configured timeout; the retune
+    # lands while the node is parked
+    _age_run(node, run_id, 700.0)
+    _configure(node, **retune)
+
+    resumed = MockLoop(node, resume=True)
+    assert resumed.run() == 0
+    # the run ended at the loop top: nothing re-entered the iteration
+    assert resumed.launched == []
+    [iteration] = node.db.read('iters', where={'iter_id': adopted['iter_id']})
+    assert iteration['ended_at'] is not None
+    assert (iteration['status'], iteration['exit_code'], iteration['metadata']) == (
+        closed
+    )
+    [run] = node.db.read('runs', where={'run_id': run_id})
+    assert run['ended_at'] is not None
+    assert run['metadata'].startswith(reason.format(run_id=run_id))
 
 
 def test_interval_defaults_iter_timeout_but_honors_a_tighter_one(
@@ -4579,6 +9621,152 @@ def test_stop_during_the_inter_iteration_sleep_ends_the_run(
 # ------ helpers
 
 
+def _assistant_frame(message_id: str, usage: dict[str, int]) -> dict[str, Any]:
+    """Return a claude stream frame of one thinking block of a top-level reply."""
+    frame = json.loads(json.dumps(_THINKING_REPLY))
+    frame['message'].update(id=message_id, model='claude-fable-5', usage=usage)
+    return frame
+
+
+def _append_entry(path: pathlib.Path, entry: dict[str, Any]) -> str:
+    """Return the shell command appending a transcript entry, stamped as it runs."""
+    code = (
+        'import datetime, json, pathlib, sys\n'
+        'path = pathlib.Path(sys.argv[1])\n'
+        'path.parent.mkdir(parents=True, exist_ok=True)\n'
+        'entry = json.loads(sys.argv[2])\n'
+        "entry['timestamp'] = datetime.datetime.now(datetime.UTC).isoformat()\n"
+        "with path.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(entry) + '\\n')\n"
+    )
+    return shlex.join([sys.executable, '-c', code, f'{path}', json.dumps(entry)])
+
+
+def _save_cost_state(path: pathlib.Path, total: Any) -> str:
+    """Return the shell command saving a session's total, as claude does at exit.
+
+    The record is real-shaped (claude 2.1.300): the session's running total
+    and the per-model usage behind it, under its session (``SID``).
+    """
+    state = {
+        'type': 'cost-state',
+        'sessionId': 'SID',
+        'totalCostUSD': total,
+        'totalAPIDuration': 5780,
+        'totalAPIDurationWithoutRetries': 5779,
+        'totalToolDuration': 227,
+        'totalLinesAdded': 0,
+        'totalLinesRemoved': 0,
+        'totalDuration': 5972,
+        'startTime': 1792304015631,
+        'modelUsage': {
+            'claude-fable-5': {
+                'inputTokens': 154,
+                'outputTokens': 5933,
+                'thinkingTokens': 5437,
+                'cacheReadInputTokens': 359431,
+                'cacheCreationInputTokens': 23408,
+                'webSearchRequests': 0,
+                'costUSD': total,
+            },
+        },
+        'hasUnknownModelCost': False,
+    }
+    folder = shlex.quote(f'{path.parent}')
+    target = shlex.quote(f'{path}')
+    line = shlex.quote(json.dumps(state))
+    return f"mkdir -p {folder}; printf '%s\\n' {line} >> {target}"
+
+
+def _assistant_entry(
+    message_id: str,
+    usage: dict[str, int],
+    *,
+    model: str = 'claude-fable-5',
+    stop_reason: Optional[str] = 'end_turn',
+    **fields: Any,
+) -> dict[str, Any]:
+    """Return a claude transcript line of one reply's content block.
+
+    A ``stop_reason`` of ``None`` is a line written before its reply
+    completed.
+    """
+    return {
+        'type': 'assistant',
+        'isSidechain': False,
+        **fields,
+        'message': {
+            'id': message_id,
+            'model': model,
+            'role': 'assistant',
+            'content': [{'type': 'text', 'text': ''}],
+            'stop_reason': stop_reason,
+            'usage': usage,
+        },
+    }
+
+
+def _stream_frame(event: dict[str, Any]) -> dict[str, Any]:
+    """Return a claude stream frame wrapping one top-level raw API event."""
+    return {
+        'type': 'stream_event',
+        'event': event,
+        'parent_tool_use_id': None,
+        'session_id': 'SID',
+    }
+
+
+def _user_entry(**fields: Any) -> dict[str, Any]:
+    """Return a claude transcript line of a user turn: a tool's result."""
+    return {
+        'type': 'user',
+        'isSidechain': False,
+        **fields,
+        'message': {
+            'role': 'user',
+            'content': [
+                {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': ''}
+            ],
+        },
+    }
+
+
+def _price(usage: dict[str, int], model: str = 'claude-fable-5') -> float:
+    """Return a claude reply's cost at the test rates (``_CLAUDE_PRICING``)."""
+    rates = _CLAUDE_PRICING[model]
+    return sum(count * rates[_RATE_KEYS[bucket]] for bucket, count in usage.items())
+
+
+def _step_rows(node: Node) -> list[str]:
+    """Return the node's step rows, oldest first, as ``name/status/metadata``."""
+    rows = node.db.read('steps', where={'node': node.branch})
+    return [
+        f'{row["step_name"]}/{row["status"]}/{row["metadata"] or ""}'
+        for row in sorted(rows, key=lambda row: row['step_id'])
+    ]
+
+
+def _effort(argv: tuple[str, ...]) -> Optional[str]:
+    """Return a claude launch's ``--effort`` value, or ``None`` without one."""
+    if '--effort' not in argv:
+        return None
+    return argv[argv.index('--effort') + 1]
+
+
+def _step_efforts(node: Node) -> list[Optional[str]]:
+    """Return the effort column of the node's step rows, oldest first."""
+    rows = node.db.read('steps', where={'node': node.branch})
+    return [row['effort'] for row in sorted(rows, key=lambda row: row['step_id'])]
+
+
+def _commit_settings(node: Node, settings: dict[str, Any]) -> None:
+    """Commit the project's ``.fractal/.settings.json`` on the node's branch."""
+    path = node.worktree / '.fractal' / '.settings.json'
+    path.write_text(json.dumps(settings), encoding='utf-8')
+    _git(node.worktree, 'add', '-f', '.fractal/.settings.json')
+    _git(node.worktree, 'commit', '-q', '-m', 'project settings')
+
+
 def _configure(node: Node, **values: Any) -> None:
     """Merge ``values`` into the node's raw ``config.json``."""
     path = node.node_dir / 'config.json'
@@ -4587,9 +9775,34 @@ def _configure(node: Node, **values: Any) -> None:
     path.write_text(json.dumps(config, indent=2), encoding='utf-8')
 
 
+def _launch_verb(node: Node, launch: str) -> str:
+    """Run the ``launch`` verb (``start``, ``continue``, or ``resume``) on ``node``."""
+    if launch == 'resume':
+        return node.resume()
+    return node.start(continue_run=launch == 'continue')
+
+
 def _locked_list(**kwargs: Any) -> list[Any]:
     """Fail the live subtree probe like a contended central-DB read."""
     raise sqlite3.OperationalError('database is locked')
+
+
+def _ready_for_launch(node: Node, launch: str) -> None:
+    """Leave ``node`` where ``launch`` starts from: idle, settled, or paused.
+
+    A continue starts from a run that exited; a resume from an open run
+    parked with its pause credit span open.
+    """
+    if launch == 'continue':
+        run_id = node.record.run_start()
+        node.record.run_end(run_id=run_id, status='exited', exit_code=1)
+        node.status_set('exited')
+    if launch == 'resume':
+        node.status_set('active')
+        node.record.run_start()
+        pause_id = node.record.event_start('pause')
+        node.record.event_end(event_id=pause_id, status='completed')
+        node.status_set('paused')
 
 
 def _record_unpriced_step(node: Node, *, run_id: int) -> None:

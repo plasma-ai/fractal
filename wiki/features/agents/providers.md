@@ -2,10 +2,12 @@
 name: features/agents/providers
 desc: |
   The supported agent backends, the registry in the core agent module that
-  resolves a base command to its backend class, and the provider routes a
-  backend may expose beside its vendor-native endpoint.
+  resolves a base command to its backend class, the provider routes a backend
+  may expose beside its vendor-native endpoint, which instruction files a
+  node's claude session reads, and when codex's in-turn error frames recover
+  after a clean exit.
 created: 2026-07-21T05:04:16Z
-updated: 2026-07-21T05:04:16Z
+updated: 2026-10-24T04:34:08Z
 ---
 
 # features/agents/providers
@@ -29,9 +31,14 @@ declared capability attributes rather than code paths: whether the session can
 be forked; whether the agent mints its own session id (codex) or the caller
 mints and pre-stamps it (claude); whether cost figures are per-invocation or
 cumulative thread totals settled against prior sibling steps; whether the
-backend needs LiteLLM token pricing (fatal at run start if the fetch fails);
-whether it accepts a hard per-step budget flag; and whether it emits one result
-frame per step (opencode) rather than one terminal result per turn.
+backend needs LiteLLM token pricing (fatal at run start if the fetch fails), or,
+reporting its own cost, wants the table for what that figure misses
+(`wants_pricing`: claude and grok, whose run start refreshes a day-old table and
+only warns when the fetch fails); whether it accepts a hard per-step budget
+flag; whether its stream marks when the agent takes and hands off control
+(`reports_progress`: claude), which arms the no-progress watchdog; and whether
+it emits one result frame per step (opencode) rather than one terminal result
+per turn.
 
 ## The registry
 
@@ -82,3 +89,62 @@ computes from the authoritative frames only.
 The route a node actually runs is configuration: the `provider` config key
 carries the node's effective route, alongside `agent`, `model`, and `effort`
 (see [[features/agents/models_and_effort]]).
+
+## Claude session isolation
+
+A node's claude session reads only its worktree's own instruction files. Claude
+Code loads the instruction files of every directory above its working directory
+(`CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `.claude/rules/`, and
+`AGENTS.md` when no `CLAUDE.md` is found) and the user's own `CLAUDE.md` and
+rules from its config home. On a host whose repos sit under a directory with its
+own `CLAUDE.md` (the operator's instructions to their own agents), every node
+would otherwise follow those instructions beside its charter.
+
+So each launch passes the node's `settings.json` through the `--settings` flag
+as JSON, composed with a `claudeMdExcludes` list: the node file's own excludes,
+the user's files under the config home claude reads (`CLAUDE_CONFIG_DIR`, else
+`~/.claude`), then every such path in each directory from the worktree's parent
+up to `/`. The worktree's own files still load, since none of its paths sits
+above it. The node's file on disk is never rewritten (it is the station's or the
+operator's), and a node with no file of its own passes the excludes alone. So
+does a node whose file is not a JSON object, with a warning logged: claude
+itself runs without a settings file it cannot load, so the composition keeps
+that outcome rather than refusing the launch. Claude Code cannot exclude an
+organization's managed `CLAUDE.md`.
+
+By default each launch also passes `--setting-sources project,local` and
+`--strict-mcp-config`: the session loads the worktree's project and local
+settings and the node's own (the flag's settings always load), and only the MCP
+servers it is handed -- none. The user's own settings (permissions, hooks,
+plugins, model and effort defaults), user skills, MCP servers, and the claude.ai
+connectors claude fetches for a subscription login stay out, and so do a
+project's `.mcp.json` servers, so a node runs the same on any host. The
+`user_settings` config key opts back in: the node's own value, else the nearest
+ancestor's that sets one (the user node's is the tree's default), read at each
+launch by `Node.user_settings_effective`; set, neither flag is passed, while the
+instruction excludes still apply. The settings-chain resolution behind the
+recorded model and effort defaults (`ClaudeAgent._setting`) reads the user's
+`~/.claude/settings.json` only under the same opt-in, so fractal never reports a
+default the session does not load (see [[features/agents/models_and_effort]]).
+The openrouter route rides process environment variables, not settings, so the
+setting sources leave it whole; a host that routes claude through its user
+settings' `env` needs the opt-in.
+
+## Codex stream recovery
+
+Codex's `exec --json` stream reports a retried stream error and a fatal one on
+the same frame — a top-level `error` frame carrying only a `message` — and tells
+them apart by exit status alone: a fatal error, a failed turn, or an interrupted
+turn exits `1`, and `turn.completed` is emitted only for a turn that completed.
+Fractal renders every `error` and `turn.failed` frame as it arrives, then
+settles the outcome after exit. An `error` frame inside the one active turn —
+after `thread.started` named the thread and `turn.started` opened the turn,
+before `turn.completed` — is provisional: when codex exits `0` and the stream
+describes that one turn completing, the recorded errors clear and the step books
+completed. A `turn.failed` frame, an error outside the active turn, an error in
+a turn that never completes, or a non-zero exit keeps the step failed.
+
+Recovery settles the stream outcome only. Cost still requires the
+invocation-bound rollout evidence described in [[features/cost/measurement]]; a
+recovered step whose rollout cannot be bound closes unpriced with the usual
+`codex usage unpriced: <reason>` warning.

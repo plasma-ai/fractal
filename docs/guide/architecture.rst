@@ -152,14 +152,18 @@ Fractal's footprint
    ``fractal untrack`` toggle this).
 
 ``.gitattributes``
-   ``fractal init`` writes the ``**/_index.md merge=wiki`` rule (under a
-   one-line comment) into the repo-root ``.gitattributes`` for the wiki it
-   creates, creating the file when absent and appending to it otherwise (one
-   with uncommitted edits is left alone), so generated wiki indexes merge
-   through the wiki merge driver. An adopted wiki gets no write: init warns
-   and names the line to append and commit instead. The rule is ordinary
-   committed content: the ``fractal commit --init`` baseline picks it up
-   while it is still init's own uncommitted edit. The driver itself is
+   ``fractal init`` writes the wiki tool's merge-driver rules for the wiki it
+   creates, each under a one-line comment: ``**/_index.md merge=wiki`` for
+   wiki indexes into the repo-root ``.gitattributes`` and, from a wiki tool
+   with a page driver, ``*.md merge=wiki`` for wiki pages into the wiki's own
+   ``.gitattributes`` (``wiki/.gitattributes``; a node's memory wiki gets one
+   too, committed with the node's data). It creates each file when absent and
+   appends the missing rule otherwise (one with uncommitted edits is left
+   alone), so wiki files merge through the wiki merge driver. An adopted wiki
+   gets no write: init warns and names the lines to append and commit
+   instead. The rules are ordinary committed content: the
+   ``fractal commit --init`` baseline picks them up while they are still
+   init's own uncommitted edit. The driver itself is
    registered in repo-local git config (``merge.wiki.driver``), which a clone
    does not carry — run ``wiki config --path=wiki`` after cloning to register
    it again.
@@ -183,13 +187,14 @@ worktree. The bootstrap and baseline commit by pathspec, so other staged work
 stays staged; the merge refuses while the target worktree has uncommitted
 tracked changes or when the squash would write over any file that exists
 untracked there (an ignored ``local.env``, your own live seed), and restores
-it if the squash conflicts. The project wiki at ``wiki/`` and the
-``.gitattributes`` merge rule are created by ``fractal init`` but committed
-as ordinary project content for you and the nodes to grow. Teardown respects
-the same line — ``fractal node delete`` removes a subtree, ``fractal reset``
-removes every node while keeping the database, and even ``fractal destroy``
-leaves committed artifacts (the wiki and baseline commits) and remote
-branches in place. See :doc:`/guide/lifecycle` for the teardown tiers.
+it if the squash conflicts. The project wiki (``wiki/``, or the folder the
+project's ``.fractal/.settings.json`` names; see :doc:`/configuration`) and
+the ``.gitattributes`` merge rule are created by ``fractal init`` but
+committed as ordinary project content for you and the nodes to grow.
+Teardown respects the same line — ``fractal node delete`` removes a subtree,
+``fractal reset`` removes every node while keeping the database, and even
+``fractal destroy`` leaves committed artifacts (the wiki and baseline
+commits) and remote branches in place. See :doc:`/guide/lifecycle` for the teardown tiers.
 
 Package names
 -------------

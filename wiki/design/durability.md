@@ -26,14 +26,15 @@ Every design choice below serves that round-trip guarantee.
 A paused node stops executing and nothing else. Its run and iteration rows stay
 open for resume to adopt; it keeps its spawn slot in the tree's limits; it
 blocks an ancestor's finish-drain the same way an active child would; and only
-resume, kill, and chat are legal on it. The alternative — treating pause as a
-lightweight exit — would make the freeze lossy: closed rows would force resume
-to fabricate a fresh run (new budget arming, reset iteration numbers), a
-released slot would let a sibling spawn into space the frozen node still owns,
-and an ancestor draining "done" children over a paused one would complete over
-work that is merely suspended. Pause is a promise the tree makes to the future
-resume, and the promise only holds if the rest of the system keeps behaving as
-though the node were still there — because it is.
+resume, kill, chat, and merge (committed work only; the node stays paused) are
+legal on it. The alternative — treating pause as a lightweight exit — would make
+the freeze lossy: closed rows would force resume to fabricate a fresh run (new
+budget arming, reset iteration numbers), a released slot would let a sibling
+spawn into space the frozen node still owns, and an ancestor draining "done"
+children over a paused one would complete over work that is merely suspended.
+Pause is a promise the tree makes to the future resume, and the promise only
+holds if the rest of the system keeps behaving as though the node were still
+there — because it is.
 
 The ordering of the fan-outs encodes the same promise. Pause sweeps parent-first
 — the inverse of every other signal — so a parent is never left running long
@@ -73,16 +74,19 @@ Cost needs no crediting — a parked node spends nothing, and spend is recorded,
 not accrued by the clock. Deadlines do: run and iteration timeouts are wall
 clock, and a raw reading would charge the frozen days against them, so a run
 paused overnight could wake already timed out. The pause and resume events are
-the correction record: each pause-to-resume span is summed and credited back to
-the run and iteration deadlines, clipped to the scope's own window, with an
-unmatched trailing pause accruing to now because the node is still parked.
+the correction record: each span from the loop's park to the resume is summed
+and credited back to the run and iteration deadlines, clipped to the scope's own
+window, with an unmatched trailing park accruing to now because the node is
+still parked.
 
-The edges of the walk are chosen for honesty. A failed resume never closes a
-span — the loop never relaunched, so the node is still frozen and the clock must
-stay stopped. A failed pause still opens one — the signal is durable and the
-loop parks at its next checkpoint anyway. Steps need no crediting at all, by
-construction: a step never spans a pause, because the interrupted step's row
-closes paused and resume opens a fresh one. The same instants double as the
+The edges of the walk are chosen for honesty. A span opens at the park the loop
+records, never at the pause request — a step in flight works on past the request
+until the loop parks, so the request marks when work was asked to stop, not when
+it stopped, and a resume that withdraws a pending pause before any park credits
+nothing. A failed resume never closes a span — the loop never relaunched, so the
+node is still frozen and the clock must stay stopped. Steps need no crediting at
+all, by construction: a step never spans a pause, because the interrupted step's
+row closes paused and resume opens a fresh one. The same instants double as the
 substrate for pause-aware cost attribution, which is why they are recorded as
 durable events rather than in-memory loop state.
 

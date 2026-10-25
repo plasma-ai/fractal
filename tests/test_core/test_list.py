@@ -17,7 +17,7 @@ from typing import Optional
 
 import pytest
 
-from fractal.constants import PGID_FILE, SOCKET_FILE
+from fractal.constants import CRASH_REASON, PGID_FILE, SOCKET_FILE
 from fractal.core.node import Node
 from tests._helpers import _past_timestamp
 
@@ -30,6 +30,7 @@ __all__ = [
     'test_list_live_trusts_real_state',
     'test_list_live_relabels_crashed_active',
     'test_list_live_reads_booting_idle_as_active',
+    'test_list_judges_the_boot_window_with_one_tmux_listing',
     'test_list_live_confirms_relabels_on_recorded_socket',
     'test_list_heals_a_bare_loop_on_a_blind_host',
     'test_list_renders_config_caps_over_stale_registry',
@@ -40,6 +41,7 @@ __all__ = [
     'test_list_flags_orphan_rows',
     'test_list_renders_last_activity_age',
     'test_list_flags_stale_active_rows',
+    'test_list_stale_flag_waits_out_the_active_steps_timeout',
     'test_list_flags_iteration_gaps',
     'test_billing_detector_reads_realistic_step_sequences',
     'test_list_flags_billing_backoff',
@@ -176,6 +178,45 @@ def test_list_live_reads_booting_idle_as_active(
     monkeypatch.setattr('fractal.util.tmux.probe', frozenset)
     live = {row['node']: row['status'] for row in parent.list(live=True)}
     assert live[child.branch] == 'idle'
+
+
+def test_list_judges_the_boot_window_with_one_tmux_listing(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decorated listing judges every row's boot window with one tmux listing.
+
+    The census runs often over many idle nodes, so the ``starting`` verdict
+    and its ``detail`` share one session listing instead of a probe per
+    row. An undecorated listing -- the one short-name resolution reads --
+    never looks, so its rows read ``starting`` as unknown, never as false.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    # two rows in the boot window: .status still 'idle', the tmux sessions
+    # already live
+    for node in (parent, child):
+        node.status_set('idle')
+    calls: list[Optional[str]] = []
+
+    def probe(socket: Optional[str] = None) -> frozenset[str]:
+        calls.append(socket)
+        return frozenset({parent.tmux_session, child.tmux_session})
+
+    monkeypatch.setattr('fractal.util.tmux.probe', probe)
+    rows = {row['node']: row for row in Node(git_repo).list(decorated=True)}
+    for node in (parent, child):
+        row = rows[node.branch]
+        assert (row['status'], row['detail'], row['starting']) == (
+            'idle',
+            'starting',
+            True,
+        )
+    assert len(calls) == 1, calls
+    # an undecorated listing never looks
+    calls.clear()
+    rows = {row['node']: row for row in Node(git_repo).list()}
+    assert [rows[node.branch]['starting'] for node in (parent, child)] == [None, None]
+    assert calls == []
 
 
 def test_list_live_confirms_relabels_on_recorded_socket(
@@ -347,7 +388,9 @@ def test_list_decorates_exited_with_run_reason(
             'Could not fetch pricing and no cached pricing.json exists.',
             'other',
         ),
-        # a reason-less exited row (the reconcile-healed crash's shape)
+        # the crash heal's own stamp, at a later read or the next boot
+        ('exited', 1, CRASH_REASON, 'crashed'),
+        # a reason-less exited row is nothing recorded
         ('exited', 1, '', None),
         ('completed', 0, '', 'goal_met'),
         # a cap-overshoot note is still done-conditions-met
@@ -396,10 +439,9 @@ def test_end_reason_types_each_recorded_landing(
 def test_end_reason_null_when_nothing_recorded(node_with_db: Node) -> None:
     """``end_reason`` is null wherever no run landing stands recorded.
 
-    A node that never ran, a live run, and a reconcile-healed crash
-    (rows closed reason-less) all read ``None`` -- and a requested stop
-    does too: the vocabulary types the completed/exited landings, not
-    every lifecycle terminal.
+    A node that never ran and a live run read ``None`` -- and a
+    requested stop does too: the vocabulary types the completed/exited
+    landings, not every lifecycle terminal.
     """
     node = node_with_db
     # never ran: no run row to read
@@ -408,7 +450,7 @@ def test_end_reason_null_when_nothing_recorded(node_with_db: Node) -> None:
     node.status_set('active')
     node.record.run_start()
     assert node.end_reason() is None
-    # a reconcile-healed crash closes its rows reason-less
+    # a run closed with no reason stands unrecorded
     node.record.close_open('exited')
     node.status_set('exited')
     assert node.end_reason() is None
@@ -519,6 +561,62 @@ def test_list_flags_stale_active_rows(
     child.status_set('completed')
     rows = {row['node']: row['last'] for row in parent.list()}
     assert rows[child.branch] == '20m'
+
+
+@pytest.mark.parametrize(
+    argnames=('step_timeout', 'frontmatter', 'recorded', 'last'),
+    argvalues=[
+        ('10m', '', None, '20m!'),
+        ('10m', '---\ntimeout: 1h\n---\n', None, '20m'),
+        (3600, '', None, '20m!'),
+        ('10m', '', 3600, '20m'),
+    ],
+    ids=['node-step-timeout', 'own-timeout', 'numeric-step-timeout', 'recorded'],
+)
+def test_list_stale_flag_waits_out_the_active_steps_timeout(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step_timeout: object,
+    frontmatter: str,
+    recorded: Optional[int],
+    last: str,
+) -> None:
+    """The stale flag measures quiet time against the active step's ceiling.
+
+    A step file's ``timeout:`` line bounds that step in place of the node's
+    ``step_timeout``, so a node quiet past the node value but inside its
+    active step's own longer timeout is working, not stale; a step without
+    one keeps the node value. The launch records the ceiling it enforces on
+    its row, and a recorded ceiling wins over the file. A hand-edited
+    ``step_timeout`` with no unit suffix reads as no step limit, so the row
+    still lists, judged against the staleness floor alone.
+    """
+    parent, child = _spawn_parent_child(git_repo, monkeypatch)
+    child.config.set('step_timeout', step_timeout)
+    steps_dir = child.node_dir / 'steps'
+    for existing in steps_dir.glob('*.md'):
+        existing.unlink()
+    (steps_dir / '01-EXECUTE.md').write_text(
+        f'{frontmatter}# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
+    run_id = child.record.runs(limit=1)[0]['run_id']
+    iter_id = child.record.iter_start(run_id=run_id, iter=1)
+    step_id = child.record.step_start(
+        iter_id=iter_id,
+        run_id=run_id,
+        step=1,
+        step_name='EXECUTE',
+    )
+    if recorded is not None:
+        child.record.step_timeout(step_id=step_id, seconds=recorded)
+    # push every activity instant on the child past the node step_timeout
+    stamp = _past_timestamp(20 * 60)
+    child.db.update({'created_at': stamp}, 'events', where={'node': child.branch})
+    for table in ('runs', 'iters', 'steps'):
+        child.db.update({'started_at': stamp}, table, where={'node': child.branch})
+    rows = {row['node']: row['last'] for row in parent.list()}
+    assert rows[child.branch] == last
 
 
 def test_list_flags_iteration_gaps(

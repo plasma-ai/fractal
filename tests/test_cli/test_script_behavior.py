@@ -1,6 +1,6 @@
 """Script-internal behavior of the node lifecycle shells (``_scripts/``).
 
-Drives ``fractal/_scripts/{init,start,resume,kill,merge,delete}.sh`` against repos
+Drives ``fractal/_scripts/{init,start,resume,kill,pause,merge,delete}.sh`` against repos
 built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 
 - **``init.sh`` worktree resolution** parses ``git worktree list --porcelain``
@@ -38,6 +38,10 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   ``.pgid``/``.step_pgid`` groups without consulting tmux at all, so a
   same-named session from another repo sharing the basename survives the kill
   and the node's own loop is the one reaped.
+- **``pause.sh`` reap verdict** reads only the reap helper's distinct
+  inside-the-tree exit as a self-pause that signals nothing; any other failure,
+  a broken install's import error included, is a helper that could not run, and
+  the script falls back to its own TERM of the step group.
 - **``delete.sh`` per-backend running guard** blocks the teardown on a bare
   tmux session-name match only for a tmux node; a headless node owns no
   session, so a same-named session from another repo sharing the basename
@@ -52,7 +56,9 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
 - **``merge.sh`` merge-base advance** judges the child worktree by the commit
   content law (``fractal commit --check``), so an estate file the law refuses
   (a parked ``.env``) never blocks the advance -- only work a commit would
-  take (dirty tracked edits, committable untracked files) skips it.
+  take (dirty tracked edits, committable untracked files) skips it, as does
+  a commit the child made after the squash took its tip, which the advance
+  would otherwise revert.
 - **``merge.sh`` merge-base advance shape** records the target's post-squash
   commit on the child as a real two-parent commit whose tree is the target's
   with the child's own and descendant seeds grafted back from its HEAD: the
@@ -142,14 +148,22 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   the node's scope roots (its project wiki excepted, every ``.fractal/`` path
   left out of the listing, and the worktree-root ``.gitattributes`` admitted
   only as init's own edit -- HEAD's content, leading blank line or trailing
-  whitespace included, plus exactly the two lines the wiki tool appends, so
-  a foreign line beside them is out of scope even on a target with no
-  ``.gitattributes`` at all), naming the paths and both remedies, in both
-  arms -- a fresh merge restores the target, a ``--continue`` leaves the
-  staged squash -- unless ``--ignore-scope`` is passed; a repo-root node
-  with no scope is unrestricted, a sub-project node with none is bounded to
-  its project dir (its own wiki in, the repo-root wiki out), and one with
-  roots to ``<project>/<root>``.
+  whitespace included, plus the index lines the wiki tool appends, so a
+  page line, a foreign line beside them, or the index lines with one
+  changed is out of scope even on a target with no ``.gitattributes`` at
+  all), naming the paths and both remedies, in both arms -- a fresh merge
+  restores the target, a ``--continue`` leaves the staged squash -- unless
+  ``--ignore-scope`` is passed; a repo-root node with no scope is
+  unrestricted, a sub-project node with none is bounded to its project dir
+  (its own wiki in, the repo-root wiki out), and one with roots to
+  ``<project>/<root>``.
+- **``merge.sh`` wiki-folder check** recomputes the node's project-wiki folder
+  by the spawn rule before the footprint judges it: a ``config.json``
+  hand-edited to another folder refuses, a depth-1 node's parent resolves as
+  the user node by the repo's record (a root checked out in a linked worktree
+  carries no seed to read), and a node held to its sub-project's committed
+  setting is refused when that setting changed since its spawn, naming the
+  setting rather than a ``config.json`` edit.
 - **Templates under the scope law**: a template folder is ordinary project
   content, so the scope rule is the only rule -- a node whose scope covers
   the folder commits a template edit through ``fractal commit`` and lands it
@@ -172,6 +186,35 @@ built by the real CLI, pinning edges the end-to-end lifecycle tests don't reach:
   prefills a later bare ``git commit`` in the target with the stale squash
   message; a marker path git cannot answer is skipped rather than resolved,
   as an empty word, to the target's worktree root.
+- **``merge.sh`` wiki-root refresh** refreshes, beyond the project and
+  memory wikis, every other declared wiki root holding a path the squash
+  adds, changes, or deletes, whole, so a validator's whole-root
+  ``wiki update --check`` passes: a page edited without a restamp, or by both
+  sides, lands restamped, every index lists what landed (a merged index in
+  order over a criss-cross merge base too, a moved page under its new
+  folder, a new or deleted folder in the index above it), a settings change
+  re-indexes its root, and a fix the target's root already needed rides the
+  squash; a path belongs to the deepest root above it. A wiki declared at
+  the worktree root refuses the merge, since every refresh would walk the
+  whole worktree; an untracked file in a refreshed root refuses the merge by
+  name, while one in a sibling a glob would match does not; an index in a
+  folder its wiki excludes is skipped; and a failed refresh restores the
+  target with the child unadvanced, as does a failed declaration read,
+  listing, or staging step around it, and a direct call that names no
+  project-wiki folder and can read it, with its project, from neither the
+  target's config nor the node's, rather than refreshing whatever sits at the
+  default ``wiki/`` -- one config names both, so a sub-project node's folder
+  never resolves under the root project.
+  Untracked files are judged by the wiki's ignore and dot rules: a file only a
+  personal ignore hides refuses the merge, since the wiki would index it, and
+  one under a dot-prefixed folder neither refuses it nor rides the squash; a
+  symlink, or a file the wiki's ``exclude.patterns`` matches, still refuses,
+  which is safe, and committing or moving the file clears it. A root the
+  wiki refuses to sweep, because its walk reaches another declared wiki,
+  lands as the driver merged it, with a warning, while one whose settings
+  exclude the inner wiki's folder refreshes like any other; an untracked file
+  under the inner wiki belongs to it, so the outer root neither refuses nor
+  stages it.
 - **``merge.sh --continue``** finishes an operator's hand-resolved squash after
   a conflicted merge with the merge's own tail -- ``.fractal/`` restore and
   seed strip, footprint check, commit, merge-base advance -- and refuses when
@@ -226,13 +269,15 @@ import pathlib
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from typing import Optional
 
 import pytest
 
 import fractal
-from tests._helpers import _git
+from fractal.core.node import Node
+from tests._helpers import _files, _git
 
 from .conftest import _await_progress, _cli_env, _fractal_bin, _reap_group, _run
 
@@ -247,6 +292,7 @@ __all__ = [
     'test_headless_handoff_failure_records_no_backend',
     'test_tmux_relaunch_failure_keeps_the_backend_record',
     'test_kill_reaps_only_the_recorded_group_for_a_headless_node',
+    'test_pause_signals_only_on_a_reap_helper_verdict',
     'test_delete_running_guard_is_per_backend',
     'test_merge_preserves_a_target_edit_that_lands_during_the_merge',
     'test_merge_re_merges_an_iterating_child_without_conflict',
@@ -254,6 +300,15 @@ __all__ = [
     'test_merge_re_merge_offering_only_the_seed_is_a_no_op',
     'test_merge_no_op_marker_clearing_never_touches_the_target_root',
     'test_merge_sibling_wiki_work_lands_without_conflict',
+    'test_merge_orders_sibling_rows_in_every_wiki_root',
+    'test_merge_orders_merged_rows_wherever_the_index_sits',
+    'test_merge_regenerates_an_index_merged_over_a_criss_cross_base',
+    'test_merge_refuses_a_wiki_declared_at_the_worktree_root',
+    'test_merge_skips_an_index_in_a_folder_its_wiki_excludes',
+    'test_merge_judges_untracked_files_by_the_wikis_own_rules',
+    'test_merge_lands_a_merged_index_whose_folder_encloses_another_wiki',
+    'test_merge_restores_the_target_when_a_corpus_refresh_fails',
+    'test_merge_restores_the_target_when_a_wiki_refresh_step_fails',
     'test_failed_merge_restore_removes_the_staged_child_additions',
     'test_merge_leaves_the_target_clean_when_scratch_creation_fails',
     'test_merge_advances_the_merge_base_past_a_refused_estate_file',
@@ -265,6 +320,7 @@ __all__ = [
     'test_merge_advance_brings_the_targets_fractal_pages_to_the_child',
     'test_merge_skips_the_advance_when_the_child_index_is_locked',
     'test_merge_skips_the_advance_when_reading_the_child_worktree_fails',
+    'test_merge_skips_the_advance_when_the_child_moves_mid_merge',
     'test_merge_skips_the_advance_over_a_private_ignored_file',
     'test_merge_skips_the_advance_over_a_path_the_target_renamed_onto',
     'test_merge_advance_moves_a_tracked_case_variant',
@@ -276,6 +332,7 @@ __all__ = [
     'test_merge_continue_lands_the_resolution_on_the_node',
     'test_merge_continue_restores_a_foreign_seed_edit_the_hand_squash_carries',
     'test_merge_continue_refuses_unstaged_target_edits',
+    'test_merge_continue_reads_the_target_by_content',
     'test_merge_continue_refuses_commits_newer_than_the_squash',
     'test_merge_continue_refuses_unresolved_conflicts',
     'test_merge_continue_refuses_a_siblings_squash',
@@ -299,7 +356,16 @@ __all__ = [
     'test_merge_into_a_node_target_resolves_a_conflict_on_its_own_seed',
     'test_merge_warnings_print_a_non_ascii_path_readably',
     'test_merge_refuses_a_squash_outside_the_nodes_scope',
+    'test_merge_footprint_exempts_the_configured_wiki',
+    'test_merge_refuses_a_hand_edited_wiki_folder',
+    'test_merge_into_a_linked_root_holds_the_trees_wiki_folder',
+    'test_merge_refreshes_a_sub_project_nodes_own_wiki',
+    'test_merge_ignoring_scope_refreshes_the_folder_the_spawn_gave',
+    'test_merge_refuses_when_the_wiki_folder_read_fails',
+    'test_merge_reads_the_wiki_folder_and_its_project_from_one_config',
+    'test_merge_refuses_a_node_whose_project_setting_changed_since_spawn',
     'test_merge_admits_init_attributes_over_a_targets_own_lines',
+    'test_merge_admits_only_the_wiki_attributes_edit',
     'test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal',
     'test_merge_continue_refuses_a_squash_outside_the_nodes_scope',
     'test_merge_lands_a_scoped_nodes_template_edit_for_later_spawns',
@@ -325,6 +391,20 @@ __all__ = [
     'test_delete_warns_on_unmerged_wiki_page_work',
     'test_delete_does_not_warn_on_merge_regenerated_wiki_state',
 ]
+
+# the merge-driver lines a worktree-root .gitattributes passes with as init's
+# edit: the index lines the wiki tool writes there
+_WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
+# a repo-wide page merge-driver block, which would take over the merge of
+# every Markdown file
+_WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
+# the page merge-driver block the wiki tool writes to each wiki root's own
+# .gitattributes
+_WIKI_ROOT_PAGE_LINES = '# Wiki page merge driver\n*.md merge=wiki\n'
+
+# an mtime no checkout records, so a tracked file set to it has stale stat
+# data in the index while its bytes stay as committed
+_AGED_NS = 1_000_000_000 * 10**9
 
 
 # ------ init.sh: worktree paths with spaces
@@ -863,6 +943,60 @@ def test_kill_reaps_only_the_recorded_group_for_a_headless_node(
         _reap_group(leader)
 
 
+# ------ pause.sh: the reap helper's verdict
+
+
+@pytest.mark.parametrize(
+    argnames=('helper', 'aborted'),
+    argvalues=[
+        # a broken install: the interpreter dies on an import, exiting 1
+        (f'exec "{sys.executable}" -c "import _fractal_not_installed"', True),
+        # the helper's own inside-the-tree verdict
+        ('exit 3', False),
+    ],
+    ids=['import-failure', 'inside-the-tree'],
+)
+def test_pause_signals_only_on_a_reap_helper_verdict(
+    tmp_path: pathlib.Path,
+    helper: str,
+    aborted: bool,
+) -> None:
+    """``pause.sh`` keeps the agent only on the reap's inside-the-tree exit.
+
+    A pause run inside the agent's own tree must signal nothing, and the
+    reap helper says so with an exit no other failure produces; a helper
+    that cannot run at all -- a broken install whose import fails exits 1,
+    as any uncaught Python error does -- must still end the step, through
+    the script's own marked TERM of the recorded step group.
+    """
+    repo = _init_tree(tmp_path / 'pauserepo')
+    node_dir = repo / '.fractal' / 'main'
+    bindir = tmp_path / 'pause-bin'
+    bindir.mkdir()
+    shim = bindir / 'fractal'
+    shim.write_text(f'#!/bin/sh\n{helper}\n', encoding='utf-8')
+    shim.chmod(0o755)
+    env = _cli_env()
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+    # a live step group, as the loop records it around a launch
+    leader = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    (node_dir / '.step_pgid').write_text(f'{leader.pid}\n', encoding='utf-8')
+    try:
+        result = _script('pause.sh', repo, f'{repo}', env=env)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        if aborted:
+            assert 'Aborted in-flight agent' in result.stdout, result.stdout
+            assert leader.wait(timeout=10) == -signal.SIGTERM
+            assert (node_dir / '.pause_abort').exists()
+        else:
+            assert 'Kept in-flight agent' in result.stdout, result.stdout
+            assert leader.poll() is None
+            assert not (node_dir / '.pause_abort').exists()
+    finally:
+        _reap_group(leader)
+
+
 # ------ delete.sh: the per-backend running guard
 
 
@@ -1221,6 +1355,875 @@ def test_merge_sibling_wiki_work_lands_without_conflict(
     assert '.wiki/cache' not in tracked
 
 
+def test_merge_orders_sibling_rows_in_every_wiki_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Sibling pages in one folder of a corpus wiki land with its index current.
+
+    The ``_index.md`` merge driver unions both siblings' rows, but it cannot
+    add a row for a page a sibling committed without refreshing its index, so
+    the merged index would fail a whole-root ``wiki update --check``. The
+    squash refreshes each declared wiki root it touches, whole, not only the
+    project wiki, so the merged index carries every page's row in order, and
+    a parent whose root already needed ``wiki update`` gets the fix in the
+    squash: the stale index of a folder no merge touched lands refreshed. The
+    refresh reads the disk, so an untracked draft in a root it refreshes
+    would be indexed into the commit: the merge refuses it by name and
+    restores the target.
+    """
+    repo = _init_tree(tmp_path / 'corpusrepo')
+    # a declared corpus root beside the project wiki: a folder both siblings
+    # add a page to, and a folder whose index no merge touches
+    corpus = repo / 'library'
+    (corpus / '.wiki').mkdir(parents=True)
+    (corpus / '.wiki' / 'settings.json').write_text('{}\n', encoding='utf-8')
+    for folder in (corpus, corpus / 'cards', corpus / 'other'):
+        folder.mkdir(exist_ok=True)
+        (folder / '_index.md').write_text(
+            f'---\nname: {folder.name}\ndesc: The {folder.name} folder.\n---\n'
+            f'# {folder.name}\n\n***\n',
+            encoding='utf-8',
+        )
+    for name in ('first', 'second'):
+        (corpus / 'other' / f'{name}.md').write_text(
+            f'---\nname: {name}\ndesc: A {name} page.\n---\n\n# {name}\n\n***\n',
+            encoding='utf-8',
+        )
+    _wiki_update(corpus)
+    _wiki_update(repo / 'wiki')
+    # leave the untouched folder's index stale: its two rows swapped
+    other = corpus / 'other' / '_index.md'
+    lines = other.read_text(encoding='utf-8').split('\n')
+    rows = [i for i, line in enumerate(lines) if line.startswith('[[other/')]
+    lines[rows[0]], lines[rows[1]] = lines[rows[1]], lines[rows[0]]
+    stale = '\n'.join(lines)
+    other.write_text(stale, encoding='utf-8')
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'add corpus')
+    # both siblings fork from the same tip; the first adds a page that sorts
+    # last, so the driver appends the second's row after it
+    for name in ('one', 'two'):
+        init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
+        assert init.returncode == 0, init.stderr
+    worktrees = {}
+    for name, page in (('one', 'zeta'), ('two', 'alpha')):
+        worktree = repo / '.worktrees' / f'main.{name}'
+        worktrees[name] = worktree
+        (worktree / 'library' / 'cards' / f'{page}.md').write_text(
+            f'---\nname: {page}\ndesc: A {page} card.\n---\n\n# {page}\n\n***\n',
+            encoding='utf-8',
+        )
+        # the node refreshes only its own folder, as a gated node does
+        subprocess.run(
+            ['wiki', 'update', f'--path={worktree / "library"}', 'cards'],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_cli_env(),
+        )
+        _git(worktree, 'add', '-A')
+        _git(worktree, 'commit', '-m', f'{page} card')
+    # the second sibling then commits a card without refreshing the index, so
+    # only the merge's own refresh can give it a row
+    _write_page(worktrees['two'] / 'library' / 'cards' / 'mid.md')
+    _git(worktrees['two'], 'add', '-A')
+    _git(worktrees['two'], 'commit', '-m', 'mid card')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    # an untracked draft in the root the second merge refreshes refuses it
+    # by name, restoring the target with the draft untouched
+    draft = corpus / 'cards' / 'draft.md'
+    draft.write_text('a bare draft\n', encoding='utf-8')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    refused = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
+    assert 'library/cards/draft.md' in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert draft.read_text(encoding='utf-8') == 'a bare draft\n'
+    # moved aside, the draft no longer blocks the second sibling's merge
+    draft.unlink()
+    second = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert second.returncode == 0, (second.stdout, second.stderr)
+
+    # the shared folder's index lists every card in order, the unrefreshed
+    # one included...
+    index = _git(repo, 'show', 'main:library/cards/_index.md').stdout
+    assert '[[cards/mid' in index, index
+    assert (
+        index.index('[[cards/alpha')
+        < index.index('[[cards/mid')
+        < index.index('[[cards/zeta')
+    ), index
+    # ...the stale index no merge touched landed refreshed, its rows in
+    # order...
+    other_index = _git(repo, 'show', 'main:library/other/_index.md').stdout
+    assert other_index != stale, other_index
+    assert other_index.index('[[other/first') < other_index.index('[[other/second')
+    # ...and the refresh left the target clean
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+@pytest.mark.parametrize(
+    argnames=('roots', 'root', 'folder', 'stray'),
+    argvalues=[
+        (('library',), 'library', '.', None),
+        (('library', 'library/inner'), 'library/inner', 'cards', None),
+        (('[x]',), '[x]', '.', 'x/sub/_index.md'),
+    ],
+    ids=['root-index', 'deepest-root', 'glob-named-root'],
+)
+def test_merge_orders_merged_rows_wherever_the_index_sits(
+    tmp_path: pathlib.Path,
+    roots: tuple[str, ...],
+    root: str,
+    folder: str,
+    stray: Optional[str],
+) -> None:
+    """A merged index lands in order wherever it sits in a corpus wiki.
+
+    A root the squash touches refreshes whole, its own index included; an
+    index in a nested declared wiki is refreshed as part of the deepest root
+    above it, so its rows link relative to that root; and a root whose name
+    holds a glob character is matched literally, so an untracked index in a
+    sibling the glob would match stays untracked and never refuses the merge.
+    """
+    repo = _init_tree(tmp_path / 'layoutrepo')
+    for declared in roots:
+        _declare_wiki(
+            repo / declared, *([folder] if declared == root and folder != '.' else [])
+        )
+    _git(repo, 'add', '-A', '--', *roots)
+    _git(repo, 'commit', '-m', 'declare the corpus')
+    worktrees = _sibling_pages(repo, root, folder)
+    if stray is not None:
+        (repo / stray).parent.mkdir(parents=True)
+        (repo / stray).write_text(
+            '---\nname: sub\n---\n# sub\n\n***\n', encoding='utf-8'
+        )
+
+    for name in ('one', 'two'):
+        result = _script('merge.sh', repo, f'{worktrees[name]}')
+        assert result.returncode == 0, (result.stdout, result.stderr)
+
+    # the merged index lists every page in order, the unrefreshed one
+    # included, linked relative to its root
+    prefix = '' if folder == '.' else f'{folder}/'
+    index = _git(repo, 'show', f'main:{root}/{prefix}_index.md').stdout
+    assert f'[[{prefix}mid' in index, index
+    assert (
+        index.index(f'[[{prefix}alpha')
+        < index.index(f'[[{prefix}mid')
+        < index.index(f'[[{prefix}zeta')
+    ), index
+    # the target is clean but for the untouched stray
+    status = _git(repo, 'status', '--porcelain').stdout.strip()
+    assert status == ('' if stray is None else f'?? {stray.rsplit("/", 2)[0]}/')
+
+
+def test_merge_regenerates_an_index_merged_over_a_criss_cross_base(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An index merged over a criss-cross base is regenerated all the same.
+
+    After the node merges the target and the target merges the node, git
+    names one of two merge bases; when the target's index matches the named
+    base, a base-relative test would call the index the node's own. The
+    squash still merges it against both, and its staged bytes match neither
+    side's, so the merge regenerates it: in order, with a row for the page
+    the node committed without refreshing the index, and with the row for a
+    page the merge deleted pruned.
+    """
+    repo = _init_tree(tmp_path / 'crissrepo')
+    # the target carries the merge-driver attribute itself: its ours-merge of
+    # the node below keeps the target's own tree
+    (repo / '.gitattributes').write_text(
+        '# Wiki index merge driver\n**/_index.md merge=wiki\n', encoding='utf-8'
+    )
+    corpus = repo / 'library'
+    _declare_wiki(corpus, 'cards')
+    _write_page(corpus / 'cards' / 'm.md')
+    _wiki_update(corpus)
+    _git(repo, 'add', '-A', '--', 'library', '.gitattributes')
+    _git(repo, 'commit', '-m', 'add the m card')
+    init = _run(repo, 'node', 'init', 'two', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.two'
+    # the node adds y; the target adds b, dated later so git names it the base
+    _write_page(worktree / 'library' / 'cards' / 'y.md')
+    _wiki_update(worktree / 'library')
+    _git(worktree, 'add', '-A', '--', 'library')
+    _git(worktree, 'commit', '-m', 'add the y card')
+    node_side = _git(worktree, 'rev-parse', 'HEAD').stdout.strip()
+    _write_page(corpus / 'cards' / 'b.md')
+    _wiki_update(corpus)
+    _git(repo, 'add', '-A', '--', 'library')
+    later = {**os.environ, 'GIT_COMMITTER_DATE': '2099-01-01T00:00:00Z'}
+    subprocess.run(
+        ['git', 'commit', '-q', '-m', 'add the b card'], cwd=repo, env=later, check=True
+    )
+    target_side = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    # criss-cross: the node takes the target's card, and the target records
+    # the node's commit while keeping its own tree
+    subprocess.run(
+        ['git', 'merge', '--no-ff', '--no-commit', 'main'],
+        cwd=worktree,
+        capture_output=True,
+    )
+    _wiki_update(worktree / 'library')
+    _git(worktree, 'add', '-A', '--', 'library')
+    _git(worktree, 'commit', '-m', 'take the b card')
+    _git(repo, 'merge', '--no-ff', '-s', 'ours', '-m', 'record the node', node_side)
+    # the node then adds a, and c without refreshing the index, so only the
+    # merge's own refresh can give c a row
+    _write_page(worktree / 'library' / 'cards' / 'a.md')
+    _wiki_update(worktree / 'library')
+    _git(worktree, 'add', '-A', '--', 'library')
+    _git(worktree, 'commit', '-m', 'add the a card')
+    _write_page(worktree / 'library' / 'cards' / 'c.md')
+    _git(worktree, 'add', '-A', '--', 'library')
+    _git(worktree, 'commit', '-m', 'add the c card')
+    # git names the target's side, where the target's index has not changed
+    assert _git(repo, 'merge-base', 'main', 'main.two').stdout.strip() == target_side
+
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    index = _git(repo, 'show', 'main:library/cards/_index.md').stdout
+    assert '[[cards/c' in index, index
+    assert (
+        index.index('[[cards/a')
+        < index.index('[[cards/b')
+        < index.index('[[cards/c')
+        < index.index('[[cards/m')
+    ), index
+    assert '[[cards/y' not in index, index
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+@pytest.mark.parametrize(
+    argnames=('root', 'change', 'landed'),
+    argvalues=[
+        # both sides edit the page apart, and the page driver keeps the
+        # target's later stamp, which is HEAD's
+        ('library', 'both-edit', None),
+        # the node edits the page and commits it without restamping it
+        ('library', 'edit', None),
+        # the node edits the page's desc, which its folder's row repeats
+        ('library', 'page-desc', ('cards/_index.md', 'An edited page.', True)),
+        # the node deletes the page, leaving its row in the folder's index
+        ('library', 'delete', ('cards/_index.md', '[[cards/page', False)),
+        # the node moves the page to another folder, refreshing neither index
+        ('library', 'move', ('notes/_index.md', '[[notes/page', True)),
+        # the node adds a data file, which its folder's index has no row for
+        ('library', 'add-file', ('cards/_index.md', 'cards/data.json', True)),
+        # the node deletes a folder's index alone, its page still there
+        ('library', 'delete-index', ('notes/_index.md', '[[notes/memo', True)),
+        # the node deletes a folder whole, leaving its row in the root's index
+        ('library', 'delete-folder', ('_index.md', '[[notes/', False)),
+        # the node adds a folder, at the root and one level down, which the
+        # index above it has no row for
+        ('library', 'add-folder', ('_index.md', '[[fresh/', True)),
+        ('library', 'add-subfolder', ('cards/_index.md', '[[cards/deep/', True)),
+        # the node edits a folder's desc, which the root's row repeats
+        ('library', 'folder-desc', ('_index.md', 'An edited folder.', True)),
+        # the node's settings exclude a folder the root's index lists
+        ('library', 'settings', ('_index.md', '[[notes/', False)),
+        # the node's unstamped edit in the project wiki, refreshed whole
+        ('wiki', 'edit', None),
+    ],
+    ids=[
+        'both-sides-edit',
+        'node-edit',
+        'node-page-desc',
+        'node-delete',
+        'node-move',
+        'node-data-file',
+        'node-index-delete',
+        'node-folder-delete',
+        'node-folder-add',
+        'node-subfolder-add',
+        'node-folder-desc',
+        'node-settings',
+        'project-wiki-edit',
+    ],
+)
+def test_merge_refreshes_every_wiki_root_its_squash_changes(
+    tmp_path: pathlib.Path,
+    root: str,
+    change: str,
+    landed: Optional[tuple[str, str, bool]],
+) -> None:
+    """A squash passes a whole-root ``wiki update --check`` in every wiki root.
+
+    The check flags a changed page whose ``updated:`` still reads as HEAD's --
+    an edit the node committed without restamping, or one both sides made,
+    where the page driver keeps the later stamp, the target's -- and an index
+    whose rows disagree with the disk: a file or folder added or deleted, a
+    page or folder whose desc changed, or a folder the settings exclude. The
+    merge refreshes, whole, each declared root holding a path its squash
+    adds, changes, or deletes, so a validator running the check on every
+    root passes: a changed page lands restamped past HEAD's stamp, and each
+    index lists what landed, a row in the index above a changed folder
+    included. The project wiki, refreshed whole, lands the same way.
+    """
+    repo = _init_tree(tmp_path / 'restamprepo')
+    # a corpus beside the project wiki, both in one layout and each mapping
+    # its pages to the merge driver as wiki init writes it; every page is
+    # stamped long before the merge, so the squash's own writes fall outside
+    # the wiki's stamp grace and only a refresh moves a stamp
+    old = '2026-01-01T00:00:00Z'
+    earlier = '2026-01-02T00:00:00Z'
+    later = '2026-01-03T00:00:00Z'
+    body = 'first line\n' + 'filler line\n' * 6 + 'last line\n'
+    for declared in ('wiki', 'library'):
+        corpus = repo / declared
+        _declare_wiki(corpus, 'cards', 'notes')
+        (corpus / '.gitattributes').write_text(
+            '# Wiki page merge driver\n*.md merge=wiki\n', encoding='utf-8'
+        )
+        for name in ('cards/page', 'notes/memo'):
+            (corpus / f'{name}.md').write_text(
+                f'---\nname: {name}\ndesc: A {name} page.\ncreated: {old}\n'
+                f'updated: {old}\n---\n\n# {name}\n\n***\n\n{body}',
+                encoding='utf-8',
+            )
+        _wiki_update(corpus)
+    # the validator runs the check a corpus gate runs, on every root
+    (repo / 'check.sh').write_text(
+        'wiki update --check --path=wiki && wiki update --check --path=library\n',
+        encoding='utf-8',
+    )
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'add the corpus')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    page = f'{root}/cards/page.md'
+    # every change is committed as made, with no refresh behind it
+    if change == 'both-edit':
+        target_page = repo / page
+        target_page.write_text(
+            target_page.read_text(encoding='utf-8')
+            .replace('first line', 'first line, edited on the target')
+            .replace(f'updated: {old}', f'updated: {later}'),
+            encoding='utf-8',
+        )
+        _git(repo, 'add', '--', page)
+        _git(repo, 'commit', '-m', 'the target edits the page')
+    node_page = worktree / page
+    if change in ('both-edit', 'edit'):
+        stamp = earlier if change == 'both-edit' else old
+        node_page.write_text(
+            node_page.read_text(encoding='utf-8')
+            .replace('last line', 'last line, edited by the node')
+            .replace(f'updated: {old}', f'updated: {stamp}'),
+            encoding='utf-8',
+        )
+    elif change == 'page-desc':
+        node_page.write_text(
+            node_page.read_text(encoding='utf-8').replace(
+                'desc: A cards/page page.', 'desc: An edited page.'
+            ),
+            encoding='utf-8',
+        )
+    elif change == 'delete':
+        _git(worktree, 'rm', '--quiet', page)
+    elif change == 'move':
+        _git(worktree, 'mv', page, f'{root}/notes/page.md')
+    elif change == 'add-file':
+        (worktree / root / 'cards' / 'data.json').write_text('{}\n', encoding='utf-8')
+    elif change == 'delete-index':
+        _git(worktree, 'rm', '--quiet', f'{root}/notes/_index.md')
+    elif change == 'delete-folder':
+        _git(worktree, 'rm', '-r', '--quiet', f'{root}/notes')
+    elif change == 'add-folder':
+        (worktree / root / 'fresh').mkdir()
+        _write_page(worktree / root / 'fresh' / 'page.md')
+    elif change == 'add-subfolder':
+        (worktree / root / 'cards' / 'deep').mkdir()
+        _write_page(worktree / root / 'cards' / 'deep' / 'page.md')
+    elif change == 'folder-desc':
+        index = worktree / root / 'cards' / '_index.md'
+        index.write_text(
+            index.read_text(encoding='utf-8').replace(
+                'desc: The cards folder.', 'desc: An edited folder.'
+            ),
+            encoding='utf-8',
+        )
+    else:
+        (worktree / root / '.wiki' / 'settings.json').write_text(
+            f'{json.dumps({"exclude": {"patterns": ["notes"]}})}\n', encoding='utf-8'
+        )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', f'the node makes a {change} change')
+
+    result = _script('merge.sh', repo, f'{worktree}', '--validate=check.sh')
+
+    # the check passed on the squash, which landed with the target clean
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    if landed is None:
+        # the page carries every edit, restamped past both sides' stamps
+        text = _git(repo, 'show', f'main:{page}').stdout
+        assert 'last line, edited by the node' in text, text
+        if change == 'both-edit':
+            assert 'first line, edited on the target' in text, text
+        stamps = [line for line in text.split('\n') if line.startswith('updated: ')]
+        assert len(stamps) == 1, text
+        assert stamps[0] > f'updated: {later}', text
+    else:
+        # the index lists exactly what landed
+        index, row, listed = landed
+        text = _git(repo, 'show', f'main:{root}/{index}').stdout
+        assert (row in text) == listed, text
+
+
+def test_merge_refuses_a_wiki_declared_at_the_worktree_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A wiki declared at the worktree root refuses the merge by name.
+
+    Such a wiki encloses every folder, so the project wiki's refresh would
+    walk the whole worktree -- writing frontmatter into every bare page and
+    leaving the target dirty past the squash. Node init refuses to spawn under
+    one, and the merge refuses one too, restoring the target untouched.
+    """
+    repo = _init_tree(tmp_path / 'rootwikirepo')
+    # the node comes first: none spawns under a worktree-root wiki
+    init = _run(repo, 'node', 'init', 'one', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.one'
+    bare = '# notes\n\nA bare page.\n'
+    (repo / 'notes.md').write_text(bare, encoding='utf-8')
+    (repo / '.wiki').mkdir()
+    (repo / '.wiki' / 'settings.json').write_text('{}\n', encoding='utf-8')
+    (repo / '_index.md').write_text(
+        '---\nname: root\ndesc: The root.\n---\n# root\n\n***\n', encoding='utf-8'
+    )
+    _git(repo, 'add', '-A', '--', 'notes.md', '.wiki', '_index.md')
+    _git(repo, 'commit', '-m', 'declare the root wiki')
+    _git(worktree, 'merge', '-q', '--no-edit', 'main')
+    _write_page(worktree / 'zeta.md')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'zeta page')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+
+    refused = _script('merge.sh', repo, f'{worktree}')
+
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
+    assert 'the worktree root declares a wiki' in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    assert (repo / 'notes.md').read_text(encoding='utf-8') == bare
+
+
+@pytest.mark.parametrize(
+    argnames=('folder', 'patterns', 'stray'),
+    argvalues=[
+        # a dot folder, which the wiki's walk never lists
+        ('.notes', [], False),
+        # an untracked file there is no stray at all
+        ('.notes', [], True),
+        # a folder the wiki's exclude.patterns names, holding a stray the
+        # guard lists, so only the excluded-folder probe lets the merge land
+        ('notes', ['notes'], True),
+    ],
+    ids=['dot-folder', 'dot-folder-untracked-file', 'pattern-untracked-file'],
+)
+def test_merge_skips_an_index_in_a_folder_its_wiki_excludes(
+    tmp_path: pathlib.Path,
+    folder: str,
+    patterns: list[str],
+    stray: bool,
+) -> None:
+    """An index in a folder its wiki excludes lands as the merge left it.
+
+    The wiki's own walk skips a dot folder and a folder its
+    ``exclude.patterns`` names, so the root's refresh leaves such an index
+    as merged: both sides' edits land, and an untracked file there, which a
+    check scoped to its folder refuses as excluded, refuses nothing and stays
+    untracked.
+    """
+    repo = _init_tree(tmp_path / 'excludedrepo')
+    corpus = repo / 'library'
+    _declare_wiki(corpus)
+    settings = {'exclude': {'patterns': patterns}} if patterns else {}
+    (corpus / '.wiki' / 'settings.json').write_text(
+        f'{json.dumps(settings)}\n', encoding='utf-8'
+    )
+    notes = corpus / folder
+    notes.mkdir()
+    body = 'first line\n' + 'filler line\n' * 6 + 'last line\n'
+    head = '---\nname: notes\ndesc: Excluded notes.\n---\n# notes\n\n***\n\n'
+    (notes / '_index.md').write_text(head + body, encoding='utf-8')
+    _git(repo, 'add', '-A', '--', 'library')
+    _git(repo, 'commit', '-m', 'add excluded notes')
+    worktrees = {}
+    for name in ('one', 'two'):
+        init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
+        assert init.returncode == 0, init.stderr
+        worktrees[name] = repo / '.worktrees' / f'main.{name}'
+    # the siblings edit opposite ends of the excluded index's authored body
+    for name, old in (('one', 'first line'), ('two', 'last line')):
+        index = worktrees[name] / 'library' / folder / '_index.md'
+        index.write_text(
+            index.read_text(encoding='utf-8').replace(old, f'{old}, edited by {name}'),
+            encoding='utf-8',
+        )
+        _git(worktrees[name], 'add', '-A')
+        _git(worktrees[name], 'commit', '-m', f'{name} edits the notes')
+    if stray:
+        (notes / 'scratch.txt').write_text('scratch\n', encoding='utf-8')
+
+    for name in ('one', 'two'):
+        result = _script('merge.sh', repo, f'{worktrees[name]}')
+        assert result.returncode == 0, (result.stdout, result.stderr)
+
+    merged = _git(repo, 'show', f'main:library/{folder}/_index.md').stdout
+    assert 'first line, edited by one' in merged, merged
+    assert 'last line, edited by two' in merged, merged
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+    expected = f'?? library/{folder}/scratch.txt' if stray else ''
+    assert status.strip() == expected, status
+
+
+@pytest.mark.parametrize(
+    argnames=('folder', 'stray', 'refused'),
+    argvalues=[
+        # a file only a personal ignore hides, which the wiki indexes anyway
+        ('library/cards', 'notes.bak', True),
+        # a file under a dot folder, which the wiki's walk never lists
+        ('library/cards', '.scratch/x.txt', False),
+        # the same pair under the project wiki
+        ('wiki', 'notes.bak', True),
+        ('wiki', '.scratch/x.txt', False),
+    ],
+    ids=[
+        'corpus-personal-ignore',
+        'corpus-dot-folder',
+        'project-personal-ignore',
+        'project-dot-folder',
+    ],
+)
+def test_merge_judges_untracked_files_by_the_wikis_own_rules(
+    tmp_path: pathlib.Path,
+    folder: str,
+    stray: str,
+    refused: bool,
+) -> None:
+    """The refresh's untracked-file guard follows the wiki's ignore and dot rules.
+
+    The wiki indexes by the repository's ignore rules alone, so a file only a
+    personal ``core.excludesFile`` hides would get a row in the squash commit
+    while the file itself stays behind: the merge refuses it by name. A file
+    under a dot-prefixed folder is never indexed, so it neither refuses the
+    merge nor rides the squash commit. The guard mirrors no other exclusion:
+    a symlink, or a file the wiki's ``exclude.patterns`` matches, still
+    refuses, which is safe, and committing or moving the file clears it.
+    """
+    repo = _init_tree(tmp_path / 'strayrepo')
+    _declare_wiki(repo / 'library', 'cards')
+    _git(repo, 'add', '-A', '--', 'library')
+    _git(repo, 'commit', '-m', 'declare the corpus')
+    worktrees = _sibling_pages(repo, 'library', 'cards')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    # a personal ignore hides *.bak from git, not from the wiki
+    personal = tmp_path / 'personal-ignore'
+    personal.write_text('*.bak\n', encoding='utf-8')
+    _git(repo, 'config', 'core.excludesFile', f'{personal}')
+    relative = f'{folder}/{stray}'
+    (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+    (repo / relative).write_text('a stray\n', encoding='utf-8')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+
+    result = _script('merge.sh', repo, f'{worktrees["two"]}')
+
+    if refused:
+        # refused by name, the target restored around the stray
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert relative in result.stderr, result.stderr
+        assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+        assert _git(repo, 'status', '--porcelain').stdout == ''
+    else:
+        # landed, with the stray neither indexed nor committed
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        index = _git(repo, 'show', f'main:{folder}/_index.md').stdout
+        assert '.scratch' not in index, index
+        status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+        assert status.splitlines() == [f'?? {relative}'], status
+    assert (repo / relative).read_text(encoding='utf-8') == 'a stray\n'
+
+
+def test_merge_lands_a_merged_index_whose_folder_encloses_another_wiki(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An index whose folder encloses another declared wiki lands as merged.
+
+    The wiki refuses to refresh a root whose walk reaches a nested declared
+    root, before it writes anything, so the merge skips that refresh with a
+    warning naming both, and the index lands as the merge driver left it --
+    both siblings' edits to its authored body included. An untracked draft
+    in the inner wiki belongs to that wiki, the deepest root above it, so it
+    refuses nothing and stays untracked.
+    """
+    repo = _init_tree(tmp_path / 'nestedrepo')
+    library = repo / 'library'
+    _declare_wiki(library)
+    index = library / '_index.md'
+    body = 'first line\n' + 'filler line\n' * 6 + 'last line\n'
+    index.write_text(index.read_text(encoding='utf-8') + '\n' + body, encoding='utf-8')
+    _declare_wiki(library / 'inner')
+    _git(repo, 'add', '-A', '--', 'library')
+    _git(repo, 'commit', '-m', 'declare the nested corpus')
+    worktrees = {}
+    for name in ('one', 'two'):
+        init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
+        assert init.returncode == 0, init.stderr
+        worktrees[name] = repo / '.worktrees' / f'main.{name}'
+    # the siblings edit opposite ends of the outer root's authored body
+    for name, old in (('one', 'first line'), ('two', 'last line')):
+        edited = worktrees[name] / 'library' / '_index.md'
+        edited.write_text(
+            edited.read_text(encoding='utf-8').replace(old, f'{old}, edited by {name}'),
+            encoding='utf-8',
+        )
+        _git(worktrees[name], 'add', '-A')
+        _git(worktrees[name], 'commit', '-m', f'{name} edits the library index')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    draft = library / 'inner' / 'draft.md'
+    draft.write_text('a bare draft\n', encoding='utf-8')
+
+    second = _script('merge.sh', repo, f'{worktrees["two"]}')
+
+    # the refresh was skipped by name, and both edits landed as merged
+    assert second.returncode == 0, (second.stdout, second.stderr)
+    assert 'library lands as merged' in second.stderr, second.stderr
+    assert 'declared wiki library/inner' in second.stderr, second.stderr
+    merged = _git(repo, 'show', 'main:library/_index.md').stdout
+    assert 'first line, edited by one' in merged, merged
+    assert 'last line, edited by two' in merged, merged
+    # the inner wiki's draft refused nothing and stayed untracked
+    status = _git(repo, 'status', '--porcelain').stdout
+    assert status == '?? library/inner/draft.md\n', status
+
+
+def test_merge_refreshes_a_root_whose_settings_exclude_its_inner_wiki(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A root whose settings exclude an inner declared wiki refreshes like any other.
+
+    The wiki refuses to sweep a root only when its walk reaches another
+    declared wiki, and a root whose ``exclude.patterns`` names the inner
+    wiki's folder walks past it: the merge refreshes and stages that root as
+    usual, so a page the node edited without a restamp lands restamped and a
+    validator's whole-root check passes, while an untracked index the inner
+    wiki holds is no file of the refresh's and stays out of the squash.
+    """
+    repo = _init_tree(tmp_path / 'excludedinnerrepo')
+    library = repo / 'library'
+    _declare_wiki(library, 'cards')
+    (library / '.wiki' / 'settings.json').write_text(
+        f'{json.dumps({"exclude": {"patterns": ["inner"]}})}\n', encoding='utf-8'
+    )
+    _declare_wiki(library / 'inner')
+    # a page stamped long before the merge, so the squash's own write falls
+    # outside the wiki's stamp grace and only a refresh moves its stamp
+    old = '2026-01-01T00:00:00Z'
+    (library / 'cards' / 'page.md').write_text(
+        f'---\nname: cards/page\ndesc: A cards page.\ncreated: {old}\n'
+        f'updated: {old}\n---\n\n# cards/page\n\n***\n\nfirst line\n',
+        encoding='utf-8',
+    )
+    _wiki_update(library)
+    (repo / 'check.sh').write_text(
+        'wiki update --check --path=library\n', encoding='utf-8'
+    )
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'declare the corpus beside its inner wiki')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    # the node edits the page and commits it without restamping it
+    node_page = worktree / 'library' / 'cards' / 'page.md'
+    node_page.write_text(
+        node_page.read_text(encoding='utf-8').replace(
+            'first line', 'first line, edited by the node'
+        ),
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'the node edits the page')
+    # an untracked index in the inner wiki, on the target
+    drafts = library / 'inner' / 'drafts'
+    drafts.mkdir()
+    (drafts / '_index.md').write_text(
+        '---\nname: drafts\n---\n# drafts\n\n***\n', encoding='utf-8'
+    )
+
+    result = _script('merge.sh', repo, f'{worktree}', '--validate=check.sh')
+
+    # the root refreshed with no warning, and the page landed restamped
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'lands as merged' not in result.stderr, result.stderr
+    landed = _git(repo, 'show', 'main:library/cards/page.md').stdout
+    assert 'first line, edited by the node' in landed, landed
+    assert f'updated: {old}' not in landed, landed
+    # the inner wiki's untracked index stayed out of the squash
+    status = _git(repo, 'status', '--porcelain').stdout
+    assert status == '?? library/inner/drafts/\n', status
+
+
+def test_merge_restores_the_target_when_a_corpus_refresh_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A failed corpus-root refresh restores the target and leaves the child.
+
+    The refresh runs after the squash is staged, so its failure resets the
+    target like a conflict -- no commit, a clean status -- and the child's
+    branch is not advanced; once the refresh can run, the same merge lands.
+    """
+    repo = _init_tree(tmp_path / 'failrepo')
+    _declare_wiki(repo / 'library', 'cards')
+    _git(repo, 'add', '-A', '--', 'library')
+    _git(repo, 'commit', '-m', 'declare the corpus')
+    worktrees = _sibling_pages(repo, 'library', 'cards')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    child = _git(repo, 'rev-parse', 'main.two').stdout
+    # a wiki that refuses every refresh of the corpus root
+    env = _cli_env()
+    real = shutil.which('wiki', path=env['PATH'])
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    shim = bindir / 'wiki'
+    shim.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ "$1" == update ]]; then\n'
+        '    for arg in "${@:2}"; do [[ "$arg" == --path=*/library ]] && exit 1; done\n'
+        'fi\n'
+        f'exec {real} "$@"\n',
+        encoding='utf-8',
+    )
+    shim.chmod(0o755)
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+
+    refused = _script('merge.sh', repo, f'{worktrees["two"]}', env=env)
+
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
+    assert 'refreshing the wiki indexes under' in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    assert _git(repo, 'rev-parse', 'main.two').stdout == child
+    retry = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert retry.returncode == 0, (retry.stdout, retry.stderr)
+
+
+@pytest.mark.parametrize(
+    argnames=('call', 'step', 'subject'),
+    argvalues=[
+        # the worktree-root wiki declaration
+        (
+            '" $* " == *" ls-files -- :(literal).wiki/settings.json "*',
+            'reading the wiki declarations of',
+            "main.two's squash failed",
+        ),
+        # the untracked files under the project wiki
+        (
+            '" $* " == *" --others "* && " $* " == *" :(literal)wiki "*',
+            'listing the untracked files under',
+            'stepfailrepo/wiki failed',
+        ),
+        # the index the project wiki's refresh created
+        (
+            '" $* " == *" add -- :(literal)wiki/sub/_index.md "*',
+            'staging wiki/sub/_index.md',
+            'after merging main.two failed',
+        ),
+        # the declared roots and the indexes the squash touched
+        (
+            '" $* " == *" :(glob)**/.wiki/settings.json "*',
+            'listing the wiki files of',
+            "main.two's squash failed",
+        ),
+        # the untracked files in the corpus root the merge refreshes
+        (
+            '" $* " == *" --others "* && " $* " == *" :(literal)library "*',
+            'listing the untracked files under',
+            'stepfailrepo/library failed',
+        ),
+        # the refreshed corpus root's tracked updates
+        (
+            '" $* " == *" add -u -- :(literal)library "*',
+            'staging the refreshed wiki indexes under',
+            'stepfailrepo/library after merging main.two failed',
+        ),
+    ],
+    ids=[
+        'root-declarations',
+        'project-strays',
+        'created-index-add',
+        'roots-listing',
+        'corpus-strays',
+        'root-staging',
+    ],
+)
+def test_merge_restores_the_target_when_a_wiki_refresh_step_fails(
+    tmp_path: pathlib.Path,
+    call: str,
+    step: str,
+    subject: str,
+) -> None:
+    """Each git step of the wiki refresh fails closed, restoring the target.
+
+    The refresh runs after the squash is staged, so a declaration read, a
+    listing, or a staging step git cannot complete refuses the merge like a
+    conflict -- the step named, no commit, the target reset, and the child
+    unadvanced -- instead of exiting under ``set -e`` with the squash left
+    staged for the target's next commit. An index the refresh created
+    before the failure goes too, so the retry lands instead of refusing it
+    as an untracked file the refresh would index.
+    """
+    repo = _init_tree(tmp_path / 'stepfailrepo')
+    _declare_wiki(repo / 'library', 'cards')
+    _git(repo, 'add', '-A', '--', 'library')
+    _git(repo, 'commit', '-m', 'declare the corpus')
+    worktrees = _sibling_pages(repo, 'library', 'cards')
+    # the second sibling also adds a project-wiki folder without an index,
+    # which the project wiki's refresh creates
+    sub = worktrees['two'] / 'wiki' / 'sub'
+    sub.mkdir()
+    _write_page(sub / 'page.md')
+    _git(worktrees['two'], 'add', '-A')
+    _git(worktrees['two'], 'commit', '-m', 'project wiki folder')
+    first = _script('merge.sh', repo, f'{worktrees["one"]}')
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    child = _git(repo, 'rev-parse', 'main.two').stdout
+    bindir = _git_shim(tmp_path, f'if [[ {call} ]]; then\n    exit 1\nfi\n')
+    env = _cli_env()
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+
+    refused = _script('merge.sh', repo, f'{worktrees["two"]}', env=env)
+
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
+    assert step in refused.stderr, refused.stderr
+    assert subject in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'rev-parse', 'main.two').stdout == child
+    # nothing of the abandoned merge is left, untracked files included...
+    status = _git(repo, 'status', '--porcelain', '--untracked-files=all').stdout
+    assert status == '', status
+    # ...so the same merge lands once the step can run
+    retry = _script('merge.sh', repo, f'{worktrees["two"]}')
+    assert retry.returncode == 0, (retry.stdout, retry.stderr)
+
+
 def test_failed_merge_restore_removes_the_staged_child_additions(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1410,13 +2413,13 @@ def test_merge_skips_the_merge_base_advance_for_dirty_tracked_work(
 
 
 @pytest.mark.parametrize(
-    argnames='edited',
-    argvalues=[True, False],
-    ids=['edited-on-disk', 'committed-clean'],
+    argnames='state',
+    argvalues=['edited', 'clean', 'touched'],
+    ids=['edited-on-disk', 'committed-clean', 'touch-only'],
 )
 def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     tmp_path: pathlib.Path,
-    edited: bool,
+    state: str,
 ) -> None:
     """An edit to a tracked file of a shape the law excludes still skips the advance.
 
@@ -1424,10 +2427,12 @@ def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     ``config.json.lock``, a ``.status`` -- so ``fractal commit --check``
     reads clean over an edit to one a node force-tracked, and the advance's
     ``reset --hard`` would write the target's copy over that edit. The
-    advance asks git for the tracked diff as well: such an edit skips it
+    advance asks git for the tracked changes as well: such an edit skips it
     with the uncommitted-changes warning and leaves the child's HEAD and the
     on-disk edit alone, while the same file committed clean lets the
-    advance run.
+    advance run. git status answers by content, as ``git diff --quiet
+    HEAD`` does, without the diff's index refresh under ``index.lock``, so
+    the file only touched (stale stat data, same bytes) reads clean too.
     """
     repo = _init_tree(tmp_path / 'lockshaperepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -1439,11 +2444,13 @@ def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     _git(worktree, 'add', '-A')
     _git(worktree, 'add', '-f', '--', '.fractal/main.task/config.json.lock')
     _git(worktree, 'commit', '-m', 'settle node scaffolding, lock tracked')
-    if edited:
+    if state == 'edited':
         lock.write_text('held\n', encoding='utf-8')
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', 'f.txt')
     _git(worktree, 'commit', '-m', 'child work')
+    if state == 'touched':
+        os.utime(lock, ns=(_AGED_NS, _AGED_NS))
     # the law reads the tree clean either way
     check = _run(worktree, 'commit', '--check')
     assert check.returncode == 0, (check.stdout, check.stderr)
@@ -1454,14 +2461,14 @@ def test_merge_skips_the_advance_over_a_tracked_excluded_shape_edit(
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
     assert (repo / 'f.txt').read_text(encoding='utf-8') == 'child work\n'
-    if edited:
+    if state == 'edited':
         # the advance was skipped and warned about; the edit is untouched
         assert 'skipped advancing' in result.stderr, result.stderr
         assert 'its worktree has uncommitted changes' in result.stderr, result.stderr
         assert _git(worktree, 'rev-parse', 'HEAD').stdout.strip() == child_head
         assert lock.read_text(encoding='utf-8') == 'held\n'
     else:
-        # committed clean, the advance ran and left the tree clean
+        # clean by content, the advance ran and left the tree clean
         assert 'skipped advancing' not in result.stderr, result.stderr
         subject = _git(worktree, 'log', '-1', '--format=%s').stdout.strip()
         assert subject == 'merge main (post-squash)', (subject, result.stderr)
@@ -1828,6 +2835,46 @@ def test_merge_skips_the_advance_when_reading_the_child_worktree_fails(
     rows = json.loads(activity.stdout)
     merges = [row['status'] for row in rows if row['event'] == 'merge']
     assert merges == ['completed'], rows
+
+
+def test_merge_skips_the_advance_when_the_child_moves_mid_merge(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A child commit made during the merge skips the advance and survives.
+
+    The advance records the target's tree on the commit the squash took; from
+    a commit made since, it would delete that commit's files as adjudicated
+    away. The merge lands, the advance is skipped with a warning naming the
+    move, and the late commit stays on the child's branch and disk. A
+    validator that commits in the child's worktree stands in for a writer
+    racing the merge.
+    """
+    repo = _init_tree(tmp_path / 'movedrepo')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work')
+    late = worktree / 'late.txt'
+    (repo / 'check.sh').write_text(
+        f'printf "late\\n" > "{late}"\n'
+        f'git -C "{worktree}" add late.txt\n'
+        f'git -C "{worktree}" commit -q -m late\n',
+        encoding='utf-8',
+    )
+    _git(repo, 'add', 'check.sh')
+    _git(repo, 'commit', '-m', 'a validator that commits in the child')
+    result = _script('merge.sh', repo, f'{worktree}', '--validate=check.sh')
+
+    # the squash landed; the advance was skipped, so the late commit is still
+    # the child's tip with its file on disk
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
+    assert 'main.task moved during the merge' in result.stderr, result.stderr
+    assert _git(worktree, 'log', '-1', '--format=%s').stdout.strip() == 'late'
+    assert late.read_text(encoding='utf-8') == 'late\n'
+    assert _git(worktree, 'status', '--porcelain').stdout == ''
 
 
 @pytest.mark.parametrize(
@@ -2572,6 +3619,46 @@ def test_merge_continue_refuses_unstaged_target_edits(
     assert (repo / 'tracked.txt').read_text(encoding='utf-8') == 'resolved line\n'
 
 
+@pytest.mark.parametrize(
+    argnames='state',
+    argvalues=['touched', 'untracked'],
+    ids=['touch-only', 'untracked'],
+)
+def test_merge_continue_reads_the_target_by_content(
+    tmp_path: pathlib.Path,
+    state: str,
+) -> None:
+    """``--continue`` counts only a tracked edit left unstaged, judged by content.
+
+    The unstaged check lists the paths git status's worktree column reports,
+    as a working-tree ``git diff`` lists them, without the diff's index
+    refresh under ``index.lock``: a tracked file only touched beside the hand
+    squash (stale stat data, same bytes) reads clean, and an untracked file
+    never counts, as the diff never lists one, so either way the continue
+    lands. An edit left unstaged refuses it (see the refusal test above).
+    """
+    repo = _init_tree(tmp_path / 'contentrepo')
+    init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work')
+    # the operator squashes by hand, then leaves the target in the state
+    _git(repo, 'merge', '--squash', 'main.task')
+    if state == 'touched':
+        os.utime(repo / 'tracked.txt', ns=(_AGED_NS, _AGED_NS))
+    else:
+        (repo / 'scratch.txt').write_text('scratch\n', encoding='utf-8')
+    landed = _script('merge.sh', repo, f'{worktree}', '--continue')
+
+    assert landed.returncode == 0, (landed.stdout, landed.stderr)
+    assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
+    assert (repo / 'f.txt').read_text(encoding='utf-8') == 'child work\n'
+    expected = '?? scratch.txt\n' if state == 'untracked' else ''
+    assert _git(repo, 'status', '--porcelain').stdout == expected
+
+
 def test_merge_continue_refuses_commits_newer_than_the_squash(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -3288,11 +4375,17 @@ def test_merge_lands_a_multi_root_scope_with_a_fractal_root(
     ],
     ids=['purged', 'edited-on-both-sides'],
 )
+@pytest.mark.parametrize(
+    argnames='untracked',
+    argvalues=[False, True],
+    ids=['alone', 'beside-untracked'],
+)
 def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     tmp_path: pathlib.Path,
     seed: str,
     target_edit: Optional[str],
     node_copy: str,
+    untracked: bool,
 ) -> None:
     """A squash conflicting only under ``.fractal/`` outside the scope resolves itself.
 
@@ -3306,7 +4399,9 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     target's content. Either way the merge resolves the entries as the tail
     would and lands: the node's own seed is stripped and its live copy
     survives the advance, while the foreign path keeps the target's content,
-    stays tracked, and reaches the node as such.
+    stays tracked, and reaches the node as such. The unmerged paths come
+    from ``git diff-files --diff-filter=U``, which never lists an untracked
+    file, so one on the target beside the conflict changes nothing.
     """
     repo = _init_tree(tmp_path / 'seedconflictrepo')
     # a seed copy on the target before the fork
@@ -3330,6 +4425,8 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     (worktree / 'f.txt').write_text('child work\n', encoding='utf-8')
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child work')
+    if untracked:
+        (repo / 'scratch.txt').write_text('scratch\n', encoding='utf-8')
     result = _script('merge.sh', repo, f'{worktree}')
 
     # the merge landed clean with the work on the target
@@ -3339,7 +4436,8 @@ def test_merge_resolves_a_conflict_on_the_nodes_own_seed(
     )
     assert _git(repo, 'log', '-1', '--format=%s').stdout.strip() == 'merge main.task'
     assert (repo / 'f.txt').read_text(encoding='utf-8') == 'child work\n'
-    assert _git(repo, 'status', '--porcelain').stdout == ''
+    expected = '?? scratch.txt\n' if untracked else ''
+    assert _git(repo, 'status', '--porcelain').stdout == expected
     # the target holds its own answer for the path -- gone, or its own content
     # still tracked -- and the node holds its live seed or the target's content
     tracked = _git(repo, 'ls-files', f'.fractal/{seed}').stdout
@@ -4086,9 +5184,9 @@ def test_merge_refuses_a_squash_outside_the_nodes_scope(
     paths and both remedies -- widening the scope, with the ``fractal
     commit`` that records it, or ``--ignore-scope`` -- and a fresh merge
     restores the target. The worktree-root ``.gitattributes`` is admitted
-    only as init's own edit -- the target's content plus exactly the two
-    lines the wiki tool appends, which a first squash carries to a target
-    that lacks them; a foreign attribute line beside them is out of scope
+    only as init's own edit -- the target's content plus the wiki tool's
+    merge-driver lines, which a first squash carries to a target that
+    lacks them; a foreign attribute line beside them is out of scope
     like any other path, even when the target has no ``.gitattributes`` for
     it to be told apart from. ``--ignore-scope`` lands the offering as it
     is, and a repo-root node with no scope is unrestricted.
@@ -4138,6 +5236,568 @@ def test_merge_refuses_a_squash_outside_the_nodes_scope(
         assert _git(repo, 'status', '--porcelain').stdout == ''
         assert not (repo / 'outside.txt').exists()
         assert not (repo / 'docs').exists()
+
+
+@pytest.mark.parametrize(
+    argnames=('wiki', 'exempt', 'stray'),
+    argvalues=[
+        pytest.param('wiki', 'wiki/page.md', 'docs/page.md', id='default'),
+        pytest.param('docs', 'docs/page.md', 'wiki/page.md', id='docs'),
+    ],
+)
+def test_merge_footprint_exempts_the_configured_wiki(
+    tmp_path: pathlib.Path,
+    wiki: str,
+    exempt: str,
+    stray: str,
+) -> None:
+    """The squash's footprint check exempts the configured project wiki alone.
+
+    The merge judges a scoped node's offering by the law ``fractal commit``
+    enforces, so a project naming ``docs`` as its shared wiki lands a page
+    under ``docs/`` past the scope and refuses one under ``wiki/``, which is
+    then ordinary content outside it.
+    """
+    repo = _init_tree(tmp_path / 'wikiscoperepo', wiki=wiki)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    # in-scope work plus a page under each folder, committed raw (fractal
+    # commit would refuse the stray itself)
+    (worktree / 'src').mkdir()
+    (worktree / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    for path in (exempt, stray):
+        (worktree / path).parent.mkdir(parents=True, exist_ok=True)
+        (worktree / path).write_text(
+            '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+            encoding='utf-8',
+        )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and pages')
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    # refused, naming the stray page alone
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert 'outside its scope' in result.stderr, result.stderr
+    for path in ('src/a.py', exempt, stray):
+        assert (path in result.stderr) is (path == stray), (path, result.stderr)
+    # with the stray gone, the squash lands the exempt page, and the merge's
+    # index refresh leaves a corpus beside the configured wiki alone
+    _git(worktree, 'rm', '-q', stray)
+    _git(worktree, 'commit', '-m', 'drop the stray page')
+    corpus = _files(repo / 'wiki')
+    result = _script('merge.sh', repo, f'{worktree}')
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    tracked = _git(repo, 'ls-files', 'src/a.py', exempt).stdout.split()
+    assert tracked == sorted(['src/a.py', exempt])
+    if wiki != 'wiki':
+        assert _files(repo / 'wiki') == corpus
+
+
+@pytest.mark.parametrize(
+    argnames=('wiki', 'project', 'spawned', 'edited'),
+    argvalues=[
+        pytest.param('wiki', None, 'wiki', 'docs', id='default'),
+        pytest.param('docs', None, 'docs', 'wiki', id='docs'),
+        # a sub-project naming no folder keeps the default, whatever the
+        # tree's root project names
+        pytest.param('docs', 'app', 'wiki', 'docs', id='sub-project'),
+    ],
+)
+def test_merge_refuses_a_hand_edited_wiki_folder(
+    tmp_path: pathlib.Path,
+    wiki: str,
+    project: Optional[str],
+    spawned: str,
+    edited: str,
+) -> None:
+    """A node whose ``config.json`` names another wiki folder cannot merge.
+
+    The ``wiki`` key is immutable through the config setters, but a raw
+    edit to another valid folder would move the node's scope exemption and
+    let the squash land pages under it. The footprint check recomputes the
+    folder by the rule spawn applied -- the parent's folder in the parent's
+    project, else the project's committed setting -- and refuses the merge
+    naming both folders, restoring the target. With the edit undone, the
+    page is an ordinary path outside the scope.
+    """
+    repo = _init_tree(tmp_path / 'editedrepo', wiki=wiki)
+    flags = []
+    prefix = ''
+    if project is not None:
+        # a committed sub-project wiki -- the base-ref precondition for the init
+        app_wiki = repo / project / 'wiki' / '_index.md'
+        app_wiki.parent.mkdir(parents=True)
+        app_wiki.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+        _git(repo, 'add', project)
+        _git(repo, 'commit', '-m', 'add app wiki')
+        flags = ['--path', project]
+        prefix = f'{project}/'
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        *flags,
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    # hand-edit the recorded folder, then commit a page under it raw
+    config_path = worktree / f'{prefix}.fractal' / 'main.task' / 'config.json'
+    original = config_path.read_text(encoding='utf-8')
+    config = json.loads(original)
+    config['wiki'] = edited
+    config_path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+    page = f'{prefix}{edited}/page.md'
+    (worktree / page).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / page).write_text(
+        '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'edit the wiki folder and add a page')
+    main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    # refused, naming both folders -- a sub-project node's by its project's
+    # committed setting; the target restored
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert f'records {edited!r}' in result.stderr, result.stderr
+    if project is None:
+        assert f'gives {spawned!r}' in result.stderr, result.stderr
+    else:
+        named = f'for project {project!r} names {spawned!r}'
+        assert named in result.stderr, result.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == main_head
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    # with the edit undone, the page is a stray outside the scope
+    config_path.write_text(original, encoding='utf-8')
+    result = _script('merge.sh', repo, f'{worktree}')
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert f'outside its scope: {page};' in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    argnames='direct',
+    argvalues=[False, True],
+    ids=['cli', 'script'],
+)
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_merge_into_a_linked_root_holds_the_trees_wiki_folder(
+    tmp_path: pathlib.Path,
+    wiki: str,
+    direct: bool,
+) -> None:
+    """An unedited depth-1 node merges into a linked root under the tree's folder.
+
+    The wiki-folder check recomputes a depth-1 node's folder from the user
+    node, which resolves by the repo's record: a root checked out in a
+    linked worktree carries no self-ignored seed to read, so a checkout
+    lookup would see the default folder and refuse every node of a ``docs``
+    tree. The node's page lands past its scope, and the merge's index
+    refresh leaves a corpus beside the configured wiki alone.
+    """
+    repo = _init_tree(tmp_path / 'linkedwikirepo', wiki=wiki)
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    page = f'{wiki}/page.md'
+    (worktree / 'src').mkdir()
+    (worktree / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    (worktree / page).write_text(
+        '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    # the repo root parks on a side branch; main is checked out linked
+    _git(repo, 'checkout', '-b', 'side', 'main')
+    linked = tmp_path / 'main-wt'
+    _git(repo, 'worktree', 'add', f'{linked}', 'main')
+    corpus = _files(linked / 'wiki')
+    if direct:
+        result = _script('merge.sh', repo, f'{worktree}')
+    else:
+        result = _run(repo, 'node', 'merge', f'--path={worktree}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
+    tracked = _git(linked, 'ls-files', 'src/a.py', page).stdout.split()
+    assert tracked == sorted(['src/a.py', page])
+    if wiki != 'wiki':
+        assert _files(linked / 'wiki') == corpus
+
+
+@pytest.mark.parametrize(
+    argnames='linked',
+    argvalues=[False, True],
+    ids=['checked_out', 'linked'],
+)
+def test_merge_refreshes_a_sub_project_nodes_own_wiki(
+    tmp_path: pathlib.Path,
+    linked: bool,
+) -> None:
+    """A sub-project node's merge refreshes its own project's wiki in the target.
+
+    The squash lands the node's pages under its project's wiki folder, so
+    that folder's indexes are what the merge regenerates in the target
+    checkout -- never the target's own wiki, which the squash left alone
+    -- whether the root is checked out in place or in a linked worktree,
+    where no config of the target's can be read at all.
+    """
+    repo = _init_tree(tmp_path / 'subwikirepo')
+    # a sub-project naming its own folder, with the committed wiki there that
+    # the base-ref precondition requires
+    notes = repo / 'app' / 'notes' / '_index.md'
+    notes.parent.mkdir(parents=True)
+    notes.write_text('---\nname: notes\n---\n# notes\n\n***\n', encoding='utf-8')
+    settings = repo / 'app' / '.fractal' / '.settings.json'
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({'wiki': 'notes'}) + '\n', encoding='utf-8')
+    _git(repo, 'add', 'app')
+    _git(repo, 'commit', '-m', 'add the app project')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--path',
+        'app',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'app' / 'src').mkdir()
+    (worktree / 'app' / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    (worktree / 'app' / 'notes' / 'page.md').write_text(
+        '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    target = repo
+    if linked:
+        # the repo root parks on a side branch; main is checked out linked
+        _git(repo, 'checkout', '-b', 'side', 'main')
+        target = tmp_path / 'main-wt'
+        _git(repo, 'worktree', 'add', f'{target}', 'main')
+    root_index = (target / 'wiki' / '_index.md').read_text(encoding='utf-8')
+    result = _run(repo, 'node', 'merge', f'--path={worktree}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    # the app wiki's index lists the landed page; the root wiki is untouched
+    index = _git(target, 'show', 'HEAD:app/notes/_index.md').stdout
+    assert '[[page|page]]' in index, index
+    assert (target / 'wiki' / '_index.md').read_text(encoding='utf-8') == root_index
+
+
+def test_merge_ignoring_scope_refreshes_the_folder_the_spawn_gave(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``--ignore-scope`` never lets a hand-edited folder steer the refresh.
+
+    The footprint check that refuses a ``config.json`` edited to another
+    folder is skipped under ``--ignore-scope``, and a root checked out in
+    a linked worktree carries no config to read the folder from, so the
+    refresh takes the folder the node's spawn gave it from the merge's
+    own resolution: the configured ``docs/`` is refreshed, and a corpus
+    ``wiki/`` beside it, the edit's target, keeps its bytes.
+    """
+    repo = _init_tree(tmp_path / 'editedrepo', wiki='docs')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'src').mkdir()
+    (worktree / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    (worktree / 'docs' / 'page.md').write_text(
+        '---\nname: page\ndesc: A page.\n---\n\n# page\n\n***\n',
+        encoding='utf-8',
+    )
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    # the node's config.json is edited to the corpus folder
+    config_path = worktree / '.fractal' / 'main.task' / 'config.json'
+    config = json.loads(config_path.read_text(encoding='utf-8'))
+    config['wiki'] = 'wiki'
+    config_path.write_text(json.dumps(config, indent=2), encoding='utf-8')
+    # the repo root parks on a side branch; main is checked out linked
+    _git(repo, 'checkout', '-b', 'side', 'main')
+    linked = tmp_path / 'main-wt'
+    _git(repo, 'worktree', 'add', f'{linked}', 'main')
+    corpus = _files(linked / 'wiki')
+    result = _run(repo, 'node', 'merge', '--ignore-scope', f'--path={worktree}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    # the configured folder's index lists the landed page; the corpus is intact
+    index = _git(linked, 'show', 'HEAD:docs/_index.md').stdout
+    assert '[[page|page]]' in index, index
+    assert _files(linked / 'wiki') == corpus
+
+
+def test_merge_refuses_when_the_wiki_folder_read_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A direct merge that cannot read its wiki folder refuses, never guesses.
+
+    With no ``--target-wiki``, ``merge.sh`` reads the project-wiki folder
+    from the target's config and then the node's; when neither read
+    answers, the default ``wiki/`` would be a guess that refreshes, and
+    stages past the footprint check, whatever ordinary content sits there.
+    The merge refuses naming the read, the target restored and the child
+    unadvanced, so a corpus ``wiki/`` beside the configured ``docs/`` keeps
+    its bytes; the folder passed with ``--target-wiki``, which the error
+    points at, lands the same merge. A ``fractal`` PATH shim fails every
+    read of the folder.
+    """
+    repo = _init_tree(tmp_path / 'wikireadrepo', wiki='docs')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'src').mkdir()
+    (worktree / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    _write_page(worktree / 'docs' / 'page.md')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    child = _git(repo, 'rev-parse', 'main.task').stdout
+    corpus = _files(repo / 'wiki')
+    # a fractal that fails every read of the wiki folder
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    shim = bindir / 'fractal'
+    shim.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ "$1 $2 $3" == "config _get wiki" ]]; then\n'
+        '    exit 1\n'
+        'fi\n'
+        f'exec "{_fractal_bin()}" "$@"\n',
+        encoding='utf-8',
+    )
+    shim.chmod(0o755)
+    env = _cli_env()
+    path = env['PATH']
+    env['PATH'] = f'{bindir}{os.pathsep}{path}'
+
+    refused = _script('merge.sh', repo, f'{worktree}', env=env)
+
+    assert refused.returncode != 0, (refused.stdout, refused.stderr)
+    assert (
+        'reading the project-wiki folder from the config of main or main.task failed'
+    ) in refused.stderr, refused.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    assert _git(repo, 'rev-parse', 'main.task').stdout == child
+    assert _files(repo / 'wiki') == corpus
+    # the folder named outright needs no read
+    retry = _script('merge.sh', repo, f'{worktree}', '--target-wiki=docs', env=env)
+    assert retry.returncode == 0, (retry.stdout, retry.stderr)
+    index = _git(repo, 'show', 'HEAD:docs/_index.md').stdout
+    assert '[[page|page]]' in index, index
+    assert _files(repo / 'wiki') == corpus
+
+
+@pytest.mark.parametrize(
+    argnames='readable',
+    argvalues=[True, False],
+    ids=['node_answers', 'node_unreadable'],
+)
+def test_merge_reads_the_wiki_folder_and_its_project_from_one_config(
+    tmp_path: pathlib.Path,
+    readable: bool,
+) -> None:
+    """A direct merge takes a sub-project node's wiki folder with its project.
+
+    A root checked out in a linked worktree carries no config to read, so a
+    direct ``merge.sh`` call with no ``--target-wiki`` takes the folder from
+    the merging node's config, and the project the folder sits under from
+    that same config, never the target's unread default: the node's page is
+    indexed in its own project's wiki, and a corpus ``wiki/`` at the repo
+    root, where the folder would land under the root project, keeps its
+    bytes. When the node's project cannot be read either, the merge refuses
+    naming the read, the target restored. A ``fractal`` PATH shim fails
+    every read of a project.
+    """
+    repo = _init_tree(tmp_path / 'subreadrepo', wiki='docs')
+    # a sub-project on the default folder, with the committed wiki there that
+    # the base-ref precondition requires
+    index = repo / 'app' / 'wiki' / '_index.md'
+    index.parent.mkdir(parents=True)
+    index.write_text('---\nname: wiki\n---\n# wiki\n\n***\n', encoding='utf-8')
+    _git(repo, 'add', 'app')
+    _git(repo, 'commit', '-m', 'add the app project')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--path',
+        'app',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'app' / 'src').mkdir()
+    (worktree / 'app' / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    _write_page(worktree / 'app' / 'wiki' / 'page.md')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work and a page')
+    # the repo root parks on a side branch; main is checked out linked
+    _git(repo, 'checkout', '-b', 'side', 'main')
+    linked = tmp_path / 'main-wt'
+    _git(repo, 'worktree', 'add', f'{linked}', 'main')
+    head = _git(linked, 'rev-parse', 'HEAD').stdout
+    corpus = _files(linked / 'wiki')
+    env = _cli_env()
+    if not readable:
+        # a fractal that fails every read of a project
+        bindir = tmp_path / 'bin'
+        bindir.mkdir()
+        shim = bindir / 'fractal'
+        shim.write_text(
+            '#!/usr/bin/env bash\n'
+            'if [[ "$1 $2 $3" == "config _get project" ]]; then\n'
+            '    exit 1\n'
+            'fi\n'
+            f'exec "{_fractal_bin()}" "$@"\n',
+            encoding='utf-8',
+        )
+        shim.chmod(0o755)
+        path = env['PATH']
+        env['PATH'] = f'{bindir}{os.pathsep}{path}'
+
+    result = _script('merge.sh', repo, f'{worktree}', env=env)
+
+    assert _files(linked / 'wiki') == corpus
+    if readable:
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        landed = _git(linked, 'show', 'HEAD:app/wiki/_index.md').stdout
+        assert '[[page|page]]' in landed, landed
+        return
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert (
+        'reading the project-wiki folder from the config of main or main.task failed'
+    ) in result.stderr, result.stderr
+    assert _git(linked, 'rev-parse', 'HEAD').stdout == head
+    assert _git(linked, 'status', '--porcelain').stdout == ''
+
+
+def test_merge_refuses_a_node_whose_project_setting_changed_since_spawn(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A changed sub-project setting refuses the merge, naming the setting.
+
+    A node that selects another sub-project than its parent's records that
+    project's setting as committed on the root branch, and the merge holds
+    it to the setting as it stands then. A folder committed after the spawn
+    refuses an unedited node, and the refusal names the setting rather than
+    a ``config.json`` edit, which would move the exemption to the new
+    folder; committing the recorded folder back lets the merge land.
+    """
+    repo = _init_tree(tmp_path / 'settingrepo', wiki='docs')
+    # a sub-project naming its own folder, with the committed wiki there that
+    # the base-ref precondition requires
+    notes = repo / 'app' / 'notes' / '_index.md'
+    notes.parent.mkdir(parents=True)
+    notes.write_text('---\nname: notes\n---\n# notes\n\n***\n', encoding='utf-8')
+    settings = repo / 'app' / '.fractal' / '.settings.json'
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({'wiki': 'notes'}) + '\n', encoding='utf-8')
+    _git(repo, 'add', 'app')
+    _git(repo, 'commit', '-m', 'add the app project')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--path',
+        'app',
+        '--scope',
+        'src',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'app' / 'src').mkdir()
+    (worktree / 'app' / 'src' / 'a.py').write_text('a = 1\n', encoding='utf-8')
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work')
+    # the operator names another folder for the project after the spawn
+    settings.write_text(json.dumps({'wiki': 'other'}) + '\n', encoding='utf-8')
+    _git(repo, 'commit', '-am', 'move the app wiki')
+    main_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    # refused, naming the setting and the remedy, never a config.json edit
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert (
+        "main.task records 'notes' as its project wiki folder, but the setting"
+        " committed on 'main' for project 'app' names 'other'"
+    ) in result.stderr, result.stderr
+    assert "commit 'notes' back on 'main'" in result.stderr, result.stderr
+    assert 'config.json' not in result.stderr, result.stderr
+    assert _git(repo, 'rev-parse', 'HEAD').stdout.strip() == main_head
+    assert _git(repo, 'status', '--porcelain').stdout == ''
+    # with the recorded folder committed back, the merge lands
+    settings.write_text(json.dumps({'wiki': 'notes'}) + '\n', encoding='utf-8')
+    _git(repo, 'commit', '-am', 'restore the app wiki')
+    result = _script('merge.sh', repo, f'{worktree}')
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize(
@@ -4205,6 +5865,122 @@ def test_merge_admits_init_attributes_over_a_targets_own_lines(
     ]
     assert (repo / 'docs' / 'a.md').read_text(encoding='utf-8') == '# a\n'
     assert _git(repo, 'status', '--porcelain').stdout == ''
+
+
+@pytest.mark.parametrize(
+    argnames=('attributes', 'edit', 'lands'),
+    argvalues=[
+        pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
+        pytest.param(
+            '* text=auto\n',
+            '\n' + _WIKI_INDEX_LINES,
+            True,
+            id='index-lines-after-own-lines',
+        ),
+        pytest.param(
+            '*.png binary\r\n',
+            '\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
+            True,
+            id='crlf-index-lines',
+        ),
+        pytest.param(
+            '*.png binary\r\n*.jpg binary',
+            '\r\n\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
+            True,
+            id='crlf-without-a-final-newline',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '\n' + _WIKI_PAGE_LINES,
+            False,
+            id='repo-wide-page-lines',
+        ),
+        pytest.param(
+            '* text=auto\n\n' + _WIKI_INDEX_LINES,
+            '\n' + _WIKI_PAGE_LINES,
+            False,
+            id='page-lines-alone',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '\n' + _WIKI_ROOT_PAGE_LINES,
+            False,
+            id='wiki-root-page-lines',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '*.bin binary\n',
+            False,
+            id='foreign-line',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES.replace('=wiki', '=union'),
+            False,
+            id='changed-line',
+        ),
+    ],
+)
+def test_merge_admits_only_the_wiki_attributes_edit(
+    tmp_path: pathlib.Path,
+    attributes: Optional[str],
+    edit: str,
+    lands: bool,
+) -> None:
+    """The footprint check admits ``.gitattributes`` only as the wiki tool's edit.
+
+    The wiki tool appends its index lines to the file, in the file's own
+    line ending: CRLF when the file already holds a CRLF line. That is
+    init's own edit. A scoped node's first squash carries the edit to the
+    target, and the footprint check admits it, so the landing succeeds with
+    the target's file as its original plus the edit, byte for byte. The
+    tool maps pages in each wiki root's own file, never this one, where a
+    page line in either spelling would take over the merge of every
+    Markdown file in the repository. So page lines, beside the index lines
+    or alone, a foreign line, or the index lines with one changed are out
+    of scope like any other path, and the merge is refused naming the file.
+    """
+    repo = _init_tree(tmp_path / 'attrsrepo')
+    if attributes is not None:
+        (repo / '.gitattributes').write_bytes(attributes.encode())
+        _git(repo, 'add', '.gitattributes')
+        _git(repo, 'commit', '-m', 'own attributes')
+    init = _run(
+        repo,
+        'node',
+        'init',
+        'task',
+        '--scope',
+        'docs',
+        '--agent',
+        'claude',
+        '--local',
+    )
+    assert init.returncode == 0, init.stderr
+    worktree = repo / '.worktrees' / 'main.task'
+    (worktree / 'docs').mkdir()
+    (worktree / 'docs' / 'a.md').write_text('# a\n', encoding='utf-8')
+    # stand in for the wiki tool's write: the target's copy followed by the edit
+    (worktree / '.gitattributes').write_bytes(((attributes or '') + edit).encode())
+    # raw git: a first squash carries the edit beside the seed and the
+    # in-scope work
+    _git(worktree, 'add', '-A')
+    _git(worktree, 'commit', '-m', 'child work with init scaffolding')
+    result = _script('merge.sh', repo, f'{worktree}')
+
+    if lands:
+        # the scoped landing succeeded, and the target's .gitattributes is
+        # its original followed by the edit, byte for byte
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        cmd = ['git', 'show', 'HEAD:.gitattributes']
+        landed = subprocess.run(cmd, cwd=repo, capture_output=True).stdout
+        assert landed == ((attributes or '') + edit).encode()
+        assert _git(repo, 'status', '--porcelain').stdout == ''
+    else:
+        # refused, naming the file
+        assert result.returncode != 0, (result.stdout, result.stderr)
+        assert 'outside its scope' in result.stderr, result.stderr
+        assert '.gitattributes' in result.stderr, result.stderr
 
 
 def test_merge_strips_a_leaked_cross_project_descendant_seed_without_a_scope_refusal(
@@ -4770,9 +6546,12 @@ def test_merge_interrupt_during_the_commit_hook_finishes_the_merge(
     (the reset --hard HEAD would restore nothing) nor a "staged squash left
     in place" that the commit already consumed.
 
-    The signal goes to the process group: bash acts on a SIGINT it receives
-    while waiting on a child only when that child dies of it, so the hook
-    and its sleep must take the signal too.
+    The signal goes to the process group, so the hook takes it too. The
+    hook traps INT and exits at whichever point the signal lands: inside
+    a sleep, or between two polls, where a bash without a trap ignores a
+    SIGINT its foreground child did not die of (a sleep forked after the
+    signal exits clean) and runs on to its marker. So the marker after
+    the gate proves the signal reached the hook, never racing its poll.
     """
     repo = _init_tree(tmp_path / 'hookrepo')
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
@@ -4793,6 +6572,7 @@ def test_merge_interrupt_during_the_commit_hook_finishes_the_merge(
     hook.parent.mkdir(exist_ok=True)
     hook.write_text(
         '#!/usr/bin/env bash\n'
+        "trap 'exit 130' INT\n"
         f'touch "{ready}"\n'
         f'while [[ ! -e "{release}" ]]; do sleep 0.05; done\n'
         f'touch "{slept}"\n',
@@ -5089,8 +6869,9 @@ def test_merge_serializes_concurrent_sibling_merges(tmp_path: pathlib.Path) -> N
     second's on top, the target clean, no squash state behind.
 
     The first squash is held open at a gate with a ``git`` shim that parks
-    before running the real ``merge --squash``; the second squash only marks
-    its start, so a merge that reaches it while the first is parked shows.
+    before running the real ``merge --squash``; a later squash only marks its
+    start, so a merge that reaches its squash while the first is parked
+    shows.
     """
     repo = _init_tree(tmp_path / 'racerepo')
     names = ('a', 'b')
@@ -5107,11 +6888,13 @@ def test_merge_serializes_concurrent_sibling_merges(tmp_path: pathlib.Path) -> N
     ready_b = tmp_path / 'gate_ready_b'
     bindir = _git_shim(
         tmp_path,
-        'if [[ " $* " == *" merge --squash main.a "* ]]; then\n'
-        f'    touch "{ready_a}"\n'
-        f'    while [[ ! -e "{release_a}" ]]; do sleep 0.05; done\n'
-        'elif [[ " $* " == *" merge --squash main.b "* ]]; then\n'
-        f'    touch "{ready_b}"\n'
+        'if [[ " $* " == *" merge "* && " $* " == *" --squash "* ]]; then\n'
+        f'    if [[ ! -e "{ready_a}" ]]; then\n'
+        f'        touch "{ready_a}"\n'
+        f'        while [[ ! -e "{release_a}" ]]; do sleep 0.05; done\n'
+        '    else\n'
+        f'        touch "{ready_b}"\n'
+        '    fi\n'
         'fi\n',
     )
     env = _cli_env()
@@ -5606,7 +7389,11 @@ def test_delete_warns_on_unmerged_non_ascii_work(tmp_path: pathlib.Path) -> None
     assert not worktree.exists()
 
 
-def test_delete_warns_on_unmerged_wiki_page_work(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_delete_warns_on_unmerged_wiki_page_work(
+    tmp_path: pathlib.Path,
+    wiki: str,
+) -> None:
     """Unmerged wiki *pages* still warn despite the generated-state excludes.
 
     The unmerged-work check excludes the wiki's generated indexes and
@@ -5615,16 +7402,16 @@ def test_delete_warns_on_unmerged_wiki_page_work(tmp_path: pathlib.Path) -> None
     a page -- refreshed index and cache riding along -- must still draw the
     warning: the excludes silence tool-owned bytes, never content.
     """
-    repo = _init_tree(tmp_path / 'wikiwarnrepo')
+    repo = _init_tree(tmp_path / 'wikiwarnrepo', wiki=wiki)
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
     # the child writes a wiki page and refreshes the generated index/cache
-    (worktree / 'wiki' / 'topic.md').write_text(
+    (worktree / wiki / 'topic.md').write_text(
         '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
         encoding='utf-8',
     )
-    wiki_dir = worktree / 'wiki'
+    wiki_dir = worktree / wiki
     _wiki_update(wiki_dir)
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child wiki page')
@@ -5638,8 +7425,10 @@ def test_delete_warns_on_unmerged_wiki_page_work(tmp_path: pathlib.Path) -> None
     assert not worktree.exists()
 
 
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
 def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
     tmp_path: pathlib.Path,
+    wiki: str,
 ) -> None:
     """Wiki state the tool regenerates never resurrects the warning.
 
@@ -5648,19 +7437,21 @@ def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
     including its committed ``_index.md`` and ``.wiki/`` cache. Once the
     target's wiki moves on, its regenerated bytes differ from the branch's
     copies, but those paths are tool-owned state, not the branch's work --
-    the unmerged check excludes them and stays silent.
+    the unmerged check excludes them, at the configured wiki folder, and
+    stays silent -- in the script and in the Python check ``fractal node
+    delete`` prints before its prompt.
     """
-    repo = _init_tree(tmp_path / 'wikiregenrepo')
+    repo = _init_tree(tmp_path / 'wikiregenrepo', wiki=wiki)
     init = _run(repo, 'node', 'init', 'task', '--agent', 'claude', '--local')
     assert init.returncode == 0, init.stderr
     worktree = repo / '.worktrees' / 'main.task'
     # the child writes a wiki page and commits the refreshed index/cache --
     # the branch's own copies of the generated state
-    (worktree / 'wiki' / 'topic.md').write_text(
+    (worktree / wiki / 'topic.md').write_text(
         '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
         encoding='utf-8',
     )
-    wiki_dir = worktree / 'wiki'
+    wiki_dir = worktree / wiki
     _wiki_update(wiki_dir)
     _git(worktree, 'add', '-A')
     _git(worktree, 'commit', '-m', 'child wiki page')
@@ -5672,19 +7463,20 @@ def test_delete_does_not_warn_on_merge_regenerated_wiki_state(
     # the target's wiki moves on (a sibling page lands and refreshes the
     # index), so its regenerated `_index.md`/`.wiki` bytes now differ from
     # the branch's committed copies
-    (repo / 'wiki' / 'other.md').write_text(
+    (repo / wiki / 'other.md').write_text(
         '---\nname: other\ndesc: A sibling page.\n---\n\n# other\n\n***\n',
         encoding='utf-8',
     )
-    wiki_dir = repo / 'wiki'
+    wiki_dir = repo / wiki
     _wiki_update(wiki_dir)
     _git(repo, 'add', '-A')
     _git(repo, 'commit', '-m', 'sibling wiki page')
+    # the branch's page is in main; its index/.wiki bytes differ only because
+    # the tool regenerated them on the target -- no false unmerged warning
+    assert Node(worktree).unmerged_warning() == ''
 
     result = _script('delete.sh', repo, f'{worktree}')
 
-    # the branch's page is in main; its index/.wiki bytes differ only because
-    # the tool regenerated them on the target -- no false unmerged warning
     assert result.returncode == 0, result.stderr
     assert 'not merged' not in result.stderr, (result.stdout, result.stderr)
     assert not worktree.exists()
@@ -5728,19 +7520,97 @@ def _wiki_update(wiki_dir: pathlib.Path) -> None:
     )
 
 
-def _init_tree(root: pathlib.Path) -> pathlib.Path:
-    """Build a git repo with a committed wiki and a ``fractal`` user node."""
+def _write_page(path: pathlib.Path) -> None:
+    """Write a minimal wiki page at ``path``, named for its stem."""
+    path.write_text(
+        f'---\nname: {path.stem}\ndesc: A {path.stem} page.\n---\n\n# {path.stem}\n\n***\n',
+        encoding='utf-8',
+    )
+
+
+def _declare_wiki(root: pathlib.Path, *folders: str) -> None:
+    """Declare a wiki at ``root`` with an index in each of ``folders``, refreshed."""
+    (root / '.wiki').mkdir(parents=True, exist_ok=True)
+    (root / '.wiki' / 'settings.json').write_text('{}\n', encoding='utf-8')
+    for folder in (root, *(root / name for name in folders)):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / '_index.md').write_text(
+            f'---\nname: {folder.name}\ndesc: The {folder.name} folder.\n---\n'
+            f'# {folder.name}\n\n***\n',
+            encoding='utf-8',
+        )
+    _wiki_update(root)
+
+
+def _sibling_pages(
+    repo: pathlib.Path, root: str, folder: str
+) -> dict[str, pathlib.Path]:
+    """Fork siblings ``one`` and ``two`` off one tip, each committing a page.
+
+    ``one`` adds ``zeta`` and ``two`` adds ``alpha`` to ``folder`` of the wiki
+    at ``root`` (both worktree-relative), each refreshing only that folder;
+    ``two`` then commits ``mid`` without refreshing, so the second merge's
+    index lacks ``mid``'s row until the merge's own refresh adds it. Returns
+    the worktrees by node name.
+    """
+    worktrees = {}
+    for name in ('one', 'two'):
+        init = _run(repo, 'node', 'init', name, '--agent', 'claude', '--local')
+        assert init.returncode == 0, init.stderr
+        worktrees[name] = repo / '.worktrees' / f'main.{name}'
+    for name, page in (('one', 'zeta'), ('two', 'alpha')):
+        worktree = worktrees[name]
+        _write_page(worktree / root / folder / f'{page}.md')
+        subprocess.run(
+            [
+                'wiki',
+                'update',
+                f'--path={worktree / root}',
+                *([] if folder == '.' else [folder]),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_cli_env(),
+        )
+        _git(worktree, 'add', '-A')
+        _git(worktree, 'commit', '-m', f'{page} page')
+    _write_page(worktrees['two'] / root / folder / 'mid.md')
+    _git(worktrees['two'], 'add', '-A')
+    _git(worktrees['two'], 'commit', '-m', 'mid page')
+    return worktrees
+
+
+def _init_tree(root: pathlib.Path, *, wiki: str = 'wiki') -> pathlib.Path:
+    """Build a git repo with a committed wiki and a ``fractal`` user node.
+
+    ``wiki`` is the shared project-wiki folder; any other folder than the
+    default is named by a committed ``.fractal/.settings.json``, and
+    ``wiki/`` then holds a corpus that is itself a wiki with a stale index,
+    so a refresh that reached it would rewrite it.
+    """
     root.mkdir(parents=True, exist_ok=True)
     _git(root, 'init', '-b', 'main')
     _git(root, 'config', 'user.email', 'script@test.local')
     _git(root, 'config', 'user.name', 'script')
     (root / 'tracked.txt').write_text('original\n', encoding='utf-8')
-    wiki = root / 'wiki'
-    wiki.mkdir()
-    (wiki / '_index.md').write_text(
+    wiki_dir = root / wiki
+    wiki_dir.mkdir(parents=True)
+    (wiki_dir / '_index.md').write_text(
         '---\nname: wiki\n---\n# wiki\n\n***\n',
         encoding='utf-8',
     )
+    # a non-default folder is named by the project's settings file, beside a
+    # corpus wiki/ whose index omits its page
+    if wiki != 'wiki':
+        settings = root / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}) + '\n', encoding='utf-8')
+        corpus = root / 'wiki'
+        corpus.mkdir()
+        index = (wiki_dir / '_index.md').read_text(encoding='utf-8')
+        (corpus / '_index.md').write_text(index, encoding='utf-8')
+        (corpus / 'theorem.md').write_text('# theorem\n', encoding='utf-8')
     _git(root, 'add', '-A')
     _git(root, 'commit', '-m', 'init')
     assert _run(root, 'init').returncode == 0

@@ -3,21 +3,35 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
+import os
 import pathlib
+import signal
 import subprocess
+import time
 
 import pytest
 
+import fractal.util.process
 from fractal.core.node import Node
 
 __all__ = [
     '_git',
+    '_files',
+    '_digests',
+    '_tree_drift',
     '_commit_template',
     '_past_timestamp',
     '_age_iter',
     '_age_run',
     '_age_step',
     '_stub_run_script',
+    '_alive',
+    '_kill_tagged',
+    '_save_cost_state',
+    '_LOCK_HOLDER',
+    '_await_ready',
 ]
 
 
@@ -30,6 +44,58 @@ def _git(cwd: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
         text=True,
         check=True,
     )
+
+
+def _files(root: pathlib.Path) -> dict[str, bytes]:
+    """Every file under ``root``, keyed by its relative path, with its bytes."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob('*')
+        if path.is_file()
+    }
+
+
+# the most paths of one kind the seed guard's message names
+_DRIFT_CAP = 20
+
+
+def _digests(root: pathlib.Path, folders: list[pathlib.Path]) -> dict[str, str]:
+    """Map every file under ``folders``, by ``root``-relative path, to its sha256."""
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for folder in folders
+        for path in folder.rglob('*')
+        if path.is_file()
+    }
+
+
+def _tree_drift(before: dict[str, str], after: dict[str, str]) -> str:
+    """Return the seed guard's failure message for two digest maps, ``''`` if equal.
+
+    Names the added, removed, and changed paths (each kind capped at
+    ``_DRIFT_CAP``, the rest counted), then both causes a drift can have --
+    the guard cannot tell a test's write from a concurrent edit.
+    """
+    added = sorted(after.keys() - before.keys())
+    removed = sorted(before.keys() - after.keys())
+    changed = sorted(
+        path for path in before.keys() & after.keys() if before[path] != after[path]
+    )
+    if not (added or removed or changed):
+        return ''
+    lines = [
+        'package seed trees (_assets/_node/_scripts/skills) changed during the session:'
+    ]
+    # cap each kind, so a mass drift (a reformat, a checkout) stays readable
+    for kind, paths in (('added', added), ('removed', removed), ('changed', changed)):
+        lines.extend(f'  {kind}: {path}' for path in paths[:_DRIFT_CAP])
+        if len(paths) > _DRIFT_CAP:
+            lines.append(f'  ... and {len(paths) - _DRIFT_CAP} more {kind}')
+    lines.append(
+        'either a test wrote into the source tree through a package path, or'
+        ' the tree was edited while the tests ran (never edit it mid-run)'
+    )
+    return '\n'.join(lines)
 
 
 def _commit_template(
@@ -119,3 +185,85 @@ def _stub_run_script(
     stub = run_script_method if isinstance(target, type) else run_script
     monkeypatch.setattr(target, '_run_script', stub)
     return calls
+
+
+def _alive(pids: list[int]) -> list[int]:
+    """Return the subset of ``pids`` still running (zombies count as dead)."""
+    table = fractal.util.process.snapshot()
+    return [pid for pid in pids if pid in table and not table[pid].zombie]
+
+
+def _kill_tagged(tag: str) -> None:
+    """SIGKILL every process whose command line carries ``tag``.
+
+    One process-table pass, so a teardown ends every process its test
+    started, recorded or not, while a pid recycled to an unrelated process
+    -- whose command lacks the tag -- is never signaled.
+    """
+    for pid, process in fractal.util.process.snapshot().items():
+        if tag in process.command:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def _save_cost_state(path: pathlib.Path, session: str, total: float) -> None:
+    """Append the ``cost-state`` record claude saves to a transcript at exit.
+
+    Real-shaped (claude 2.1.300): the session's running total, and the
+    per-model usage behind it. A resume, or a fork, of the session counts
+    its result figure on from that total.
+    """
+    state = {
+        'type': 'cost-state',
+        'sessionId': session,
+        'totalCostUSD': total,
+        'totalAPIDuration': 5780,
+        'totalAPIDurationWithoutRetries': 5779,
+        'totalToolDuration': 227,
+        'totalLinesAdded': 0,
+        'totalLinesRemoved': 0,
+        'totalDuration': 5972,
+        'startTime': 1792304015631,
+        'modelUsage': {
+            'claude-fable-5': {
+                'inputTokens': 154,
+                'outputTokens': 5933,
+                'thinkingTokens': 5437,
+                'cacheReadInputTokens': 359431,
+                'cacheCreationInputTokens': 23408,
+                'webSearchRequests': 0,
+                'costUSD': total,
+            },
+        },
+        'hasUnknownModelCost': False,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps(state) + '\n')
+
+
+# a standalone holder of the real merge lock file: acquire an exclusive
+# fcntl.flock on argv[1], signal readiness via argv[2], then block -- the same
+# lock and mode Node.merge and a booting loop contend
+_LOCK_HOLDER = (
+    'import fcntl, sys, time; '
+    "f = open(sys.argv[1], 'a'); "
+    'fcntl.flock(f, fcntl.LOCK_EX); '
+    "open(sys.argv[2], 'w').close(); "
+    'time.sleep(120)'
+)
+
+
+def _await_ready(
+    marker: pathlib.Path,
+    *,
+    proc: subprocess.Popen,
+    deadline: float,
+) -> None:
+    """Block (bounded) until ``marker`` appears, failing if ``proc`` dies first."""
+    while not marker.exists():
+        assert proc.poll() is None, 'holder exited before acquiring the lock'
+        assert time.monotonic() < deadline, 'holder never signalled ready'
+        time.sleep(0.02)

@@ -39,15 +39,17 @@ any open iteration stay open for resume to adopt.
 ## Events beside statuses
 
 Every transition writes a point-in-time event row: `init`, `spawn`, `commit`,
-`approve`, `merge`, `delete`, `orphan`, `model_drop`, `start`, `finish`,
-`finish_cancel`, `stop`, `kill`, `pause`, `resume`, `retire`, and `unretire`.
-Not every event is a transition — `model_drop` records a step served off its
-pinned model against that attempt's own row, leaving the node's status untouched
-(see [[features/loop/steps|steps]]). Rows carry start and end instants
-(durations are derived, never stored), and the `pause` / `resume` event instants
-credit paused spans back to run and iteration deadlines. Refused signals also
-leave evidence: a refusal writes a `failed` event row whose metadata states the
-reason before the operation raises.
+`approve`, `merge`, `delete`, `orphan`, `model_drop`, `preflight`, `start`,
+`finish`, `finish_cancel`, `stop`, `kill`, `pause`, `resume`, `retire`, and
+`unretire`. Not every event is a transition — `model_drop` records a step served
+off its pinned model against that attempt's own row, leaving the node's status
+untouched (see [[features/loop/steps|steps]]), and `preflight` records a passed
+codex probe's priced summary before the run is active, so the event carries no
+run (see [[features/agents/models_and_effort|models_and_effort]]). Rows carry
+start and end instants (durations are derived, never stored), and the `pause` /
+`resume` event instants credit paused spans back to run and iteration deadlines.
+Refused signals also leave evidence: a refusal writes a `failed` event row whose
+metadata states the reason before the operation raises.
 
 ## Legal signals per status
 
@@ -60,12 +62,16 @@ reason before the operation raises.
   refusing over a recorded process group whose identity cannot be verified, and
   over a record naming no group yet (a launch's claim in flight) with guidance
   to retry once its pid lands or remove an abandoned record.
-- **`paused`** accepts only `resume`, `kill`, and `chat`. Everything else
-  refuses; a paused node holds its spawn slot and blocks ancestor finish-drains
-  until resumed or killed.
+- **`paused`** accepts only `resume`, `kill`, `chat`, and `merge` (committed
+  work only; the node stays paused). Everything else refuses; a paused node
+  holds its spawn slot and blocks ancestor finish-drains until resumed or
+  killed.
 - **`idle`** is the parked, startable state: `start` runs it, `retire` hides it,
   `delete` removes it, and `kill` stamps it `killed` — a booting spawn is
-  reaped, a never-started one can never activate.
+  reaped, a never-started one can never activate. A started node stays `idle`
+  until its loop stamps `active` after preflight; through that boot window, with
+  its loop runtime already live, it reads `idle (starting)` (a display
+  qualifier, never stored), and `list --live` reads it as `active`.
 - **Settled** nodes (`completed`/`stopped`/`exited`/`killed`) accept
   `start --continue` to re-arm, `retire`, and `delete`.
 - **`retired`** accepts only `unretire` and `delete`; a retired node is hidden

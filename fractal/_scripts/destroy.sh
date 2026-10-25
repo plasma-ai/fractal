@@ -16,6 +16,8 @@ Options:
     --branch=<branch>    Tree root branch (default: the current checkout)
     --all                Destroy every tree and remove .worktrees/
     --node-dir=<dir>     Tree data dir to remove, repo-relative (repeatable)
+    --wiki=<relpath>     Tree's project wiki, repo-relative (resolved by the caller;
+                         default: wiki under the tree's project)
     --help|-h            Show this help message
 USAGE
     exit 0
@@ -27,6 +29,8 @@ ALL=false
 # the data dirs an --all sweep clears, repo-relative: which dirs are user
 # roots is a config question, so the caller answers it and names them here
 ROOT_DIRS=()
+# the project wiki the report names: its folder is a config question too
+WIKI_REL=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -34,6 +38,7 @@ for arg in "$@"; do
         --branch=*) BRANCH="${arg#*=}" ;;
         --all) ALL=true ;;
         --node-dir=*) ROOT_DIRS+=("${arg#*=}") ;;
+        --wiki=*) WIKI_REL="${arg#*=}" ;;
         *)
             if [[ -z "$REPO" ]]; then
                 REPO="$arg"
@@ -83,10 +88,10 @@ if [[ -f "$PROJECT_FILE" ]]; then
 fi
 if [[ "$PROJECT" == "." ]]; then
     NODE_DIR="$REPO/.fractal/$BRANCH"
-    WIKI_REL="wiki"
+    WIKI_REL="${WIKI_REL:-wiki}"
 else
     NODE_DIR="$REPO/$PROJECT/.fractal/$BRANCH"
-    WIKI_REL="$PROJECT/wiki"
+    WIKI_REL="${WIKI_REL:-$PROJECT/wiki}"
 fi
 
 # find active worktrees -- worktree dirs are named by branch, so the <branch>.*

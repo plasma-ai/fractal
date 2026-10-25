@@ -50,8 +50,10 @@ manager must keep working after spawning.
 
 `reserve_budget` (default 10% of `max_cost`, materialized to a fixed decimal
 precision in config) is a buffer below the ceiling that steers cleanup before
-the money runs out. During an iteration, the loop enters **RESERVE** when any of
-these hold:
+the money runs out. A cap retune re-derives the default reserve for the new cap,
+while a reserve set by flag, template preset, or `config set` keeps its figure
+(the `reserve_mode` key in [[configuration/config_json]]). During an iteration,
+the loop enters **RESERVE** when any of these hold:
 
 - the run's remaining budget drains into the reserve window (checked before each
   step, so entry can happen mid-iteration);
@@ -77,25 +79,36 @@ whichever order the two signals landed.
 
 Spawn-heavy iterations get a harder backstop: between steps the loop also checks
 the subtree ceiling directly, so a long iteration stops queuing steps as soon as
-descendants blow the budget rather than waiting for the boundary.
+descendants blow the budget rather than waiting for the boundary. The steps it
+cuts off are never launched and book no row; the `stopped` / `over budget` step
+row belongs only to a step that reaches its launch with no budget left.
 
 Enforcement is only as good as the ledger: armed caps over fully-untracked spend
 ([[features/cost/measurement|measurement]]) can never trip, and a run that mixes
 priced and unpriced steps stands against them undercounted, since a `NULL`-cost
 step adds nothing to the guards' figure; the loop warns once per loop process in
-either case. Caps paired with an agent that takes no budget flag and no timeout
-draw the same one-time warning, since one runaway step could overshoot every cap
-unbounded. A failed ledger read holds the last good figure rather than
-re-inflating headroom, and before the run's first good reading it holds the
-probes outright -- the reserve-entry probe included, so unknown spend never
-reads as drained -- and the untracked warning waits for a successful read to
-prove the spend untracked, never firing for a contention window.
+either case. A step whose record leaves part of its spend out (a reply cut off,
+or a result figure refused; marked `partly unpriced`) counts at the spend
+recorded. Nothing adds a margin for spend the engine cannot see: the step leash
+holds back only the configured reserve. Caps paired with an agent that takes no
+budget flag and a step with no timeout -- no run or iteration wall, no
+`step_timeout`, and no `timeout:` on that step file (SYNC runs on
+`step_timeout`) -- draw the same one-time warning, since one runaway step could
+overshoot every cap unbounded. A failed ledger read holds the last good figure
+rather than re-inflating headroom, and before the run's first good reading it
+holds the probes outright -- the reserve-entry probe included, so unknown spend
+never reads as drained -- and the untracked warning waits for a successful read
+to prove the spend untracked, never firing for a contention window.
 
 ## Preflight guarantees
 
 A token-priced agent cannot run without pricing: the loop refreshes the LiteLLM
 cache at run start and aborts preflight when no table can be fetched and none is
 cached (a stale cache degrades to a warning -- see
-[[features/cost/pricing|pricing]]). The refresh runs whether or not a model is
-configured: a token-priced agent with no model set is priced at the served model
-its session record names.
+[[features/cost/pricing|pricing]]). Under a cost cap the refreshed table then
+judges every token-priced step's effective model before the run row commits and
+before the paid probe: the first gap (no model, or a model the table cannot
+price) aborts the boot naming its step, so a cap never meets the launch-time
+refusal three times over and reads as a billing outage. The refresh runs whether
+or not a model is configured: a token-priced agent with no model set is priced
+at the served model its session record names.

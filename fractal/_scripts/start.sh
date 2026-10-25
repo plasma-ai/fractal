@@ -81,15 +81,15 @@ fi
 
 # propagate env into the child via env(1) argv -- a plain command
 # every default-shell parses alike, where a 'VAR=value cmd' prefix is
-# POSIX-only grammar; _NODE also drives the re-entry exec above
+# POSIX-only grammar; _NODE also drives the re-entry exec above; the
+# venv rides PATH alone -- a VIRTUAL_ENV names the repo's own project
+# env, which uv in a node worktree warns about and ignores
 ENV_ARGS=("_NODE=$NODE_DIR")
 VENV_DIR="$REPO_DIR/.venv"
 if [[ -d "$VENV_DIR" ]]; then
-    ENV_ARGS+=("VIRTUAL_ENV=$VENV_DIR")
     ENV_ARGS+=("PATH=$VENV_DIR/bin:$PATH")
 else
     ENV_ARGS+=("PATH=$PATH")
-    [[ -n "${VIRTUAL_ENV:-}" ]] && ENV_ARGS+=("VIRTUAL_ENV=$VIRTUAL_ENV")
 fi
 
 # ------ launch headless

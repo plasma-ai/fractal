@@ -15,6 +15,14 @@ Run `wiki --help` and `wiki <command> --help` for the CLI.
 
 ## Conventions
 
+- **Name node files by their variables.** Write memory, plans, and scratch
+  through `$MEMORY_DIR`, `$PLANS_DIR`, and `$NODE_DIR/tmp/`, never a bare
+  `memory/` or `plans/` path: file tools resolve relative paths against the
+  worktree root, which is the project, not your node.
+- **Keep binaries and logs out of memory.** The commit refuses such files (a
+  binary, an archive, a log) and leaves them out of the committed index; their
+  rows come back in memory's local index at the next refresh. Put such files in
+  `$NODE_DIR/tmp/` or in project space.
 - **Write knowledge, not history.** Never reference iteration numbers,
   timestamps, or chronological markers -- a reader shouldn't be able to tell how
   many iterations have run. Before COMMIT, scan memory and any page you promote
@@ -46,6 +54,6 @@ Run `wiki --help` and `wiki <command> --help` for the CLI.
   factor overflow into child pages.
 - **Wikilinks stay within one wiki.** Reference anything outside this wiki --
   the project wiki, source files, configs -- in plain text or backticks, never
-  as a wikilink; `wiki lint` notes a wikilink that points outside the wiki.
-  Write in-wiki links prefix-free (`[[state]]`, never `[[./state]]` or
-  `[[../state]]`).
+  as a wikilink; `wiki lint` fails a wikilink that points outside the wiki (the
+  `outside_link` issue). Write in-wiki links prefix-free (`[[state]]`, never
+  `[[./state]]` or `[[../state]]`).

@@ -58,6 +58,12 @@ findings would push knowledge into radio messages and private memory, where
 other nodes cannot find it. The wiki is the one surface where every node's write
 access is part of the design, with merge machinery (see below and
 [[features/wiki_system/merge_behavior]]) reconciling the concurrent edits.
+Because the exemption is that wide, its folder is fixed per project: `wiki/` by
+default, or the folder the project's tracked `.fractal/.settings.json` names,
+fixed, immutable, into every node at init and checked against the committed root
+branch at every spawn -- so a project whose `wiki/` holds ordinary content moves
+the exemption off it, and no node can widen its own boundary by renaming the
+wiki (see [[features/wiki_system/knowledge_stores]]).
 
 Runtime artifacts — the central database and its sidecars, status and pause
 markers, virtualenvs — are excluded from staging unconditionally. They are state
@@ -129,8 +135,8 @@ no-fast-forward merge carrying grandchild commits no check saw), so the squash
 is the one point that sees the node's whole offering: the staged paths outside
 `.fractal/` are judged by the node's boundaries — its scope roots and the
 project wiki, with the worktree-root `.gitattributes` admitted only as init's
-own `**/_index.md merge=wiki` edit, exactly as `fractal commit` judges them —
-and a path outside them is refused there with the paths named and
+own `merge=wiki` edit, exactly as `fractal commit` judges them — and a path
+outside them is refused there with the paths named and
 `node merge --ignore-scope` as the override. The merge refuses over a dirty,
 active, or paused target — the squash mutates the target's worktree, and its
 recovery path resets hard, so it must never run where it could destroy someone's

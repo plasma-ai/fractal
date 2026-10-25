@@ -162,6 +162,16 @@ _alive() {
 
 # ------ main teardown
 
+# reap both recorded groups' whole trees in one call, so the loop dies with
+# its agent instead of launching the next step; survivors and worktree strays
+# are named on stderr, and the group teardown below backs a helper failure
+REAP_ARGS=()
+[[ -n "$STEP_PGID" ]] && REAP_ARGS+=(--pgid="$STEP_PGID")
+[[ -n "$PGID" ]] && REAP_ARGS+=(--pgid="$PGID")
+if ((${#REAP_ARGS[@]} > 0)); then
+    fractal node _reap "${REAP_ARGS[@]}" --worktree="$WORKTREE_DIR" || true
+fi
+
 # SIGTERM, brief poll, then SIGKILL stragglers; destroy session
 _reap TERM
 

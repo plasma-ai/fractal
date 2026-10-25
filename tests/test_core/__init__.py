@@ -9,11 +9,13 @@ from .test_db import *
 from .test_event import *
 from .test_files import *
 from .test_governance import *
+from .test_index_lock import *
 from .test_init import *
 from .test_lifecycle import *
 from .test_list import *
 from .test_loop import *
 from .test_merge_atomicity import *
+from .test_merge_paused import *
 from .test_merge_validation import *
 from .test_node import *
 from .test_packaging import *
@@ -26,6 +28,7 @@ from .test_record import *
 from .test_render import *
 from .test_session import *
 from .test_teardown import *
+from .test_template import *
 from .test_time import *
 from .test_time_iteration_scope import *
 from .test_worktree import *

@@ -232,7 +232,10 @@ def commit(app: typer.Typer) -> typer.Typer:
     message_help = 'Short description for the commit message (required unless --check).'
     message = typer.Argument(None, help=message_help)
     # init flag
-    init_help = 'Baseline commit ("init" instead of "iteration <run>.<iter>").'
+    init_help = (
+        'Baseline commit ("init" instead of "iteration <run>.<iter>"; a child node'
+        ' commits only its seed).'
+    )
     init = typer.Option(False, '--init', help=init_help)
     # check flag
     check_help = 'Exit 1 if uncommitted changes exist instead of committing.'
@@ -432,7 +435,13 @@ def reset(app: typer.Typer) -> typer.Typer:
         force: bool = force,
         path: str = path,
     ) -> None:
-        """Reset a tree: remove its node worktrees, keep the history."""
+        """Reset a tree: remove its node worktrees, keep the history.
+
+        Removes the node worktrees, their local branches -- unmerged work
+        included -- and their registrations; the user node's data and the
+        central database stay. The tree's root branch and remote branches
+        remain; push or copy a node branch first to keep it.
+        """
         # the confirmation names the repo, resolved from any cwd inside it
         # (the agent's NODE_DIR, a worktree, or the repo root)
         repo_dir = Node(path).repo_dir
@@ -492,7 +501,12 @@ def destroy(app: typer.Typer) -> typer.Typer:
         force: bool = force,
         path: str = path,
     ) -> None:
-        """Destroy a fractal tree, or the whole fractal with ``--all``."""
+        """Destroy a fractal tree, or the whole fractal with ``--all``.
+
+        Removes the node worktrees, their local branches -- unmerged work
+        included -- and the fractal data. The tree's root branch and remote
+        branches remain; push or copy a node branch first to keep it.
+        """
         # exactly one scope: a bare destroy is ambiguous between "this tree"
         # and "everything", so the caller must name one
         if (name is not None) == all_:

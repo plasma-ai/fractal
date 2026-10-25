@@ -5,7 +5,7 @@ desc: |
   sets it, which keys are immutable, and the surfaces for reading and
   retuning configuration after init.
 created: 2026-07-21T04:48:38Z
-updated: 2026-07-21T04:48:38Z
+updated: 2026-10-24T04:34:08Z
 ---
 
 # configuration/config_json
@@ -34,6 +34,19 @@ String keys:
 - `title` -- display name. Default: the de-slugged node name.
 - `project` -- project root relative to the repo (monorepo sub-project). Set by
   `--path`; **immutable**.
+- `wiki` -- the shared project-wiki folder relative to the project: the one
+  folder a node commits to regardless of its `scope`. Read at `fractal init`
+  from the project's tracked `.fractal/.settings.json` (`{"wiki": "docs"}`,
+  beside the `effort_ladder` key the loop reads; see
+  [[features/agents/models_and_effort#The effort ladder|models_and_effort]]) and
+  copied from the parent at every spawn in the same project (a child in another
+  sub-project reads that project's setting); not settable by flag; **immutable**
+  -- a change would let a node widen its own boundary. Absent means `wiki`, and
+  no config records the key. The value must be a canonical subdirectory: never
+  absolute, `.`, `null`, or carrying a `..`, `.fractal`, `.worktrees`, or `.git`
+  component (casefolded). Validated at init, by every config write and `start`,
+  and again on every commit and merge scope check. See
+  [[configuration/inheritance]].
 - `root` -- the tree's root (user) node branch, inherited from the parent at
   init; every node carries it so any node can resolve the tree's central
   database. Not settable by flag; **immutable**. See
@@ -78,6 +91,14 @@ Boolean keys (must be JSON `true`/`false`/`null`):
   listings, refused `radio read`/`save`/`unsave`/`react`/`reply`) until an
   operator or the parent unseals it; the sealed seat cannot clear the key
   itself. Default: false.
+- `user_settings` -- let the node's agent sessions load the user's own agent
+  configuration: for claude, the user setting source (permissions, hooks,
+  plugins, model and effort defaults, skills) and every MCP server, claude.ai
+  connectors included. Resolved at each launch from the node's own value, else
+  the nearest ancestor's that sets one, so the user node's value is the tree's
+  default; not settable by flag (set it with
+  `fractal node config set user_settings=true`). Default: false (see
+  [[features/agents/providers#Claude session isolation|providers]]).
 
 Integer cap keys (non-negative; `max_iters` strictly positive):
 
@@ -106,20 +127,41 @@ Cost keys (non-negative USD numbers):
   percent flag value is resolved against `max_cost` and rounded). Default: 10%
   of `max_cost`; absent without `max_cost`.
 
+The reserve's origin rides beside it as the string key `reserve_mode`: `default`
+for the 10% init materializes, `explicit` for a figure set by `--reserve-budget`
+(at init or on `fractal node update`), a template preset, or
+`config set reserve_budget=`. A cap change through `node update --max-cost` or
+`node start --continue --max-cost` re-derives a default reserve that still
+equals 10% of the old cap; every other reserve keeps its figure and records as
+explicit, so a figure the operator chose never moves with the cap, even one at
+exactly 10%. A config with no `reserve_mode` reads as default when its reserve
+equals 10% of its `max_cost`, explicit otherwise; reading never rewrites the
+file, and the next cap change records the reading. Fractal alone writes the key:
+`config set` refuses it, a `reserve_budget` write records `explicit` (or clears
+the mode with a cleared reserve), and the validator refuses any other value.
+
 ## Validation
 
 One merged validator guards every write path -- init flags, the config setters,
-and the re-check at `fractal node start` (which covers direct file edits). It
-rejects what the loop cannot run: non-numeric or non-finite costs, non-positive
-ceilings, a per-iteration or per-step cap without `max_cost`, a reserve at or
-above 99% of `max_cost`, a broken `step <= iter <= run` cost ordering,
-non-integer or degenerate integer caps, non-boolean mode flags, bare-number or
-sub-second durations, `interval` and `sleep` both set, `iter_timeout` exceeding
-`interval`, absolute or `..` list-key entries (a scope root that never matches
-the commit pipeline's relative prefix check, or a `clone_dirs` entry reaching
-outside the worktree it warms), non-canonical list-key spellings (`./src`,
-`src/` -- the setters store canonical form, so only a hand-edit lands one), and
-a `.` cache dir, which would clone the whole checkout.
+and the launch re-check (`Node._check_launch_config`: the validator plus the
+agent resolve) that `fractal node start` runs and resume runs for every node it
+would relaunch, which covers direct file edits. It rejects what the loop cannot
+run: non-numeric or non-finite costs, non-positive ceilings, a per-iteration or
+per-step cap without `max_cost`, a reserve at or above 99% of `max_cost`, a
+broken `step <= iter <= run` cost ordering, non-integer or degenerate integer
+caps, non-boolean mode flags, bare-number or sub-second durations, `interval`
+and `sleep` both set, `iter_timeout` exceeding `interval`, absolute or `..`
+list-key entries (a scope root that never matches the commit pipeline's relative
+prefix check, or a `clone_dirs` entry reaching outside the worktree it warms),
+non-canonical list-key spellings (`./src`, `src/` -- the setters store canonical
+form, so only a hand-edit lands one), and a `.` cache dir, which would clone the
+whole checkout.
+
+The loop's boot reads the same values in `Loop._read_run_parameters`, a stage of
+the boot's `_abort_preflight` guard rather than the constructor, so an edit
+landing between the launch check and the boot ends in a recorded abort (`exited`
+with the reason, or a resume left paused with its credit span re-opened) instead
+of a crash with nothing recorded.
 
 ## Reading and writing after init
 
@@ -136,35 +178,31 @@ a `.` cache dir, which would clone the whole checkout.
   the very file the guard checks.
 - `fractal node update <node>` is the supported retune path for a running child:
   it updates the registry row and the child's `config.json` together (title,
-  cost caps, reserve, step timeout, and tree limits), and the loop picks the new
-  caps up at its next iteration.
+  cost caps, reserve, step timeout, and tree limits), and each retuned key lands
+  at its own boundary below -- the cost caps and reserve at the next iteration's
+  pricing and every budget probe, the step timeout at the next iteration, and
+  the tree limits at once for the spawn gate and at the child's next step.
 
-The three init-fixed keys -- `root`, `user`, `project` -- can never be changed,
-and the operator-facing `config set` refuses even their first write.
-
-## When changes take effect
-
-The loop enforces the caps in `config.json`, so a retune or direct config edit
-reaches a running loop without a restart -- the registry row is back-filled from
-the config with a warning (config wins over a stale registry row). The cost caps
-are re-read at run start, at each iteration top, and by the budget boundary
-probes themselves, so a cap granted mid-iteration reaches the very next probe;
-`max_iters`, `step_timeout`, and `wait` are re-read at each iteration top. A
-malformed live edit warns and keeps the prior value rather than crashing the
-run. Everything else is pinned when a run launches and holds for that run -- the
-mode-composition and agent-preference keys (`sync`, `detached`, `meta`, `agent`,
-`provider`, `model`, `effort`), the run and iteration time budgets and pacing
-(`timeout`, `iter_timeout`, `interval`, `sleep`), and the retry knobs
-(`step_retries`, `step_retry_backoff`) -- and applies from the next
-`fractal node start`.
+The four init-fixed keys -- `root`, `user`, `project`, `wiki` -- can never be
+changed, and the operator-facing `config set` refuses even their first write.
 
 ## When edits take effect
 
-Config is a live steering surface with per-key boundaries: `max_iters` at the
-next iteration's stop gate; `iter_timeout`/`step_timeout`/`wait` at the next
-iteration; `interval`/`sleep` at the next between-iterations sleep call; the
-cost caps at the next iteration's pricing (and live at every budget probe);
-`scope`/`local` per commit; `sealed` at the next radio read. The boot-pinned set
-— `timeout`, `agent`, `provider`, `model`, `effort`, `detached`, `sync`, `meta`,
-`step_retries`, `step_retry_backoff` — reaches the next start/resume, never a
-run in flight. Malformed mid-run edits warn and keep the prior value.
+The loop enforces the values in `config.json`, so a retune or a direct config
+edit reaches a running loop without a restart, and the registry row is
+back-filled from the config with a warning (config wins over a stale registry
+row). Each key has its own boundary: `max_iters` at the next iteration's stop
+gate; `iter_timeout`/`step_timeout`/`wait` at the next iteration;
+`interval`/`sleep` at the next between-iterations sleep call; the cost caps
+(`max_cost`, `max_iter_cost`, `max_step_cost`, `reserve_budget`) at the next
+iteration's pricing and live at every budget probe, so a cap granted
+mid-iteration reaches the very next probe; `scope`/`local` per commit;
+`clone_dirs` at the next child spawn; `sealed` at the next radio read;
+`user_settings` at the next agent launch; `blind` at the next start and the next
+child spawn; and the spawn limits (`max_depth`, `max_children`,
+`max_descendants`) at once for the spawn gate, which reads them from
+`config.json` at every spawn, and at the next step's prompt and environment. The
+boot-pinned set -- `timeout`, `agent`, `provider`, `model`, `effort`,
+`detached`, `sync`, `meta`, `step_retries`, `step_retry_backoff` -- reaches the
+next start or resume, never a run in flight. A malformed mid-run edit warns and
+keeps the prior value rather than crashing the run.

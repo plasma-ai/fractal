@@ -8,7 +8,8 @@ worker nodes. The tests exercise the node lifecycle surface end to end:
 the ``finish``/``stop``/``kill``/``retire``/``unretire``/``attach`` status
 guards (including their ``RuntimeError`` messages and exit codes), ``update``
 of a child's configuration, ``merge``'s ``--ignore-scope`` override reaching
-the script, ``delete``'s unmerged-work warning ahead of its prompt (and behind
+the script and its landing of a paused node under ``--message``, ``delete``'s
+unmerged-work warning ahead of its prompt (and behind
 its refusals, which describe no deletion), orphan coherence after out-of-band
 git cleanup (stored-status display plus ``reconcile``'s event-log audit), and
 the hidden ``_scope`` footprint check ``merge.sh`` shells out to.
@@ -67,6 +68,7 @@ __all__ = [
     'test_init_blind_seeds_no_subs_and_start_sweeps',
     'test_merge_delete_reaps_the_merged_child',
     'test_merge_ignore_scope_flag_lands_an_out_of_scope_squash',
+    'test_merge_lands_a_paused_node_under_its_message',
     'test_delete_warns_of_unmerged_work_before_the_point_of_no_return',
     'test_delete_warns_of_a_descendants_unmerged_work_before_the_prompt',
     'test_delete_refuses_a_locked_worktree_before_any_unmerged_warning',
@@ -79,6 +81,7 @@ __all__ = [
     'test_list_rejects_unknown_status',
     'test_list_whole_tree_from_a_non_init_checkout',
     'test_status_reports_idle_from_anywhere',
+    'test_booting_node_reads_idle_starting',
     'test_rm_rf_worktree_lists_orphan_then_force_deletes',
     'test_list_shows_stored_status_for_orphaned_terminal_node',
     'test_reconcile_records_orphan_event_once',
@@ -87,12 +90,17 @@ __all__ = [
     'test_diff_requires_a_recorded_template_and_a_full_sha',
     'test_diff_stays_clean_after_the_template_folder_moves',
     'test_diff_never_judges_a_root_file_named_like_a_surface',
+    'test_diff_reports_drift_in_a_shared_include',
+    'test_diff_never_judges_the_trust_stanza_for_this_repository',
     'test_diff_and_reseed_name_the_record_remedy_for_a_missing_value',
+    'test_diff_and_reseed_refuse_files_the_commit_never_stores',
     'test_reseed_keeps_recorded_values_and_adds_new_defaults',
     'test_reseed_restores_the_seed_surfaces_and_records_the_event',
     'test_reseed_ref_reads_another_commit_and_keeps_exclusions',
+    'test_reseed_ref_picks_up_a_changed_shared_include',
     'test_reseed_refuses_a_missing_path_at_a_ref_and_re_points',
     'test_reseed_bare_re_point_reads_the_node_branch_tip',
+    'test_reseed_re_point_names_a_shared_file_differing_on_the_root',
     'test_reseed_prints_no_root_notice_without_a_re_point',
     'test_reseed_refuses_a_template_carrying_agent_credentials',
     'test_reseed_refuses_steps_breaking_the_discovery_contract',
@@ -107,7 +115,8 @@ __all__ = [
     'test_update_rewrites_child_config',
     'test_update_changes_title',
     'test_update_rejects_unknown_child_and_negatives',
-    'test_update_max_cost_retunes_default_reserve',
+    'test_update_max_cost_retunes_only_a_default_reserve',
+    'test_update_max_cost_reads_a_reserve_without_a_mode_by_its_figure',
     'test_update_resolves_short_name',
     'test_update_validates_config_like_init',
     'test_update_retunes_iter_and_step_cost',
@@ -1211,6 +1220,40 @@ def test_merge_ignore_scope_flag_lands_an_out_of_scope_squash(
     assert (root / 'outside.txt').read_text(encoding='utf-8') == 'outside the scope\n'
 
 
+def test_merge_lands_a_paused_node_under_its_message(tmp_path: pathlib.Path) -> None:
+    """``node merge --message`` lands a paused node's committed work, keeping it paused.
+
+    The squash lands under the given message, and the node stays paused for
+    ``fractal node resume`` with its frozen step's uncommitted edit and scratch
+    file still in its worktree.
+    """
+    root = tmp_path
+    _init_tree(root, 'paused')
+    assert _run(root, 'node', 'init', 'task', '--agent', 'claude').returncode == 0
+    task = root / '.worktrees' / 'main.task'
+    (task / 'feature.txt').write_text('the work\n', encoding='utf-8')
+    _git(task, 'add', 'feature.txt')
+    _git(task, 'commit', '-m', 'main.task: feature')
+    # the frozen step left an uncommitted edit and a scratch file
+    (task / 'README.md').write_text('frozen edit\n', encoding='utf-8')
+    (task / 'scratch.txt').write_text('frozen scratch\n', encoding='utf-8')
+    Node(task).status_set('paused')
+    message = 'Land the paused feature'
+
+    result = _run(root, 'node', 'merge', 'main.task', f'--message={message}')
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'Squash-merged main.task into main' in result.stdout, result.stdout
+    assert _git(root, 'log', '-1', '--format=%B').stdout.strip() == message
+    assert (root / 'feature.txt').read_text(encoding='utf-8') == 'the work\n'
+    assert _run(task, 'node', 'status').stdout.strip() == 'paused'
+    assert (task / 'README.md').read_text(encoding='utf-8') == 'frozen edit\n'
+    assert (task / 'scratch.txt').read_text(encoding='utf-8') == 'frozen scratch\n'
+    status = _git(task, 'status', '--porcelain').stdout.splitlines()
+    for entry in (' M README.md', '?? scratch.txt'):
+        assert entry in status, status
+
+
 # ------ delete
 
 
@@ -1533,6 +1576,7 @@ def test_list_json_mirrors_csv_shape(repo: dict) -> None:
             'cost_budget',
             'timeout',
             'setup_abort',
+            'crashed',
             'other',
         }
     # the two machine formats cannot be combined ...
@@ -1686,6 +1730,72 @@ def test_status_reports_idle_from_anywhere(repo: dict) -> None:
     by_branch = _run(repo['root'], 'node', 'status', 'main.task')
     assert by_branch.returncode == 0
     assert by_branch.stdout.strip() == 'idle'
+
+
+def test_booting_node_reads_idle_starting(repo: dict) -> None:
+    """A started node reads ``idle (starting)`` until its loop stamps ``active``.
+
+    Between ``start`` and the loop's post-preflight ``active`` stamp the
+    stored status stays ``idle`` while the loop's tmux session is already
+    live -- the boot window. ``status`` shows ``idle (starting)``; both
+    JSON listings mark the row ``starting`` with a ``starting`` detail,
+    the plain one keeping the stored ``idle`` and ``--all --live`` (the
+    merge helper's read) the ``active`` its drains read. A never-started
+    idle node and a stamped active one are not starting. Creates and removes its own node, so the
+    shared fixture is left as found.
+    """
+    _require_tmux()
+    root = repo['root']
+    spawn = _run(root, 'node', 'init', 'boot', '--agent', 'claude', '--max-cost', '1')
+    assert spawn.returncode == 0, spawn.stderr
+    worktree = root / '.worktrees' / 'main.boot'
+
+    def listed(*flags: str) -> dict:
+        result = _run(root, 'node', 'list', '--json', *flags)
+        assert result.returncode == 0, result.stderr
+        rows = json.loads(result.stdout)
+        (row,) = [row for row in rows if row['node'] == 'main.boot']
+        return row
+
+    # never started: no live session, so plain idle everywhere
+    assert _run(worktree, 'node', 'status').stdout.strip() == 'idle'
+    for flags in ((), ('--all', '--live')):
+        row = listed(*flags)
+        assert (row['status'], row['starting']) == ('idle', False), row
+    # the boot window: the session start.sh names (<repo dirname> (<branch,
+    # dots dashed>)) is live while the stored status is still idle
+    session = f'{root.name} (main-boot)'
+    subprocess.run(['tmux', 'new-session', '-d', '-s', session], check=True)
+    try:
+        status = _run(worktree, 'node', 'status').stdout.strip()
+        plain = listed()
+        live = listed('--all', '--live')
+        # the loop's post-preflight stamp ends the window
+        Node(worktree).status_set('active')
+        stamped = [listed(), listed('--all', '--live')]
+    finally:
+        # settle the node before its session goes, or the read heals it exited
+        Node(worktree).status_set('idle')
+        # `=` prefix forces an exact target match (no prefix resolution)
+        subprocess.run(
+            ['tmux', 'kill-session', '-t', f'={session}'],
+            capture_output=True,
+        )
+    assert status == 'idle (starting)'
+    assert (plain['status'], plain['detail'], plain['starting']) == (
+        'idle',
+        'starting',
+        True,
+    ), plain
+    assert (live['status'], live['detail'], live['starting']) == (
+        'active',
+        'starting',
+        True,
+    ), live
+    for row in stamped:
+        assert (row['status'], row['starting']) == ('active', False), row
+    # clean up so the shared module fixture is left as other tests expect
+    assert _run(root, 'node', 'delete', 'main.boot', '--force').returncode == 0
 
 
 def test_rm_rf_worktree_lists_orphan_then_force_deletes(repo: dict) -> None:
@@ -2078,6 +2188,167 @@ def test_diff_never_judges_a_root_file_named_like_a_surface(repo: dict) -> None:
         _run(root, 'node', 'delete', 'main.rootnames', '--force')
 
 
+def test_diff_reports_drift_in_a_shared_include(repo: dict) -> None:
+    """``diff`` re-renders a shared include at the recorded commit.
+
+    A charter including a shared file seeds clean and stays clean after
+    the root branch moves the shared file on -- the recorded commit is
+    what re-renders -- while a hand edit to the included portion of the
+    live charter is drift.
+    """
+    root = repo['root']
+    _commit_template(root, 'shared/diffdoc', {'DOCTRINE.md': 'doctrine v1\n'})
+    charter = (
+        '# shareddiff\n\n## Instructions\n\n'
+        "{% include '/shared/diffdoc/DOCTRINE.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+    }
+    _commit_template(root, 'templates/shareddiff', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'shareddiff',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/shareddiff',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.shareddiff' / '.fractal' / 'main.shareddiff'
+        )
+        # the root's newer copy never reaches the recorded render
+        _commit_template(root, 'shared/diffdoc', {'DOCTRINE.md': 'doctrine v2\n'})
+        clean = _run(root, 'node', 'diff', 'main.shareddiff')
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        assert clean.stdout.strip() == 'No drift from the recorded template.'
+        # a hand edit to the included text is charter drift
+        live = node_dir / 'NODE.md'
+        text = live.read_text(encoding='utf-8')
+        edited = text.replace('doctrine v1', 'doctrine, hand-edited')
+        live.write_text(edited, encoding='utf-8')
+        drifted = _run(root, 'node', 'diff', 'main.shareddiff')
+        assert drifted.returncode == 1, drifted.stdout + drifted.stderr
+        assert '--- template/NODE.md' in drifted.stdout
+        assert '-doctrine v1' in drifted.stdout
+        assert '+doctrine, hand-edited' in drifted.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.shareddiff', '--force')
+
+
+def test_diff_never_judges_the_trust_stanza_for_this_repository(
+    repo: dict,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Codex's trust stanza for this repository is not drift.
+
+    Codex trusts the project it runs in by appending a stanza to the
+    ``config.toml`` in its ``CODEX_HOME`` (the node's ``.codex/``): a
+    blank line, a ``[projects.<path>]`` header keyed to the repository's
+    main worktree, and a trusted level. The seed plus a run of them
+    diffs clean, keyed to the main worktree or the node's own worktree,
+    in either quoted TOML form, through a symlink, or with a trailing
+    slash. Any other difference still reports: a changed or removed
+    seeded line diffs without the stanza, while a stanza trusting a
+    foreign path, the repository's parent, or a relative path, a
+    projects table carrying more than the trusted level, and another
+    level are drift themselves.
+    """
+    root = repo['root']
+    seeded = 'model = "gpt-5.5"\n\n[analytics]\nenabled = false\n'
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+        'agents/codex/config.toml': seeded,
+    }
+    _commit_template(root, 'templates/codextrust', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'codextrust',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/codextrust',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        worktree = root / '.worktrees' / 'main.codextrust'
+        config = worktree / '.fractal' / 'main.codextrust' / '.codex' / 'config.toml'
+        assert config.read_text(encoding='utf-8') == seeded
+        stanza = '\n[projects.{}]\ntrust_level = "trusted"\n'.format
+        # the stanza codex appends keys the repository's main worktree
+        trust = stanza(f'"{root}"')
+        # links to the main worktree whose names take an escaped basic
+        # string and a literal string
+        quoted = tmp_path / 'a "quoted" link'
+        quoted.symlink_to(root)
+        literal = tmp_path / 'a\\literal link'
+        literal.symlink_to(root)
+        escaped = str(quoted).replace('"', '\\"')
+        accepted = (
+            stanza(f'"{worktree}"') + stanza(f'"{escaped}/"') + stanza(f"'{literal}'")
+        )
+        # the seed plus a run of stanzas for this repository is clean
+        for text in (seeded + trust, seeded + trust + accepted):
+            config.write_text(text, encoding='utf-8')
+            clean = _run(root, 'node', 'diff', 'main.codextrust')
+            assert clean.returncode == 0, clean.stdout + clean.stderr
+            assert clean.stdout.strip() == 'No drift from the recorded template.'
+        # a changed or removed seeded line reports without the stanza; a
+        # stanza for another path, a projects table carrying more, or
+        # another level is drift itself
+        changed = seeded.replace('gpt-5.5', 'gpt-5.4')
+        removed = seeded.replace('enabled = false\n', '')
+        foreign = stanza('"/srv/elsewhere"')
+        extra = trust + 'sandbox_mode = "danger-full-access"\n'
+        untrusted = trust.replace('"trusted"', '"untrusted"')
+        cases = [
+            (
+                changed + trust,
+                ['-model = "gpt-5.5"', '+model = "gpt-5.4"'],
+                ['trust_level'],
+            ),
+            (removed + trust, ['-enabled = false'], ['trust_level']),
+            (
+                seeded + trust + foreign,
+                ['+[projects."/srv/elsewhere"]', '+trust_level = "trusted"'],
+                [f'[projects."{root}"]'],
+            ),
+            (
+                seeded + stanza(f'"{root.parent}"'),
+                [f'+[projects."{root.parent}"]'],
+                [],
+            ),
+            (seeded + stanza('"."'), ['+[projects."."]'], []),
+            (
+                seeded + extra,
+                ['+trust_level = "trusted"', '+sandbox_mode = "danger-full-access"'],
+                [],
+            ),
+            (seeded + untrusted, ['+trust_level = "untrusted"'], []),
+        ]
+        for text, present, absent in cases:
+            config.write_text(text, encoding='utf-8')
+            drifted = _run(root, 'node', 'diff', 'main.codextrust')
+            assert drifted.returncode == 1, drifted.stdout + drifted.stderr
+            assert '--- template/.codex/config.toml' in drifted.stdout
+            assert '+++ node/.codex/config.toml' in drifted.stdout
+            for line in present:
+                assert line in drifted.stdout, drifted.stdout
+            for line in absent:
+                assert line not in drifted.stdout, drifted.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.codextrust', '--force')
+
+
 def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
     repo: dict,
 ) -> None:
@@ -2125,6 +2396,54 @@ def test_diff_and_reseed_name_the_record_remedy_for_a_missing_value(
             assert 'supply it with --set' not in result.stderr, result.stderr
     finally:
         _run(root, 'node', 'delete', 'main.slotcrew', '--force')
+
+
+def test_diff_and_reseed_refuse_files_the_commit_never_stores(repo: dict) -> None:
+    """A recorded commit carrying a seed file the commit never stores refuses.
+
+    ``_template.toml`` is hand-editable, so its commit can name a folder
+    whose ``scripts/`` gained a suffix-less file. ``diff`` and ``reseed``
+    judge that effective set exactly as init does: each refuses naming
+    the file, ``diff`` reports no missing-file drift for it, and
+    ``reseed`` deploys nothing.
+    """
+    root = repo['root']
+    files = {
+        'config.json': '{}\n',
+        'steps/01-GO.md': '# go\n',
+    }
+    _commit_template(root, 'templates/barecrew', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'barecrew',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/barecrew',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = root / '.worktrees' / 'main.barecrew' / '.fractal' / 'main.barecrew'
+        # the template gains a suffix-less script, and the record names it
+        files = {
+            'scripts/run': 'echo run\n',
+        }
+        sha = _commit_template(root, 'templates/barecrew', files)
+        record = node_dir / '_template.toml'
+        data = tomllib.loads(record.read_text(encoding='utf-8'))
+        data['commit'] = sha
+        record.write_text(tomli_w.dumps(data), encoding='utf-8')
+        for verb in ('diff', 'reseed'):
+            result = _run(root, 'node', verb, 'main.barecrew')
+            assert result.returncode == 2, result.stdout + result.stderr
+            assert 'never stores: scripts/run' in result.stderr, result.stderr
+            assert 'missing from the node' not in result.stdout, result.stdout
+        # nothing deployed: the script never reached the node
+        assert not (node_dir / 'scripts' / 'run').exists()
+    finally:
+        _run(root, 'node', 'delete', 'main.barecrew', '--force')
 
 
 # ------ reseed
@@ -2415,6 +2734,60 @@ def test_reseed_ref_reads_another_commit_and_keeps_exclusions(
         _run(root, 'node', 'delete', 'main.refreseed', '--force')
 
 
+def test_reseed_ref_picks_up_a_changed_shared_include(repo: dict) -> None:
+    """``reseed --ref`` reads the shared files at the new commit.
+
+    A step including a shared file deploys the shared file's new text
+    once the root branch changes it, and the record's ``[shared]`` blob id
+    advances with the commit; the charter keeps its seeded text, as every
+    reseed does.
+    """
+    root = repo['root']
+    _commit_template(root, 'shared/reseeddoc', {'DOCTRINE.md': 'doctrine v1\n'})
+    charter = (
+        '# sharedreseed\n\n## Instructions\n\n'
+        "{% include '/shared/reseeddoc/DOCTRINE.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+        'steps/01-GO.md': "# go\n{% include '/shared/reseeddoc/DOCTRINE.md' %}",
+    }
+    _commit_template(root, 'templates/sharedreseed', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'sharedreseed',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/sharedreseed',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        node_dir = (
+            root / '.worktrees' / 'main.sharedreseed' / '.fractal' / 'main.sharedreseed'
+        )
+        # the shared file evolves after the spawn; the template folder does not
+        _commit_template(root, 'shared/reseeddoc', {'DOCTRINE.md': 'doctrine v2\n'})
+        advanced = _git(root, 'rev-parse', 'main').stdout.strip()
+        reseeded = _run(root, 'node', 'reseed', 'main.sharedreseed', '--ref', 'main')
+        assert reseeded.returncode == 0, reseeded.stdout + reseeded.stderr
+        go = (node_dir / 'steps' / '01-GO.md').read_text(encoding='utf-8')
+        assert go == '# go\ndoctrine v2\n'
+        assert 'doctrine v1\n' in (node_dir / 'NODE.md').read_text(encoding='utf-8')
+        # the record advances the shared blob id with the commit
+        data = tomllib.loads((node_dir / '_template.toml').read_text(encoding='utf-8'))
+        shared = f'{advanced}:shared/reseeddoc/DOCTRINE.md'
+        blob = _git(root, 'rev-parse', shared).stdout.strip()
+        assert data['commit'] == advanced
+        assert data['shared'] == {'shared/reseeddoc/DOCTRINE.md': blob}
+    finally:
+        _run(root, 'node', 'delete', 'main.sharedreseed', '--force')
+
+
 def test_reseed_refuses_a_missing_path_at_a_ref_and_re_points(
     repo: dict,
 ) -> None:
@@ -2543,6 +2916,60 @@ def test_reseed_bare_re_point_reads_the_node_branch_tip(repo: dict) -> None:
         assert data['commit'] == tip
     finally:
         _run(root, 'node', 'delete', 'main.pointer', '--force')
+
+
+def test_reseed_re_point_names_a_shared_file_differing_on_the_root(
+    repo: dict,
+) -> None:
+    """A re-point's root-differs notice names a shared file the root moved on.
+
+    The template folder is the same on the root and the node branch, but
+    the shared file its charter includes changed on the root after the
+    spawn: a bare re-point reads the node branch's tip, and its notice
+    names the shared file that differs.
+    """
+    root = repo['root']
+    _commit_template(root, 'shared/pointdoc', {'DOCTRINE.md': 'doctrine v1\n'})
+    charter = (
+        '# sharedpoint\n\n## Instructions\n\n'
+        "{% include '/shared/pointdoc/DOCTRINE.md' %}\n"
+        '## Completion Requirements\n\nDone.\n'
+    )
+    files = {
+        'config.json': '{}\n',
+        'NODE.md': charter,
+    }
+    _commit_template(root, 'templates/sharedpoint', files)
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'sharedpoint',
+        '--agent',
+        'claude',
+        '--template',
+        'templates/sharedpoint',
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    try:
+        # only the shared file moves on, and only on the root
+        _commit_template(root, 'shared/pointdoc', {'DOCTRINE.md': 'doctrine v2\n'})
+        repointed = _run(
+            root,
+            'node',
+            'reseed',
+            'main.sharedpoint',
+            '--template',
+            'templates/sharedpoint',
+        )
+        assert repointed.returncode == 0, repointed.stdout + repointed.stderr
+        assert (
+            "Notice: template 'templates/sharedpoint' differs on the root branch"
+            " (differing shared files: 'shared/pointdoc/DOCTRINE.md'); pass"
+            " --template=templates/sharedpoint@main to read the root's copy."
+        ) in repointed.stdout, repointed.stdout
+    finally:
+        _run(root, 'node', 'delete', 'main.sharedpoint', '--force')
 
 
 def test_reseed_prints_no_root_notice_without_a_re_point(repo: dict) -> None:
@@ -3227,46 +3654,134 @@ def test_update_rejects_unknown_child_and_negatives(repo: dict) -> None:
     assert 'max-cost' in (negative.stdout + negative.stderr)
 
 
-def test_update_max_cost_retunes_default_reserve(repo: dict) -> None:
-    """``update --max-cost`` keeps a default-mode reserve at 10% of the cap.
+@pytest.mark.parametrize(
+    argnames=('flags', 'setup', 'expected'),
+    argvalues=[
+        # init's own default fraction tracks the new cap
+        pytest.param((), (), '0.8', id='init-default'),
+        # a reserve the operator set stays put, even at exactly the default
+        # fraction of the old cap -- by flag at init, in either grammar
+        pytest.param(('--reserve-budget', '10%'), (), '0.4', id='init-percent'),
+        pytest.param(('--reserve-budget', '0.4'), (), '0.4', id='init-usd'),
+        # ...or over the default afterwards, through either setter
+        pytest.param(
+            (),
+            ('node', 'update', 'main.reserved', '--reserve-budget', '0.4'),
+            '0.4',
+            id='update',
+        ),
+        pytest.param(
+            (),
+            (
+                'node',
+                'config',
+                'set',
+                'reserve_budget=0.4',
+                '--path',
+                '.worktrees/main.reserved',
+            ),
+            '0.4',
+            id='config-set',
+        ),
+    ],
+)
+def test_update_max_cost_retunes_only_a_default_reserve(
+    repo: dict,
+    flags: tuple[str, ...],
+    setup: tuple[str, ...],
+    expected: str,
+) -> None:
+    """``update --max-cost`` retunes a default reserve and leaves an explicit one.
 
-    Init materializes the default reserve once (10% of the initial cap); an
-    ``update --max-cost`` that ignored it would leave a reserve sized for the
-    old cap, with lowering the cap under a stale reserve rejected outright.
+    Init materializes the default reserve as 10% of the cap, and a cap change
+    re-derives it so it never sits sized for the old cap. A reserve the
+    operator set keeps its figure through the cap change, even a figure equal
+    to the default -- it is the operator's number, not the default's.
     """
     root = repo['root']
     spawn = _run(
         root,
         'node',
         'init',
-        'retuned',
+        'reserved',
         '--agent',
         'claude',
         '--max-cost',
         '4',
+        *flags,
     )
     assert spawn.returncode == 0, spawn.stderr
-    node = root / '.worktrees' / 'main.retuned'
-    assert _config(node, 'reserve_budget') == '0.4'
+    node = root / '.worktrees' / 'main.reserved'
     try:
-        # a default-mode reserve tracks the retuned cap
-        updated = _run(root, 'node', 'update', 'main.retuned', '--max-cost', '8')
+        # every case holds the same figure before the cap change
+        if setup:
+            prepared = _run(root, *setup)
+            assert prepared.returncode == 0, prepared.stderr
+        assert _config(node, 'reserve_budget') == '0.4'
+        updated = _run(root, 'node', 'update', 'main.reserved', '--max-cost', '8')
         assert updated.returncode == 0, updated.stderr
-        assert _config(node, 'reserve_budget') == '0.8'
-        # an explicit reserve is settable directly
-        explicit = _run(
-            root,
-            'node',
-            'update',
-            'main.retuned',
-            '--reserve-budget',
-            '1.2',
-        )
-        assert explicit.returncode == 0, explicit.stderr
-        assert _config(node, 'reserve_budget') == '1.2'
+        assert _config(node, 'reserve_budget') == expected
     finally:
         # clean up so the shared module fixture is left as other tests expect
-        assert _run(root, 'node', 'delete', 'main.retuned', '--force').returncode == 0
+        assert _run(root, 'node', 'delete', 'main.reserved', '--force').returncode == 0
+
+
+@pytest.mark.parametrize(
+    argnames=('flags', 'caps', 'expected'),
+    argvalues=[
+        # a reserve at the default fraction of its cap reads as default and
+        # tracks each new cap
+        pytest.param((), ('8', '20'), ('0.8', '2.0'), id='default-figure'),
+        # any other figure reads as explicit and stays put, even once a cap
+        # change leaves it at the new cap's default fraction
+        pytest.param(
+            ('--reserve-budget', '1.0'),
+            ('10', '20'),
+            ('1.0', '1.0'),
+            id='other-figure',
+        ),
+    ],
+)
+def test_update_max_cost_reads_a_reserve_without_a_mode_by_its_figure(
+    repo: dict,
+    flags: tuple[str, ...],
+    caps: tuple[str, ...],
+    expected: tuple[str, ...],
+) -> None:
+    """A config that records no ``reserve_mode`` is judged by its reserve's figure.
+
+    Such a config reads as default when its reserve equals the default
+    fraction of its cap, and as explicit otherwise; nothing is rewritten on
+    read. The first cap change records that reading, so a later one never
+    re-judges a figure the first left at the new cap's default fraction.
+    """
+    root = repo['root']
+    spawn = _run(
+        root,
+        'node',
+        'init',
+        'modeless',
+        '--agent',
+        'claude',
+        '--max-cost',
+        '4',
+        *flags,
+    )
+    assert spawn.returncode == 0, spawn.stderr
+    node = root / '.worktrees' / 'main.modeless'
+    config_path = node / '.fractal' / 'main.modeless' / 'config.json'
+    try:
+        # drop the recorded mode, leaving the reserve's figure alone
+        config = json.loads(config_path.read_text(encoding='utf-8'))
+        config.pop('reserve_mode', None)
+        config_path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+        for cap, reserve in zip(caps, expected, strict=True):
+            updated = _run(root, 'node', 'update', 'main.modeless', '--max-cost', cap)
+            assert updated.returncode == 0, updated.stderr
+            assert _config(node, 'reserve_budget') == reserve
+    finally:
+        # clean up so the shared module fixture is left as other tests expect
+        assert _run(root, 'node', 'delete', 'main.modeless', '--force').returncode == 0
 
 
 def test_update_resolves_short_name(repo: dict) -> None:
@@ -3699,8 +4214,9 @@ def test_activity_names_attribution_and_lineage_columns(repo: dict) -> None:
 
     Consumers bind by header name, so the header names every projected
     column; an event row carries its writer and a step row its name, the
-    iteration-relative step number, and the run-relative iteration number
-    the surrogate lineage ids stand for.
+    iteration-relative step number, the run-relative iteration number the
+    surrogate lineage ids stand for, the agent and served model its
+    stream named, and the effort its launch was handed.
     """
     root = repo['root']
     # seed one settled lineage on the root node so a step row exists to
@@ -3714,6 +4230,10 @@ def test_activity_names_attribution_and_lineage_columns(repo: dict) -> None:
         step=2,
         step_name='PLAN',
     )
+    node.record.step_session(
+        'codex', step_id=step_id, model='gpt-5.3-codex', session='thread-1'
+    )
+    node.record.step_effort(step_id=step_id, effort='high')
     node.record.step_end(step_id=step_id, status='completed', exit_code=0)
     node.record.iter_end(iter_id=iter_id, status='completed', exit_code=0)
     node.record.run_end(run_id=run_id, status='completed', exit_code=0)
@@ -3733,6 +4253,9 @@ def test_activity_names_attribution_and_lineage_columns(repo: dict) -> None:
         'step_name',
         'step',
         'iter',
+        'agent',
+        'model',
+        'effort',
         'status',
         'exit_code',
         'metadata',
@@ -3746,6 +4269,14 @@ def test_activity_names_attribution_and_lineage_columns(repo: dict) -> None:
     # a step row renders its name and the run-relative numbers
     step = next(row for row in rows if row['step_id'])
     assert (step['step_name'], step['step'], step['iter']) == ('PLAN', '2', '3')
+    # a step row names the agent that ran it, the model that served it, and
+    # the effort its launch was handed; an event row carries none
+    assert (step['agent'], step['model'], step['effort']) == (
+        'codex',
+        'gpt-5.3-codex',
+        'high',
+    )
+    assert (spawn['agent'], spawn['model'], spawn['effort']) == ('', '', '')
 
 
 # ------ chat

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
+import re
+import sqlite3
 import subprocess
 import sys
 from typing import Any, Optional
@@ -13,7 +16,7 @@ import pytest
 import fractal.util
 from fractal.core import commit
 from fractal.core.node import Node
-from tests._helpers import _git
+from tests._helpers import _files, _git
 
 from .conftest import (
     _make_git_repo,
@@ -26,6 +29,12 @@ __all__ = [
     'test_user_node_commit_init_commits_baseline',
     'test_commit_pushes_unless_local',
     'test_user_init_baseline_survives_a_hostile_external_ignore',
+    'test_user_init_baseline_fails_when_its_seed_cannot_stage',
+    'test_sub_project_user_baseline_commits_its_wiki',
+    'test_child_baseline_carries_only_its_seed',
+    'test_child_baseline_refuses_a_file_moved_into_its_seed',
+    'test_child_baseline_reads_project_changes_by_content',
+    'test_child_baseline_commits_its_memory_wiki_attributes',
     'test_commit_event_records_sha_and_emits_once',
     'test_commit_excludes_write_atomic_temp_files',
     'test_commit_excludes_project_registry_sidecars',
@@ -44,33 +53,88 @@ __all__ = [
     'test_commit_untracks_a_pretracked_wiki_cache',
     'test_commit_update_failure_blocks_commit_but_not_backstops',
     'test_force_commit_body_describes_the_sweep',
+    'test_commit_warns_on_a_root_path_shadowing_the_node_folder',
+    'test_a_failing_shadow_check_never_fails_the_commit',
+    'test_committed_memory_index_links_no_left_out_file',
+    'test_unchanged_memory_index_keeps_its_committed_bytes',
+    'test_rebuilt_memory_index_is_the_refresh_less_left_out_rows',
+    'test_rebuilt_memory_index_keeps_the_node_edits',
+    'test_rebuilt_memory_index_follows_the_wiki_ignore_check',
+    'test_rebuilt_memory_index_reads_a_colon_path_literally',
+    'test_memory_index_rebuild_waits_for_a_left_out_file',
+    'test_a_failed_memory_index_rebuild_never_fails_the_commit',
+    'test_a_failed_memory_index_write_back_leaves_the_tree_as_staged',
     'test_commit_ignore_scope_bypasses_scope_but_not_lint',
     'test_multi_scope_commit_boundary',
     'test_dot_scope_root_bounds_the_whole_project',
+    'test_scoped_commit_refuses_a_file_moved_into_scope',
     'test_sub_project_commit_boundary',
+    'test_scoped_sub_project_node_commits_its_new_files',
+    'test_wiki_setting_moves_the_scope_exemption',
+    'test_commit_refuses_an_invalid_stored_wiki',
     'test_scoped_commit_handles_non_ascii_and_whitespace_paths',
     'test_scoped_child_baseline_commits_init_gitattributes',
-    'test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes',
+    'test_scoped_child_baseline_admits_only_the_wiki_attributes_edit',
     'test_commit_check_detects_untracked_work',
     'test_commit_surfaces_hook_aborted_commit',
     'test_commit_retries_after_reformat_hook',
     'test_commit_resolves_invoking_installation_cli',
     'test_commit_resolves_invoking_installation_wiki',
     'test_lint_runs_standalone_without_node_dir',
+    'test_lint_lints_the_configured_wiki',
 ]
 
 # the console script beside the running interpreter -- a bare name would
 # resolve through a shim to whatever install the ambient PATH front-runs
 _FRACTAL_BIN = pathlib.Path(sys.executable).parent / 'fractal'
+# the wiki CLI beside the running interpreter, for the same reason
+_WIKI_BIN = pathlib.Path(sys.executable).parent / 'wiki'
+
+# the memory index of the node every memory index rebuild test spawns, and
+# the index of the memory folder those tests fill with a refused log alone
+_MEMORY_INDEX = '.fractal/main.task/memory/_index.md'
+_LOGS_INDEX = '.fractal/main.task/memory/logs/_index.md'
+
+# an index stamp far older than any a test run writes
+_AGED_STAMP = '2020-01-01T00:00:00Z'
+
+# an mtime no checkout records, so a tracked file set to it has stale stat
+# data in the index while its bytes stay as committed
+_AGED_NS = 1_000_000_000 * 10**9
+
+# the commit warning's header over the root paths shadowing node folder entries
+_SHADOW_WARNING = (
+    "Warning: staged root path(s) share a name with an entry of the node's own"
+    ' folder; if these are node files, move them under {node_folder}/; if they'
+    ' are project files, ignore this warning:'
+)
+
+# the merge-driver lines a worktree-root .gitattributes passes with as init's
+# edit: the index lines the wiki tool writes there
+_WIKI_INDEX_LINES = '# Wiki index merge driver\n**/_index.md merge=wiki\n'
+# a repo-wide page merge-driver block, which would take over the merge of
+# every Markdown file
+_WIKI_PAGE_LINES = '# Wiki page merge driver\n**/*.md merge=wiki\n'
+# the page merge-driver block the wiki tool writes to each wiki root's own
+# .gitattributes
+_WIKI_ROOT_PAGE_LINES = '# Wiki page merge driver\n*.md merge=wiki\n'
 
 
 # ------ baselines and pushes
 
 
-@pytest.mark.parametrize('track', [False, True], ids=['untracked', 'tracked'])
+@pytest.mark.parametrize(
+    argnames=('track', 'wiki'),
+    argvalues=[
+        pytest.param(False, 'wiki', id='untracked'),
+        pytest.param(True, 'wiki', id='tracked'),
+        pytest.param(False, 'docs', id='docs'),
+    ],
+)
 def test_user_node_commit_init_commits_baseline(
     git_repo: pathlib.Path,
     track: bool,
+    wiki: str,
 ) -> None:
     """``commit(init=True)`` baselines the project wiki -- plus node data when tracked.
 
@@ -79,8 +143,17 @@ def test_user_node_commit_init_commits_baseline(
     other staged work is untouched) and commits them, while a non-init commit from
     a user node is rejected. The node's own ``.fractal/`` is git-ignored on the
     top-level branch by default, so it is committed only after ``fractal track``
-    opts the tree in.
+    opts the tree in. A project naming another folder in its settings file
+    baselines the wiki init created there, and the settings file itself.
+    Runtime files in the seed never ride the baseline, tracked or not: the
+    seed answers to the work commits' estate law, so fractal's own exclude
+    block holds even past the force-add, and a file the law refuses is
+    withheld and named.
     """
+    if wiki != 'wiki':
+        settings = git_repo / '.fractal' / '.settings.json'
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'wiki': wiki}) + '\n', encoding='utf-8')
     node = Node(git_repo)
     node.init(agent='claude', user=True)
     if track:
@@ -104,8 +177,18 @@ def test_user_node_commit_init_commits_baseline(
     system = git_repo / '.fractal' / 'main' / 'skills' / '.system' / 'imagegen'
     system.mkdir(parents=True)
     (system / 'SKILL.md').write_text('engine-materialized\n', encoding='utf-8')
+    # runtime files fractal's own exclude block holds sit in the seed: the
+    # scratch log, an agent's stderr capture, and a bytecode cache
+    for runtime in ('tmp/commit.log', 'claude.err', '__pycache__/hook.cpython.pyc'):
+        path = git_repo / '.fractal' / 'main' / runtime
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('runtime\n', encoding='utf-8')
+    # a file no ignore rule holds but the estate law refuses (no record)
+    (git_repo / '.fractal' / 'main' / 'parked.pem').write_text(
+        'key\n', encoding='utf-8'
+    )
     # the wiki tool's self-ignored derived cache sits inside the staged wiki
-    cache = git_repo / 'wiki' / '.wiki' / 'cache'
+    cache = git_repo / wiki / '.wiki' / 'cache'
     cache.mkdir(parents=True, exist_ok=True)
     (cache / '.gitignore').write_text('*\n', encoding='utf-8')
     (cache / 'word_counts.json').write_text('{}\n', encoding='utf-8')
@@ -113,19 +196,28 @@ def test_user_node_commit_init_commits_baseline(
     # lean on a block written at init -- the runtime artifacts beside the
     # seed must stay out of the commit on their own
     (git_repo / '.git' / 'info' / 'exclude').unlink()
-    node.commit('configure', init=True)
-    # a tracked tree makes a real commit (the seed is new); untracked, the wiki
-    # is already committed by the fixture, so the baseline is legitimately a no-op
-    if track:
+    output = node.commit('configure', init=True)
+    # a tracked tree makes a real commit (the seed is new), and so does a
+    # configured folder (init created its wiki); untracked, the default wiki
+    # is already committed by the fixture, so the baseline is legitimately a
+    # no-op
+    if track or wiki != 'wiki':
         assert _head(git_repo) != before
-    result = _git(git_repo, 'ls-files', '.fractal', 'wiki')
+    result = _git(git_repo, 'ls-files', '.fractal', wiki)
     tracked = result.stdout
-    assert 'wiki/_index.md' in tracked
+    assert f'{wiki}/_index.md' in tracked
+    assert ('.fractal/.settings.json' in tracked) == (wiki != 'wiki')
     assert ('.fractal/main/config.json' in tracked) == track
     # runtime artifacts never ride the baseline, tracked or not
     assert '.db' not in tracked
     assert 'config.json.lock' not in tracked
     assert 'skills/.system' not in tracked
+    assert 'tmp/' not in tracked
+    assert 'claude.err' not in tracked
+    assert '__pycache__' not in tracked
+    assert 'parked.pem' not in tracked
+    # the law's refusal is named, as on a work commit
+    assert ('parked.pem' in output) == track
     # the wiki's derived cache stays self-ignored past the force-add
     assert '.wiki/cache' not in tracked
 
@@ -150,10 +242,8 @@ def test_commit_pushes_unless_local(tmp_path: pathlib.Path) -> None:
         # configure git user in the worktree
         _git(project_dir, 'config', 'user.email', 'test@test.com')
         _git(project_dir, 'config', 'user.name', 'Test')
-        # baseline commit through the real path (--init skips the empty-memory
-        # lint stub but still pushes unless local)
-        (project_dir / f'{name}.txt').write_text('work\n', encoding='utf-8')
-        Node(project_dir).commit(f'add {name}', init=True)
+        # the seed's baseline commit through the real path pushes unless local
+        Node(project_dir).commit(f'configure {name}', init=True)
         return branch
 
     pushed = _commit_node('pushed', local=False)
@@ -206,6 +296,254 @@ def test_user_init_baseline_survives_a_hostile_external_ignore(
     assert '.db' not in tracked
 
 
+def test_user_init_baseline_fails_when_its_seed_cannot_stage(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A seed the add cannot stage fails the baseline, never lands without it.
+
+    The seed's plain add tolerates only git's refusal of an ignored seed --
+    the hold the record pass overrides, as the hostile-ignore case shows.
+    Any other failure (here an unreadable record) raises with git's message,
+    before anything is staged, rather than commit a baseline missing its
+    seed.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    _git(repo, 'config', 'user.email', 'test@test.com')
+    _git(repo, 'config', 'user.name', 'Test')
+    Node(repo).init(agent='claude', user=True)
+    subprocess.run(
+        [f'{_FRACTAL_BIN}', 'track'],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    record = repo / '.fractal' / 'main' / 'memory' / 'notes.md'
+    record.parent.mkdir(parents=True)
+    record.write_text('root notes\n', encoding='utf-8')
+    record.chmod(0)
+    head = _git(repo, 'rev-parse', 'HEAD').stdout
+    try:
+        with pytest.raises(RuntimeError, match=r'git add of \.fractal/main failed'):
+            Node(repo).commit('configure', init=True)
+    finally:
+        record.chmod(0o644)
+    # nothing committed and nothing left staged
+    assert _git(repo, 'rev-parse', 'HEAD').stdout == head
+    assert _git(repo, 'diff', '--cached', '--name-only').stdout == ''
+
+
+@pytest.mark.parametrize('project', ['backend', 'apps/web'])
+def test_sub_project_user_baseline_commits_its_wiki(
+    tmp_path: pathlib.Path,
+    project: str,
+) -> None:
+    """A sub-project's user baseline commits the wiki init scaffolds there.
+
+    With the root ``.gitattributes`` already mapping the wiki indexes, every
+    path the baseline adds sits in the project's directory, beside the stage
+    excludes; git before 2.56 strips that shared directory from each exclude
+    as well, so an add run from the worktree root stages no new file once
+    the directory is no shorter than an exclude. The new wiki must land
+    regardless: it is the base-branch precondition every spawn in the
+    project checks.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # the root attributes already map the wiki indexes, so init's edit
+    # leaves the file as committed and the baseline's add skips it
+    (repo / '.gitattributes').write_text(_WIKI_INDEX_LINES, encoding='utf-8')
+    _git(repo, 'add', '.gitattributes')
+    _git(repo, 'commit', '-m', 'map the wiki indexes')
+    Node(repo).init(path=project, agent='claude', user=True)
+    output = Node(repo).commit('configure', init=True)
+    assert output.endswith('Committed user node baseline on main.')
+    tracked = _git(repo, 'ls-files', project).stdout
+    assert f'{project}/wiki/_index.md' in tracked
+    # the committed wiki admits a child into the project
+    Node(repo).init(name='task', agent='claude', local=True)
+
+
+def test_child_baseline_carries_only_its_seed(tmp_path: pathlib.Path) -> None:
+    """A child's ``--init`` baseline commits its seed alone.
+
+    The baseline skips the wiki refresh and the lint, so it carries only
+    fractal's setup: material copied into the child's tree refuses it by
+    name, with nothing staged or committed. With the material set aside the
+    seed commits as the baseline, and the material then lands through an
+    ordinary commit, which the lint gates.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    material = project_dir / 'reference.txt'
+    material.write_text('copied material\n', encoding='utf-8')
+    head = _git(project_dir, 'rev-parse', 'HEAD').stdout
+
+    with pytest.raises(RuntimeError, match='commits only the node seed') as refused:
+        node.commit('configure', init=True)
+
+    # the refusal names the copied file, and nothing was staged or committed
+    assert 'reference.txt' in str(refused.value)
+    assert _git(project_dir, 'rev-parse', 'HEAD').stdout == head
+    assert _git(project_dir, 'diff', '--cached', '--name-only').stdout == ''
+    # set aside, the material no longer blocks the seed's baseline...
+    aside = tmp_path / 'reference.txt'
+    material.rename(aside)
+    node.commit('configure', init=True)
+    subject = _git(project_dir, 'log', '-1', '--format=%s').stdout.strip()
+    assert subject == 'main.task: init (configure)'
+    tracked = _git(project_dir, 'ls-files').stdout
+    assert '.fractal/main.task/NODE.md' in tracked
+    assert 'reference.txt' not in tracked
+    # ...and returned, it lands through an ordinary commit
+    aside.rename(material)
+    node.commit('add reference material')
+    assert 'reference.txt' in _git(project_dir, 'ls-files').stdout
+    node.commit(check=True)
+
+
+def test_child_baseline_refuses_a_file_moved_into_its_seed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A project file moved into the seed refuses the baseline by its source.
+
+    git's rename detection names only a rename's destination, so a project
+    file moved into the node's data dir would read as seed content alone,
+    and the baseline would land the file's deletion without the lint. The
+    refusal names the moved file's source, with nothing committed.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    head = _head(project_dir)
+    _git(project_dir, 'mv', 'README.md', '.fractal/main.task/README.md')
+
+    with pytest.raises(RuntimeError, match='commits only the node seed') as refused:
+        node.commit('configure', init=True)
+
+    # the refusal lists the source alone (the destination
+    # is seed content), and nothing was committed
+    listing = str(refused.value).splitlines()[1:]
+    assert listing == ['README.md']
+    assert _head(project_dir) == head
+
+
+@pytest.mark.parametrize(
+    argnames='state',
+    argvalues=['touched', 'edited', 'staged-reverted'],
+    ids=['touch-only', 'real-change', 'staged-reverted'],
+)
+def test_child_baseline_reads_project_changes_by_content(
+    tmp_path: pathlib.Path,
+    state: str,
+) -> None:
+    """The baseline check counts a project file changed by content, never by stat.
+
+    The changed paths come from one git status listing, which compares the
+    index to HEAD and the working tree to the index by content, as
+    ``git diff HEAD`` and ``git diff --cached HEAD`` do, without the
+    working-tree diff's index refresh under ``index.lock``. A project file
+    only touched (stale stat data, same bytes) reads unchanged and the seed
+    baseline lands; an edit refuses by name, and so does an edit staged and
+    then reverted on disk, which the index still carries.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    head = _head(project_dir)
+    readme = project_dir / 'README.md'
+    if state == 'touched':
+        os.utime(readme, ns=(_AGED_NS, _AGED_NS))
+    elif state == 'edited':
+        readme.write_text('# edited\n', encoding='utf-8')
+    else:
+        committed = readme.read_text(encoding='utf-8')
+        readme.write_text('# staged\n', encoding='utf-8')
+        _git(project_dir, 'add', 'README.md')
+        readme.write_text(committed, encoding='utf-8')
+
+    if state == 'touched':
+        node.commit('configure', init=True)
+        subject = _git(project_dir, 'log', '-1', '--format=%s').stdout.strip()
+        assert subject == 'main.task: init (configure)'
+        assert 'README.md' not in _git(project_dir, 'show', '--name-only').stdout
+    else:
+        with pytest.raises(RuntimeError, match='commits only the node seed') as refused:
+            node.commit('configure', init=True)
+        assert str(refused.value).splitlines()[1:] == ['README.md']
+        assert _head(project_dir) == head
+
+
+@pytest.mark.parametrize(
+    argnames=('folder', 'admitted'),
+    argvalues=[
+        pytest.param('memory', True, id='memory-wiki-root'),
+        pytest.param('memory/notes', False, id='memory-folder'),
+        pytest.param('plans', False, id='plans'),
+    ],
+)
+def test_child_baseline_commits_its_memory_wiki_attributes(
+    tmp_path: pathlib.Path,
+    folder: str,
+    admitted: bool,
+) -> None:
+    """A child's baseline commits the page merge attributes its memory wiki gains.
+
+    ``wiki init`` writes the page merge-driver block into each wiki root's
+    own ``.gitattributes``, so the memory wiki init seeds gains one at
+    ``memory/``, beside the index block the tool writes to the worktree
+    root. The file is the wiki tool's own state, which a clone needs to
+    merge the memory's pages through the driver, so the baseline commits it
+    byte for byte with no refusal notice and the tree reads back clean. The
+    estate admits it only where the tool writes it: a ``.gitattributes``
+    anywhere else in the estate is withheld by name, like any dot file.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # stand in for the wiki tool's writes: the index block in the new
+    # worktree-root file, the page block in the folder's own
+    (project_dir / '.gitattributes').write_bytes(_WIKI_INDEX_LINES.encode())
+    attributes = node.node_dir / folder / '.gitattributes'
+    attributes.parent.mkdir(parents=True, exist_ok=True)
+    attributes.write_bytes(_WIKI_ROOT_PAGE_LINES.encode())
+    result = node.commit('configure', init=True)
+
+    relpath = attributes.relative_to(project_dir).as_posix()
+    tracked = _git(project_dir, 'ls-files').stdout.splitlines()
+    assert '.gitattributes' in tracked
+    if admitted:
+        # committed byte for byte, with nothing withheld or left over
+        cmd = ['git', 'show', f'HEAD:{relpath}']
+        committed = subprocess.run(cmd, cwd=project_dir, capture_output=True).stdout
+        assert committed == _WIKI_ROOT_PAGE_LINES.encode()
+        assert 'NOT staged' not in result
+        assert _git(project_dir, 'status', '--porcelain').stdout == ''
+    else:
+        # withheld and named
+        assert relpath not in tracked
+        refused = next(line for line in result.splitlines() if 'NOT staged' in line)
+        assert relpath in refused
+    # either way the tree reads back clean
+    node.commit(check=True)
+
+
 # ------ events, staging, and subjects
 
 
@@ -226,8 +564,11 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    # freshen both generated wikis up front -- the pipeline's index refresh
-    # is byte-stable once run, so the no-op invocation below stays a no-op
+    # an --init baseline of the seed lands but emits no commit event
+    node.commit('baseline', init=True)
+    assert node.db.read('events', where={'event': 'commit'}) == []
+    # freshen both generated wikis -- the pipeline's index refresh is
+    # byte-stable once run, so the no-op invocation below stays a no-op
     for wiki_dir in (
         project_dir / 'wiki',
         project_dir / '.fractal' / branch / 'memory',
@@ -237,10 +578,6 @@ def test_commit_event_records_sha_and_emits_once(tmp_path: pathlib.Path) -> None
             capture_output=True,
             check=True,
         )
-    # an --init baseline commit lands but emits no commit event
-    (project_dir / 'seed.txt').write_text('seed\n', encoding='utf-8')
-    node.commit('baseline', init=True)
-    assert node.db.read('events', where={'event': 'commit'}) == []
     # stub the lint gate (not under test) so the hook path alone decides
     lint = project_dir / '.fractal' / branch / 'scripts' / 'lint.sh'
     lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
@@ -503,6 +840,13 @@ def test_stage_records_survives_an_unreadable_held_file(
     assert 'plans/0099-doomed.md' not in tracked
     assert 'could not be staged' in result
     assert 'plans/0099-doomed.md' in result
+    # that warning alone names it -- never an ignore-rule skip -- and the last
+    # line counts it as an estate file
+    lines = result.splitlines()
+    skip_lines = [line for line in lines if 'skipped by ignore rules' in line]
+    for line in skip_lines:
+        assert 'plans/0099-doomed.md' not in line, line
+    assert lines[-1].startswith('Held out: 1 estate file(s) not staged'), result
 
 
 def test_skip_alarm_covers_foreign_info_exclude_lines(
@@ -514,7 +858,9 @@ def test_skip_alarm_covers_foreign_info_exclude_lines(
     marker-delimited block -- so a user line there eats a deliverable
     exactly like a tracked ``.gitignore`` pattern and must count into the
     ignore-skip warning. The suppression keys on the block's line span,
-    never the whole file.
+    never the whole file. Rule sources outside the repo -- the shared
+    exclude and the host's global ignore file -- are named without their
+    machine paths, since a force commit folds the warning into history.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
@@ -541,6 +887,22 @@ def test_skip_alarm_covers_foreign_info_exclude_lines(
     (src / 'other.txt').write_text('more work\n', encoding='utf-8')
     result = node.commit('foreign line hold')
     assert 'skipped by ignore rules' in result
+    # the rule is named by its repo-relative source, never a machine path
+    assert 'src/generated.txt (.git/info/exclude:' in result
+    assert f'{repo}' not in result
+    # the host's global ignore file is the other rule source outside the
+    # repo -- git names it by a machine path, so it reads as its config key,
+    # in the warning and in the force commit body that folds the warning in
+    excludes = tmp_path / 'global_ignore'
+    excludes.write_text('# host\n*.swp\n', encoding='utf-8')
+    _git(project_dir, 'config', 'core.excludesFile', f'{excludes}')
+    (project_dir / 'notes.swp').write_text('swap\n', encoding='utf-8')
+    (src / 'third.txt').write_text('still more work\n', encoding='utf-8')
+    result = node.commit('host rule hold', force=True)
+    assert 'notes.swp (core.excludesFile:2:*.swp)' in result
+    body = _git(project_dir, 'log', '-1', '--format=%b').stdout
+    assert 'notes.swp (core.excludesFile:2:*.swp)' in body
+    assert f'{tmp_path}' not in body
 
 
 def test_record_force_add_refuses_non_record_files(
@@ -553,7 +915,9 @@ def test_record_force_add_refuses_non_record_files(
     would silently commit a dotenv or a key a node parked in its estate.
     Only the canon-required record surfaces at text suffixes qualify; a
     non-record file is refused by name, and every force-add is reported
-    on the commit output.
+    on the commit output. A refused file is the refusal's to report: the
+    ignore-rule warning, which names repository and host holds, leaves it
+    out, and the held-out counts take it as an estate file.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
@@ -566,7 +930,8 @@ def test_record_force_add_refuses_non_record_files(
     exclude = repo / '.git' / 'info' / 'exclude'
     with exclude.open('a', encoding='utf-8') as handle:
         handle.write('/.fractal/\n')
-    # a record, plus secret-shaped files a node parked beside it
+    # a record, plus secret-shaped files a node parked beside it -- one in
+    # a new directory, which the ignore listing collapses to one entry
     memory = node.node_dir / 'memory' / 'state.md'
     memory.parent.mkdir(parents=True, exist_ok=True)
     memory.write_text('finding of record\n', encoding='utf-8')
@@ -574,18 +939,32 @@ def test_record_force_add_refuses_non_record_files(
     (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
     (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
     (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
+    (node.node_dir / 'data').mkdir()
+    (node.node_dir / 'data' / 'blob.bin').write_bytes(b'binary')
+    parked = ('.env', 'id_rsa', 'creds.pem', 'memory/dump.tar', 'data/blob.bin')
     result = node.commit('record custody', force=True)
 
     tracked = _git(project_dir, 'ls-files').stdout
     # the record landed; nothing secret-shaped or binary did
     assert 'memory/state.md' in tracked
-    for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
-        assert parked not in tracked, parked
+    for path in parked:
+        assert path not in tracked, path
     # the pass reports both halves rather than leaving them to be inferred
     assert 'Force-staged' in result
     assert 'memory/state.md' in result
-    assert 'not node records and were NOT force-staged' in result
-    assert 'id_rsa' in result
+    lines = result.splitlines()
+    refused_line = next(line for line in lines if 'NOT force-staged' in line)
+    assert 'not node records and were NOT force-staged' in refused_line
+    for path in parked:
+        assert f'.fractal/main.task/{path}' in refused_line, path
+    # the ignore warning names neither a refused file nor the collapsed
+    # directory holding one, and the last line counts them as estate files
+    skip_lines = [line for line in lines if 'skipped by ignore rules' in line]
+    for line in skip_lines:
+        assert 'id_rsa' not in line, line
+        assert '.fractal/main.task/data' not in line, line
+    held = f'Held out: {len(parked)} estate file(s) not staged'
+    assert lines[-1].startswith(held), result
     # both halves name worktree-relative paths -- a force commit folds these
     # bytes into git history, where machine-local paths do not belong
     forced_line = next(
@@ -617,6 +996,9 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
     memory = node.node_dir / 'memory' / 'state.md'
     memory.parent.mkdir(parents=True, exist_ok=True)
     memory.write_text('finding of record\n', encoding='utf-8')
+    checker = node.node_dir / 'memory' / 'evidence' / 'main.py'
+    checker.parent.mkdir(parents=True, exist_ok=True)
+    checker.write_text('print("checked")\n', encoding='utf-8')
     (node.node_dir / '.env').write_text(
         'AWS_SECRET_ACCESS_KEY=hunter2\n',
         encoding='utf-8',
@@ -624,16 +1006,30 @@ def test_estate_add_refuses_non_record_files_with_no_ignore_layer(
     (node.node_dir / 'id_rsa').write_text('PRIVATE KEY\n', encoding='utf-8')
     (node.node_dir / 'creds.pem').write_text('CERT\n', encoding='utf-8')
     (node.node_dir / 'memory' / 'dump.tar').write_bytes(b'binary')
+    # a plan's text patches are records; its screenshots and run output are not
+    plans = node.node_dir / 'plans'
+    plans.mkdir(parents=True, exist_ok=True)
+    (plans / 'fix.diff').write_text('--- a\n+++ b\n', encoding='utf-8')
+    (plans / 'fix.patch').write_text('--- a\n+++ b\n', encoding='utf-8')
+    (plans / 'shot.png').write_bytes(b'\x89PNG')
+    (plans / 'run.log').write_text('ran\n', encoding='utf-8')
+    (plans / 'run.err').write_text('failed\n', encoding='utf-8')
     result = node.commit('plain add path')
 
     tracked = _git(project_dir, 'ls-files').stdout
-    # the record landed; nothing secret-shaped or binary did
+    # the records landed; nothing secret-shaped, binary, or run output did
     assert 'memory/state.md' in tracked
+    assert 'memory/evidence/main.py' in tracked
+    assert 'plans/fix.diff' in tracked
+    assert 'plans/fix.patch' in tracked
     for parked in ('.env', 'id_rsa', 'creds.pem', 'dump.tar'):
         assert parked not in tracked, parked
     # the refusal is named, not inferred from an absent file
     assert 'are not node records' in result
     for parked in ('id_rsa', 'creds.pem', 'dump.tar'):
+        assert parked in result, parked
+    for parked in ('shot.png', 'run.log', 'run.err'):
+        assert parked not in tracked, parked
         assert parked in result, parked
     # a record edited after it is tracked still commits -- the allowlist
     # gates what the estate adds new, never the upkeep of its own history
@@ -869,15 +1265,19 @@ def test_commit_rejects_prelabeled_agent_messages(tmp_path: pathlib.Path) -> Non
 # ------ wiki refresh and force backstops
 
 
-def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path, wiki: str) -> None:
     """A commit refreshes both wiki indexes so current bytes ride the commit.
 
     Agents write pages without touching the generated ``_index.md`` files;
     the pipeline runs ``wiki update`` on the project and memory wikis before
     the lint gate, so the refreshed indexes land in the same commit as the
-    work -- no dedicated refresh commits, no agent turns spent on it.
+    work -- no dedicated refresh commits, no agent turns spent on it. The
+    project wiki is the configured folder, whatever its name: a corpus at
+    ``wiki/`` beside a ``docs`` project wiki is ordinary content the
+    refresh never touches, stale index and all.
     """
-    repo = _make_git_repo(tmp_path / 'repo')
+    repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(name='task', agent='claude', local=True)
     project_dir = _parse_project_dir(output)
@@ -887,8 +1287,9 @@ def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path) -> None:
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
     node.commit('baseline', init=True)
+    corpus = _files(project_dir / 'wiki')
     # new pages in both wikis, with the generated indexes left stale
-    (project_dir / 'wiki' / 'topic.md').write_text(
+    (project_dir / wiki / 'topic.md').write_text(
         '---\nname: topic\ndesc: A topic page.\n---\n\n# topic\n\n***\n',
         encoding='utf-8',
     )
@@ -903,12 +1304,15 @@ def test_commit_refreshes_wiki_indexes(tmp_path: pathlib.Path) -> None:
         return result.stdout
 
     # both committed indexes carry the regenerated link rows...
-    assert '[[topic' in _committed('wiki/_index.md')
+    assert '[[topic' in _committed(f'{wiki}/_index.md')
     assert '[[finding' in _committed(f'.fractal/{branch}/memory/_index.md')
     # ...and the refresh left nothing behind for a later commit to sweep
     result = _git(project_dir, 'status', '--porcelain')
     status = result.stdout
     assert status == ''
+    # a corpus beside the configured wiki kept its bytes
+    if wiki != 'wiki':
+        assert _files(project_dir / 'wiki') == corpus
 
 
 def test_commit_untracks_a_pretracked_wiki_cache(tmp_path: pathlib.Path) -> None:
@@ -970,13 +1374,17 @@ def test_commit_update_failure_blocks_commit_but_not_backstops(
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
 
-    # a conflict-marked wiki page -- `wiki update` refuses to write over it
+    # a conflict-marked wiki page in history -- `wiki update` refuses to write
+    # over it (committed with raw git, past the pipeline's refresh)
     (project_dir / 'wiki' / 'broken.md').write_text(
         '---\nname: broken\ndesc: A broken page.\n---\n\n# broken\n\n***\n'
         '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other\n',
         encoding='utf-8',
     )
-    # the --init baseline skips the refresh -- it lands despite the markers
+    _git(project_dir, 'add', 'wiki/broken.md')
+    _git(project_dir, 'commit', '-m', 'broken page')
+    # the --init baseline of the seed skips the refresh -- it lands despite
+    # the markers
     node.commit('baseline', init=True)
     head_before = _head(project_dir)
     # a plain commit fails with the refusal named in the error, before landing
@@ -995,7 +1403,8 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     The loop's backstop saves are force commits made when an iteration
     fails, so the commit must explain itself from git history alone: the
     caller's body paragraph (the failure reason and never-run tail), the
-    ignore-skip and oversized-file warnings, and the staged diffstat.
+    ignore-skip, oversized-file, and root-shadow warnings, and the staged
+    diffstat.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     Node(repo).init(agent='claude', user=True)
@@ -1008,12 +1417,15 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     node = Node(project_dir)
     node.commit('baseline', init=True)
     # a tracked host ignore rule eats a workspace file (the skip warning), an
-    # oversized file trips the size warning, and real work rides the sweep
+    # oversized file trips the size warning, a root plan trips the shadow
+    # warning, and real work rides the sweep
     gitignore = project_dir / '.gitignore'
     ignored = gitignore.read_text(encoding='utf-8') + 'eaten.log\n'
     gitignore.write_text(ignored, encoding='utf-8')
     (project_dir / 'eaten.log').write_text('eaten\n', encoding='utf-8')
     (project_dir / 'blob.bin').write_bytes(b'\0' * (11 * 1024 * 1024))
+    (project_dir / 'plans').mkdir()
+    (project_dir / 'plans' / 'stray.md').write_text('plan\n', encoding='utf-8')
     (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
     # a hostile external ignore holds the estate out, so the record pass
     # force-stages a fresh record and refuses the parked non-record --
@@ -1040,7 +1452,7 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     # the subject is the run-qualified backstop label
     assert _log('%s') == f'{branch}: iteration {run_id}.2 (failed on EXECUTE)'
     # the body carries the caller's paragraph, the record pass's notices,
-    # both warnings, and a diffstat naming the swept files
+    # every warning, and a diffstat naming the swept files
     body = _log('%b')
     assert 'agent error (exit 2)' in body
     assert 'steps not run: REVIEW, COMMIT' in body
@@ -1050,8 +1462,603 @@ def test_force_commit_body_describes_the_sweep(tmp_path: pathlib.Path) -> None:
     assert '.env' in body
     assert f'{project_dir}' not in body
     assert 'skipped by ignore rules' in body
+    # the refused .env is the refusal's to name, never an ignore-rule skip
+    assert '.fractal/main.task/.env (.git/info/exclude:' not in body
+    assert f'{repo}' not in body
     assert 'blob.bin (11MB)' in body
+    assert 'plans/stray.md (shadows .fractal/main.task/plans)' in body
     assert 'work.txt' in body
+
+
+@pytest.mark.parametrize(
+    argnames=('origin', 'path', 'warned'),
+    argvalues=[
+        # a node plan written at the worktree root by mistake
+        ('written', 'plans/x.md', True),
+        # a committed node plan moved to the worktree root
+        ('moved', 'plans/x.md', True),
+        # the project's own plans folder, there when the node started
+        ('at-base', 'plans/x.md', False),
+        # a new top-level path no node folder entry names
+        ('unrelated', 'notes/x.md', False),
+        # a merge bringing the path in, not the node writing it
+        ('merged', 'plans/x.md', False),
+    ],
+    ids=['written', 'moved', 'at-base', 'unrelated', 'merged'],
+)
+def test_commit_warns_on_a_root_path_shadowing_the_node_folder(
+    tmp_path: pathlib.Path,
+    origin: str,
+    path: str,
+    warned: bool,
+) -> None:
+    """A new root path named like a node folder entry warns, and still commits.
+
+    An agent that writes ``plans/x.md`` from the worktree root, or moves its
+    own plan there, may have meant its own ``.fractal/<branch>/plans``; the
+    commit names the path and the entry it shares a name with, and says what
+    to do either way. A top-level name the project already had when the node
+    started is the project's own, an unrelated new path is ordinary work, and
+    a merge's additions are not the node's writes.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    if origin == 'at-base':
+        (repo / 'plans').mkdir()
+        (repo / 'plans' / 'README.md').write_text('roadmap\n', encoding='utf-8')
+        _git(repo, 'add', 'plans')
+        _git(repo, 'commit', '-m', 'add the project plans folder')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    branch = _resolve_branch(project_dir)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    node.commit('baseline', init=True)
+    assert (node.node_dir / 'plans').is_dir()
+    stray = project_dir / path
+    stray.parent.mkdir(exist_ok=True)
+    if origin == 'moved':
+        plan = node.node_dir / 'plans' / 'x.md'
+        plan.write_text('plan\n', encoding='utf-8')
+        node.commit('add a plan')
+        plan.rename(stray)
+    elif origin == 'merged':
+        _git(project_dir, 'checkout', '-q', '-b', 'side')
+        stray.write_text('plan\n', encoding='utf-8')
+        _git(project_dir, 'add', path)
+        _git(project_dir, 'commit', '-q', '-m', 'side plan')
+        _git(project_dir, 'checkout', '-q', branch)
+        _git(project_dir, 'merge', '-q', '--no-commit', '--no-ff', 'side')
+    else:
+        stray.write_text('plan\n', encoding='utf-8')
+    result = node.commit('add the path')
+    lines = result.splitlines()
+    warning = _SHADOW_WARNING.format(node_folder=f'.fractal/{branch}')
+    assert (warning in lines) is warned, result
+    assert (f'{path} (shadows .fractal/{branch}/plans)' in lines) is warned
+    # the warning never refuses: the path is committed either way
+    assert _git(project_dir, 'ls-files', path).stdout.strip() == path
+
+
+@pytest.mark.parametrize('force', [False, True], ids=['plain', 'force'])
+def test_a_failing_shadow_check_never_fails_the_commit(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force: bool,
+) -> None:
+    """The shadow check is advisory: when it cannot run, the commit lands.
+
+    The check reads the node's record for its base, and a locked central
+    database must not fail a commit -- least of all the loop's backstop save.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    node.commit('baseline', init=True)
+    (project_dir / 'plans').mkdir()
+    (project_dir / 'plans' / 'x.md').write_text('plan\n', encoding='utf-8')
+
+    def _locked(*args: Any, **kwargs: Any) -> str:
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr('fractal.core.files.Files._diff_anchor', _locked)
+    result = commit.commit(node=node, message='add a plan', force=force)
+    assert 'share a name' not in result
+    assert _git(project_dir, 'ls-files', 'plans/x.md').stdout.strip() == 'plans/x.md'
+
+
+# ------ the memory index rebuild
+
+
+@pytest.mark.parametrize('force', [False, True], ids=['plain', 'force'])
+def test_committed_memory_index_links_no_left_out_file(
+    tmp_path: pathlib.Path,
+    force: bool,
+) -> None:
+    """No committed memory index row links a file the commit leaves out.
+
+    The memory wiki indexes every file on disk, so a binary or a log the
+    estate law refuses gains a row -- from the commit's own refresh, or,
+    before a backstop save that skips the refresh, from the node's own
+    ``wiki update``. The committed indexes link none of the refused files:
+    a folder holding only them keeps its index, in the commit and on disk,
+    rebuilt without their rows. The estate warning still names each file,
+    and the working tree reads back clean.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # records beside a refused archive, and a folder holding only a refused log
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'data.json').write_text('{}\n', encoding='utf-8')
+    (memory / 'dump.tar').write_bytes(b'binary')
+    (memory / 'logs').mkdir()
+    (memory / 'logs' / 'run.log').write_text('ran\n', encoding='utf-8')
+    if force:
+        subprocess.run(
+            [_WIKI_BIN, 'update', f'--path={memory}'],
+            capture_output=True,
+            check=True,
+        )
+    head_before = _head(project_dir)
+    result = node.commit('memory beside refused files', force=force)
+
+    assert _head(project_dir) != head_before
+    # the records keep their rows and the refused files have none; the folder
+    # holding only the log keeps its index, rebuilt without the log's row
+    index = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert '[[notes' in index
+    assert '[[data.json' in index
+    assert 'dump.tar' not in index
+    assert '[[logs/_index' in index
+    folder_index = _git(project_dir, 'show', f'HEAD:{_LOGS_INDEX}').stdout
+    assert 'run.log' not in folder_index
+    assert (memory / 'logs' / '_index.md').is_file()
+    # the estate warning still names each refused file, beside the rebuild
+    refused = next(line for line in result.splitlines() if 'NOT staged' in line)
+    for path in ('memory/dump.tar', 'memory/logs/run.log'):
+        assert f'.fractal/main.task/{path}' in refused, path
+    assert 'Memory index rebuilt without 2 file(s) the commit leaves out' in result
+    node.commit(check=True)
+
+
+def test_unchanged_memory_index_keeps_its_committed_bytes(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A memory index unchanged but for a refused file keeps HEAD's bytes.
+
+    Every refresh adds the refused file's row back and re-stamps the index,
+    so a rebuild without the row would move the ``updated:`` stamp on each
+    commit while the rows stand still. An index whose rebuild matches HEAD's
+    but for that stamp commits HEAD's bytes, old stamp included.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    node.commit('notes beside a refused archive')
+    # age the committed stamps, so a re-stamp within the same second shows
+    index = memory / '_index.md'
+    text = index.read_text(encoding='utf-8')
+    aged = re.sub(r'(?m)^(created|updated): .*$', rf'\1: {_AGED_STAMP}', text)
+    index.write_text(aged, encoding='utf-8')
+    _git(project_dir, 'add', f'{index}')
+    _git(project_dir, 'commit', '-m', 'age the memory index')
+    # work elsewhere, with memory untouched and the archive still in it
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    node.commit('more work')
+
+    committed = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert committed == _git(project_dir, 'show', f'HEAD~1:{_MEMORY_INDEX}').stdout
+    assert f'updated: {_AGED_STAMP}' in committed
+    assert 'dump.tar' not in committed
+    node.commit(check=True)
+
+
+def test_rebuilt_memory_index_is_the_refresh_less_left_out_rows(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The rebuilt memory index is the refresh's, less the left-out rows.
+
+    The rebuild drops what the commit leaves out and nothing else: a new
+    page's row, every description, a folder holding only refused files, and
+    the rest of each index keep the bytes the refresh wrote, and only the
+    rows linking a refused file go.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    node.commit('notes')
+    # a new page beside a refused archive and a folder holding only a log
+    (memory / 'finding.md').write_text(
+        '---\nname: finding\ndesc: A finding.\n---\n\n# finding\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    (memory / 'logs').mkdir()
+    (memory / 'logs' / 'run.log').write_text('ran\n', encoding='utf-8')
+    # the refresh the commit runs, taken ahead of it so its bytes are in hand
+    # (the commit's own refresh then finds nothing left to do)
+    subprocess.run(
+        [_WIKI_BIN, 'update', f'--path={memory}'],
+        capture_output=True,
+        check=True,
+    )
+    refreshed = {
+        index: (memory / index).read_text(encoding='utf-8')
+        for index in ('_index.md', 'logs/_index.md')
+    }
+    node.commit('finding beside refused files')
+
+    def _lines(text: str) -> list[str]:
+        # an index's content lines, blank lines and the stamp aside
+        return [
+            line
+            for line in text.splitlines()
+            if line and not line.startswith('updated:')
+        ]
+
+    # each committed index is the refresh's, less its refused file's row
+    for index, path, row in (
+        ('_index.md', _MEMORY_INDEX, '[[dump.tar'),
+        ('logs/_index.md', _LOGS_INDEX, '[[logs/run.log'),
+    ):
+        committed = _git(project_dir, 'show', f'HEAD:{path}').stdout
+        expected = [
+            line for line in _lines(refreshed[index]) if not line.startswith(row)
+        ]
+        assert _lines(committed) == expected, index
+    committed = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert '[[finding' in committed
+    assert '[[logs/_index' in committed
+
+
+def test_rebuilt_memory_index_keeps_the_node_edits(tmp_path: pathlib.Path) -> None:
+    """A node's own edits to a memory index survive the rebuild.
+
+    The wiki regenerates an index's link rows but keeps its description and
+    the text below its separator from the file it reads, and both are the
+    node's to write. The rebuild starts from the bytes the commit stages, so
+    the edits land in the commit and stay on disk while the refused row goes.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    node.commit('notes')
+    # the node describes its memory and adds a line below the separator, with
+    # a refused archive beside the pages
+    index = memory / '_index.md'
+    text = index.read_text(encoding='utf-8')
+    text = text.replace('desc: ...', 'desc: What the node knows.')
+    index.write_text(f'{text}\nRead the notes page first.\n', encoding='utf-8')
+    (memory / 'dump.tar').write_bytes(b'binary')
+    node.commit('describe memory beside a refused archive')
+
+    committed = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    on_disk = index.read_text(encoding='utf-8')
+    for text in (committed, on_disk):
+        assert 'desc: What the node knows.' in text
+        assert 'Read the notes page first.' in text
+        assert 'dump.tar' not in text
+    node.commit(check=True)
+
+
+@pytest.mark.parametrize(
+    argnames=('source', 'rule', 'indexed'),
+    argvalues=[
+        pytest.param('info/exclude', 'held.md', False, id='repository-rule'),
+        pytest.param('core.excludesFile', 'held.md', True, id='host-rule'),
+        pytest.param('info/exclude', '/.fractal/', True, id='ignored-root'),
+    ],
+)
+def test_rebuilt_memory_index_follows_the_wiki_ignore_check(
+    tmp_path: pathlib.Path,
+    source: str,
+    rule: str,
+    indexed: bool,
+) -> None:
+    """A force-added memory record keeps exactly the row the refresh gives it.
+
+    The record pass force-adds a record a machine-local ignore rule holds
+    out, but the wiki's own ignore check decides whether the refresh indexes
+    it: the repository's rules alone, read from the patterns, so a tracked
+    file counts too. A repository rule keeps the record out of the index; a
+    host rule does not, and neither does a rule that ignores the memory wiki
+    itself, which turns the check off. The rebuild, which runs outside the
+    repository, applies the same check, both at the commit that force-adds
+    the record and at a later one that finds it tracked.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # a machine-local rule holds the record out of the plain adds
+    if source == 'info/exclude':
+        exclude = repo / '.git' / 'info' / 'exclude'
+        with exclude.open('a', encoding='utf-8') as handle:
+            handle.write(f'{rule}\n')
+    else:
+        excludes = tmp_path / 'global_ignore'
+        excludes.write_text(f'{rule}\n', encoding='utf-8')
+        _git(project_dir, 'config', 'core.excludesFile', f'{excludes}')
+    memory = node.node_dir / 'memory'
+    (memory / 'held.md').write_text(
+        '---\nname: held\ndesc: A held record.\n---\n\n# held\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    result = node.commit('record held by an ignore rule')
+    assert '.fractal/main.task/memory/held.md' in result
+    # a later commit finds the record tracked, the archive still refused
+    (project_dir / 'work.txt').write_text('work\n', encoding='utf-8')
+    node.commit('work beside the tracked record')
+
+    for revision in ('HEAD~1', 'HEAD'):
+        index = _git(project_dir, 'show', f'{revision}:{_MEMORY_INDEX}').stdout
+        assert ('[[held' in index) == indexed, revision
+        assert 'dump.tar' not in index, revision
+
+
+@pytest.mark.parametrize(
+    argnames=('rule', 'indexed'),
+    argvalues=[
+        pytest.param(
+            '/:app/.fractal/main.task/memory/held.md',
+            False,
+            id='rule-on-the-path',
+        ),
+        pytest.param(
+            '/app/.fractal/main.task/memory/held.md',
+            True,
+            id='rule-on-the-path-without-its-colon',
+        ),
+    ],
+)
+def test_rebuilt_memory_index_reads_a_colon_path_literally(
+    tmp_path: pathlib.Path,
+    rule: str,
+    indexed: bool,
+) -> None:
+    """A memory path opening with ``:`` meets the ignore rules for that path.
+
+    git reads a ``check-ignore --stdin`` path opening with ``:`` as pathspec
+    magic and matches what follows it, so in a project folder named
+    ``:app`` every memory path the rebuild probes would meet the rules for
+    ``app/`` instead. The wiki's own check reads each path literally, so the
+    rebuild must too: a rule on the record's real path keeps it out of the
+    committed index, and a rule on the path without its colon does not.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    # a committed wiki for the colon-named project -- the init's precondition
+    app_wiki = repo / ':app' / 'wiki' / '_index.md'
+    app_wiki.parent.mkdir(parents=True)
+    app_wiki.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+    _git(repo, 'add', ':(literal):app')
+    _git(repo, 'commit', '-m', 'add app wiki')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True, path=':app')
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    node.commit('baseline', init=True)
+    # a repository rule, and a refused archive so the rebuild runs
+    exclude = repo / '.git' / 'info' / 'exclude'
+    with exclude.open('a', encoding='utf-8') as handle:
+        handle.write(f'{rule}\n')
+    memory = node.node_dir / 'memory'
+    (memory / 'held.md').write_text(
+        '---\nname: held\ndesc: A held record.\n---\n\n# held\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    result = node.commit('record beside a refused archive')
+
+    assert 'Memory index rebuilt' in result
+    index = _git(project_dir, 'show', f'HEAD::app/{_MEMORY_INDEX}').stdout
+    assert ('[[held' in index) == indexed
+
+
+def test_memory_index_rebuild_waits_for_a_left_out_file(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing left out, the commit carries the refresh's index untouched.
+
+    The rebuild exists for the files a commit leaves out, so an ordinary
+    commit never starts it: no wiki run outside the repository, no notice,
+    and the committed memory index is byte for byte what the refresh wrote.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'data.json').write_text('{}\n', encoding='utf-8')
+    rebuilds = _watch_rebuilds(monkeypatch, project_dir, fail=False)
+    result = node.commit('notes and data')
+
+    assert rebuilds == []
+    assert 'Memory index rebuilt' not in result
+    cmd = ['git', 'show', f'HEAD:{_MEMORY_INDEX}']
+    committed = subprocess.run(cmd, cwd=project_dir, capture_output=True).stdout
+    assert committed == (memory / '_index.md').read_bytes()
+    assert b'[[data.json' in committed
+
+
+@pytest.mark.parametrize('force', [False, True], ids=['plain', 'force'])
+def test_a_failed_memory_index_rebuild_never_fails_the_commit(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force: bool,
+) -> None:
+    """A failed rebuild warns in one line, and the commit lands without it.
+
+    The rebuild is upkeep, so a failure inside it must never cost the save,
+    least of all the loop's backstop. The commit carries the memory index
+    as staged, refused row and all, and the warning says the rebuild did not
+    happen.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    # the node's own refresh, so both modes stage the refused row
+    subprocess.run(
+        [_WIKI_BIN, 'update', f'--path={memory}'],
+        capture_output=True,
+        check=True,
+    )
+    rebuilds = _watch_rebuilds(monkeypatch, project_dir, fail=True)
+    head_before = _head(project_dir)
+    result = node.commit('notes beside a refused archive', force=force)
+
+    assert _head(project_dir) != head_before
+    assert len(rebuilds) == 1
+    warnings = [
+        line
+        for line in result.splitlines()
+        if line.startswith('Warning: memory index not rebuilt')
+    ]
+    assert len(warnings) == 1, result
+    assert 'update refused' in warnings[0]
+    index = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert '[[dump.tar' in index
+
+
+@pytest.mark.parametrize('fault', ['index-lock', 'read-only-memory'])
+def test_a_failed_memory_index_write_back_leaves_the_tree_as_staged(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    """A rebuild that fails to write back leaves the tree matching the git index.
+
+    The rebuilt indexes reach the git index and the working tree alike, and
+    a failure in either write leaves the two agreeing: another process
+    holding the index lock fails the staging, and a read-only memory folder
+    fails the tree write. The commit lands the indexes as staged, with the
+    warning, and the tree reads back clean, so the loop's dirty check finds
+    nothing of the rebuild's for a backstop to save.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    memory = node.node_dir / 'memory'
+    (memory / 'notes.md').write_text(
+        '---\nname: notes\ndesc: Notes.\n---\n\n# notes\n\n***\n',
+        encoding='utf-8',
+    )
+    (memory / 'dump.tar').write_bytes(b'binary')
+    # the lock another git process holds while it writes the git index
+    git_path = _git(project_dir, 'rev-parse', '--git-path', 'index.lock').stdout
+    lock = project_dir / git_path.strip()
+
+    # raise the fault for the rebuild's write-back, and lift it for the commit
+    def _fault(raised: bool) -> None:
+        if fault == 'read-only-memory':
+            memory.chmod(0o555 if raised else 0o755)
+        elif raised:
+            lock.touch()
+        else:
+            lock.unlink(missing_ok=True)
+
+    real_run = subprocess.run
+
+    def _run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(cmd, list) and cmd[:1] == ['git'] and 'commit' in cmd:
+            _fault(raised=False)
+        result = real_run(cmd, *args, **kwargs)
+        # the rebuild's wiki run is the only one outside the worktree
+        is_update = isinstance(cmd, list) and cmd[1:2] == ['update']
+        if is_update and pathlib.Path(cmd[0]).name == 'wiki':
+            path = pathlib.Path(cmd[2].removeprefix('--path='))
+            if not path.is_relative_to(project_dir):
+                _fault(raised=True)
+        return result
+
+    monkeypatch.setattr(subprocess, 'run', _run)
+    # the held lock outlasts the staging's wait, so the wait is zeroed
+    monkeypatch.setattr('fractal.util.git.INDEX_LOCK_WAIT', 0)
+    head_before = _head(project_dir)
+    result = node.commit('notes beside a refused archive')
+
+    assert _head(project_dir) != head_before
+    warnings = [
+        line
+        for line in result.splitlines()
+        if line.startswith('Warning: memory index not rebuilt')
+    ]
+    assert len(warnings) == 1, result
+    index = _git(project_dir, 'show', f'HEAD:{_MEMORY_INDEX}').stdout
+    assert '[[dump.tar' in index
+    assert _git(project_dir, 'diff', '--name-only').stdout == ''
+    node.commit(check=True)
 
 
 # ------ scope boundaries
@@ -1189,6 +2196,43 @@ def test_dot_scope_root_bounds_the_whole_project(tmp_path: pathlib.Path) -> None
     assert 'root.txt' in tracked
 
 
+def test_scoped_commit_refuses_a_file_moved_into_scope(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A file moved into a scope root from outside it refuses by its source.
+
+    git's rename detection names only a rename's destination, so a tracked
+    file moved into a scope root would read as in-scope work, and the commit
+    would land the deletion outside the scope that the merge's footprint
+    check refuses. The scope check names the moved file's source.
+    """
+    repo = _make_git_repo(tmp_path / 'repo')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True, scope=['src'])
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # baseline cleans the tree (sweeping init's root .gitattributes); stub the
+    # lint gate (not under test) so the boundary check alone decides
+    node.commit('baseline', init=True)
+    branch = _resolve_branch(project_dir)
+    lint = project_dir / '.fractal' / branch / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+    head = _head(project_dir)
+    (project_dir / 'src').mkdir()
+    _git(project_dir, 'mv', 'README.md', 'src/README.md')
+
+    with pytest.raises(RuntimeError, match='Changes outside node scope') as refused:
+        node.commit('move readme')
+
+    # the refusal lists the source alone, and nothing was committed
+    listing = str(refused.value).splitlines()[1:]
+    assert listing == ['README.md']
+    assert _head(project_dir) == head
+
+
 @pytest.mark.parametrize(
     argnames=('scope', 'inside', 'strays'),
     argvalues=[
@@ -1261,6 +2305,180 @@ def test_sub_project_commit_boundary(
     assert tracked == inside
 
 
+@pytest.mark.parametrize(
+    argnames=('root_wiki', 'project', 'scope'),
+    argvalues=[
+        pytest.param('wiki', 'backend', 'src', id='backend'),
+        pytest.param('wiki', 'apps/web', 'src', id='apps/web'),
+        # the root project, its wiki and the scope sharing one folder
+        pytest.param('handbook/wiki', None, 'handbook/src', id='root-handbook'),
+    ],
+)
+def test_scoped_sub_project_node_commits_its_new_files(
+    tmp_path: pathlib.Path,
+    root_wiki: str,
+    project: Optional[str],
+    scope: str,
+) -> None:
+    """A scoped node commits every new file it stages under a shared folder.
+
+    In a sub-project, the baseline's estate add and a work commit's scope
+    sweep stage paths sharing the project's directory; in the root project,
+    a work commit's sweep stages a wiki and a scope sharing a folder. Git
+    before 2.56 strips that shared directory from each stage exclude as
+    well, so an add run from the worktree root stages no new file once the
+    directory is no shorter than an exclude. The baseline must land every
+    seed file, and a work commit the new file in its scope, however long
+    the shared path is.
+    """
+    repo = _make_git_repo(tmp_path / 'repo', wiki=root_wiki)
+    # a committed sub-project wiki -- the base-ref precondition for the init
+    if project is not None:
+        index = repo / project / 'wiki' / '_index.md'
+        index.parent.mkdir(parents=True)
+        index.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+        _git(repo, 'add', project)
+        _git(repo, 'commit', '-m', 'add the project wiki')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        path=project,
+        scope=[scope],
+    )
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    worktree = node.worktree
+    # the baseline commits every seed file, so the tree reads clean
+    node.commit('configure', init=True)
+    node.commit(check=True)
+    # stub the lint gate (not under test) so staging alone decides
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+    # a new file in scope rides the work commit
+    folder = scope if project is None else f'{project}/{scope}'
+    module = worktree / folder / 'module.py'
+    module.parent.mkdir()
+    module.write_text('VALUE = 1\n', encoding='utf-8')
+    node.commit('add a module')
+    result = _git(worktree, 'ls-files', folder)
+    assert result.stdout.split() == [f'{folder}/module.py']
+    node.commit(check=True)
+
+
+@pytest.mark.parametrize(
+    argnames=('root_wiki', 'wiki', 'project', 'exempt', 'stray'),
+    argvalues=[
+        pytest.param(
+            'wiki', 'wiki', None, 'wiki/note.md', 'docs/note.md', id='default'
+        ),
+        pytest.param('docs', 'docs', None, 'docs/note.md', 'wiki/note.md', id='docs'),
+        pytest.param(
+            'wiki',
+            'docs',
+            'app',
+            'app/docs/note.md',
+            'app/wiki/note.md',
+            id='sub-project',
+        ),
+        pytest.param(
+            'docs',
+            'wiki',
+            'app',
+            'app/wiki/note.md',
+            'app/docs/note.md',
+            id='sub-project-default',
+        ),
+    ],
+)
+def test_wiki_setting_moves_the_scope_exemption(
+    tmp_path: pathlib.Path,
+    root_wiki: str,
+    wiki: str,
+    project: Optional[str],
+    exempt: str,
+    stray: str,
+) -> None:
+    """The configured project-wiki folder is the one a scope exempts.
+
+    A project naming another folder as its shared wiki in
+    ``.fractal/.settings.json`` moves the always-committable exemption
+    there: a scoped node commits pages under it, while ``wiki/`` becomes
+    ordinary content outside the scope. A child that selects a sub-project
+    follows that project's own setting, whatever the tree's root project
+    names.
+    """
+    repo = _make_git_repo(tmp_path / 'repo', wiki=root_wiki)
+    # a committed sub-project wiki (the base-ref precondition for the init),
+    # with a settings file when the sub-project names another folder
+    if project is not None:
+        index = repo / project / wiki / '_index.md'
+        index.parent.mkdir(parents=True)
+        index.write_text('---\nname: app\n---\n# app\n\n***\n', encoding='utf-8')
+        if wiki != 'wiki':
+            settings = repo / project / '.fractal' / '.settings.json'
+            settings.parent.mkdir()
+            settings.write_text(json.dumps({'wiki': wiki}), encoding='utf-8')
+        _git(repo, 'add', project)
+        _git(repo, 'commit', '-m', 'add app wiki')
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(
+        name='task',
+        agent='claude',
+        local=True,
+        path=project,
+        scope=['src'],
+    )
+    project_dir = _parse_project_dir(output)
+    # configure git identity in the worktree
+    _git(project_dir, 'config', 'user.email', 'test@test.com')
+    _git(project_dir, 'config', 'user.name', 'Test')
+    node = Node(project_dir)
+    # baseline cleans the tree (sweeping init's root .gitattributes); stub the
+    # lint gate (not under test) so the boundary check alone decides
+    node.commit('baseline', init=True)
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+    # a page under each folder: only the configured one is exempt
+    for path in (exempt, stray):
+        (project_dir / path).parent.mkdir(parents=True, exist_ok=True)
+        (project_dir / path).write_text(f'{path}\n', encoding='utf-8')
+    with pytest.raises(RuntimeError) as excinfo:
+        node.commit('pages in both folders')
+    listed = str(excinfo.value).split(':\n', 1)[1].splitlines()
+    assert listed == [stray]
+    # the exempt page alone commits past the scope
+    (project_dir / stray).unlink()
+    node.commit('page in the project wiki')
+    result = _git(project_dir, 'ls-files', exempt)
+    assert result.stdout.split() == [exempt]
+
+
+@pytest.mark.parametrize('value', ['../outside', '.', 'src/.git'])
+def test_commit_refuses_an_invalid_stored_wiki(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    """A hand-edited ``wiki`` key fails the commit instead of moving the boundary.
+
+    The key is fixed at init, so only a raw edit of ``config.json`` lands a
+    bad value; every commit re-validates it, so a folder outside the project
+    or over its machinery can never widen what a scoped node may commit.
+    """
+    _, child = _spawn_parent_child(git_repo, monkeypatch)
+    config = json.loads(child.config.path.read_text(encoding='utf-8'))
+    config['wiki'] = value
+    child.config.path.write_text(json.dumps(config, indent=2), encoding='utf-8')
+    (child.worktree / 'probe.md').write_text('# probe\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='wiki must'):
+        child.commit('add probe')
+
+
 def test_scoped_commit_handles_non_ascii_and_whitespace_paths(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1324,7 +2542,9 @@ def test_scoped_child_baseline_commits_init_gitattributes(
     sweep init's own artifact, like the user-init commit does -- over a base
     with no file, and over one whose own lines the tool appends to, compared
     byte for byte: a stripped read of HEAD's copy would lose a leading blank
-    line or trailing whitespace and miss init's edit.
+    line or trailing whitespace and miss init's edit. The memory wiki's own
+    ``.gitattributes``, the page attribute the wiki tool writes in its root,
+    commits with the node's seed.
     """
     repo = _make_git_repo(tmp_path / 'repo')
     if base is not None:
@@ -1358,21 +2578,91 @@ def test_scoped_child_baseline_commits_init_gitattributes(
     assert committed.startswith(base or ''), committed
     lines = [line for line in committed.splitlines() if line]
     assert lines[-2:] == ['# Wiki index merge driver', '**/_index.md merge=wiki']
+    # the memory wiki's page attribute is committed with the seed
+    attributes = node.node_dir / 'memory' / '.gitattributes'
+    relpath = attributes.relative_to(project_dir).as_posix()
+    result = _git(project_dir, 'show', f'HEAD:{relpath}')
+    committed = result.stdout
+    assert '*.md merge=wiki' in committed.splitlines()
 
 
-def test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes(
+@pytest.mark.parametrize(
+    argnames=('base', 'edit', 'admitted'),
+    argvalues=[
+        pytest.param(None, _WIKI_INDEX_LINES, True, id='index-lines'),
+        pytest.param(
+            '*.md text\n',
+            '\n' + _WIKI_INDEX_LINES,
+            True,
+            id='index-lines-after-own-lines',
+        ),
+        pytest.param(
+            '*.png binary\r\n',
+            '\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
+            True,
+            id='crlf-index-lines',
+        ),
+        pytest.param(
+            '*.png binary\r\n*.jpg binary',
+            '\r\n\r\n' + _WIKI_INDEX_LINES.replace('\n', '\r\n'),
+            True,
+            id='crlf-without-a-final-newline',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '\n' + _WIKI_PAGE_LINES,
+            False,
+            id='repo-wide-page-lines',
+        ),
+        pytest.param(
+            '*.md text\n\n' + _WIKI_INDEX_LINES,
+            '\n' + _WIKI_PAGE_LINES,
+            False,
+            id='page-lines-alone',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '\n' + _WIKI_ROOT_PAGE_LINES,
+            False,
+            id='wiki-root-page-lines',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES + '*.bin binary\n',
+            False,
+            id='foreign-line',
+        ),
+        pytest.param(
+            None,
+            _WIKI_INDEX_LINES.replace('=wiki', '=union'),
+            False,
+            id='changed-line',
+        ),
+    ],
+)
+def test_scoped_child_baseline_admits_only_the_wiki_attributes_edit(
     tmp_path: pathlib.Path,
+    base: Optional[str],
+    edit: str,
+    admitted: bool,
 ) -> None:
-    """A foreign line in init's uncommitted ``.gitattributes`` puts it out of scope.
+    """A child's baseline admits ``.gitattributes`` only as the wiki tool's edit.
 
-    Init's ``.gitattributes`` edit is admitted past the scope check as a
-    whole: HEAD's content followed by exactly the two lines the wiki tool
-    appends. Any other line riding beside them -- an attribute an agent adds
-    while the init edit is still uncommitted -- makes the file an ordinary
-    out-of-scope path, so a scoped node's commit refuses it naming the file;
-    with the foreign line gone, the same baseline sweeps the edit in.
+    The wiki tool appends its index lines to HEAD's copy, in the file's own
+    line ending: CRLF when the file already holds a CRLF line. That is
+    init's own edit, which a scoped child's baseline sweeps in although the
+    file sits outside every scope root. The tool maps pages in each wiki
+    root's own file, never this one, where a page line in either spelling
+    would take over the merge of every Markdown file in the repository. So
+    page lines, beside the index lines or alone, a foreign line, or the
+    index lines with one changed make the file an ordinary out-of-scope
+    path, which the baseline refuses by name.
     """
     repo = _make_git_repo(tmp_path / 'repo')
+    if base is not None:
+        (repo / '.gitattributes').write_bytes(base.encode())
+        _git(repo, 'add', '.gitattributes')
+        _git(repo, 'commit', '-m', 'own attributes')
     Node(repo).init(agent='claude', user=True)
     output = Node(repo).init(
         name='task',
@@ -1385,18 +2675,24 @@ def test_scoped_commit_refuses_a_foreign_line_beside_init_gitattributes(
     _git(project_dir, 'config', 'user.email', 'test@test.com')
     _git(project_dir, 'config', 'user.name', 'Test')
     node = Node(project_dir)
+    # stand in for the wiki tool's write: HEAD's copy followed by the edit
     attributes = project_dir / '.gitattributes'
-    init_edit = attributes.read_text(encoding='utf-8')
-    # a foreign attribute beside init's lines refuses, naming the file
-    attributes.write_text(init_edit + '*.bin binary\n', encoding='utf-8')
-    with pytest.raises(RuntimeError, match=r'\.gitattributes'):
+    attributes.write_bytes(((base or '') + edit).encode())
+
+    if admitted:
+        # the baseline commits the edit byte for byte and leaves the file clean
         node.commit('baseline', init=True)
-    # init's edit alone sweeps in
-    attributes.write_text(init_edit, encoding='utf-8')
-    node.commit('baseline', init=True)
-    result = _git(project_dir, 'ls-files', '.gitattributes')
-    tracked = result.stdout
-    assert '.gitattributes' in tracked
+        cmd = ['git', 'show', 'HEAD:.gitattributes']
+        result = subprocess.run(cmd, cwd=project_dir, capture_output=True)
+        committed = result.stdout
+        assert committed == ((base or '') + edit).encode()
+        result = _git(project_dir, 'status', '--porcelain', '--', '.gitattributes')
+        status = result.stdout
+        assert status == ''
+    else:
+        # the baseline refuses, naming the file
+        with pytest.raises(RuntimeError, match=r'\.gitattributes'):
+            node.commit('baseline', init=True)
 
 
 # ------ the dirty-tree check
@@ -1476,6 +2772,9 @@ def test_commit_surfaces_hook_aborted_commit(tmp_path: pathlib.Path) -> None:
     head_before = _head(project_dir)
     # a clean tree is a genuine no-op -- commit must not raise
     node.commit('noop', init=True)
+    # stub the lint gate (not under test) so the hook path alone decides
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
     # install a pre-commit hook that aborts the commit (a check-only hook
     # failing, or black reformatting staged files and exiting non-zero);
     # it prints its findings the way linters do -- to stdout
@@ -1494,7 +2793,7 @@ def test_commit_surfaces_hook_aborted_commit(tmp_path: pathlib.Path) -> None:
     # (script exits non-zero -> RuntimeError), carrying the hook's findings
     # so the agent's remediation loop has something to act on
     with pytest.raises(RuntimeError, match='lint finding: bad format'):
-        node.commit('work', init=True)
+        node.commit('work')
     # HEAD did not advance -- the work is genuinely uncommitted, so a masked
     # "success" would have been a lie that a later --continue could discard
     assert _head(project_dir) == head_before
@@ -1521,6 +2820,9 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
     node.commit('baseline', init=True)
     head_before = _head(project_dir)
 
+    # stub the lint gate (not under test) so the hook path alone decides
+    lint = node.node_dir / 'scripts' / 'lint.sh'
+    lint.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
     # a pre-commit config makes the recovery path eligible
     (project_dir / '.pre-commit-config.yaml').write_text(
         'repos: []\n',
@@ -1545,7 +2847,7 @@ def test_commit_retries_after_reformat_hook(tmp_path: pathlib.Path) -> None:
 
     work.write_text('original work\n', encoding='utf-8')
     # first hook run reformats + aborts; the pipeline re-stages and retries
-    node.commit('work', init=True)
+    node.commit('work')
 
     # HEAD advanced and the committed work is the hook's reformatted version
     assert _head(project_dir) != head_before
@@ -1643,6 +2945,49 @@ def test_lint_runs_standalone_without_node_dir(
     assert 'unbound variable' not in result.stderr
 
 
+@pytest.mark.parametrize('wiki', ['wiki', 'docs'])
+def test_lint_lints_the_configured_wiki(
+    tmp_path: pathlib.Path,
+    wiki: str,
+) -> None:
+    """``lint.sh`` lints the project wiki at the node's configured folder.
+
+    The seeded hook reads the folder from the node's config, so a project
+    naming ``docs`` has ``docs/`` linted and ``wiki/`` left alone as
+    ordinary content.
+    """
+    repo = _make_git_repo(tmp_path / 'repo', wiki=wiki)
+    Node(repo).init(agent='claude', user=True)
+    output = Node(repo).init(name='task', agent='claude', local=True)
+    project_dir = _parse_project_dir(output)
+    node = Node(project_dir)
+    # front a decoy `wiki` that records each invocation's arguments
+    decoy_dir = tmp_path / 'decoy_bin'
+    decoy_dir.mkdir()
+    calls = decoy_dir / 'calls'
+    decoy = decoy_dir / 'wiki'
+    decoy.write_text(f'#!/bin/sh\necho "$@" >>"{calls}"\n', encoding='utf-8')
+    decoy.chmod(0o755)
+    path = os.pathsep.join(
+        [f'{decoy_dir}', f'{_FRACTAL_BIN.parent}', os.environ['PATH']]
+    )
+    env = {**os.environ, 'PATH': path}
+    lint_sh = node.node_dir / 'scripts' / 'lint.sh'
+    subprocess.run(
+        ['bash', f'{lint_sh}'],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    lines = calls.read_text(encoding='utf-8').splitlines()
+    assert f'lint --path={project_dir / wiki}' in lines
+    # a corpus at wiki/ beside the configured folder is never linted
+    linted = f'lint --path={project_dir / "wiki"}' in lines
+    assert linted is (wiki == 'wiki')
+
+
 # ------ helpers
 
 
@@ -1650,3 +2995,32 @@ def _head(project_dir: pathlib.Path) -> str:
     """The checked-out worktree's HEAD sha."""
     result = _git(project_dir, 'rev-parse', 'HEAD')
     return result.stdout.strip()
+
+
+def _watch_rebuilds(
+    monkeypatch: pytest.MonkeyPatch,
+    worktree: pathlib.Path,
+    *,
+    fail: bool,
+) -> list[str]:
+    """Record each ``wiki update`` run outside ``worktree``, failing it on ``fail``.
+
+    The memory index rebuild is the only wiki run outside the repository, so
+    the record lists its runs, and a refused run stands in for any failure
+    inside the rebuild.
+    """
+    real_run = subprocess.run
+    paths: list[str] = []
+
+    def _run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        is_update = isinstance(cmd, list) and cmd[1:2] == ['update']
+        if is_update and pathlib.Path(cmd[0]).name == 'wiki':
+            path = cmd[2].removeprefix('--path=')
+            if not pathlib.Path(path).is_relative_to(worktree):
+                paths.append(path)
+                if fail:
+                    return subprocess.CompletedProcess(cmd, 1, '', 'update refused')
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', _run)
+    return paths

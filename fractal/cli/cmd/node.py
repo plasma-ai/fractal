@@ -9,6 +9,7 @@ from typing import Optional
 
 import typer
 
+import fractal.util
 from fractal.cli.utils import (
     StreamRenderer,
     command,
@@ -20,7 +21,7 @@ from fractal.cli.utils import (
     resolve_node,
     resolve_target,
 )
-from fractal.constants import STATUSES, WORKTREES_FOLDER
+from fractal.constants import PGID_FILE, STATUSES, WORKTREES_FOLDER
 from fractal.core.agent import seed_agents
 from fractal.core.commit import out_of_scope, scope_boundaries
 from fractal.core.config import parse_reserve_budget
@@ -55,6 +56,7 @@ __all__ = [
     'node_launch',
     'node_seed',
     'node_scope',
+    'node_reap',
 ]
 
 # consumers bind list columns by header name, never by position
@@ -70,6 +72,7 @@ _LIST_COLUMNS = [
     'max_descendants',
     'last',
     'end_reason',
+    'starting',
 ]
 
 # consumers bind activity columns by header name, never by position
@@ -85,6 +88,9 @@ _ACTIVITY_COLUMNS = [
     'step_name',
     'step',
     'iter',
+    'agent',
+    'model',
+    'effort',
     'status',
     'exit_code',
     'metadata',
@@ -147,8 +153,9 @@ def node_init(app: typer.Typer) -> typer.Typer:
     exclude = typer.Option(None, '--exclude', help=exclude_help)
     # values option
     values_help = (
-        'Literal TOML input values for seed-time Jinja rendering'
-        " (override the template's _template.toml defaults)."
+        'Path to a TOML file of input values for seed-time Jinja rendering,'
+        ' flat or under a [values] table as _template.toml records them'
+        " (override the template's defaults)."
     )
     values = typer.Option(None, '--values', help=values_help)
     # set option
@@ -619,6 +626,9 @@ def node_merge(app: typer.Typer) -> typer.Typer:
         ' restored, refreshed squash; it must preserve the staged tree.'
     )
     validate = typer.Option(None, '--validate', help=validate_help)
+    # message option
+    message_help = "Squash commit message (default: 'merge <branch>')."
+    message = typer.Option(None, '--message', help=message_help)
     # delete flag
     delete_help = (
         'Delete the node (worktree, branch, and subtree) after a successful merge.'
@@ -637,11 +647,17 @@ def node_merge(app: typer.Typer) -> typer.Typer:
         continue_: bool = continue_,
         ignore_scope: bool = ignore_scope,
         validate: Optional[str] = validate,
+        message: Optional[str] = message,
         delete: bool = delete,
         force: bool = force,
         path: str = path,
     ) -> None:
-        """Squash-merge a node's branch into its parent."""
+        """Squash-merge a node's branch into its parent.
+
+        A paused node merges too: its committed work lands, its uncommitted
+        mid-step state stays in its worktree, and it stays paused for
+        ``fractal node resume``.
+        """
         node = resolve_target(path, node)
         # --delete tears down the subtree; pre-flight every one of the
         # teardown's refusals (the cwd inside a doomed worktree, a live or
@@ -674,9 +690,10 @@ def node_merge(app: typer.Typer) -> typer.Typer:
                 )
                 typer.confirm(prompt, abort=True)
         output, notices = node.merge(
+            validation_script=validate,
+            message=message,
             continue_merge=continue_,
             ignore_scope=ignore_scope,
-            validation_script=validate,
         )
         if output:
             typer.echo(output)
@@ -920,7 +937,11 @@ def node_diff(app: typer.Typer) -> typer.Typer:
         exit code rather than parse the output.
         """
         node = resolve_target(path, node)
-        reports, warnings = diff(node_dir=node.node_dir, repo_dir=node.repo_dir)
+        reports, warnings = diff(
+            node_dir=node.node_dir,
+            worktree=node.worktree,
+            repo_dir=node.repo_dir,
+        )
         for warning in warnings:
             typer.echo(f'Warning: {warning}', err=True)
         if not reports:
@@ -1046,11 +1067,19 @@ def node_list(app: typer.Typer) -> typer.Typer:
         ``model drop``, an ``iteration gap``); ``end_reason`` types a
         settled row's landing (``goal_met``, ``run_exhausted``,
         ``final_iteration_failed``, ``cost_budget``, ``timeout``,
-        ``setup_abort``, ``other``), null when nothing is recorded.
+        ``setup_abort``, ``crashed``, ``other``), null when nothing is
+        recorded. ``starting`` is true only for a node in its boot window
+        (a live loop runtime, ``active`` not yet stamped): ``status`` stays
+        ``idle`` there, or reads ``active`` under ``--live``, and ``detail``
+        says ``starting``. It is false otherwise, and null (unknown) where
+        the listing did not look -- tmux gave no answer and the node records
+        no runtime of its own -- so null never reads as not starting.
         ``spend`` is the current run's subtree cost, the
         scope ``max_cost`` beside it is enforced at, and is blank for a node
         that has never run. ``last`` is the age of each node's newest activity;
-        ``!`` flags an active node quiet past ``max(step_timeout, 5m)``.
+        ``!`` flags an active node quiet past its step limit or the staleness
+        floor, whichever is longer, the step limit being its active step's
+        ``timeout:`` line, else ``step_timeout``.
         """
         # validate arguments
         require_non_negative(max_depth=max_depth)
@@ -1578,9 +1607,12 @@ def node_scope(app: typer.Typer) -> typer.Typer:
         the node's commit boundaries, the law ``fractal commit`` enforces;
         prints the out-of-scope ones one per line. Exit 1 when any is out
         of scope, 0 when all are in scope, 2 on a command error -- scripts
-        branch on the exit code rather than parse the output.
+        branch on the exit code rather than parse the output. A node whose
+        recorded project-wiki folder is not the one its spawn gave it is a
+        command error, so a hand-edited folder never moves the exemption.
         """
         node = resolve_node(path)
+        node.check_wiki()
         raw = sys.stdin.buffer.read()
         decoded = os.fsdecode(raw)
         paths = filter(None, decoded.split('\0'))
@@ -1592,6 +1624,68 @@ def node_scope(app: typer.Typer) -> typer.Typer:
             listing = os.fsencode('\n'.join(offending))
             typer.echo(listing)
             raise SystemExit(1)
+
+    return app
+
+
+def node_reap(app: typer.Typer) -> typer.Typer:
+    """Register the ``_reap`` command."""
+    # pgid option
+    pgid_help = 'Recorded process group to reap with its whole tree (repeatable).'
+    pgid = typer.Option(..., '--pgid', help=pgid_help)
+    # worktree option
+    worktree_help = (
+        "The reaped node's worktree: spare every other node's loop group and"
+        ' report processes outside the tree working in this directory.'
+    )
+    worktree = typer.Option(None, '--worktree', help=worktree_help)
+    # abort marker option
+    abort_marker_help = (
+        'File to touch just before the first signal to a recorded group.'
+    )
+    abort_marker = typer.Option(None, '--abort-marker', help=abort_marker_help)
+    # outside-only flag
+    outside_only_help = 'Signal nothing when this command runs inside the tree.'
+    outside_only = typer.Option(False, '--outside-only', help=outside_only_help)
+
+    @command(app, '_reap')
+    def _reap(
+        pgid: list[int] = pgid,
+        worktree: Optional[str] = worktree,
+        abort_marker: Optional[str] = abort_marker,
+        outside_only: bool = outside_only,
+    ) -> None:
+        """Reap process groups with their trees (invoked by pause.sh and kill.sh).
+
+        Names on stderr each tree member still alive after the KILL and,
+        with ``--worktree``, each spared loop group the walk reached and
+        each process outside the tree whose working directory lies in that
+        directory, other than a node's loop -- reported, never signaled --
+        and in each line the node the worktree belongs to. Exit 3 when
+        ``--outside-only`` finds this command inside the tree (nothing
+        signaled), 0 after a reap, 2 on a command error -- pause.sh branches
+        on the exit code, and 3 is one no interpreter, typer, or CLI failure
+        exits with (an uncaught error or a failed import exits 1).
+        """
+        worktree_dir = pathlib.Path(worktree) if worktree else None
+        node = resolve_node(worktree) if worktree else None
+        spare = node.loop_records if node else tuple
+        owner = node.node_dir / PGID_FILE if node else None
+        mark = pathlib.Path(abort_marker) if abort_marker else None
+        reaped = fractal.util.process.reap(
+            roots=pgid,
+            worktree=worktree_dir,
+            owner=owner,
+            mark=mark,
+            outside_only=outside_only,
+            spare=spare,
+        )
+        if reaped.inside:
+            raise SystemExit(3)
+        branch = node.branch if node else None
+        lines = reaped.lines(branch=branch)
+        for line in lines:
+            typer.echo(line, err=True)
 
     return app
 
@@ -1617,23 +1711,11 @@ def _spend_unmetered(
     cache as it stands; the loop's first preflight is what fetches it.
     """
     # resolve the effective agent the way init does: the flag, else the nearest
-    # ancestor's default walked from the calling node (_NODE) the child nests
-    # under -- not the repo-root target resolve_init returned (they differ once
-    # an agent spawns its own children)
-    parent = Node.resolve_caller()
-    if parent is not None and parent.repo_dir != node.repo_dir:
-        parent = None
-    # no ambient caller but a path under .worktrees/ (a manual init from inside
-    # a worktree): parent on that worktree's node, the way init itself does, so
-    # the read-back finds the branch it composed
-    if parent is None:
-        parts = pathlib.Path(path).parts
-        if len(parts) >= 2 and parts[0] == WORKTREES_FOLDER:
-            candidate = Node(node.repo_dir / WORKTREES_FOLDER / parts[1])
-            if candidate.exists():
-                parent = candidate
-    if parent is None or not parent.exists():
-        parent = node
+    # ancestor's default walked from the node the child nests under
+    # (resolve_init_parent: the calling node, else a .worktrees/ path's node) --
+    # not the repo-root target resolve_init returned (they differ once an agent
+    # spawns its own children)
+    parent = node.resolve_init_parent(path)
     # a template preset can cap, re-agent, route, or pin what the flags left
     # unset, and --inherit config can re-agent, route, or pin -- the child's
     # stored config holds the merged values, so read them back rather than

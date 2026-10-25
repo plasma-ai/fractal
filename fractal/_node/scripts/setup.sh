@@ -6,4 +6,4 @@ set -euo pipefail
 #
 # Must be idempotent. Update this script instead of installing
 # packages inline, so the environment stays reproducible across
-# iterations. The loop activates the repo venv automatically.
+# iterations. The loop puts the repo venv's bin first on PATH.

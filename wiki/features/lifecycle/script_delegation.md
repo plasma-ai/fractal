@@ -37,7 +37,21 @@ runtime handoff so fresh, continued, tmux and headless launches cannot overlap.
 `merge.sh` runs under a separate repo-wide merge flock
 (`.worktrees/.merge.lock`) — separate because the script shells back into
 `fractal` verbs that take the `.worktrees` lock — so two merges into one target
-queue instead of interleaving their index writes.
+queue instead of interleaving their index writes. Writers a merge's advance
+would race take the merge flock too, always before the `.worktrees` lock and
+never inside it: `reseed`, and every loop boot for its continue clean-up and its
+`active` stamp.
+
+A script's git reads never hold a worktree's index lock, which a node's own
+`git add` or `git commit` there would fail on. Every read of a real index --
+`status`, `diff`, `ls-files` -- passes `--no-optional-locks`, and a working-tree
+check reads `git status` instead of a working-tree `git diff`, whose index
+refresh takes the lock even then: `merge.sh`'s unstaged checks read status's
+worktree column, its advance gate any status entry, and its seed conflict pass
+the unmerged paths of `git diff-files --diff-filter=U`. Reads of a private index
+(`GIT_INDEX_FILE`) are left as they are; they never touch a worktree's own lock.
+The commit pipeline's side of the contract is in
+[[features/loop/commit_pipeline]].
 
 ## What the scripts do
 
@@ -61,8 +75,9 @@ queue instead of interleaving their index writes.
   pid-less claim refuses, and an unverifiable group refuses naming the `ps`
   check — so a bare `fractal node _loop`, which runs none of the launch gates
   above, still cannot boot over a live loop.
-- `pause.sh` reaps the recorded step process group, aborting the in-flight agent
-  so the loop can park.
+- `pause.sh` reaps the in-flight agent's whole process tree from the recorded
+  step process group (see [[#Reaping an agent's process tree]]), aborting the
+  agent so the loop can park.
 - `resume.sh` relaunches the loop through the backend the node's `.headless`
   marker records — the same record an unflagged `start --continue` reuses; the
   relaunched loop withdraws the run's recorded pause signals itself as it adopts
@@ -73,12 +88,13 @@ queue instead of interleaving their index writes.
   still-parking loop is refused by the relaunch's group vet instead.
 - `kill.sh` reaps the node's live process groups — the in-flight agent's
   recorded step group and the tmux pane's or, with no pane, the recorded `.pgid`
-  group — escalating a polite termination to a forced one, then destroys the
-  tmux session. The teardown is per-backend like `resume.sh`'s guard: under the
-  `.headless` marker the pane lookup, session check, and session destroy are all
-  skipped and only the recorded groups are reaped, so a same-named session from
-  another repo sharing the basename is never cross-fired. When nothing is alive
-  (a paused park), it exits cleanly and the kill is pure bookkeeping.
+  group — together with every process their trees hold, escalating a polite
+  termination to a forced one, then destroys the tmux session. The teardown is
+  per-backend like `resume.sh`'s guard: under the `.headless` marker the pane
+  lookup, session check, and session destroy are all skipped and only the
+  recorded groups are reaped, so a same-named session from another repo sharing
+  the basename is never cross-fired. When nothing is alive (a paused park), it
+  exits cleanly and the kill is pure bookkeeping.
 - `merge.sh` squash-merges the node's branch into its target from inside the
   target's worktree: it restores the target's `.fractal/` outside the node's
   scope roots, strips the node's own seed from a user-node target, judges the
@@ -90,12 +106,123 @@ queue instead of interleaving their index writes.
 - `delete.sh` removes one node's worktree, local branch, and remote branch; the
   recursive delete calls it once per node, deepest first.
 
+## Reaping an agent's process tree
+
+Agent CLIs run each tool command in a process group of its own — some in a
+session of their own — so they can time it out. Signaling the recorded step
+group alone misses those groups, and once the agent dies they live on,
+reparented to init. Every path that ends an agent invocation therefore reaps its
+whole tree through one helper, `fractal.util.process.reap`: `pause.sh` and
+`kill.sh` call it through the private
+`fractal node _reap --pgid=<pgid> [--worktree=<dir>]`; the loop calls it
+in-process when a step's deadline fires and when its stream reader dies with the
+agent still running; the crashed-but-active heal calls it on a dead loop's
+recorded groups; and codex's preflight calls it when its model probe times out.
+
+The helper finds the tree before sending any signal. The agent leader starts its
+own session, so every process whose session id is the recorded group id belongs
+to the invocation; a session id survives reparenting, so this finds orphans too.
+A walk down parent links from the leader and every member then catches tools
+that left the session while their parent is alive, and any session a member
+leads joins the match. The helper TERMs every member group, re-walks, and TERMs
+any group the walk newly finds, for up to five rounds; it waits out the grace
+(five seconds from the scripts, the loop's own grace for a deadline, two seconds
+when the stream reader dies — enough for a tool's `git commit` to drop
+`.git/index.lock` before the force-commit backstop needs it — two seconds for
+the crash heal, and the probe's own grace for a codex preflight timeout) while
+still signaling late groups, then KILLs every group with a live member the same
+way. Members still alive after that are named in a `Warning:` line: on stderr,
+which `Node` relays as warnings, for pause and kill; on stderr for a deadline, a
+dead stream reader and a codex probe timeout; and as a node warning for the
+crash heal. The lines from pause, kill and the crash heal name the reaped node,
+so those of a tree-wide pause can be told apart.
+
+`pause.sh` hands the reap its `.pause_abort` marker, which the reap touches just
+before its first signal to the step group: the loop still finds the marker
+before the agent dies, and a step a self-pause leaves running is never marked,
+so a later unrelated failure is never read as a park.
+
+`kill.sh` passes the loop's recorded group beside the step group, so the loop
+dies in the same round as its agent and cannot launch the next step while the
+agent's tree drains. The crash heal passes the same two groups, each only after
+its identity check proves it the recorded one. Pause passes only the step group:
+the loop sits above the tree and must live to record the park.
+
+Pause and kill also pass the node's worktree for a report-only sweep: each
+process outside the tree whose working directory lies in the worktree is named
+on stderr as left running and never signaled. A double-forked daemon that left
+the session after its parent exited cannot be tied to the invocation, so the
+sweep is how the operator learns of it. The same holds for the one process the
+walk cannot reach: an orphan from an earlier tool call whose own session's
+leader has exited (`validate.sh &` under a `setsid` shell that already returned)
+sits in no member's session and under no member, so the sweep names it and
+leaves it running. No other reap sweeps the worktree — the step deadline, the
+no-progress watchdog, a stream failure, and the crash heal pass none, and they
+miss such an orphan while its step still runs. A step that ends normally reaps
+nothing at all, so a job a finished step left behind is outside every later
+reap; pause sweeps only with a step in flight and kill only with a recorded
+group. The sweep reads `lsof` on macOS and `/proc/<pid>/cwd` on Linux, and it
+skips the caller and its ancestors (an operator may run `fractal pause` from a
+shell in the worktree), the processes the tree hangs from (the loop and its
+parents), every process in the node's own loop group (its `.pgid`, read before
+the first signal, since an abort parks the loop and the park drops the record),
+and every other node's loop with everything at or below it, since a child's loop
+works in the worktree of the tool that started it.
+
+After the script returns, pause and kill check the worktree for a git operation
+the abort may have cut short — an unfinished merge, squash, cherry-pick, revert
+or rebase, or the `index.lock` a killed git command leaves — and log one warning
+per leftover, naming it, so nobody merges the node over a half-done operation.
+The check runs in `Node` through `fractal.util.git.in_progress`, whichever way
+the script went. The loop runs the same probe at every launch, so a resumed or
+continued step's prompt names each leftover too (see
+[[features/loop/prompt_assembly]]).
+
+Four rails bound the reap. It never signals pid 0 or 1, the caller's own group,
+or the group of any of the caller's ancestors, so a reap run from inside the
+tree lives to finish. A pause goes further: run from inside the agent's own tree
+(an agent pausing its own node, or running a tree-wide pause), it signals
+nothing at all — `fractal node _reap --outside-only` exits 3 when a root group
+is the caller's own or an ancestor's, `pause.sh` reports the agent kept, the
+step finishes with every tool it started, the loop parks at the next checkpoint,
+and the pause confirmation says the caller's own agent was not aborted. The reap
+never signals another node's loop group, nor walks through one: a node the agent
+launches headless (`fractal node start` runs the child's loop in a new session)
+stays a child of the agent's tool while its launcher runs — a tmux launch forks
+the loop from the tmux server, outside the agent's tree — so the reap spares
+every group recorded in another registered node's `.pgid`, everything in a
+session one of its processes leads, and everything below it, and names each
+spared group it reached — but never a root group, the group being reaped, so a
+crashed node's stale record whose pid now leads the step's group spares nothing.
+The record list comes from the registry by path alone (no git, so a sibling
+whose worktree no longer resolves is skipped, never fatal), and both the list
+and the records are rebuilt before every signal round, so a launch that lands
+mid-reap is honored. It signals only groups found through the recorded group's
+session or tree. And when the first process table cannot be read, it falls back
+to signaling the recorded groups alone (minus the caller's own group, not its
+ancestors', which no table names -- so a self-pause from a tool shell in a group
+of its own can hit the step group, as `pause.sh`'s own fallback does); when a
+later read fails, it keeps signaling the groups it already knows, minus the
+protected and spared ones, probing them by signal instead of re-walking; the
+loop, the crash heal, and codex's preflight warn and fall back to a plain group
+KILL if the reap itself breaks; when `fractal node _reap` itself cannot run (any
+status but the self-pause's exit 3), `pause.sh` and `kill.sh` fall back to their
+own group-only teardown, so a helper failure never fails the pause or kill. The
+self-pause exit is 3 because nothing else exits with it: an uncaught Python
+error, a broken install's failed import included, exits 1, and a CLI error 2, so
+a helper that cannot run is never read as a deliberate self-pause.
+
 ## Launch environment
 
 `start.sh` guarantees the same explicit variables on both arms, forwarded via
-`env(1)` argv: `_NODE` (which also drives the re-entry exec), a venv-prefixed
-`PATH`, and `VIRTUAL_ENV`; the headless arm adds `FRACTAL_HEADLESS=true`, the
-record seats re-export so delegated child starts follow the parent's backend.
+`env(1)` argv: `_NODE` (which also drives the re-entry exec) and a venv-prefixed
+`PATH`; the headless arm adds `FRACTAL_HEADLESS=true`, the record seats
+re-export so delegated child starts follow the parent's backend. The venv rides
+`PATH` alone: a `VIRTUAL_ENV` names the repo's own project environment, never a
+node worktree's, so every `uv run` in the worktree would warn that it does not
+match and ignore it. The loop drops any `VIRTUAL_ENV` it inherits (a tmux
+server's global environment, the launching shell) at boot, before `setup.sh`
+runs, and the agent invocation verb unsets it in every launch, chats included.
 The tmux arm additionally forwards `OPENROUTER_API_KEY` and `XAI_API_KEY` via
 `new-session -e`, on a warm server running tmux >= 3.2 only — a cold
 `new-session` becomes the server and would keep any `-e` pair in its `ps(1)`
@@ -130,7 +257,7 @@ a tmux launch clears it), `.pgid` and `.step_pgid` (process groups for liveness
 and pause/kill reaping — the step marker also names the codex preflight probe's
 group for the probe's lifetime, which `kill` reaps by that handle and a later
 boot, finding it live under an idle node, reaps as an orphan through the crash
-heal's cadence before recording its own), `.pgid.lock` (the launch handoff's
+heal's tree reap before recording its own), `.pgid.lock` (the launch handoff's
 flock sidecar), `.paused` (the tree-wide pause latch beside the central
 database) and `.pause_abort`. Signals the loop observes — finish, stop, pause —
 take effect at iteration or step boundaries; the escalation path that does not
@@ -161,7 +288,9 @@ identity is judged only by this Python law, `Node._kill`'s flock'd vet included.
 The crashed-but-active heal holds no flock over its probe, so it fences its own
 writes instead: it fingerprints `.pgid`/`.step_pgid` before probing, re-verifies
 at act time that the status is still `active` and the records unchanged, reaps
-only that judged snapshot, and re-checks its license under the `.worktrees`
-flock after the reap — status still `active` and no record on disk the verdict
-never judged — before stamping `exited`. A kill or continue landing mid-heal
-keeps its stamp, and a relaunch racing the probe stands the heal down.
+only that judged snapshot (each live, identity-checked group with its whole
+process tree, so tools the dead loop's agent started die too), and re-checks its
+license under the `.worktrees` flock after the reap — status still `active` and
+no record on disk the verdict never judged — before stamping `exited`. A kill or
+continue landing mid-heal keeps its stamp, and a relaunch racing the probe
+stands the heal down.

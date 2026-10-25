@@ -6,6 +6,8 @@ sandbox_mode = "danger-full-access"
 
 [features]
 fast_mode = false
+multi_agent = true
+multi_agent_v2 = true
 
 [analytics]
 enabled = false

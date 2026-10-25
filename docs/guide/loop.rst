@@ -155,12 +155,32 @@ Every step launch assembles one prompt from three parts, joined in order:
    (a wind-down: the harness refuses ``fractal node init``, ``start``,
    ``update``, and ``resume`` from that run's seats, and the drain is
    recorded on the run so a pause and resume keep it), ``DETACHED.md`` in
-   detached mode, and ``META.md`` for a meta node. Mode documents always
-   come from the installed package, never a per-node copy.
+   detached mode, ``META.md`` for a meta node, and ``GIT_PENDING.md`` while
+   the worktree holds an unfinished git operation (see below). Mode documents
+   always come from the installed package, never a per-node copy.
 
 The joined text is rendered in one pass with ``$VAR`` / ``${VAR}``
 substitution matching GNU ``envsubst``: unknown placeholders and ``$$`` pass
 through verbatim, so ordinary shell text in a step file survives rendering.
+
+A steered relaunch (see `Stuck steps`_) is the one launch built otherwise:
+its whole prompt is the package's ``modes/STALL.md`` alone, rendered with the
+same variables, since its resumed session already holds the step.
+
+Every launch — a retry, a resumed step, a steer, and SYNC included — first
+checks the node's worktree for a git operation left unfinished: a merge, a
+squash merge, a cherry-pick, a revert, a rebase, or a held ``index.lock``.
+When it finds one, the prompt carries the package's
+``modes/GIT_PENDING.md`` as a mode, beneath the charter (a steer's prompt,
+which has no charter, opens with it ahead of ``STALL.md``). It names each
+operation and says to finish or abort it before starting any other git work.
+A squash merge points at ``fractal node merge <child> --continue`` to finish
+and ``git reset --merge`` to abort. git holds ``index.lock`` only while a
+command runs, so the notice names the lock by its resolved path (a linked
+worktree keeps it in its own git directory, not the main checkout's
+``.git/``) and its age, without judging whether it is stale, and says to
+remove it only once no git process runs in the worktree. A clean worktree
+adds nothing to the prompt.
 
 On the iteration a resume re-enters, the prompt also ends with an
 unread-inbox digest, appended after rendering (so it is never substituted):
@@ -174,9 +194,12 @@ the digest.
 Template variables
 ~~~~~~~~~~~~~~~~~~
 
-Static variables are pinned once at boot in the exported environment. In
-prompts they are re-derived per step from live config — only
-``DETACHED_MODE`` and ``META_MODE`` stay boot-pinned in prompts as well:
+Static variables are re-derived from live config for every step, in prompts
+and in the exported environment alike, so a mid-run edit (the spawn limits
+included) reaches the next step. Only the mode flags (``DETACHED_MODE``,
+``META_MODE``, ``META_TARGET``) and ``FRACTAL_HEADLESS`` stay pinned to their
+boot values, so a mid-run config edit cannot flip a run's mode composition or
+launch backend:
 
 .. list-table::
    :header-rows: 1
@@ -195,10 +218,8 @@ prompts they are re-derived per step from live config — only
    * - ``CURRENT_BRANCH``
      - The node's branch.
    * - ``MAX_DEPTH``, ``MAX_CHILDREN``, ``MAX_DESCENDANTS``
-     - The node's spawn limits. An unset cap renders as ``None`` on a node
-       seeded by ``fractal node init`` (the seed stores unset keys as
-       ``null``); ``-1`` appears only when the key is absent from
-       ``config.json``.
+     - The node's spawn limits: ``-1`` for an unset (unlimited) cap, ``0``
+       for a leaf (no spawns).
    * - ``DETACHED_MODE``, ``META_MODE``, ``META_TARGET``
      - The boot-pinned mode flags (``true``/``false``) and the meta
        target branch.
@@ -227,7 +248,8 @@ Run-scoped variables are refreshed for every step:
      - The iteration's UTC start timestamp.
    * - ``TIME_BUDGET``
      - The configured walls, e.g. ``24h total, 1h/iter, 10m/step``, or
-       ``no limit``.
+       ``no limit``. Rebuilt for every step: the step part is that step's
+       own ceiling (its ``timeout:`` frontmatter, else ``step_timeout``).
    * - ``COST_BUDGET``
      - Live remaining budget, recomputed before *every* step, e.g.
        ``$87.6543 remaining of $100 (max $10/iter) (warn $1/step)``, or
@@ -252,6 +274,16 @@ wall-clock deadlines (``RUN_END_EPOCH``, ``ITER_END_EPOCH``), and the step's
 ``STEP_MODEL`` and ``STEP_DETACHED``. Scripts and tools the agent runs can
 read these directly — ``fractal plan init``, for example, defaults its
 ``--iter-ref`` from ``ITER_REF``.
+
+No launch carries a ``VIRTUAL_ENV``. One inherited from the shell or the tmux
+server names the launching project's venv, not the node worktree's, so ``uv``
+in the worktree would warn about it on every call. The loop drops it before
+``scripts/setup.sh`` runs, and every agent launch, ``fractal node chat``
+included, runs without it. ``PATH`` keeps the venv's bin (a node start puts
+the repo's ``.venv/bin`` first when it exists), so ``fractal`` and its helper
+tools still resolve from the installation. With no repo ``.venv`` and a venv
+activated outside the repo, ``uv pip install`` in ``setup.sh`` cannot find that
+venv; ``pip`` and every CLI on ``PATH`` still resolve from it.
 
 Step frontmatter
 ----------------
@@ -321,9 +353,13 @@ model re-dispatches once — see below). These config keys control it:
      - Extra attempts a failed launch gets; ``0`` disables retries.
    * - ``step_retry_backoff``
      - ``10s``
-     - Delay before each retry. Slept in one-second increments, polling
-       pause (parks the run), stop, finish, and the subtree cost ceiling —
-       a failed step never buys another attempt once the budget is spent.
+     - Delay before each retry, and the base a provider outage's wait
+       doubles from (see `Provider outages`_). Slept in one-second
+       increments, polling pause (parks the run), stop, finish, and the
+       subtree cost ceiling — a failed step never buys another attempt once
+       the budget is spent. A wait (this one, the billing breaker's, or an
+       outage's) ends at the run or iteration deadline, and the launch it
+       was holding books the timeout.
 
 Every attempt books its own step row, so cost and duration are attributed
 accurately per attempt; retry rows carry a ``retry`` marker in their
@@ -355,13 +391,18 @@ A launch that fails in under 10 seconds with zero recorded cost never
 reached paid inference — the signature of an API billing or credit refusal.
 Three such failures in a row trip the loop's billing breaker. Every agent
 launch counts toward the streak, the before-step SYNC included; a
-cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, or
-one that spent real money is not billing-shaped and resets the streak to
-zero (which also disarms an armed breaker). Paused and budget-skipped steps
-bought no launch and leave the streak untouched.
+cannot-exec launch (exit 127), a failure that ran 10 seconds or longer, one
+that spent real money, or one its agent names as a provider outage (see
+below) is not billing-shaped and resets the streak to zero (which also
+disarms an armed breaker), and so is a step refused before
+its launch — a cost cap over a model the price table cannot price, or a
+per-step agent or provider that cannot run — since it bought no inference.
+Its failed step row's reason leads with ``not launched:``, and ``fractal node
+list`` never counts such a row toward ``PAUSED: billing``. Paused and
+budget-skipped steps bought no launch and leave the streak untouched.
 
 While the breaker is armed, every launch — the SYNC and the work step alike
-— is held behind a backoff that starts at 60 seconds and doubles per further
+— is held once behind a backoff that starts at 60 seconds and doubles per further
 failure to a one-hour cap, announced on the pane as ``=== PAUSED: billing —
 N instant zero-cost failure(s); probing again in Ns ===``. A failed step's
 retry under the breaker waits that clock instead of ``step_retry_backoff``
@@ -376,6 +417,117 @@ knowable-zero spend), and the iteration closes ``stopped``, never
 them. While an active node's newest launches carry this signature,
 ``fractal node list`` shows ``PAUSED: billing`` in its ``detail`` column
 (see :doc:`/cli/node`).
+
+Provider outages
+~~~~~~~~~~~~~~~~
+
+A failed launch whose agent names its provider as unavailable retries on a
+doubling wait instead of the fixed backoff. Each agent backend reads its
+own CLI's error text: the failed result frame, the stream's error frames, and
+the stderr capture.
+
+- **Claude**: an ``API Error:`` with a 429 or 5xx status (529 overloaded
+  included), Claude Code's own ``API Error:`` for a response stream that
+  broke off (a lost connection, a server error, or a stall, before or
+  mid-response), the API's ``overloaded_error``, ``api_error``, or
+  ``rate_limit_error`` types, or the words "overloaded" or "service
+  unavailable".
+- **Codex**: its give-up after its own reconnects (the last ``Reconnecting...
+  N/N``, or ``stream disconnected before completion``), a 429 or 5xx status,
+  or the words "overloaded", "service unavailable", "at capacity" (the
+  selected model is at capacity), or "experiencing high demand". An earlier
+  reconnect that codex recovers from never fails the step.
+
+Other backends name no outages and keep the fixed backoff. The first retry
+after such a failure waits ``step_retry_backoff``; each consecutive one doubles
+the wait, capped at one hour (a ``step_retry_backoff`` above the cap still
+holds), announced as ``retrying in 20s (provider unavailable)``. The streak
+counts every launch, the before-step SYNC included, and spans steps and
+iterations. Any completed launch resets it; any other failed or timed-out
+launch breaks it. Only the wait changes: ``step_retries`` still bounds the
+attempts, and the wait polls the same signals as a retry backoff. A named
+outage is never billing-shaped, however fast and unpriced its failure: it is
+the provider's weather, not the account's credits, so it paces on this streak
+and never arms the billing breaker. Its failed step row's reason leads with
+``provider unavailable:``, and ``fractal node list`` never counts such a row
+toward ``PAUSED: billing``. No config key tunes the doubling or the cap.
+
+An outage that outlasts the retries (or meets ``step_retries: 0``) fails the
+iteration as usual, but the streak stands: the next step's first launch waits
+the same doubling clock before it goes out, announced as ``=== Provider
+unavailable — N consecutive failure(s); probing again in Ns ===``, and so does
+the work step after a SYNC that met the outage too. The launch after the wait
+is the probe that clears or extends the streak. The wait polls the same
+signals as a retry backoff; a stop, finish, or spent subtree ceiling ends the
+iteration, booking the gated step and the never-run tail as ``stopped`` rows
+with ``outage gate interrupted`` in their metadata, as the billing breaker's
+gate does.
+
+Stuck steps
+~~~~~~~~~~~
+
+Two triggers mark a Claude launch as **stuck**, and both take the same path:
+
+- **Thinking cap.** A reply can hit the model's output-token cap while still
+  thinking, with no text and no tool call. Claude Code then continues on its
+  own, but the continuation drops the cut-off thinking, so the agent starts
+  the thought over and hits the cap again, spending the step's time on
+  thoughts it never finishes. The
+  loop watches for a thinking-only top-level reply that the API stops at
+  ``max_tokens``, or that Claude Code follows with its own "Output token
+  limit hit" continuation. Sub-agent replies, and replies that reached text
+  or a tool call, are left alone.
+- **No action for 30 minutes.** A watchdog times the agent's own idle span,
+  counted only while the agent holds control. The clock runs from the
+  launch, from a result that answers the agent's last pending tool call,
+  from each visible text block, from the end of each thinking block, and
+  from each wake-up after its turn ends (Claude Code's background-task
+  notice, a new reply). It pauses while a tool call (a sub-agent included)
+  awaits its result, and when the agent ends its turn, since Claude Code
+  then waits on background work such as a long build. It also pauses while
+  a thinking block is open: the stream shows nothing of a think in
+  progress, and a long one can take most of the half hour. A think that
+  hangs is left to Claude Code's own stream timeout and the step deadline.
+  An API retry's backoff does not count, and sub-agent frames never touch
+  the clock. At 30 minutes the watchdog ends the agent the way the step
+  deadline does.
+
+The first stuck launch in an attempt **steers** the step. The stuck row
+closes ``stopped`` with ``steered: thinking cap`` or ``steered: no action for
+30 minutes`` in its metadata. The step is then relaunched on a row of its
+own (marked ``steer``) as a resume of the same session, in detached mode
+too. The relaunch's whole prompt is the package's ``modes/STALL.md``, which
+tells the agent that its last launch went too long without an action and asks
+it to write down what it has (in its plan file when the iteration has one),
+then take the next concrete action. The steer is not a retry and does not use
+``step_retries``, and the step's own timeout still counts from the attempt's
+first launch. Like a retry, the steer first polls the signals: a pause parks
+the step instead (the stuck row closes ``stopped``, and resume re-enters the
+step), and a stop, a finish, or a spent subtree ceiling abandons it, closing
+the row ``failed`` with ``<trigger>; steer abandoned``.
+
+A thinking cap's steer runs one effort level lower. The step's effort is its
+own ``effort:`` frontmatter, else the node's ``effort`` key, else the agent's
+configured default (Claude's ``effortLevel``). Claude's levels, lowest first,
+are ``low``, ``medium``, ``high``, ``xhigh``, and ``max``, with a floor of
+``high``: a ``max`` step steers at ``xhigh``, and an ``xhigh`` step at
+``high``. The lowered level lasts only for the steer. The steer's row records
+it in its ``effort`` column, and the pane prints a line such as
+``(effort xhigh -> high for the steer)`` under the step header. A step at or
+below the floor, or at a level off the ladder, steers at its own effort. The
+no-action watchdog's steer always keeps the step's effort, and Codex never
+lowers. A project can set an agent's levels and floor (see
+:doc:`/configuration`).
+
+A second stuck launch after the steer, by either trigger, is a **stall**. The
+step closes ``exited`` with ``stalled: <trigger>, after a steer``, naming the
+second trigger, and like a timeout it never retries. The steps after it are
+booked ``stopped``, the work in progress is force-committed, the iteration
+fails with ``<step> stalled: ...``, and the loop moves on to the next
+iteration. The loop also posts a ``step stalled: <step>`` notice to the
+node's outbox, which the parent follows, naming the node, step, iteration,
+and trigger. The SYNC step is never steered. The watchdog runs only for
+Claude, the one agent whose stream marks when each tool call completes.
 
 Time limits
 -----------
@@ -410,7 +562,8 @@ A deadline that has already passed before launch records the step as timed
 out without spawning anything.
 
 Enforcement is in-process: at the limit the loop sends ``SIGTERM`` to the
-agent's whole process group, waits a 10-second grace, then ``SIGKILL``\ s any
+agent's whole process tree (every group in its session or below it, other
+nodes' loops spared), waits a 10-second grace, then ``SIGKILL``\ s any
 survivor. An agent that shuts down cleanly within the grace is still recorded
 as timed out — the limit was reached.
 
@@ -427,8 +580,9 @@ How the walls interact:
 - ``setup.sh`` is unbounded — the walls gate step launches only.
 
 A step that times out fails the iteration and records
-``<step> timed out (<limit>s)``; an iteration that times out with no launch
-to blame records plain ``timed out``.
+``<step> timed out (<limit>s)``, naming the effective ceiling (a steered
+launch names the step's whole timeout, which its stuck launch shared); an
+iteration that times out with no launch to blame records plain ``timed out``.
 
 Cost ceilings
 -------------
@@ -439,7 +593,12 @@ that recorded no cost counts as zero in every sum, though its ``NULL`` means
 "unknown", never "$0"; a step that ended abnormally (any status other than
 ``completed``) with a session on its row but no figure flushed is marked
 ``unpriced`` in its metadata, and a figure that flushes later strips the
-marker. These config keys (all USD) bound spend:
+marker. A ``claude`` or ``codex`` step whose record leaves part of its
+spend out (a reply cut off, a request in flight, or a result figure refused)
+books the spend recorded and is marked ``partly unpriced`` instead (see
+:doc:`agents`); no
+cap adds a margin for the spend no record holds. These config keys (all
+USD) bound spend:
 
 .. list-table::
    :header-rows: 1
@@ -481,15 +640,19 @@ run's remaining budget minus the reserve, the iteration's remaining headroom,
 and ``max_step_cost``. Inside the reserve window the budget floors at the
 full run remaining, so wind-down steps may spend the reserve but never past
 the ceiling. A non-positive budget skips the launch entirely — the step is
-recorded ``stopped`` with reason ``over budget``.
+recorded ``stopped`` with reason ``over budget``. That row belongs only to a
+step that reaches its launch with no budget left; the steps the between-steps
+subtree ceiling check cuts off (below) are never launched and book no row.
 
 For an enforcing agent the budget is passed as a hard flag; an agent that
 stops itself at that budget records a *clean completed* step — a budget stop
 is neither a failure nor a goal-met completion. For non-enforcing agents the
 cap is advisory: the loop warns after the fact when a step's recorded cost
 exceeded ``max_step_cost``, and warns once per loop process when caps are
-armed with no timeout at all (one runaway step could then overshoot without
-bound — the warning names ``step_timeout`` as the remedy).
+armed and some step has no timeout — no run or iteration wall, no
+``step_timeout``, and no ``timeout:`` frontmatter on that step file (SYNC
+runs on ``step_timeout``). One runaway step could then overshoot without
+bound; the warning names ``step_timeout`` as the remedy.
 
 Reserve mode and how a budget ends a run
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -500,7 +663,8 @@ budget abort has cascaded a finish down to this node. It sets
 ``RESERVE_MODE=true`` so the packaged wind-down instructions join every
 prompt, and it skips approval gates. At the iteration boundary the loop then
 ends the run; a mid-iteration check also stops queuing steps once the subtree
-ceiling itself is crossed.
+ceiling itself is crossed, and the steps it cuts off are never launched and
+leave no row.
 
 A budget end always lands the run as ``exited`` with **exit code 0** — the
 ``exited``/0 pair is how a budget landing is distinguished from both a
@@ -520,11 +684,26 @@ Pricing and untracked spend
 Token-priced backends and provider routes price usage from a cached copy of
 the LiteLLM price table (``~/.fractal/pricing.json``), refreshed at run start
 and daily during long runs. If the fetch fails and no cache exists, the run
-aborts at preflight; a stale cache warns and is used. A cost cap combined
-with an agent whose spend cannot be priced fails the step at launch: no model
-set means ``a cost cap requires a model``, and a model missing from the price
-table is refused by name. When caps are armed but a run's spend goes entirely
-untracked, the loop warns once that the budget guards cannot trip.
+aborts at preflight; a stale cache warns and is used. A native ``claude``
+step prices from the same table only a launch that ends without its own
+cost figure (killed, capped, paused, or with the figure refused), and a
+``grok`` step only a stream that reports no cost, so a run with either
+refreshes a cache older than a day at run start, and a failed fetch only
+warns: every launch that reports its figure still books it, and with no
+cache at all such a launch books unpriced. With ``OFFLINE_MODE=true`` in the
+loop's environment (the switch the ``wiki`` tool honors too), every refresh
+skips the fetch and behaves as a failed one: the cached table serves with
+the warning, and a token-priced run with no cache aborts at preflight; any
+value other than ``true`` or ``false`` aborts the boot. A cost cap combined
+with an agent whose spend cannot be priced aborts the run at preflight, before
+the run row commits and before any paid probe: every token-priced step's
+effective model (its own ``model:`` or the node's) is judged against the
+refreshed table, and the first gap names its step — no model set means
+``a cost cap requires a model``, and a model missing from the price table is
+refused by name. A step that reaches launch unpriced all the same (a step
+file edited mid-run) fails at launch with the same words. When caps are armed
+but a run's spend goes entirely untracked, the loop warns once that the
+budget guards cannot trip.
 
 The commit pipeline
 -------------------
@@ -550,35 +729,88 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    ``--ignore-scope`` or ``--force``.
 2. **Refreshes and lints.** ``wiki update`` runs on the project wiki and the
    node's memory wiki, then ``scripts/lint.sh`` runs; either failing fails
-   the commit with the tool's output. Skipped with ``--force`` or ``--init``
-   (the baseline wiki lints dirty by design).
+   the commit with the tool's output. The seeded ``lint.sh`` also runs
+   ``wiki lint`` on both wikis but only warns: its findings appear in the
+   commit output and do not fail the commit. Skipped with ``--force`` or
+   ``--init``: neither may block a backstop save or a baseline, the setup
+   save a node starts from, which carries only fractal's own setup — project
+   content takes an ordinary, linted commit.
 3. **Stages.** Scoped staging of the scope roots, node directory, and wiki
    (the whole worktree when unscoped), always excluding runtime artifacts
    (``**/.venv``, ``**/.db``, ``**/.db-*``, ``**/.status``, ``**/.paused``,
    temp files). New content under the node directory is admitted only by a
    content allowlist: ``NODE.md`` and ``config.json`` at the node-directory
    root, and under ``memory/``, ``plans/``, ``scripts/``, ``skills/``, and
-   ``steps/`` files with a text suffix (``.md``, ``.json``, ``.sh``,
-   ``.toml``, ``.yaml``/``.yml``, ``.csv``/``.tsv``, ``.txt``) plus, inside
-   those directories, the tool state ``.wiki/`` and ``.gitkeep``. Anything
+   ``steps/`` files with a text suffix (``.md``, ``.json``, ``.py``, ``.sh``,
+   ``.toml``, ``.yaml``/``.yml``, ``.csv``/``.tsv``, ``.txt``,
+   ``.diff``/``.patch``) plus, inside
+   those directories, the tool state ``.wiki/`` and ``.gitkeep``, and the
+   memory wiki's own ``memory/.gitattributes``. Anything
    else a node parks there — a key, a ``.env`` file, an archive, a
    dot-directory, any other file at the root — is withheld by name and
-   reported (``Warning: N estate file(s) are not node records and were NOT
-   staged: ...``), on the plain add and the ignore-rule force-add alike;
-   what the node directory already tracks keeps committing. Node records
-   that only a machine-local ignore layer holds out (a foreign
-   ``.git/info/exclude`` line, ``core.excludesFile``) are force-added by
-   explicit path and reported (``Force-staged N node record(s) held out by
-   an ignore rule: ...``); fractal's own exclude block and repo
-   ``.gitignore`` files keep their hold, and records they hold surface
-   through step 4's ignore-rule warning instead. ``--check`` applies the
-   same law, so a refused untracked file under the node directory never
-   counts as uncommitted.
+   reported, on the plain add (``Warning: N estate file(s) are not node
+   records and were NOT staged: ...``) and the ignore-rule force-add
+   (``Warning: N ignored estate file(s) are not node records and were NOT
+   force-staged: ...``) alike; what the node directory already tracks keeps
+   committing. Node records that only a machine-local ignore layer holds out
+   (a foreign ``.git/info/exclude`` line, ``core.excludesFile``) are
+   force-added by explicit path and reported (``Force-staged N node
+   record(s) held out by an ignore rule: ...``); repo ``.gitignore`` files
+   keep their hold, and records they hold surface through step 4's
+   ignore-rule warning instead, while records held by fractal's own exclude
+   block (its ``tmp/`` and ``__pycache__/`` lines among them) or by a
+   self-ignoring directory stay silent and are not counted in ``Held out``.
+   ``--check`` applies the same law, so a refused untracked file under the
+   node directory never counts as uncommitted. The memory wiki indexes every
+   file on disk, so the pipeline then rebuilds the staged memory indexes
+   without the files the commit leaves out, in a temp folder outside the
+   repository: no committed row links a refused file (a folder holding only
+   refused files keeps its index, without their rows), and an index unchanged
+   but for those rows keeps its committed bytes, ``updated:`` stamp
+   included. Each rebuilt index is written
+   to the working tree too, so the tree stays clean, and the rows come back
+   there at the next refresh. The output says ``Memory index rebuilt without
+   N file(s) the commit leaves out`` beside the warning that names each file.
+   The rebuild also runs on ``--force`` saves and skips ``--init``; a failure
+   warns (``Warning: memory index not rebuilt (...)``), never fails the
+   commit, and leaves the working tree matching the indexes it commits.
 4. **Warns** — never blocks — about paths silently eaten by tracked ignore
-   rules and staged files of 10 MB or more.
+   rules and staged files of 10 MB or more. The ignore warning names the first
+   ten eaten paths, each with the rule that ate it as ``git check-ignore -v``
+   reports it (source file, line, and pattern), and counts the rest
+   (``Warning: N path(s) skipped by ignore rules (repository or host rules,
+   not node-record refusals): eaten.log (.gitignore:3:*.log), ...``); it
+   leaves out every estate file step 3 left unstaged, which step 3's warnings
+   name. Rule sources outside the repository carry no machine path: the shared
+   exclude reads ``.git/info/exclude`` and the host's global ignore file
+   ``core.excludesFile``. Whenever step 3 left an estate file unstaged or the
+   ignore warning fired, the command's last line repeats the counts (``Held
+   out: N estate file(s) not staged; N path(s) ignored``, non-zero parts
+   only), after any hook or gate output and on a no-op commit too. A third
+   warning names each staged addition at the worktree root whose top-level
+   name matches an entry of the node's own folder, when the project had no
+   top-level path of that name at the node's base (its fork commit) —
+   ``plans/x.md`` beside ``.fractal/<node>/plans``, say. Such a path may be a
+   node file written at the worktree root by mistake or real project work, so
+   the warning says to move node files under the node's folder and to ignore
+   it for project files (``Warning: staged root path(s) share a name with an
+   entry of the node's own folder; ...`` then one ``plans/x.md (shadows
+   .fractal/<node>/plans)`` line per path). It stays quiet while a merge or
+   squash merge is in progress, since a merge's additions are not the node's
+   writes, and a failure inside the check skips it rather than failing the
+   commit. Those paths are staged and committed, so they are not counted in
+   ``Held out``.
 5. **Commits** and logs a ``commit`` event keyed on the new sha with the
    caller's run/iteration/step lineage. "Nothing staged" is a tolerated
-   no-op.
+   no-op. A staging or commit call that finds the worktree's ``index.lock``
+   held by another process — a ``git status`` refreshing the index, an
+   editor's git — waits two seconds and retries once. The lock is never
+   removed: one still held then fails the commit with git's own message
+   (``Unable to create '.../index.lock': File exists``), not as a hook
+   failure. fractal's own reads never take the lock: each one that reads the
+   index or the working tree passes ``--no-optional-locks``, and the
+   working-tree checks read ``git status``, since a working-tree ``git diff``
+   rewrites the index under the lock even then.
 6. **Recovers from hooks.** If the commit fails and a
    ``.pre-commit-config.yaml`` exists, the pipeline re-stages the hook's
    edits and retries once. Wiki pages (the project wiki and the node memory
@@ -588,13 +820,22 @@ message that starts with the branch name or ``iteration``. The pipeline then:
    pre-existing lint failure is surfaced as a notice and tolerated); other
    node-data pages keep byte-identity. A rewrite that breaks either gate is
    restored to its authored bytes and the commit fails with remediation
-   guidance.
+   guidance. Node records pass through the repository's hooks like any
+   staged file, so a hook that rewrites one — a formatter reflowing a ``.py``
+   record, or trailing-whitespace stripping a ``.patch`` record's
+   single-space context lines — fails each ordinary commit that stages it,
+   until the iteration's backstop commit, which bypasses hooks, lands the
+   record as written. A hooked repository should keep rewriting hooks off
+   ``.fractal/`` (for example ``exclude: ^\.fractal/`` in its pre-commit
+   config).
 7. **Pushes** ``origin <branch>`` unless the ``local`` config key is true. A
    missing ``origin`` remote is a skipped-push notice, not an error.
 
 Options: ``--init`` labels the commit ``init`` instead of an iteration (the
 baseline commit) and skips the message-shape check, the wiki refresh, lint,
-and the ``commit`` event; ``--check`` exits 1 if uncommitted changes exist
+and the ``commit`` event — so a node's baseline carries only its own seed and
+init's ``.gitattributes`` edit, refusing any other change, which an ordinary
+commit carries through the lint; ``--check`` exits 1 if uncommitted changes exist
 instead of committing; ``--ignore-scope`` commits out-of-scope changes but
 still lints; ``--force`` bypasses scope, lint, and git hooks; and ``--path``
 names the worktree (default ``.``). A dirty tree under ``--check`` is the
@@ -622,9 +863,14 @@ machine-local layer fences (step 3 above).
 
 Pause is the one path that never commits: the dirty worktree *is* the frozen
 mid-step state that resume continues from. ``fractal node start --continue``
-is the path that discards it (it restores the worktree with a clean), after
-first committing any operator edits made under the node directory and
-preserving ``config.json`` edits.
+is the path that discards it: it first commits any operator edits made under
+the node directory, in a commit that carries nothing else, then restores the
+worktree with a clean that discards every other uncommitted change, staged or
+not, preserving ``config.json`` edits. A worktree holding a git operation in
+progress (a merge, squash merge, cherry-pick, revert, rebase, or
+``index.lock``) is the exception: the continue leaves it as found, skipping
+both the operator-edit commit and the clean, says so on its output, and the
+first step's prompt names the operation for the agent to finish or abort.
 
 What gets recorded
 ------------------
@@ -636,7 +882,9 @@ continuous mode — the iteration's session id. A step row is booked **per
 launch attempt** with the step number and name, status, a binary exit code,
 the agent/model/session, the cost (flushed as the stream reports it, so even
 a killed step keeps its last figure — except ``codex``, which prices the
-whole invocation after a clean exit and records none for a killed step), and
+whole invocation once its process exits, a failed or killed step from its
+session log's token counters; a ``claude`` step killed before its result
+frame is priced from its session transcript instead, see :doc:`agents`), and
 a short reason in its metadata.
 
 Step rows land with these statuses:
@@ -657,7 +905,7 @@ Step rows land with these statuses:
    * - timed out
      - ``exited``
      - ``timed out``
-   * - budget skip (never launched)
+   * - budget skip (launch reached with no budget left)
      - ``stopped``
      - ``over budget``
    * - paused mid-step
@@ -665,7 +913,23 @@ Step rows land with these statuses:
      - — (``awaiting approval`` when parked in an approval wait)
    * - failed
      - ``failed``
-     - the launch reason, e.g. ``agent error (exit N): <stderr tail>``
+     - the launch reason, e.g. ``agent error (exit N): <stderr tail>``,
+       prefixed ``provider unavailable:`` when the agent named a provider
+       outage (see `Provider outages`_)
+   * - stuck, then steered (see `Stuck steps`_)
+     - ``stopped``
+     - ``steered: <trigger>``, or ``<trigger>; paused before the steer`` when
+       a pause lands first
+   * - stuck, steer abandoned by a stop, finish, or spent subtree ceiling
+     - ``failed``
+     - ``<trigger>; steer abandoned``
+   * - stuck again after the steer (a stall)
+     - ``exited``
+     - ``stalled: <trigger>, after a steer``
+   * - steered relaunch
+     - as above
+     - suffixed ``; steer`` (``steer`` alone when there is no other reason;
+       a stall's reason already names the steer)
    * - retry attempt
      - as above
      - suffixed ``; retry``
@@ -674,7 +938,8 @@ When a step fails, the steps after it are still booked as real rows —
 opened and immediately closed ``stopped`` with reason ``failed on <step>`` —
 so the activity log answers which steps never ran. An abnormally ended step
 that has a session but no recorded cost gets ``; unpriced`` appended to its
-metadata.
+metadata, and a step whose record leaves part of its spend out (a reply
+cut off, or a result figure refused) gets ``; partly unpriced``.
 
 How a run ends
 ~~~~~~~~~~~~~~
@@ -770,9 +1035,12 @@ step attempt, its duration, cost, and metadata reason — with ``--limit``,
 TUI (:doc:`/tui`) presents the same data interactively across the whole tree.
 
 Diagnostics persist in the node directory: ``setup.log`` holds the
-last setup output, ``<agent>.err`` the last launch's live stderr capture, and
+last setup output, ``<agent>.err`` the last launch's live stderr capture,
 ``tmp/err/<run>-<iter>-<step>.err`` a durable per-failure stderr snapshot for
-every failed or timed-out launch (retries add a ``-N`` serial).
+every failed or timed-out launch (retries add a ``-N`` serial), and
+``tmp/commit.log`` the report or error of every ``fractal commit`` run on the
+node, each under a banner naming its time and sha (see :doc:`/cli/fractal`);
+the loop's backstop saves describe themselves in their commit bodies instead.
 
 Steering a running loop
 -----------------------

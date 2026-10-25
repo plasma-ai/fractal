@@ -269,16 +269,18 @@ files, then runs each in order. Around each step:
   abnormal ends — so ``fractal node activity`` reads honestly per attempt.
 - **Retries.** Only a *failed* launch retries (``step_retries``, default 1,
   after a ``step_retry_backoff``, default ``10s``). Timed-out, paused, and
-  budget-skipped steps are deliberate outcomes and never retry. Two
+  budget-skipped steps are deliberate outcomes and never retry. Three
   exceptions to the plain schedule: a *completed* launch served off its
   pinned ``model`` re-dispatches once, after the same backoff but outside
   the ``step_retries`` allowance, and a drop the re-dispatch cannot resolve
-  fails the step; and after three consecutive instant (under 10s) zero-cost
-  failures — SYNC and step launches both count — the billing breaker
-  replaces the backoff with an exponential wait (60s, doubling to a 1h cap)
-  and holds every further launch, the before-step SYNC included, behind a
-  ``PAUSED: billing`` gate until a probe launch completes (or fails without
-  that signature).
+  fails the step; a failed launch whose agent names a provider outage waits
+  ``step_retry_backoff``, doubling per consecutive outage up to a one-hour
+  cap, while ``step_retries`` still bounds the attempts; and after three
+  consecutive instant (under 10s) zero-cost failures — SYNC and step
+  launches both count — the billing breaker replaces the backoff with an
+  exponential wait (60s, doubling to a 1h cap) and holds every further
+  launch, the before-step SYNC included, behind a ``PAUSED: billing`` gate
+  until a probe launch completes (or fails without that signature).
 - **Approval.** A step marked ``requires_approval: true`` that succeeds
   holds the iteration until the parent runs ``fractal node approve`` (the
   parent's ``fractal node pending`` lists waiting steps). The wait counts

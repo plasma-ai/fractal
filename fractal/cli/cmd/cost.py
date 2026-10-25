@@ -10,6 +10,7 @@ from fractal.cli.utils import (
     command,
     print_rows,
     require_non_negative,
+    require_scope_owner,
     resolve_ledger_target,
 )
 
@@ -69,6 +70,14 @@ def cost_remaining(app: typer.Typer) -> typer.Typer:
         # a deleted target reports the cap-less 'no budget' -- its history
         # persists, but remaining never answers through the caller
         node, deleted, _ = resolve_ledger_target(path, node)
+        branch = deleted or node.branch
+        require_scope_owner(
+            node=node,
+            branch=branch,
+            run_id=run_id,
+            iter_id=iter_id,
+            step_id=step_id,
+        )
         if deleted is not None:
             typer.echo('no budget')
             return
@@ -132,6 +141,14 @@ def cost_spent(app: typer.Typer) -> typer.Typer:
         # recorded run standing in for the current one -- core gives run_id
         # precedence over the caller's own scope
         node, deleted, latest = resolve_ledger_target(path, node)
+        branch = deleted or node.branch
+        require_scope_owner(
+            node=node,
+            branch=branch,
+            run_id=run_id,
+            iter_id=iter_id,
+            step_id=step_id,
+        )
         if deleted is not None:
             if run_id is None and iter_id is None and step_id is None:
                 run_id = latest
@@ -153,6 +170,16 @@ def cost_spent(app: typer.Typer) -> typer.Typer:
                 s = 's' if unpriced != 1 else ''
                 typer.echo(
                     f'{unpriced} unpriced step{s} (NULL cost) excluded',
+                    err=True,
+                )
+            # and the steps whose record leaves part of their spend out
+            partly = node.cost.partly_unpriced(**kwargs, max_depth=max_depth)
+            if partly:
+                s = 's' if partly != 1 else ''
+                typer.echo(
+                    f'{partly} partly unpriced step{s}'
+                    ' (some spend missing from the record)'
+                    ' counted at recorded spend',
                     err=True,
                 )
 
@@ -207,6 +234,8 @@ def cost_breakdown(app: typer.Typer) -> typer.Typer:
         # its latest recorded run standing in for the current one -- core
         # gives run_id precedence over the caller's own scope
         node, deleted, latest = resolve_ledger_target(path, node)
+        branch = deleted or node.branch
+        require_scope_owner(node=node, branch=branch, run_id=run_id)
         if deleted is not None and run_id is None:
             run_id = latest
         # the display-complete spend table (leads with the target, sums to
@@ -234,6 +263,19 @@ def cost_breakdown(app: typer.Typer) -> typer.Typer:
             s = 's' if unpriced != 1 else ''
             typer.echo(
                 f'{unpriced} unpriced step{s} (NULL cost) excluded',
+                err=True,
+            )
+        # and the steps whose record leaves part of their spend out
+        partly = node.cost.partly_unpriced(
+            run_id=run_id,
+            max_depth=max_depth,
+        )
+        if partly:
+            s = 's' if partly != 1 else ''
+            typer.echo(
+                f'{partly} partly unpriced step{s}'
+                ' (some spend missing from the record)'
+                ' counted at recorded spend',
                 err=True,
             )
 

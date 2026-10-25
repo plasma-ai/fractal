@@ -6,11 +6,12 @@ the node's data directory that holds the node's entire run configuration:
 agent selection, budgets, timeouts, pacing, and mode flags. The file is the
 live source of truth: the loop reads it from disk at every access, so the
 re-read keys — the cost caps, ``max_iters``, ``iter_timeout``,
-``step_timeout``, ``wait``, ``interval``, ``sleep``, ``scope``, ``local``, and
-``sealed`` — can be changed while a node runs (see `When edits take effect`_
-for each key's boundary). This page is the complete key reference;
-:doc:`/guide/loop` describes how the loop enforces the budget and timeout
-keys, and :doc:`/guide/plans` covers the per-step override surface.
+``step_timeout``, ``wait``, ``interval``, ``sleep``, ``scope``, ``local``,
+``sealed``, and ``user_settings`` — can be changed while a node runs (see
+`When edits take effect`_ for each key's boundary). This page is the
+complete key reference; :doc:`/guide/loop` describes how the loop enforces
+the budget and timeout keys, and :doc:`/guide/plans` covers the per-step
+override surface.
 
 Where ``config.json`` lives
 ---------------------------
@@ -23,9 +24,10 @@ Each node's config sits inside its data directory:
   (with the same monorepo project prefix), beside the tree's central
   database.
 
-``fractal node init`` writes every key in the schema except ``user`` and
-``clone_dirs``, storing unset keys as JSON ``null``. A freshly created node
-titled "Build the parser" looks like:
+``fractal node init`` writes every key in the schema except ``user``,
+``clone_dirs``, ``user_settings``, and ``wiki`` (written only when the tree
+names a project-wiki folder), storing unset keys as JSON ``null``. A freshly
+created node titled "Build the parser" looks like:
 
 .. code-block:: json
 
@@ -56,6 +58,7 @@ titled "Build the parser" looks like:
      "max_iter_cost": 2.0,
      "max_step_cost": null,
      "reserve_budget": 1.0,
+     "reserve_mode": "default",
      "sync": null,
      "detached": null,
      "local": false,
@@ -65,7 +68,8 @@ titled "Build the parser" looks like:
 
 The user node's config is minimal — ``{"user": true, "project": ".",
 "root": "<branch>"}`` plus optional ``agent``/``provider`` defaults that
-children inherit. The user node has no loop, so the run-parameter keys never
+children inherit, and ``wiki`` when the project names its wiki folder (see
+`The project wiki folder`_). The user node has no loop, so the run-parameter keys never
 apply to it.
 
 Reads hit disk on every access (nothing is cached), so edits from other
@@ -104,11 +108,15 @@ directory; pass ``--path <dir>`` to target another worktree.
   accept their directories comma- or space-joined and store a JSON list, each
   entry in canonical form (``./src``, ``src/``, ``a//b`` land as ``src``,
   ``a/b``).
+- ``reserve_budget=`` records the reserve as explicit, so no later cap change
+  retunes it, and the echo names the change (``reserve_mode: default ->
+  explicit``); ``reserve_budget=null`` clears the mode with the reserve.
+  ``reserve_mode`` itself is refused: it records how the reserve was set.
 - The merged result is checked by the validator (see `Validation`_) before
   anything is written, so ``set`` cannot store a value the validator rejects.
   ``node init``'s additional flag checks — the agent registry, provider
   support, the base worktree, a reserve requiring ``max_cost`` — do not run
-  here; ``node start`` re-validates the stored file at launch.
+  here; ``node start`` and ``resume`` re-validate the stored file at launch.
 
 ``fractal node update``
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -147,9 +155,11 @@ consequences:
   snapshot, the drift is healed *from config to registry* with a per-key
   warning at the next boundary — config always wins.
 - A *bad* hand edit (a bare-number duration, a broken cost ordering) is not
-  caught at edit time: ``node start`` re-validates the stored file before
-  launching, and the loop's mid-run re-readers warn and keep the previous
-  values rather than crash.
+  caught at edit time: ``node start`` and ``resume`` re-validate the stored
+  file of every node they launch before they change anything, the loop's
+  boot aborts on record over an edit that lands after that check, and the
+  loop's mid-run re-readers warn and keep the previous values rather than
+  crash.
 
 The duration format
 -------------------
@@ -183,12 +193,21 @@ silently no-ops. Per key:
    * - ``max_cost``, ``max_iter_cost``, ``max_step_cost``, ``reserve_budget``
      - The next iteration's pricing, and live at every budget boundary
        probe.
+   * - ``reserve_mode``
+     - The next cap retune (``node update --max-cost`` or ``node start
+       --continue --max-cost``); the loop never reads it.
+   * - ``max_depth``, ``max_children``, ``max_descendants``
+     - At once for the spawn gate, which reads them from the file at every
+       spawn; the next step's prompt and environment.
    * - ``scope``, ``local``
      - The next commit (read per commit).
    * - ``clone_dirs``
      - The next child spawn (read from the user node's file per spawn).
    * - ``sealed``
      - The next radio read.
+   * - ``user_settings``
+     - The next agent launch, which reads it from the node and its
+       ancestors.
    * - ``blind``
      - Setting it lands at the next ``start`` (which sweeps a blind node's
        subscriptions — a ``resume`` relaunch does not) and at the next child
@@ -200,7 +219,7 @@ silently no-ops. Per key:
      - Pinned at loop boot — the edit reaches the next ``start``/``resume``,
        never a run already in flight (a mid-run edit cannot flip a run's
        mode composition).
-   * - ``root``, ``user``, ``project``
+   * - ``root``, ``user``, ``project``, ``wiki``
      - Immutable.
 
 A malformed mid-run edit warns on the loop's stderr and keeps the prior
@@ -231,6 +250,13 @@ Plain values
      - inherited (``.`` at the repo root)
      - Project sub-path within the worktree, for monorepos. **Immutable**
        (see `Immutable keys`_).
+   * - ``wiki``
+     - absent (``wiki``); inherited
+     - The shared project-wiki folder, relative to the project: the one
+       folder a node commits to regardless of its ``scope``, refreshed at
+       each commit and merge. Read from the project's tracked settings file
+       at ``fractal init`` and inherited by every node in the same project;
+       no flag sets it. **Immutable** (see `The project wiki folder`_).
    * - ``root``
      - inherited from the parent
      - The tree's root branch. Every node carries it to resolve the central
@@ -280,6 +306,13 @@ Plain values
      - Reasoning-effort override, passed through the agent CLI's effort flag.
        Not validated by fractal — unknown levels surface as the agent's own
        error.
+   * - ``reserve_mode``
+     - ``default`` for init's own reserve, ``explicit`` for a flag or preset
+       one; ``null`` without a reserve
+     - Where the stored ``reserve_budget`` came from: a cap change retunes a
+       ``default`` reserve and leaves an ``explicit`` one (see
+       `The cleanup reserve`_). Recorded by fractal; ``config set`` refuses
+       it.
 
 Booleans
 ~~~~~~~~
@@ -321,6 +354,21 @@ Booleans
        which the sealed seat itself may not run) — the hold mechanism for
        verifier isolation. Takes effect at the next radio read; an
        operator shell is never held.
+   * - ``user_settings``
+     - ``null`` → ``false``; resolved from the ancestors
+     - Let the node's agent sessions load the user's own agent
+       configuration. Unset or ``false``, a ``claude`` session loads only
+       the worktree's project and local settings and the node's own
+       ``settings.json``, and no MCP server: the user's settings
+       (permissions, hooks, plugins, model and effort defaults), skills,
+       MCP servers, and claude.ai connectors stay out, and so do a
+       project's ``.mcp.json`` servers. ``true`` loads them as a plain
+       ``claude`` session does. Resolved at each launch from the node's own
+       value, else the nearest ancestor's that sets one, so ``fractal node
+       config set user_settings=true`` on the user node (from the main
+       checkout) sets the tree's default; no ``node init`` flag sets it.
+       The instruction-file excludes apply either way (see
+       :doc:`/guide/agents`).
 
 Integer caps
 ~~~~~~~~~~~~
@@ -423,7 +471,8 @@ loop-side default is noted.
        Re-read each iteration, so retunes land mid-run.
    * - ``step_retry_backoff``
      - ``null`` → ``10s``
-     - Delay before each retry of a failed step launch.
+     - Delay before each retry of a failed step launch, and the base a
+       provider outage's retry wait doubles from.
    * - ``interval``
      - ``null``
      - Fixed iteration cadence (an iteration starts every ``interval``).
@@ -442,19 +491,24 @@ Inheritance at spawn
 
 ``root`` is always inherited from the parent, and ``project`` is inherited by
 default (``node init --path <sub-project>`` selects a different sub-project
-for the child; either way the key is immutable after init); ``agent`` and
-``provider`` resolve through the nearest ancestor that sets them; a ``local``
-parent forces ``local`` children. A spawn with ``--template`` fills the
-budget, limit, duration, model, and mode keys its flags left unset from the
-template's ``config.json`` preset — a flag wins over the preset, and the
-preset beats an inherited value (see :doc:`/cli/node`). Everything else
-defaults fresh unless the spawn passes ``--inherit config``, which copies the
-parent's *preference* keys — ``model``, ``effort``, ``sync``, ``detached``,
-``iter_timeout``, ``step_timeout``, ``step_retries``, ``step_retry_backoff``,
-``wait``, and ``sleep``/``interval`` (only when the spawn sets neither) — as a
-spawn-time snapshot. Budget-class keys (the cost caps, ``max_iters``, the
-width/depth caps, and the run ``timeout``) never inherit; each node's budgets
-are set deliberately. See :doc:`/cli/node` for the ``--inherit`` surface.
+for the child; either way the key is immutable after init); ``wiki`` is
+inherited by a child in its parent's project and read from the selected
+project's own settings file otherwise (see `The project wiki folder`_);
+``agent`` and ``provider`` resolve through the nearest ancestor that sets
+them; a ``local`` parent forces ``local`` children; ``user_settings`` resolves
+at each agent launch, not at spawn, from the node itself or else the nearest
+ancestor that sets it. A spawn with ``--template`` fills the budget, limit,
+duration, model, and mode keys its flags left unset from the template's
+``config.json`` preset — a flag wins over the preset, and the preset beats an
+inherited value (see :doc:`/cli/node`).
+Everything else defaults fresh unless the spawn passes ``--inherit config``,
+which copies the parent's *preference* keys — ``model``, ``effort``, ``sync``,
+``detached``, ``iter_timeout``, ``step_timeout``, ``step_retries``,
+``step_retry_backoff``, ``wait``, and ``sleep``/``interval`` (only when the
+spawn sets neither) — as a spawn-time snapshot. Budget-class keys (the cost
+caps, ``max_iters``, the width/depth caps, and the run ``timeout``) never
+inherit; each node's budgets are set deliberately. See :doc:`/cli/node` for
+the ``--inherit`` surface.
 
 Immutable keys
 --------------
@@ -475,10 +529,124 @@ These keys are fixed at init and can never be changed:
     ``.worktrees/``; the track/untrack, lint, and merge machinery all read
     it, so a post-init change would desync them from the real paths.
 
+``wiki``
+    Fixes the folder every commit and merge admits regardless of scope. A
+    post-init change would let a node widen its own boundary, and would
+    split one project's nodes across two wiki folders.
+
 The public ``fractal node config set`` refuses these keys outright — even a
 first write (so ``config set user=true`` cannot turn a child into a root
 node). Only the internal bootstrap path used by ``node init`` seeds them, and
 even that path admits only the initial write, never a change.
+
+The project wiki folder
+-----------------------
+
+The shared project wiki lives at ``<project>/wiki/`` by default. A project
+whose ``wiki/`` holds other content names a different folder in a tracked
+settings file at ``<project>/.fractal/.settings.json``:
+
+.. code-block:: json
+
+   {
+     "wiki": "docs"
+   }
+
+The file is the repository's source of truth, committed with the project, so
+no operator flag can be forgotten. ``wiki`` and ``effort_ladder`` (see `The
+effort ladder`_) are its only keys — any other key refuses, so a typo cannot read as
+the default. The default folder is spelled
+by omitting the key (or the file), never by setting it to ``null``, which
+refuses. No node's ``config.json``, user or child, records ``wiki`` for the
+default: a child's config stores ``null`` for its other unset keys but omits
+``wiki``. ``fractal init`` reads the file before it writes anything and
+records the folder as the user node's ``wiki`` key; ``fractal commit --init``
+commits the file beside the wiki, and refuses a file naming another folder
+than the one recorded. Each spawn reads the setting committed on the tree's
+root branch, never a node's checkout, so a node editing its own copy changes
+nothing (``merge`` restores the target's ``.fractal/``, so such an edit never
+lands either):
+
+- a child in its parent's project copies the parent's value, and the spawn
+  refuses when the root branch's setting names another folder — a setting
+  committed after the tree recorded its folder — naming the remedy;
+- a child that selects another sub-project takes that project's own setting
+  (``wiki/`` when it has none), so each project's folder holds whichever tree
+  spawns into it.
+
+The merge footprint check applies the same two rules again before it judges
+a squash: a node whose ``config.json`` was edited by hand to name another
+valid folder would otherwise move its own scope exemption, so the merge
+refuses, naming both folders. A child in its parent's project is held to the
+parent's recorded folder, which never changes. A child in another
+sub-project (or one whose parent is checked out nowhere) is held to the
+setting committed on the root branch as it stands at the merge, so
+committing a new folder for that project after the spawn refuses the merge
+too; the refusal names the setting, and the remedy is to commit the
+recorded folder back on the root branch, or to delete the node and spawn it
+again to adopt the new one.
+
+The folder decides the scope exemption in ``fractal commit`` and the merge
+footprint check, the commit-time and merge-time index refresh, the base-ref
+precondition of ``fractal node init`` (``<folder>/_index.md`` must be
+committed), ``$WIKI_DIR`` in node prompts, the seeded ``lint.sh``, the
+unmerged-work check of ``node delete``, and the ``destroy`` report. With no
+file, every one of them uses ``wiki/`` and no config gains a ``wiki`` key.
+
+A tree records its folder when it is created. To switch a running tree to a
+new folder, commit the new setting, run ``fractal reset <root>`` (the tree's
+history survives), re-run ``fractal init``, and commit the baseline with
+``--init``. A re-init over live nodes refuses. An absent setting and one
+naming ``wiki`` are the same folder, so neither counts as a switch.
+
+The effort ladder
+-----------------
+
+A step stuck at a thinking cap is steered one effort level lower (see
+:doc:`/guide/loop`). Each agent carries its own ladder of levels and a floor
+the steer never goes below: Claude lowers through ``low``, ``medium``,
+``high``, ``xhigh``, and ``max``, never below ``high``; Codex never lowers. A
+project overrides an agent's ladder with the ``effort_ladder`` key of its
+``<project>/.fractal/.settings.json``, mapping the agent's name to its levels,
+lowest first, and its floor:
+
+.. code-block:: json
+
+   {
+     "effort_ladder": {
+       "claude": {
+         "levels": ["low", "medium", "high", "xhigh", "max"],
+         "floor": "medium"
+       }
+     }
+   }
+
+With this file, a ``high`` step that hits a thinking cap steers at
+``medium``. Both ``levels`` and ``floor`` are required; the levels must be
+unique non-empty strings, and the floor must be one of them. Each name must be
+a registered agent, so a misspelled name refuses instead of reading as the
+default ladder. A ladder built only from levels the agent itself declares
+must list them in the agent's order, lowest first, so a reversed list refuses
+instead of raising the effort. An agent the key does not name keeps its own
+ladder. A step at or below the floor, or at a level that is not on the ladder,
+steers at its own effort.
+
+The loop reads the file as committed on the tree's root branch each time it
+starts or resumes, and holds the ladder for the run. A node editing its own
+copy changes nothing, and a change committed on the root branch takes effect
+at each node's next start or resume. A ladder with a bad shape refuses
+wherever the file is read: each start or resume, the loop's boot,
+``fractal init``, ``fractal commit --init``, each spawn, and the merge
+footprint check where it reads the root branch's copy (for a node in another
+sub-project than its parent, or one whose parent is checked out nowhere). An
+unknown agent name or a reversed ladder refuses at each start or resume and
+at the loop's boot, once the tree's custom agents are registered. A start or
+resume refuses before it changes anything, checking every node it would
+launch. The boot reads the file again, so a bad ladder committed after that
+check still aborts it on record: a start or continue ends ``exited`` with the
+reason on its run, and a resume stays paused for the next resume. Fractal
+does not check the levels against the ones the agent accepts, so a level the
+agent rejects fails the steered launch.
 
 The cleanup reserve
 -------------------
@@ -506,9 +674,20 @@ Defaulting and rounding:
   noise persists into ``config.json``.
 - An explicit reserve requires ``max_cost`` and must sit in the range from 0
   (inclusive) to 99% of ``max_cost`` (exclusive).
-- On ``node update --max-cost`` without ``--reserve-budget``, a reserve that
-  equals the old cap's 10% default is re-derived against the new cap instead
-  of going stale; an explicitly set reserve is left alone.
+- The reserve's origin is recorded beside it as ``reserve_mode``:
+  ``default`` for the 10% init materializes, ``explicit`` for a figure set by
+  ``--reserve-budget`` (at init or on ``node update``), a template preset, or
+  ``config set reserve_budget=``.
+- On ``node update --max-cost`` or ``node start --continue --max-cost``
+  without a new ``--reserve-budget``, a default reserve that still equals 10%
+  of the old cap is re-derived against the new cap instead of going stale.
+  Every other reserve keeps its figure: an explicit one, even at exactly 10%,
+  and one moved off the default by a hand edit or by ``config set
+  max_cost=`` (which changes the cap alone); the retune records such a
+  reserve as explicit.
+- A config with no ``reserve_mode`` reads as default when its reserve equals
+  10% of its ``max_cost``, and as explicit otherwise. Reading never rewrites
+  the file; the next cap change records the reading.
 
 Validation
 ----------
@@ -522,7 +701,8 @@ It rejects:
 - non-numeric or non-finite cost values, and non-positive cost ceilings;
 - ``max_iter_cost`` or ``max_step_cost`` without ``max_cost``, and any
   violation of the ``step <= iter <= run`` cost ordering;
-- a reserve outside ``[0, 99% of max_cost)``;
+- a reserve outside ``[0, 99% of max_cost)``, and a ``reserve_mode`` other
+  than ``default`` or ``explicit``;
 - non-integer or negative values for the integer caps, integer caps at or
   past SQLite's signed 64-bit ceiling (2**63), and ``max_iters <= 0``;
 - non-boolean values for the mode flags;
@@ -530,7 +710,12 @@ It rejects:
 - ``interval`` and ``sleep`` both set, or ``iter_timeout`` exceeding
   ``interval``;
 - absolute paths, ``..`` components, or non-canonical spellings (``./src``,
-  ``src/``) in ``scope`` or ``clone_dirs``, and ``.`` in ``clone_dirs``.
+  ``src/``) in ``scope`` or ``clone_dirs``, and ``.`` in ``clone_dirs``;
+- a ``wiki`` folder that is not a non-empty string, is absolute, carries a
+  ``..`` component, is ``.`` or ``null``, is not canonical, or has a
+  ``.fractal``, ``.worktrees``, or ``.git`` component (compared
+  case-insensitively). Every commit and merge scope check re-validates the
+  stored value too.
 
 Per-step overrides
 ------------------

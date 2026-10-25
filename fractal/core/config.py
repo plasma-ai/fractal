@@ -10,7 +10,12 @@ import typing
 from typing import Any, Optional
 
 import fractal.util
-from fractal.constants import CONFIG_FILE, LOCK_FILE
+from fractal.constants import (
+    CONFIG_FILE,
+    FRACTAL_FOLDER,
+    LOCK_FILE,
+    WORKTREES_FOLDER,
+)
 
 if typing.TYPE_CHECKING:
     from .node import Node
@@ -22,6 +27,7 @@ KEYS = (
     'title',
     'user',
     'project',
+    'wiki',
     'root',
     'scope',
     'clone_dirs',
@@ -47,11 +53,13 @@ KEYS = (
     'max_iter_cost',
     'max_step_cost',
     'reserve_budget',
+    'reserve_mode',
     'sync',
     'detached',
     'local',
     'blind',
     'sealed',
+    'user_settings',
 )
 
 # keys whose value is a JSON list of repo-relative subdirectories (the CLI
@@ -70,6 +78,7 @@ BOOL_KEYS = (
     'local',
     'blind',
     'sealed',
+    'user_settings',
 )
 
 # keys whose value must be a non-negative integer cap
@@ -104,8 +113,10 @@ DURATION_KEYS = (
 # tree, 'user' marks node identity (flipping it would let a root branch be
 # started as a loop), 'project' fixes the on-disk layout the immutable
 # .worktrees/.project cache mirrors (track/untrack, lint.sh, and merge.sh
-# all read it -- a post-init change desyncs them from the real paths)
-IMMUTABLE_KEYS = ('root', 'user', 'project')
+# all read it -- a post-init change desyncs them from the real paths), and
+# 'wiki' fixes the folder every commit admits regardless of scope (a
+# post-init change would let a node widen its own boundary)
+IMMUTABLE_KEYS = ('root', 'user', 'project', 'wiki')
 
 # default cleanup reserve as a fraction of max_cost
 DEFAULT_RESERVE_FRACTION = 0.10
@@ -119,6 +130,11 @@ MAX_RESERVE_FRACTION = 0.99
 # child_retune's default-detection equality matches what parse_reserve_budget
 # stored; the two sites MUST round identically, so both quote this constant
 RESERVE_PRECISION = 4
+
+#: where a stored reserve's figure came from -- 'default' is the fraction
+#: init materializes, which a cap change retunes; 'explicit' is a figure set
+#: by flag, template preset, or `config set`, which no cap change moves
+RESERVE_MODES = ('default', 'explicit')
 
 # signed 64-bit ceiling for SQLite INTEGER columns; an integer cap at or above
 # this raises a raw "int too large to convert" from the adapter downstream
@@ -183,6 +199,63 @@ def parse_reserve_budget(
     # (10% of $6) would otherwise persist binary noise into config.json
     # and every echo that quotes it
     return round(reserve, RESERVE_PRECISION)
+
+
+def validate_wiki(value: Any, source: str) -> str:
+    """Validate a shared project-wiki folder setting.
+
+    The folder is committable regardless of a node's scope, so it must
+    name a canonical subdirectory of the project -- the commit boundary
+    is a literal prefix match against git's canonical paths -- and stay
+    clear of fractal's own machinery: a ``.`` would exempt the whole
+    project, and a ``.fractal``, ``.worktrees``, or ``.git`` component
+    (casefolded, as the files surface matches them) would admit the
+    control plane. A folder named ``null`` is refused too: ``config _set``
+    reads that value as clearing the key, so a spawn would record the
+    default instead.
+
+    Args:
+        value: The configured folder, relative to the project path.
+        source: The setting's name in the error (the config key, or the
+            settings file it was read from).
+
+    Returns:
+        The validated folder.
+
+    Raises:
+        ValueError: If ``value`` is not a non-empty string, is absolute,
+            has a ``..`` component, is ``.``, is not canonical, has a
+            machinery component, or is ``null``.
+
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f'{source} must be a non-empty folder name, not {value!r}.')
+    rel = pathlib.PurePosixPath(value)
+    if rel.is_absolute() or '..' in rel.parts:
+        raise ValueError(
+            f'{source} must be a project-relative folder, not {value!r}'
+            ' (no absolute or ".." paths).'
+        )
+    if not rel.parts:
+        raise ValueError(f'{source} must name a subdirectory, not {value!r}.')
+    if value != rel.as_posix():
+        raise ValueError(
+            f'{source} must be canonical, not {value!r}'
+            f' (write it as {rel.as_posix()!r}).'
+        )
+    reserved = (FRACTAL_FOLDER, WORKTREES_FOLDER, '.git')
+    if any(part.casefold() in reserved for part in rel.parts):
+        names = ', '.join(reserved)
+        raise ValueError(
+            f'{source} must stay outside fractal machinery, not {value!r}'
+            f' (no {names} component).'
+        )
+    if value == 'null':
+        raise ValueError(
+            f'{source} cannot be {value!r}, which a config value reads as'
+            ' clearing the key.'
+        )
+    return value
 
 
 class Config:
@@ -318,7 +391,8 @@ class Config:
         comparison), a non-positive ceiling (which makes the subtree check
         finish the node at $0), a per-iter/step cap with no ceiling (which
         the loop cannot enforce once the per-iter budget drains), an
-        out-of-range reserve, a broken ``step <= iter <= run`` cost
+        out-of-range reserve, a reserve mode outside
+        :data:`RESERVE_MODES`, a broken ``step <= iter <= run`` cost
         ordering, a non-integer or degenerate integer cap (a non-positive
         ``max_iters`` reads as unlimited in the loop, and a cap at or past
         the SQLite signed 64-bit ceiling raises raw from the adapter
@@ -332,8 +406,10 @@ class Config:
         warms), a non-canonical list-key spelling (``./src``, ``src/`` --
         the setters store canonical form, so only a hand-edit lands one,
         and the literal prefix match would refuse every scoped commit),
-        and a ``.`` cache dir (which would clone the whole checkout
-        -- as a scope root it is legal, naming the project itself).
+        a ``.`` cache dir (which would clone the whole checkout
+        -- as a scope root it is legal, naming the project itself), and
+        a ``wiki`` folder :func:`validate_wiki` refuses (the folder every
+        commit admits regardless of scope).
 
         Args:
             config: The config mapping to validate; the stored
@@ -420,6 +496,12 @@ class Config:
                         'reserve_budget must be'
                         f' < {MAX_RESERVE_FRACTION:.0%} of max_cost.'
                     )
+        # the reserve's mode must name an origin the retune reads -- any other
+        # value would leave the reserve neither tracking the cap nor pinned
+        reserve_mode = config.get('reserve_mode')
+        if reserve_mode is not None and reserve_mode not in RESERVE_MODES:
+            modes = ' or '.join(repr(mode) for mode in RESERVE_MODES)
+            raise ValueError(f'reserve_mode must be {modes}, not {reserve_mode!r}.')
         # cost ordering: step <= iter <= run
         if max_iter_cost is not None and max_cost is not None:
             if max_iter_cost > max_cost:
@@ -456,9 +538,9 @@ class Config:
             if int(seconds) <= 0:
                 raise ValueError(f'{key} must be at least 1 second.')
             durations[key] = seconds
-        # pacing invariants the loop enforces at construction -- checked here
-        # too so a bad combination is refused at init/start, not deep inside
-        # the tmux pane where it strands the node idle with no run row
+        # pacing invariants the loop enforces at boot -- checked here too so
+        # a bad combination is refused at init/start/resume, not at the boot
+        # after the launch already reported success
         interval = durations.get('interval')
         if interval is not None:
             # interval and sleep are rival pacing keys (fixed cadence vs
@@ -515,6 +597,12 @@ class Config:
                         )
             else:
                 raise ValueError(f'{key} must be a list of strings.')
+        # the shared project wiki is committable regardless of scope, so its
+        # folder must stay a canonical project subdirectory (any JSON type
+        # can land here via a hand-edit, as above)
+        wiki = config.get('wiki')
+        if wiki is not None:
+            validate_wiki(wiki, source='wiki')
 
     def reconcile(self: Config) -> dict[str, tuple[Any, Any]]:
         """Reconcile the registry cap row to this node's config file.

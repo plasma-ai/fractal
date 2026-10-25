@@ -10,7 +10,8 @@ displayed seconds.
 ``Time.remaining`` returns ``None`` (no timeout / nothing running) or a float;
 the command turns that into exactly one of:
 
-- ``"no limit"`` -- no ``timeout``/``iter_timeout``/``step_timeout`` configured;
+- ``"no limit"`` -- no ``timeout``/``iter_timeout``/``step_timeout`` configured
+  and no step file carrying its own ``timeout:`` line;
 - ``"not running"`` -- a timeout is set but nothing active counts down;
 - ``"<N>s"`` -- ``int(remaining)`` for the soonest active deadline (run,
   iteration, or step).
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from typing import Optional
 
 import pytest
 
@@ -50,6 +52,10 @@ __all__ = [
 # a 10-minute budget, in the suffix form the loop validates
 TIMEOUT = '10m'
 TIMEOUT_SECONDS = 600
+
+# a step file's own timeout: line, longer than the node's step_timeout
+STEP_TIMEOUT = '30m'
+STEP_TIMEOUT_SECONDS = 1800
 
 
 @pytest.fixture
@@ -113,15 +119,37 @@ def test_remaining_reports_not_running_without_active_run(time_node: dict) -> No
     assert _remaining(time_node['repo']) == 'not running'
 
 
-def test_remaining_reports_not_running_with_only_step_timeout(time_node: dict) -> None:
-    """A lone ``--step-timeout`` is still a limit -> ``"not running"``, not ``"no limit"``.
+@pytest.mark.parametrize(
+    argnames='scope',
+    argvalues=[None, 'step'],
+    ids=['soonest', 'step-scope'],
+)
+@pytest.mark.parametrize(
+    argnames='source',
+    argvalues=['node', 'step-file'],
+)
+def test_remaining_reports_not_running_with_only_step_timeout(
+    time_node: dict,
+    source: str,
+    scope: Optional[str],
+) -> None:
+    """A lone step timeout is still a limit -> ``"not running"``, not ``"no limit"``.
 
-    A configured step timeout still time-bounds the node -- there is just
-    nothing active to count down against.
+    A configured ``--step-timeout``, or a step file's own ``timeout:`` line,
+    still time-bounds the node -- there is just nothing active to count
+    down against, whether the soonest default or the step scope is asked.
     """
     node = time_node['node']
-    node.config.set('step_timeout', TIMEOUT)
-    assert _remaining(time_node['repo']) == 'not running'
+    if source == 'node':
+        node.config.set('step_timeout', TIMEOUT)
+    else:
+        steps_dir = node.node_dir / 'steps'
+        steps_dir.mkdir()
+        (steps_dir / '01-EXECUTE.md').write_text(
+            f'---\ntimeout: {STEP_TIMEOUT}\n---\n# EXECUTE\n',
+            encoding='utf-8',
+        )
+    assert _remaining(time_node['repo'], scope=scope) == 'not running'
 
 
 def test_remaining_counts_down_for_the_run(time_node: dict) -> None:
@@ -157,14 +185,40 @@ def test_remaining_counts_down_for_the_active_iteration(time_node: dict) -> None
     assert TIMEOUT_SECONDS - 150 <= seconds <= TIMEOUT_SECONDS - 100
 
 
-def test_remaining_counts_down_for_the_active_step(time_node: dict) -> None:
-    """A ``--step-timeout`` active step renders ``int(budget - elapsed)``.
+@pytest.mark.parametrize(
+    argnames='scope',
+    argvalues=[None, 'step'],
+    ids=['soonest', 'step-scope'],
+)
+@pytest.mark.parametrize(
+    argnames=('frontmatter', 'budget'),
+    argvalues=[
+        ('', TIMEOUT_SECONDS),
+        (f'---\ntimeout: {STEP_TIMEOUT}\n---\n', STEP_TIMEOUT_SECONDS),
+    ],
+    ids=['node-step-timeout', 'own-timeout'],
+)
+def test_remaining_counts_down_for_the_active_step(
+    time_node: dict,
+    frontmatter: str,
+    budget: int,
+    scope: Optional[str],
+) -> None:
+    """An active step renders ``int(budget - elapsed)`` against its own ceiling.
 
     A loop node commonly runs with only a step budget, so its one active
-    deadline must render as a countdown like the run and iteration scopes.
+    deadline must render as a countdown like the run and iteration scopes --
+    counted against the step file's own ``timeout:`` line when it carries
+    one (the ceiling the loop enforces), else the node's ``--step-timeout``.
     """
     node = time_node['node']
     node.config.set('step_timeout', TIMEOUT)
+    steps_dir = node.node_dir / 'steps'
+    steps_dir.mkdir()
+    (steps_dir / '01-EXECUTE.md').write_text(
+        f'{frontmatter}# EXECUTE\n\nWork.\n',
+        encoding='utf-8',
+    )
     run_id = node.record.run_start()
     iter_id = node.record.iter_start(run_id=run_id, iter=1)
     step_id = node.record.step_start(
@@ -174,23 +228,26 @@ def test_remaining_counts_down_for_the_active_step(time_node: dict) -> None:
         step_name='EXECUTE',
     )
     _age_step(node, step_id, 100.0)
-    seconds = _remaining_seconds(time_node['repo'])
-    assert TIMEOUT_SECONDS - 150 <= seconds <= TIMEOUT_SECONDS - 100
+    seconds = _remaining_seconds(time_node['repo'], scope=scope)
+    assert budget - 150 <= seconds <= budget - 100
 
 
 # ------ helpers
 
 
-def _remaining(repo: pathlib.Path) -> str:
+def _remaining(repo: pathlib.Path, *, scope: Optional[str] = None) -> str:
     """Run ``fractal node time remaining`` against ``repo`` and return stdout."""
-    result = _run(repo, 'node', 'time', 'remaining', '--path', f'{repo}')
+    args = ['node', 'time', 'remaining', '--path', f'{repo}']
+    if scope is not None:
+        args.append(f'--scope={scope}')
+    result = _run(repo, *args)
     assert result.returncode == 0, f'rc={result.returncode}\nstderr:\n{result.stderr}'
     return result.stdout.strip()
 
 
-def _remaining_seconds(repo: pathlib.Path) -> int:
+def _remaining_seconds(repo: pathlib.Path, *, scope: Optional[str] = None) -> int:
     """Parse the ``"<N>s"`` countdown output into an int (asserts the format)."""
-    out = _remaining(repo)
+    out = _remaining(repo, scope=scope)
     assert out.endswith('s')
     seconds = out.removesuffix('s')
     assert seconds.isdigit()

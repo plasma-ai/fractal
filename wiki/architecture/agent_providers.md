@@ -29,25 +29,32 @@ owns:
 
 - **Invocation building.** A composed invocation is pure serializable data: the
   base command's argv words, the working directory (the node's worktree), an
-  environment overlay, and an optional caller-minted session id. Backends
-  contribute only their reserved provider keys to the environment; the public
-  verb composes the full subprocess environment, and a reserved key valued as
-  unset scrubs routing variables inherited from an ancestor's provider route.
-  Agent commands split on whitespace only — shell quoting is refused at accept
-  time.
+  environment overlay, an optional caller-minted session id, and the mode the
+  launch reaches that session in (fresh, resume, or fork), which tells a
+  consumer whether it continues the session's spend. Backends contribute only
+  their reserved provider keys to the environment; the public verb composes the
+  full subprocess environment, and a reserved key valued as unset scrubs routing
+  variables inherited from an ancestor's provider route. The verb always unsets
+  a few ambient variables too: the effort and model-forcing knobs, so a pin
+  reaches the agent only through its flag, and `VIRTUAL_ENV`, which names the
+  launching project's venv rather than the node worktree's. Agent commands split
+  on whitespace only — shell quoting is refused at accept time.
 
 - **Spawning and stream parsing.** Agents are subprocesses driven line-by-line.
   Each backend ships a parser that turns its own wire format into normalized
   stream events with a small set of kinds — session, text, tool, tool result,
-  cost, result, error. Every consumer (the renderer, TUI bubbles, the record
-  verbs) branches on the event kind only, never on the provider. Parsed strings
-  are sanitized once, centrally, so no downstream sink can meet an unencodable
-  surrogate. The shared `finish_stream` seam waits for the actual process after
-  stdout drains, then runs provider finalization and the parser's deferred
-  terminal events. The caller retains deadline and pipe cleanup. Process-bound
-  evidence stays attached to its own invocation, so parsers may be constructed
-  either before or after spawning without sharing mutable accounting state
-  through their Agent instance.
+  cost, result, error, thinking cap (`thinking_cap`, reported once per
+  thinking-only top-level reply that hits the output cap), and acting and
+  waiting (marking when the agent takes control and hands it off; a waiting with
+  a duration is a timed pause, such as an API retry's backoff). Every consumer
+  (the renderer, TUI bubbles, the record verbs) branches on the event kind only,
+  never on the provider. Parsed strings are sanitized once, centrally, so no
+  downstream sink can meet an unencodable surrogate. The shared `finish_stream`
+  seam waits for the actual process after stdout drains, then runs provider
+  finalization and the parser's deferred terminal events. The caller retains
+  deadline and pipe cleanup. Process-bound evidence stays attached to its own
+  invocation, so parsers may be constructed either before or after spawning
+  without sharing mutable accounting state through their Agent instance.
 
 - **Cost and session policy.** Capability attributes declare how a backend
   reports cost (per-invocation figures or cumulative thread totals, and whether

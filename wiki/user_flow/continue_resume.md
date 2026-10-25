@@ -45,10 +45,16 @@ must be resumed instead, and a retired one unretired). What "fresh run" means:
 
 - **Runs are isolated.** Each launch arms the cost cap anew and starts new
   run/iteration accounting; the node's history keeps every prior run.
-- **The worktree is restored.** The launch restores the worktree to its
-  committed state; if uncommitted project files exist (a kill usually leaves
-  some), the continue refuses until you pass `--clean` to acknowledge discarding
-  them.
+- **The worktree is restored.** The launch commits the operator's edits under
+  the node folder, in a commit that carries nothing else, and restores the rest
+  of the worktree to its committed state, discarding staged and unstaged changes
+  alike (it unstages everything first, so a staged project file can neither ride
+  that commit nor survive the restore); if uncommitted project files exist (a
+  kill usually leaves some), the continue refuses until you pass `--clean` to
+  acknowledge discarding them. A worktree holding a git operation in progress (a
+  merge, squash merge, cherry-pick, revert, rebase, or `index.lock`) is left as
+  found instead, and the first step's prompt names the operation for the agent
+  to finish or abort.
 - **A budget-ended run never re-arms silently.** If the last run ended by
   exhausting its cost cap, a bare `--continue` refuses, naming the spent and
   armed figures; pass an explicit `--max-cost` to arm the next run deliberately.
@@ -80,8 +86,10 @@ loops reclassify the abort and park with status `paused`. What paused preserves:
 - The **pause latch**: a paused subtree admits no new work — spawning under it,
   starting into it, and resuming a descendant while an ancestor is frozen all
   refuse until the ancestor resumes.
-- Legal verbs on a paused node: `resume`, `kill`, and `chat` (you can
-  interrogate a frozen node). Merge, delete, retire, and start all refuse.
+- Legal verbs on a paused node: `resume`, `kill`, `chat` (you can interrogate a
+  frozen node), and `merge`, which lands committed work only — the node stays
+  paused and its frozen step's uncommitted state stays in its worktree (see
+  [[user_flow/finishing/merge_guards]]). Delete, retire, and start all refuse.
 
 ## Resume: thawing
 
@@ -92,7 +100,9 @@ iteration count, the interrupted step re-entered (resuming the recorded agent
 session when one exists, re-orienting fresh otherwise), and the run and
 iteration deadlines credited for the paused span, so a pause never costs
 wall-clock budget. A node caught still parking gets its pause withdrawn instead
-— the live loop simply never parks.
+— the live loop simply never parks. If the abort left a git operation unfinished
+in the worktree, the re-entered step's prompt names it, so the agent finishes or
+aborts it before any other git work (see [[features/loop/prompt_assembly]]).
 
 ## Tree-wide pause and resume
 
@@ -134,10 +144,16 @@ seat who it is and a seat can move. `_DRAIN` is the seat's own environment;
 actor, which survives an env scrub but still falls back to the node owning the
 working directory — so a seat that steps into a sibling worktree resolves to a
 real but *wrong* node, and one that steps outside every worktree resolves to
-none and fails open. `Node.drain_lineage` closes both: the loop makes each agent
-invocation its own process group leader and records the id (`.step_pgid`), so
-every command that seat runs inherits it, and the tree asks which of its open
-draining runs owns this process. No `env -u` or `cd` rewrites a process group.
-The handle is identity-checked like the orphan reap's, so a stale record naming
-a recycled id never refuses an unrelated caller, and a caller in any other group
-— an operator's shell — acts normally while the drain runs.
+none and fails open. `Node.drain_lineage` closes both: the loop records each
+agent invocation's pid (`.step_pgid`), every command that seat runs descends
+from it — whether the agent CLI starts the command in a process group or a
+session of its own, as Claude Code does — and the tree asks whether one of its
+open draining runs recorded this process or one of its ancestors. No `env -u` or
+`cd` rewrites ancestry. A command whose parent chain was cut (a double fork, or
+an intermediate that exited) is reparented out of the agent's tree: it still
+matches while it stays in the agent's session, but under a CLI that starts each
+command in a session of its own it escapes the lineage check, while `_DRAIN` and
+`Node.drain_bound` still apply to it. The handle is identity-checked like the
+orphan reap's, so a stale record naming a recycled id never refuses an unrelated
+caller, and a caller outside every seat's lineage — an operator's shell — acts
+normally while the drain runs.

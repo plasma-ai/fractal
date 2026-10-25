@@ -2,12 +2,36 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
+import time
 import typing
 from typing import Literal, Optional
 
+from fractal.exceptions import IndexLockedError
+
 __all__ = []
+
+#: git's markers of an operation left unfinished in a worktree, each mapped to
+#: what it names: a merge, cherry-pick, or revert stopped on a conflict (or a
+#: squash staged but never committed), a rebase stopped part-way, and the index
+#: lock a running git command holds and a killed one leaves behind
+OPERATION_MARKERS = {
+    'MERGE_HEAD': 'a merge in progress',
+    'SQUASH_MSG': 'a squash merge in progress',
+    'CHERRY_PICK_HEAD': 'a cherry-pick in progress',
+    'REVERT_HEAD': 'a revert in progress',
+    'rebase-merge': 'a rebase in progress',
+    'rebase-apply': 'a rebase in progress',
+    'index.lock': 'a running git process or a stale index.lock',
+}
+
+#: seconds a git write that meets another process's index.lock waits
+#: before its one retry -- a reader's refresh or a quick git command holds
+#: the lock for well under that, while one still held after it belongs to a
+#: long-running command (an editor's `git commit`) or a killed one
+INDEX_LOCK_WAIT = 2.0
 
 
 @typing.overload
@@ -16,6 +40,7 @@ def run(
     *,
     cwd: Optional[pathlib.Path] = None,
     check: Literal[True] = True,
+    lock_retry: bool = False,
 ) -> str: ...
 
 
@@ -25,6 +50,7 @@ def run(
     *,
     cwd: Optional[pathlib.Path] = None,
     check: Literal[False],
+    lock_retry: bool = False,
 ) -> Optional[str]: ...
 
 
@@ -33,6 +59,7 @@ def run(
     *,
     cwd: Optional[pathlib.Path] = None,
     check: bool = True,
+    lock_retry: bool = False,
 ) -> Optional[str]:
     """Run a git command and return stripped stdout.
 
@@ -40,6 +67,11 @@ def run(
         cmd: Git subcommand and arguments (without ``git`` prefix).
         cwd: Working directory for the command.
         check: Raise ``RuntimeError`` on non-zero exit.
+        lock_retry: Wait out another process's held ``index.lock`` once (a
+            write that stages or commits): retry after
+            :data:`INDEX_LOCK_WAIT`, and raise ``IndexLockedError`` with
+            git's message when the lock outlasts the wait, even when
+            ``check`` is ``False``.
 
     Returns:
         Stripped stdout string, or ``None`` on non-zero
@@ -58,16 +90,25 @@ def run(
             capture_output=True,
             text=True,
         )
+        # a write that meets another process's index lock waits it out once;
+        # the lock is never removed -- its holder may still be running
+        if lock_retry and index_locked(result):
+            time.sleep(INDEX_LOCK_WAIT)
+            result = subprocess.run(full_cmd, capture_output=True, text=True)
     except FileNotFoundError as e:
         if check:
             cmd_string = ' '.join(cmd)
             raise RuntimeError(f'git {cmd_string} failed: {e}') from e
         return None
     if result.returncode != 0:
-        if check:
+        # a lock that outlasts the wait fails even an unchecked write -- a
+        # write whose failure the caller tolerates must not drop paths over it
+        locked = lock_retry and index_locked(result)
+        if check or locked:
             cmd_string = ' '.join(cmd)
             error = result.stderr.strip()
-            raise RuntimeError(
+            error_type = IndexLockedError if locked else RuntimeError
+            raise error_type(
                 f'git {cmd_string} failed (exit {result.returncode}): {error!r}'
             )
         return None
@@ -108,6 +149,23 @@ def run_bytes(
     if result.returncode != 0:
         return None
     return result.stdout
+
+
+def index_locked(result: subprocess.CompletedProcess) -> bool:
+    """Return whether a git call failed on another process's held index lock.
+
+    git dies (exit 128) naming the ``index.lock`` it could not create, and
+    the lock's path reads the same in every locale.
+
+    Args:
+        result: The completed git call, its streams captured as text or
+            bytes.
+
+    Returns:
+        Whether the call failed because the lock was held.
+
+    """
+    return result.returncode == 128 and 'index.lock' in os.fsdecode(result.stderr)
 
 
 def toplevel(path: pathlib.Path, *, check: bool = True) -> Optional[pathlib.Path]:
@@ -240,3 +298,43 @@ def prunable(repo_dir: pathlib.Path) -> bool:
     cmd = ['worktree', 'list', '--porcelain']
     output = run(cmd, cwd=repo_dir, check=False)
     return any(line.startswith('prunable ') for line in (output or '').splitlines())
+
+
+def in_progress(
+    path: pathlib.Path,
+    *,
+    check: bool = True,
+) -> list[tuple[str, pathlib.Path]]:
+    """Return the git operations left unfinished in a worktree.
+
+    One ``git rev-parse --git-path`` probe resolves every marker in
+    :data:`OPERATION_MARKERS` -- a linked worktree keeps them in its own git
+    dir -- and each marker present on disk names its operation.
+
+    Args:
+        path: The worktree's top-level directory.
+        check: Raise ``RuntimeError`` on non-zero exit.
+
+    Returns:
+        Each unfinished operation's description and marker path, in
+        :data:`OPERATION_MARKERS` order, or none on non-zero exit when
+        ``check`` is ``False``.
+
+    Raises:
+        RuntimeError: If git cannot resolve the markers and ``check`` is set,
+            so a caller guarding on the answer fails closed.
+
+    """
+    cmd = ['rev-parse']
+    for marker in OPERATION_MARKERS:
+        cmd.extend(['--git-path', marker])
+    output = run(cmd, cwd=path, check=check)
+    if output is None:
+        return []
+    result = []
+    for marker, resolved in zip(OPERATION_MARKERS, output.splitlines(), strict=True):
+        # git answers relative to the worktree it ran in, else absolute
+        marker_path = path / resolved
+        if marker_path.exists():
+            result.append((OPERATION_MARKERS[marker], marker_path))
+    return result

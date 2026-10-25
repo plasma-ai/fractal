@@ -82,8 +82,9 @@ def test_config_set_rejects_immutable_key_change(node_with_db: Node) -> None:
     """Immutable keys admit their initial write but never a change.
 
     ``root`` anchors the central database for the whole tree, ``user``
-    marks node identity, and ``project`` fixes the on-disk layout the
-    .project cache mirrors -- a post-init change to any would silently
+    marks node identity, ``project`` fixes the on-disk layout the
+    .project cache mirrors, and ``wiki`` fixes the folder every commit
+    admits regardless of scope -- a post-init change to any would silently
     corrupt the tree. The initial write (and a same-value rewrite) must stay
     legal: init writes these keys through the same setter.
     """
@@ -91,7 +92,8 @@ def test_config_set_rejects_immutable_key_change(node_with_db: Node) -> None:
     # the fixture config carries 'root'; seed the other keys' initial writes
     node.config.set('user', True)
     node.config.set('project', '.')
-    for key in ('root', 'user', 'project'):
+    node.config.set('wiki', 'docs')
+    for key in ('root', 'user', 'project', 'wiki'):
         current = node.config.get(key)
         # a same-value rewrite is not a change
         node.config.set(key, current)
@@ -192,6 +194,15 @@ def test_config_set_serializes_concurrent_writers(
         ({'clone_dirs': ['../sibling/.cache']}, 'repo-relative'),
         ({'clone_dirs': ['.']}, 'must name a subdirectory'),
         ({'clone_dirs': 123}, 'list of strings'),
+        ({'wiki': ''}, 'non-empty'),
+        ({'wiki': 42}, 'non-empty'),
+        ({'wiki': '/abs/docs'}, 'project-relative'),
+        ({'wiki': 'docs/../..'}, 'project-relative'),
+        ({'wiki': '.'}, 'must name a subdirectory'),
+        ({'wiki': './docs'}, 'canonical'),
+        ({'wiki': 'docs/'}, 'canonical'),
+        ({'wiki': '.fractal'}, 'machinery'),
+        ({'wiki': 'docs/.Worktrees'}, 'machinery'),
     ],
     ids=[
         'nan_cost',
@@ -227,6 +238,15 @@ def test_config_set_serializes_concurrent_writers(
         'dotdot_clone_dir',
         'root_clone_dir',
         'non_list_clone_dirs',
+        'empty_wiki',
+        'non_string_wiki',
+        'absolute_wiki',
+        'dotdot_wiki',
+        'project_root_wiki',
+        'dot_slash_wiki',
+        'trailing_slash_wiki',
+        'fractal_wiki',
+        'worktrees_component_wiki',
     ],
 )
 def test_validate_rejects_launch_invariant_violations(
@@ -253,7 +273,9 @@ def test_validate_rejects_launch_invariant_violations(
     ``src/``) slips past the setters only by hand-edit and would read
     every change as out of scope, and a ``.`` cache dir would clone the
     entire checkout over the worktree root -- while the same ``.`` is a
-    legal scope root, naming the project itself. Only the keys present in
+    legal scope root, naming the project itself. The ``wiki`` folder is
+    committable regardless of scope, so it must be a canonical project
+    subdirectory clear of fractal's machinery. Only the keys present in
     the mapping are checked, so each case isolates one invariant.
     """
     with pytest.raises(ValueError, match=match):
