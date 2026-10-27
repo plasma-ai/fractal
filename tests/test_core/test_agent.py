@@ -603,7 +603,7 @@ def test_spawn_decodes_stdout_leniently(node_with_db: Node) -> None:
     assert any('done' in line for line in lines)
 
 
-@pytest.mark.parametrize(argnames='name', argvalues=['claude', 'codex'])
+@pytest.mark.parametrize('name', ['claude', 'codex'])
 def test_spawn_feeds_the_prompt_on_stdin(
     node_with_db: Node,
     monkeypatch: pytest.MonkeyPatch,
@@ -617,6 +617,8 @@ def test_spawn_feeds_the_prompt_on_stdin(
     block; the launch runs on a bounded daemon thread, and the ``join``
     timeout fails this test fast instead of wedging the suite.
     """
+    # stand-in output written before it reads stdin, sized past a pipe buffer
+    output_bytes = 262_144
     # a stand-in on PATH records its argv and stdin, writing its output first
     bindir = tmp_path / 'bin'
     bindir.mkdir()
@@ -626,7 +628,7 @@ def test_spawn_feeds_the_prompt_on_stdin(
     stand_in.write_text(
         '#!/usr/bin/env bash\n'
         f'printf "%s\\0" "$@" > "{argv_log}"\n'
-        'head -c 262144 /dev/zero | tr "\\0" x\n'
+        f'head -c {output_bytes} /dev/zero | tr "\\0" x\n'
         f'cat > "{stdin_log}"\n',
         encoding='utf-8',
     )
@@ -654,7 +656,7 @@ def test_spawn_feeds_the_prompt_on_stdin(
     # a blocked launch leaves the thread alive past the join -- fail fast
     assert not worker.is_alive(), 'spawn blocked: the prompt never reached the agent'
     assert captured['code'] == 0
-    assert len(captured['stdout']) == 262_144
+    assert len(captured['stdout']) == output_bytes
     # the agent's argv carries no prompt text, and its stdin carries the
     # prompt's exact bytes, encoded as an argv word would be
     assert b'PROMPT-MARKER' not in argv_log.read_bytes()

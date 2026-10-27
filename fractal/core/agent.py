@@ -248,10 +248,10 @@ class Invocation:
     # values of None mean 'pop this key from the composed spawn env'
     env: Optional[Mapping[str, Optional[str]]] = None
     session: Optional[str] = None
-    # 'fresh' | 'resume' | 'fork'
-    mode: str = 'fresh'
     # text fed on standard input (None = detached)
     stdin: Optional[str] = None
+    # 'fresh' | 'resume' | 'fork'
+    mode: str = 'fresh'
 
 
 @dataclasses.dataclass(frozen=True)
