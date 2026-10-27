@@ -229,8 +229,8 @@ class ChatTurn:
                 self._parser.baseline = None
                 yield ChatEvent(kind='error', text=f'cost baseline error: {error}')
         # launch through the seam's spawn triad (a host's _spawn override
-        # covers this surface too); the base hook wires argv/cwd/env,
-        # stdin=DEVNULL, and stdout=PIPE in text mode -- the TUI pipes stderr
+        # covers this surface too); the base hook wires argv/cwd/env, the
+        # stdin text, and stdout=PIPE in text mode -- the TUI pipes stderr
         try:
             process = self._agent.spawn(self._command, stderr=subprocess.PIPE)
         except OSError as error:

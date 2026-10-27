@@ -162,7 +162,10 @@ claude
 ~~~~~~
 
 Requires the ``claude`` binary (Claude Code CLI) installed and
-authenticated. ``claude`` runs on the user's own config home
+authenticated. Each launch runs ``claude -p`` with the prompt on standard
+input, so a process listing on the host shows the launch flags, the session
+id, and the ``--settings`` JSON, never the prompt. ``claude`` runs on the
+user's own config home
 (``~/.claude``, or ``$CLAUDE_CONFIG_DIR``) — fractal never touches its
 auth or session storage. The node's ``settings.json`` rides the
 ``--settings`` flag and outranks worktree and user settings, so per-node
@@ -202,6 +205,9 @@ codex
 ~~~~~
 
 Requires the ``codex`` binary (Codex CLI) installed and logged in. Each
+launch passes ``-`` as the prompt argument and feeds the prompt on standard
+input, so a process listing on the host shows the launch flags and the
+worktree path or thread id, never the prompt. Each
 node's ``.codex`` directory serves as its ``CODEX_HOME``, with
 ``auth.json`` symlinked to the global home (``~/.codex``, or
 ``$CODEX_HOME`` when set in the launching environment) — credentials

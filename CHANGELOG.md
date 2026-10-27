@@ -7,6 +7,17 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- A claude or codex node receives its prompt on standard input instead of as a
+  command-line argument, so a process listing on the host (`ps`) shows none of
+  it: any node that listed processes could read every running node's prompt. The
+  listing still shows the launch flags, the session or thread id, the worktree
+  path, and claude's `--settings` JSON. `Invocation` carries the prompt in its
+  new `stdin` field: a host `_spawn` override that delegates to `super()._spawn`
+  keeps working, while one that builds `Popen` itself must feed that text on the
+  process's standard input.
+
 ## [1.4.0] - 2026-10-25
 
 ### Breaking

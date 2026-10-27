@@ -238,15 +238,14 @@ printf '%s' "$SETTINGS" > "$CAPTURE_DIR/settings_$N.txt"
 printf '%s' "${STEP_TIMEOUT_SECONDS:-}" > "$CAPTURE_DIR/step_timeout_$N.txt"
 
 if [[ "$SELF" == "claude" ]]; then
-    # claude: the prompt is the positional after the '--' terminator, the
-    # per-step USD cap the value after --max-budget-usd, the reasoning
-    # effort the value after --effort (each empty when the loop passed none)
-    PROMPT=""
+    # claude: the prompt arrives on stdin, the per-step USD cap is the value
+    # after --max-budget-usd, the reasoning effort the value after --effort
+    # (each empty when the loop passed none)
+    PROMPT=$(cat)
     BUDGET=""
     EFFORT=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --) PROMPT="${2:-}"; shift 2 ;;
             --max-budget-usd) BUDGET="${2:-}"; shift 2 ;;
             --effort) EFFORT="${2:-}"; shift 2 ;;
             *) shift ;;
@@ -392,9 +391,8 @@ elif [[ "$SELF" == "opencode" ]]; then
     printf '{"type":"step_finish","timestamp":0,"sessionID":"%s","part":{"type":"step-finish","reason":"stop","cost":%s}}\\n' \
         "$SID" "${STUB_COST:-0.001}"
 else
-    # codex: codex exec ... <PROMPT> -- the prompt is the final argument
-    PROMPT=""
-    for ARG in "$@"; do PROMPT="$ARG"; done
+    # codex: codex exec ... - -- the prompt arrives on stdin
+    PROMPT=$(cat)
     printf '%s' "$PROMPT" > "$CAPTURE_DIR/prompt_$N.txt"
     # codex session weaving: exec resume <id> reuses a thread, exec -C mints
     # one; record which (for the round-trip assertion) and emit thread.started so

@@ -44,8 +44,8 @@ ABORT_REASON = 'cost budget reserve reached (spent $0.90 >= $1.00 max - $0.10 re
 _CLAUDE_STUB = """#!/usr/bin/env bash
 # test stub for claude: capture the -p prompt to a per-call file and emit a
 # stream-json result event so the loop records this step's cost
-# capture the session id (before the arg loop consumes $@) to echo in the init
-# event, like real claude -- lets the loop capture and weave the session
+# capture the session id to echo in the init event, like real claude -- lets
+# the loop capture and weave the session
 SID=""
 PREV=""
 for ARG in "$@"; do
@@ -55,13 +55,7 @@ for ARG in "$@"; do
     PREV="$ARG"
 done
 
-PROMPT=""
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --) PROMPT="${2:-}"; shift 2 ;;
-        *) shift ;;
-    esac
-done
+PROMPT=$(cat)
 
 N=$(( $(cat "$CAPTURE_DIR/counter" 2>/dev/null || echo 0) + 1 ))
 echo "$N" > "$CAPTURE_DIR/counter"

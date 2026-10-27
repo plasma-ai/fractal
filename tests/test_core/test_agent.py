@@ -14,6 +14,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import threading
 from typing import Any
 
 import pytest
@@ -52,12 +53,14 @@ __all__ = [
     'test_invocation_merges_the_env_overlay',
     'test_invocation_pops_none_valued_env_keys',
     'test_invocation_scrubs_ambient_effort_vars',
+    'test_invocation_keeps_the_prompt_off_the_command_line',
     'test_stream_records_sessions_and_costs',
     'test_stream_neutralizes_lone_surrogates',
     'test_stream_detached_skips_the_session_map',
     'test_stream_fails_on_error_frames_after_draining',
     'test_stream_reports_a_budget_stop',
     'test_spawn_decodes_stdout_leniently',
+    'test_spawn_feeds_the_prompt_on_stdin',
     'test_record_cost_settles_thread_scope_cumulative_totals',
     'test_record_cost_clamps_a_negative_call_scope_figure',
     'test_settle_cost_books_the_launch_figure_whatever_the_scope',
@@ -394,6 +397,39 @@ def test_invocation_scrubs_ambient_effort_vars(
     assert bare.env['AMBIENT'] == 'inherited'
 
 
+@pytest.mark.parametrize(
+    argnames=('name', 'kwargs'),
+    argvalues=[
+        pytest.param('claude', {}, id='claude-fresh'),
+        pytest.param('claude', {'session': 'past-1'}, id='claude-resume'),
+        pytest.param('claude', {'session': 'past-1', 'fork': True}, id='claude-fork'),
+        pytest.param('codex', {}, id='codex-fresh'),
+        pytest.param('codex', {'session': 'thr-1'}, id='codex-resume'),
+    ],
+)
+@pytest.mark.parametrize(
+    argnames='prompt',
+    argvalues=[
+        pytest.param('Summarize the PROMPT-MARKER notes.', id='plain'),
+        pytest.param('--continue with the PROMPT-MARKER notes', id='dash-leading'),
+    ],
+)
+def test_invocation_keeps_the_prompt_off_the_command_line(
+    node_with_db: Node,
+    name: str,
+    kwargs: dict[str, Any],
+    prompt: str,
+) -> None:
+    """The prompt rides the invocation's stdin, never an argv word.
+
+    A process's argv is readable by anything that lists processes, so a
+    prompt in argv would let any node read every running node's prompt.
+    """
+    invocation = node_with_db.agent(name).invocation(prompt, **kwargs)
+    assert not [word for word in invocation.argv if 'PROMPT-MARKER' in word]
+    assert invocation.stdin == prompt
+
+
 def test_stream_records_sessions_and_costs(node_with_db: Node) -> None:
     """The driver stamps the session, flushes each figure, renders all."""
     node = node_with_db
@@ -565,6 +601,64 @@ def test_spawn_decodes_stdout_leniently(node_with_db: Node) -> None:
     process.wait(timeout=30)
     assert any('\ufffd' in line for line in lines)
     assert any('done' in line for line in lines)
+
+
+@pytest.mark.parametrize(argnames='name', argvalues=['claude', 'codex'])
+def test_spawn_feeds_the_prompt_on_stdin(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    name: str,
+) -> None:
+    """A spawned agent reads its whole prompt on stdin, with none in its argv.
+
+    The stand-in writes past a pipe buffer before it reads its stdin, so a
+    launch that pushed the prompt through a pipe before returning would
+    block; the launch runs on a bounded daemon thread, and the ``join``
+    timeout fails this test fast instead of wedging the suite.
+    """
+    # a stand-in on PATH records its argv and stdin, writing its output first
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    argv_log = tmp_path / 'argv'
+    stdin_log = tmp_path / 'stdin'
+    stand_in = bindir / name
+    stand_in.write_text(
+        '#!/usr/bin/env bash\n'
+        f'printf "%s\\0" "$@" > "{argv_log}"\n'
+        'head -c 262144 /dev/zero | tr "\\0" x\n'
+        f'cat > "{stdin_log}"\n',
+        encoding='utf-8',
+    )
+    stand_in.chmod(0o755)
+    monkeypatch.setenv('PATH', f'{bindir}{os.pathsep}{os.environ["PATH"]}')
+    # a few hundred KiB, dash-leading, non-ASCII, and ending on a lone
+    # surrogate (a terminal byte that does not decode as utf-8)
+    prompt = (
+        '--continue looks right\n'
+        + 'na\u00efve caf\u00e9 PROMPT-MARKER\n' * 12_000
+        + '\udcff'
+    )
+    backend = node_with_db.agent(name)
+    invocation = backend.invocation(prompt)
+    captured: dict[str, Any] = {}
+
+    def launch() -> None:
+        process = backend.spawn(invocation)
+        captured['stdout'] = process.stdout.read()
+        captured['code'] = process.wait()
+
+    worker = threading.Thread(target=launch, daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+    # a blocked launch leaves the thread alive past the join -- fail fast
+    assert not worker.is_alive(), 'spawn blocked: the prompt never reached the agent'
+    assert captured['code'] == 0
+    assert len(captured['stdout']) == 262_144
+    # the agent's argv carries no prompt text, and its stdin carries the
+    # prompt's exact bytes, encoded as an argv word would be
+    assert b'PROMPT-MARKER' not in argv_log.read_bytes()
+    assert stdin_log.read_bytes() == prompt.encode('utf-8', 'surrogateescape')
 
 
 def test_record_cost_settles_thread_scope_cumulative_totals(

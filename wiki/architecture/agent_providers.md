@@ -5,7 +5,7 @@ desc: |
   provider name registry, and how the backend modules for claude, codex,
   grok, opencode, and omp slot in.
 created: 2026-07-21T04:47:26Z
-updated: 2026-07-21T04:47:26Z
+updated: 2026-10-27T18:23:53Z
 ---
 
 # architecture/agent_providers
@@ -29,9 +29,12 @@ owns:
 
 - **Invocation building.** A composed invocation is pure serializable data: the
   base command's argv words, the working directory (the node's worktree), an
-  environment overlay, an optional caller-minted session id, and the mode the
-  launch reaches that session in (fresh, resume, or fork), which tells a
-  consumer whether it continues the session's spend. Backends contribute only
+  environment overlay, an optional caller-minted session id, the mode the launch
+  reaches that session in (fresh, resume, or fork), which tells a consumer
+  whether it continues the session's spend, and the text the launch feeds the
+  process on standard input. Claude and codex put their prompt in that text,
+  since a process's argv is readable by anything that lists the host's
+  processes; grok, opencode, and omp pass it in argv. Backends contribute only
   their reserved provider keys to the environment; the public verb composes the
   full subprocess environment, and a reserved key valued as unset scrubs routing
   variables inherited from an ancestor's provider route. The verb always unsets

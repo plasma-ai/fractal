@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import importlib
@@ -12,10 +13,11 @@ import pathlib
 import re
 import shutil
 import subprocess
+import tempfile
 import typing
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, Optional, Union
+from typing import IO, Any, Optional, Union
 
 from fractal.exceptions import AbstractMethodError, AgentStreamError
 
@@ -232,8 +234,10 @@ class Invocation:
     the launch reaches ``session``: ``'fresh'`` starts it, while
     ``'resume'`` and ``'fork'`` continue its history, and with it any
     spend the provider counts its result figure on from
-    (``Agent.cost_baseline``). Pure serializable data: a host can ship it
-    to any executor.
+    (``Agent.cost_baseline``). ``stdin`` is the text the launch feeds the
+    process on standard input (a backend that reads its prompt there keeps
+    it off the process command line), and ``None`` detaches stdin. Pure
+    serializable data: a host can ship it to any executor.
     """
 
     # base command name (DB/session-map key)
@@ -246,6 +250,8 @@ class Invocation:
     session: Optional[str] = None
     # 'fresh' | 'resume' | 'fork'
     mode: str = 'fresh'
+    # text fed on standard input (None = detached)
+    stdin: Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -568,7 +574,9 @@ class Agent:
         owns minting (uuid4; already lowercase).
 
         Args:
-            prompt: The prompt text (the subprocess's only input).
+            prompt: The prompt text, the subprocess's only input (the
+                backend passes it as the invocation's ``stdin`` text or
+                in argv).
             session: Session to resume or fork; ``None`` starts fresh.
             fork: Fork ``session`` instead of resuming it in place.
             model: Model override for this invocation.
@@ -678,11 +686,17 @@ class Agent:
         public verb; ``session`` is the minted or supplied id (``None``
         only when the agent mints its own).
 
-        Override in a backend to build the provider command::
+        Override in a backend to build the provider command, with the
+        prompt riding stdin so it stays off the process command line::
 
             def _invocation(self, prompt, *, mode, session, model, effort, budget):
-                argv = (*self.parts, '-p', prompt, '--resume', session)
-                return Invocation(agent=self.name, argv=argv, cwd=self.node.worktree)
+                argv = (*self.parts, '-p', '--resume', session)
+                return Invocation(
+                    agent=self.name,
+                    argv=argv,
+                    cwd=self.node.worktree,
+                    stdin=prompt,
+                )
         """
         raise AbstractMethodError(self)
 
@@ -712,13 +726,14 @@ class Agent:
         """Hook for process creation.
 
         Default: ``subprocess.Popen`` with the invocation's
-        argv/cwd/env, ``stdin=DEVNULL`` (the prompt is the only input
-        channel), and ``stdout=PIPE`` in text mode for ``stream``.
+        argv/cwd/env, its ``stdin`` text on standard input (``DEVNULL``
+        when ``None``), and ``stdout=PIPE`` in text mode for ``stream``.
 
         A backend may bind per-process accounting here (codex captures its
         rollout window around the launch), so a host override rewrites the
         invocation and delegates to ``super()._spawn`` rather than calling
-        ``Popen`` itself. Override in a host to redirect execution::
+        ``Popen`` itself (an override that does must feed the ``stdin``
+        text). Override in a host to redirect execution::
 
             def _spawn(self, invocation, **kwargs):
                 wrapped = dataclasses.replace(
@@ -727,21 +742,35 @@ class Agent:
                 )
                 return super()._spawn(wrapped, **kwargs)
         """
-        return subprocess.Popen(
-            invocation.argv,
-            cwd=invocation.cwd,
-            # a spawned invocation is composed, so its env holds no None
-            # values (the pre-compose Mapping type is wider than Popen's)
-            env=invocation.env,  # type: ignore[arg-type]
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            text=True,
-            # agent output is parsed/logged, not trusted: a non-UTF-8 byte must
-            # decode leniently, not crash the stream reader (the parser already
-            # tolerates wire noise)
-            errors='replace',
-            **kwargs,
-        )
+        # feed the stdin text from an unlinked temporary file, never a pipe:
+        # claude gives up on a stdin with no data within 3s, and a file holds
+        # the whole text at exec, with no writer to schedule or to block on a
+        # full pipe while the child writes its stdout first; the parent's
+        # handle closes once Popen returns (the child holds its own)
+        with contextlib.ExitStack() as stack:
+            feed: Union[int, IO[bytes]] = subprocess.DEVNULL
+            if invocation.stdin is not None:
+                feed = stack.enter_context(tempfile.TemporaryFile())
+                # utf-8 with surrogateescape, as an argv word encodes, so the
+                # agent reads the bytes a command-line prompt would carry
+                feed.write(invocation.stdin.encode('utf-8', 'surrogateescape'))
+                feed.flush()
+                feed.seek(0)
+            return subprocess.Popen(
+                invocation.argv,
+                cwd=invocation.cwd,
+                # a spawned invocation is composed, so its env holds no None
+                # values (the pre-compose Mapping type is wider than Popen's)
+                env=invocation.env,  # type: ignore[arg-type]
+                stdin=feed,
+                stdout=subprocess.PIPE,
+                text=True,
+                # agent output is parsed/logged, not trusted: a non-UTF-8 byte must
+                # decode leniently, not crash the stream reader (the parser already
+                # tolerates wire noise)
+                errors='replace',
+                **kwargs,
+            )
 
     def parser(self: Agent, *, model: Optional[str] = None) -> StreamParser:
         """Return a fresh stream parser (constructed from ``__parser__``)."""

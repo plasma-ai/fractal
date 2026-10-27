@@ -78,10 +78,9 @@ def test_chat_streams_and_returns_the_captured_session(
 
     result = node.chat('hello', render=StreamRenderer())
 
-    # the real backend invocation was spawned, stdin detached (the prompt,
-    # an argument, is the only input channel)
+    # the real backend invocation was spawned, its stdin carrying the prompt
     assert captured['argv'][0] == agent
-    assert captured['stdin'] == subprocess.DEVNULL
+    assert captured['stdin'].endswith('hello')
     # the resulting session id is captured from the stream
     assert result == expected
 
@@ -209,7 +208,7 @@ def test_chat_seeds_prompt_docs_per_fresh_fork_and_resume(
 
     node.chat('the user question', **kwargs)
 
-    prompt = captured['argv'][captured['argv'].index('--') + 1]
+    prompt = captured['stdin']
     assert ('NODE_CHARTER_MARKER' in prompt) is has_node
     # 'Chat Mode' is the heading of the package CHAT.md (seeded from there now)
     assert ('Chat Mode' in prompt) is has_chat
@@ -410,7 +409,8 @@ def _patch_popen(
         captured['argv'] = list(argv)
         captured['cwd'] = kwargs.get('cwd')
         captured['env'] = kwargs.get('env')
-        captured['stdin'] = kwargs.get('stdin')
+        # read the prompt file here: the spawn closes it once Popen returns
+        captured['stdin'] = kwargs['stdin'].read().decode('utf-8')
         return _FakeProc(stdout_text, returncode)
 
     monkeypatch.setattr(subprocess, 'Popen', fake_popen)

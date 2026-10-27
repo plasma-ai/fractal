@@ -462,11 +462,12 @@ class CodexAgent(Agent):
         # the -c override outranks the config.toml default
         if effort:
             argv += ['-c', f'model_reasoning_effort="{effort}"']
-        # a '--' sentinel ends option parsing (codex exec uses clap), so a
-        # message whose first char is '-' ('-1 on that', '--continue looks
-        # right') is the message, never mistaken for a flag that fails the run
-        # or silently flips a boolean option
-        argv += ['--', prompt]
+        # a '-' prompt reads the prompt from stdin (exec resume reads stdin
+        # only for an explicit '-'), so it never shows on the process command
+        # line, and a message whose first char is '-' ('-1 on that',
+        # '--continue looks right') is never mistaken for a flag that fails
+        # the run or silently flips a boolean option
+        argv += ['-']
         # run in the worktree (the project): CODEX_HOME supplies
         # config/auth/skills, so the cwd is the project not the node dir; the
         # env carries only the reserved CODEX_HOME; invocation() composes it
@@ -478,6 +479,7 @@ class CodexAgent(Agent):
             cwd=self.node.worktree,
             env=env,
             session=session,
+            stdin=prompt,
         )
 
     def _config_model(self: CodexAgent) -> Optional[str]:
