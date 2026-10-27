@@ -586,11 +586,6 @@ class ClaudeAgent(Agent):
         # carries them composed with the instruction excludes as JSON, so the
         # node's file on disk stays as its author wrote it
         argv += ['--settings', json.dumps(self._settings())]
-        # a '--' sentinel ends option parsing (claude's CLI uses commander),
-        # so a message whose first char is '-' ('-1 on that', '--continue
-        # looks right') is the message, never mistaken for a flag that fails
-        # the run or silently flips a boolean option
-        argv += ['--', prompt]
         # route through openrouter: the vendor env vars redirect the CLI at
         # its anthropic seam -- the base url has no /v1 (claude appends
         # /v1/messages), the key rides the bearer token, and the api key must
@@ -626,13 +621,18 @@ class ClaudeAgent(Agent):
             # env never silently reroutes a native descendant through the
             # gateway; the rest of the user's environment passes untouched
             env = dict.fromkeys(_ROUTING_KEYS)
-        # the worktree is the cwd (the session slug loop forks resolve under)
+        # the worktree is the cwd (the session slug loop forks resolve under);
+        # -p with no prompt argument reads the prompt from stdin, so it never
+        # shows on the process command line, and a message whose first char
+        # is '-' ('-1 on that', '--continue looks right') is never mistaken
+        # for a flag that fails the run or silently flips a boolean option
         return Invocation(
             agent=self.name,
             argv=tuple(argv),
             cwd=self.node.worktree,
             env=env,
             session=session,
+            stdin=prompt,
         )
 
     def _settings(self: ClaudeAgent) -> dict[str, Any]:

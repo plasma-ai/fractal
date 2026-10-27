@@ -879,7 +879,7 @@ async def test_interrupt_dispatches_several_queued_sends_as_one_turn(
             'third',
         ]
     # the combined turn's invocation carries both prompts, oldest first
-    assert any('second\n\nthird' in part for part in commands[-1].argv)
+    assert 'second\n\nthird' in commands[-1].stdin
 
 
 async def test_broken_deployment_hook_errors_the_turn_not_the_app(

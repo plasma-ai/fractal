@@ -1276,9 +1276,9 @@ def test_invocation_modes_build_the_pinned_argv_claude(
         '--include-partial-messages',
         '--verbose',
     )
-    # the prompt closes the argv behind the '--' sentinel, so a dash-leading
-    # message is the message, never parsed as a flag
-    assert argv[-2:] == ('--', 'hello')
+    # the prompt rides stdin, so the argv ends on the settings JSON
+    assert argv[-2] == '--settings'
+    assert invocation.stdin == 'hello'
     for token in expect:
         assert token in argv
     for token in absent:

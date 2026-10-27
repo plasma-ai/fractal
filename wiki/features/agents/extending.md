@@ -5,7 +5,7 @@ desc: |
   agent subclass declares its capabilities and overrides the private hooks,
   registered in the core agent module or injected from outside the package.
 created: 2026-07-21T05:04:16Z
-updated: 2026-07-21T05:04:16Z
+updated: 2026-10-27T18:23:53Z
 ---
 
 # features/agents/extending
@@ -32,14 +32,20 @@ delegates to its private hook, which the subclass implements:
   session, spelling the model, effort, and budget overrides in the provider's
   dialect and returning any provider-specific environment keys (a key valued
   `None` means *unset* — that is how a native route scrubs an ancestor route's
-  keys from the composed spawn environment);
+  keys from the composed spawn environment), and setting the prompt as the
+  invocation's standard-input text for a provider that reads it there, which
+  keeps it off the process command line;
 - the parser is a stream-parser subclass fed the subprocess's output line by
   line, emitting typed stream events (session, cost, actions); a backend may
   swap parsers per route;
-- the spawn hook creates the process; a backend may bind per-process accounting
-  there (codex captures its rollout window around the launch), so a host
-  override rewrites the invocation and delegates to the base hook rather than
-  calling `Popen` itself;
+- the spawn hook creates the process, feeding the invocation's standard-input
+  text from an unlinked temporary file, never a pipe: claude gives up on a
+  standard input that has no data within three seconds, and a file holds the
+  whole text at exec, with no writer to schedule or to block on a full pipe; a
+  backend may bind per-process accounting there (codex captures its rollout
+  window around the launch), so a host override rewrites the invocation and
+  delegates to the base hook rather than calling `Popen` itself, and one that
+  does call it must feed that text;
 - the stream finalization hook receives the drained parser and the exited
   process; `Agent.stream(..., process=process)` drives it, and a consumer
   feeding a parser directly (the TUI) calls

@@ -1751,13 +1751,14 @@ def test_invocation_modes_build_the_pinned_argv_codex(node_with_db: Node) -> Non
     worktree = str(node.worktree)
     # fresh threads anchor the worktree with -C; codex mints the id itself
     fresh = backend.invocation('hi')
-    assert fresh.argv == ('codex', 'exec', '-C', worktree, '--json', '--', 'hi')
+    assert fresh.argv == ('codex', 'exec', '-C', worktree, '--json', '-')
+    assert fresh.stdin == 'hi'
     assert fresh.session is None
     # exec resume takes no -C -- the shell cwd carries the worktree
     resume = backend.invocation('hi', session='thr-7')
-    assert resume.argv == ('codex', 'exec', 'resume', 'thr-7', '--json', '--', 'hi')
+    assert resume.argv == ('codex', 'exec', 'resume', 'thr-7', '--json', '-')
     assert resume.session == 'thr-7'
-    # the model rides -m, and the prompt stays the final positional
+    # the model rides -m, and the stdin prompt '-' stays the final positional
     priced = backend.invocation('hi', model='gpt-5-codex')
     assert priced.argv == (
         'codex',
@@ -1767,12 +1768,12 @@ def test_invocation_modes_build_the_pinned_argv_codex(node_with_db: Node) -> Non
         '--json',
         '-m',
         'gpt-5-codex',
-        '--',
-        'hi',
+        '-',
     )
-    # a dash-leading message is protected by the sentinel, not parsed as a flag
+    # a dash-leading message rides stdin, never parsed as a flag
     dashed = backend.invocation('-1 on that idea')
-    assert dashed.argv[-2:] == ('--', '-1 on that idea')
+    assert dashed.argv[-1] == '-'
+    assert dashed.stdin == '-1 on that idea'
     # codex runs in the worktree over the FULL environment plus CODEX_HOME
     assert fresh.cwd == node.worktree
     assert fresh.env['CODEX_HOME'] == str(node.node_dir / '.codex')
@@ -2194,7 +2195,8 @@ def test_preflight_probes_model_acceptance(
     ((invocation, probe),) = probes
     assert 'exec' in invocation.argv
     assert invocation.argv[invocation.argv.index('-m') + 1] == 'gpt-5-codex'
-    assert invocation.argv[-1] == 'reply with: ok'
+    assert invocation.argv[-1] == '-'
+    assert invocation.stdin == 'reply with: ok'
     assert probe.returncode == 0, invocation.argv
     # a rejection relays codex's own message, leading with the short reason
     # the loop persists, then the neutral cause list

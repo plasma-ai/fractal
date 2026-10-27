@@ -560,8 +560,8 @@ class ScriptedClaude(ClaudeAgent):
 
     Each launch runs the next script in place of ``claude`` (``SID`` in it
     becomes the launch's session), in the production spawn shape: its own
-    process group, a text stdout pipe; its argv and the env it was handed
-    are kept. Each launch first opens the session's transcript, as claude
+    process group, a text stdout pipe; its argv, prompt, and env are kept.
+    Each launch first opens the session's transcript, as claude
     does, and appends its next batch of ``transcripts`` entries to it, or
     to a sub-agent's own transcript beside it for an entry naming one
     (``subagent``), stamped at the spawn unless an entry carries its own
@@ -580,6 +580,7 @@ class ScriptedClaude(ClaudeAgent):
         self.scripts = list(scripts)
         self.transcripts = list(transcripts or [])
         self.argvs: list[tuple[str, ...]] = []
+        self.prompts: list[str] = []
         self.envs: list[dict[str, Optional[str]]] = []
         self.spawned: list[subprocess.Popen] = []
         self.flushed: list[tuple[float, bool]] = []
@@ -593,8 +594,9 @@ class ScriptedClaude(ClaudeAgent):
         invocation: Any,
         **kwargs: Any,
     ) -> subprocess.Popen:
-        """Run the next script, recording the launch's argv and env."""
+        """Run the next script, recording the launch's argv, prompt, and env."""
         self.argvs.append(invocation.argv)
+        self.prompts.append(invocation.stdin)
         self.envs.append(dict(invocation.env or {}))
         batch = self.transcripts.pop(0) if self.transcripts else []
         if batch is not None:
@@ -1382,7 +1384,7 @@ def test_midrun_limit_edits_reach_the_next_step_env(
     EditingLoop(loop_node, agent).run()
     first, argv = agent.argvs
     boot, env = agent.envs
-    prompt = argv[-1]
+    prompt = agent.prompts[-1]
     # the boot launch carried the boot limits, an unset cap as -1
     assert boot['MAX_CHILDREN'] == '4'
     assert boot['MAX_DEPTH'] == '-1'
@@ -2298,7 +2300,7 @@ def test_no_progress_steers_then_stalls_without_retry(
     first, steer = agent.argvs
     session = first[first.index('--session-id') + 1]
     assert steer[steer.index('--resume') + 1] == session
-    assert 'went too long without an action' in steer[-1]
+    assert 'went too long without an action' in agent.prompts[1]
     assert all(process.poll() is not None for process in agent.spawned)
     assert _step_rows(loop_node) == [
         'PLAN/stopped/steered: no action for 1s; unpriced',
@@ -2413,7 +2415,7 @@ def test_a_cap_on_a_sessionless_stream_steers_the_launchs_own_session(
     first, steer, _ = agent.argvs
     session = first[first.index('--session-id') + 1]
     assert steer[steer.index('--resume') + 1] == session
-    assert 'ran out of room while still thinking' in steer[-1]
+    assert 'ran out of room while still thinking' in agent.prompts[1]
 
 
 @pytest.mark.parametrize(
