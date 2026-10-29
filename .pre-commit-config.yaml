@@ -7,7 +7,7 @@ repos:
         name: reject forbidden file patterns
         entry: reject
         language: fail
-        files: \.rej$
+        files: \.(orig|rej)$
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:

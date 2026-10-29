@@ -20,6 +20,7 @@ _RESET = '\033[0m'
 def cli(**kwargs: Any) -> None:
     """Run the ``fractal`` CLI."""
     # construct app
+    kwargs.setdefault('rich_markup_mode', None)
     kwargs.setdefault('pretty_exceptions_enable', False)
     app = typer.Typer(name='fractal', **kwargs)
     # version callback

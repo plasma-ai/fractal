@@ -87,19 +87,22 @@ def install(app: typer.Typer) -> typer.Typer:
         (.agents/skills) skill directories. Targets your home directory by
         default, or the current project with --project. The wiki skill ships
         with fractal's plasma-wiki dependency and is installed alongside it.
-        --link symlinks the skills instead of copying -- the editable-install
-        dev setup, where source edits apply without re-installing.
+        --link symlinks the skills instead of copying them, for an editable
+        install, where source edits apply without re-installing.
         """
         # resolve install directory
         if project:
             root = pathlib.Path.cwd()
         else:
             root = pathlib.Path.home()
-        # resolve agent skill directories
+        # resolve agent skill directories through any links, so a folder
+        # linked to the other, or to a shared one, is installed once and
+        # reported where the skill lands
         targets = [
-            root / '.claude' / 'skills',
-            root / '.agents' / 'skills',
+            (root / '.claude' / 'skills').resolve(),
+            (root / '.agents' / 'skills').resolve(),
         ]
+        targets = list(dict.fromkeys(targets))
         # collect skills
         skills = _bundled_skills()
         # a symlink needs a real directory to point at; only an on-disk
