@@ -626,8 +626,10 @@ USD) bound spend:
      - 10% of ``max_cost``
      - The cleanup buffer below the ceiling. Once remaining budget drains
        into the reserve, steps run in reserve mode and the run ends at
-       the iteration boundary. USD, or ``N%`` of ``max_cost`` at init;
-       must be under 99% of ``max_cost``.
+       the first iteration boundary after an iteration that ran in
+       reserve mode, so a crossing in an iteration's last step buys one
+       wind-down iteration. USD, or ``N%`` of ``max_cost`` at init; must
+       be under 99% of ``max_cost``.
 
 Caps must be positive and ordered ``max_step_cost <= max_iter_cost <=
 max_cost``.
@@ -661,8 +663,15 @@ Reserve mode is entered per-iteration when the iteration cap is spent, when
 the run's remaining budget drains to the reserve, or when an ancestor's
 budget abort has cascaded a finish down to this node. It sets
 ``RESERVE_MODE=true`` so the packaged wind-down instructions join every
-prompt, and it skips approval gates. At the iteration boundary the loop then
-ends the run; a mid-iteration check also stops queuing steps once the subtree
+prompt, and it skips approval gates. Once spend is in the reserve, the loop
+ends the run at the first iteration boundary after an iteration that ran a
+step in reserve mode. Spend that crosses into the reserve during an
+iteration's last step leaves no step to run in reserve, so the run gets one
+more iteration, entirely in reserve mode and without the ``sleep`` or
+``interval`` wait, and ends at its boundary. The boundary ends the run at once
+instead when spend has reached ``max_cost`` itself, or when no further
+iteration can start (``max_iters`` reached, the run timeout spent, or a stop
+pending). A mid-iteration check also stops queuing steps once the subtree
 ceiling itself is crossed, and the steps it cuts off are never launched and
 leave no row.
 

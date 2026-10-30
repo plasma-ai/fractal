@@ -22,6 +22,11 @@ may include breaking changes, each listed under a Breaking heading.
   it: any node that listed processes could read every running node's prompt. The
   listing still shows the launch flags, the session or thread id, the worktree
   path, and claude's `--settings` JSON.
+- A run whose spend crosses into its `reserve_budget` during an iteration's last
+  step runs one more iteration, entirely in reserve mode and without the `sleep`
+  or `interval` wait, before it ends: the run ended at that iteration's boundary
+  with no step having run the wind-down instructions. It still ends at once when
+  spend has reached `max_cost` or no further iteration can start.
 
 ## [1.4.0] - 2026-10-25
 

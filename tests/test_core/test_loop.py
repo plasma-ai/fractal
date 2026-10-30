@@ -169,6 +169,8 @@ __all__ = [
     'test_step_budget_reserve_window_floors_at_remaining',
     'test_no_budget_margin_for_unseen_spend',
     'test_boundary_checks_read_live_caps',
+    'test_reserve_boundary_defers_the_end_once_for_a_winddown',
+    'test_reserve_winddown_iteration_starts_without_the_pacing_sleep',
     'test_unpriced_spend_under_caps_warns_once',
     'test_priced_first_step_never_reads_as_untracked',
     'test_failed_cost_reads_hold_the_last_good_reading',
@@ -5540,6 +5542,102 @@ def test_boundary_checks_read_live_caps(loop_node: Node) -> None:
 
 
 @pytest.mark.parametrize(
+    argnames=('spent', 'state', 'defers'),
+    argvalues=[
+        # the iteration's last step crossed the line, so no step ran in
+        # reserve: the end defers to one wind-down iteration
+        pytest.param(9.5, None, True, id='last-step-crossing'),
+        # a step ran in reserve: the iteration was the wind-down
+        pytest.param(9.5, 'wound-down', False, id='wound-down'),
+        # spend at the ceiling leaves nothing to wind down with
+        pytest.param(10.0, None, False, id='ceiling'),
+        # no next iteration can start, so a deferral would trade the budget
+        # landing for a max-iters, timeout, or stop ending
+        pytest.param(9.5, 'final-iteration', False, id='final-iteration'),
+        pytest.param(9.5, 'deadline-spent', False, id='deadline-spent'),
+        pytest.param(9.5, 'stop-pending', False, id='stop-pending'),
+    ],
+)
+def test_reserve_boundary_defers_the_end_once_for_a_winddown(
+    loop_node: Node,
+    spent: float,
+    state: Optional[str],
+    defers: bool,
+) -> None:
+    """A reserve boundary no reserve step preceded defers the run's end once.
+
+    The run ends at the first boundary after an iteration that ran a step
+    in reserve mode. One whose last step crossed into the reserve ran
+    none, so the boundary leaves the run going for one wind-down
+    iteration -- never at the ceiling, never when no next iteration can
+    start, and never twice in a run: the boundary after the wind-down
+    ends the run whatever ran.
+    """
+    node = loop_node
+    _configure(node, max_iters=3, max_cost=10.0, reserve_budget=1.0)
+    loop = MockLoop(node)
+    loop._run_id = node.record.run_start()
+    loop._iter = 3 if state == 'final-iteration' else 1
+    loop._reserve_launched = state == 'wound-down'
+    if state == 'deadline-spent':
+        loop._run_end_epoch = int(time.time()) - 1
+    if state == 'stop-pending':
+        node.record.signal_set('stop', 'operator')
+    _record_step_cost(node, run_id=loop._run_id, cost=spent)
+    assert loop._check_reserve_boundary() is not defers
+    if defers:
+        # the deferral is spent: the next boundary ends the run though no
+        # step ran in reserve again
+        assert loop._check_reserve_boundary() is True
+
+
+def test_reserve_winddown_iteration_starts_without_the_pacing_sleep(
+    loop_node: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crossing in the iteration's last step buys one wind-down iteration at once.
+
+    No step of the crossing iteration ran in reserve, so the boundary
+    defers the run's end and the next iteration starts without the
+    pacing sleep -- a wait would let the run deadline or a stop end the
+    run on another reason first. Its every step runs in reserve, and the
+    boundary after it lands the run on the budget.
+    """
+    monkeypatch.setenv('_NODE', '')
+    node = loop_node
+    _configure(node, max_iters=3, max_cost=10.0, reserve_budget=1.0, sleep='1h')
+    slept: list[float] = []
+    monkeypatch.setattr(time, 'sleep', slept.append)
+    # the iteration's second step carries spend to the $9.00 reserve line
+    costs = iter([4.5, 4.5, 0.1, 0.1])
+
+    class _SpendingLoop(MockLoop):
+        """Mock loop whose every launch books the next scripted cost."""
+
+        def __init__(self: _SpendingLoop, node: Node, **kwargs: Any) -> None:
+            """Initialize ``_SpendingLoop``."""
+            super().__init__(node, **kwargs)
+            self.prompts: list[str] = []
+
+        def _launch(
+            self: _SpendingLoop, step: Step, prompt: str, **kwargs: Any
+        ) -> StepResult:
+            """Record the prompt, then price the step."""
+            self.prompts.append(prompt)
+            self.node.record.step_cost(step_id=self._step_id, cost=next(costs))
+            return super()._launch(step, prompt, **kwargs)
+
+    loop = _SpendingLoop(node)
+    assert loop.run() == 0
+    marker_flags = ['Reserve Mode' in prompt for prompt in loop.prompts]
+    assert marker_flags == [False, False, True, True]
+    assert slept == []
+    row = node.db.read('runs', where={'run_id': loop._run_id})[0]
+    assert (row['status'], row['exit_code']) == ('exited', 0)
+    assert row['metadata'].startswith('cost budget reserve reached (spent $9.2000')
+
+
+@pytest.mark.parametrize(
     argnames=('priced_costs', 'warning'),
     argvalues=[
         # every step NULL: the whole run's spend is untracked
@@ -5662,8 +5760,10 @@ def test_failed_cost_reads_hold_the_last_good_reading(
     # the leash holds the residual readings, not the full caps
     assert loop._step_budget() == pytest.approx(0.3)
     assert 'WARNING: cost read failed' in capsys.readouterr().out
-    # the reserve boundary still trips on the last good spend, and the
-    # attribution stays honest -- no unpriced-steps (untracked) blame
+    # the reserve boundary after a wind-down iteration still trips on the
+    # last good spend, and the attribution stays honest -- no unpriced-steps
+    # (untracked) blame
+    loop._reserve_launched = True
     assert loop._check_reserve_boundary() is True
     assert 'untracked' not in capsys.readouterr().out
 

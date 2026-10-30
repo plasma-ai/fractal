@@ -2049,39 +2049,64 @@ def test_subtree_cost_ceiling_finishes_the_run(repo: dict) -> None:
     assert run == 'exited/0', (run, result.stdout)
 
 
-def test_total_cost_reserve_ends_run_after_one_winddown(repo: dict) -> None:
+@pytest.mark.parametrize(
+    argnames=('crossing', 'stub_cost', 'max_iters', 'reserved_prompts'),
+    argvalues=[
+        # step 1 ($0.40) crosses the $0.30 line: step 2 winds down, and the
+        # boundary after it ends the run
+        ('earlier', '0.4', 3, [False, True]),
+        # step 2 crosses it ($0.20 + $0.20): no step ran in reserve, so one
+        # more iteration winds down whole and the boundary after it ends the run
+        ('last', '0.2', 3, [False, False, True, True]),
+        # the same crossing on the run's final iteration: none can follow, so
+        # the boundary ends the run at once
+        ('final', '0.2', 1, [False, False]),
+    ],
+    ids=['earlier_step', 'last_step', 'last_step_of_final_iteration'],
+)
+def test_total_cost_reserve_ends_run_after_one_winddown(
+    repo: dict,
+    crossing: str,
+    stub_cost: str,
+    max_iters: int,
+    reserved_prompts: list[bool],
+) -> None:
     """Entering total-cost reserve ends the run after one wind-down iteration.
 
     The reserve carves a buffer below ``--max-cost`` for a cheap cleanup pass;
     once a node drains into it the loop must not keep starting fresh iterations --
-    each re-entering reserve -- until the hard ceiling. With ``--max-cost 1.0``, a
-    $0.70 reserve, and a $0.40/step agent over two steps: step 1 runs un-steered
-    ($1.00 remaining > the reserve), step 2 is steered into RESERVE ($0.60
-    remaining <= $0.70), and the iteration ends with $0.20 remaining -- inside the
-    reserve yet with spend ($0.80) still below the $1.00 ceiling. So the boundary
-    ends the run before a second iteration despite ``--max-iters 2``; the hard
-    ceiling never trips (the reserve, not the cap or max-iters, ended it), and the
-    budget landing is recorded ``exited``/0.
+    each re-entering reserve -- until the hard ceiling, nor end the run before a
+    step has wound down. With ``--max-cost 1.0`` and a $0.70 reserve, spend enters
+    the reserve at $0.30. A crossing in step 1 steers step 2 into RESERVE, and the
+    boundary ends the run after that iteration. A crossing in step 2, the
+    iteration's last, leaves no step to wind down, so the next iteration runs in
+    RESERVE whole before the boundary ends the run -- unless ``--max-iters``
+    leaves no next iteration, when the boundary ends the run at once. Spend stays
+    below the $1.00 ceiling, so the hard ceiling never trips (the reserve, not the
+    cap or max-iters, ended it), and the budget landing is recorded ``exited``/0.
     """
+    name = f'reserve_{crossing}'
     node = _make_node(
         repo=repo,
-        name='reserve',
+        name=name,
         detached=False,
         sync=False,
-        max_iters=2,
+        max_iters=max_iters,
         max_cost=1.0,
     )
     worktree = node['worktree']
-    # carve a wide reserve so step 2 enters RESERVE while spend is still under the
-    # cap (node init defaulted it to 10%); the loop reads this from config.json
+    # carve a wide reserve so spend enters it while still under the cap (node
+    # init defaulted it to 10%); the loop reads this from config.json
     assert _run(worktree, 'config', '_set', 'reserve_budget=0.7').returncode == 0
-    calls, result = _run_loop(repo, node, capture_name='reserve', stub_cost='0.4')
+    calls, result = _run_loop(repo, node, capture_name=name, stub_cost=stub_cost)
 
-    # the second step wound down in RESERVE; the first ran before spend crossed in
-    assert _RESERVE_MARKER not in calls[1]['prompt'], (calls, result.stdout)
-    assert _RESERVE_MARKER in calls[2]['prompt'], (calls, result.stdout)
-    # the run ended after one iteration: two work steps, no second iteration
-    assert len(calls) == 2, (calls, result.stdout)
+    # only the steps launched after the crossing wound down in RESERVE
+    reserved = [_RESERVE_MARKER in calls[num]['prompt'] for num in sorted(calls)]
+    assert reserved == reserved_prompts, (calls, result.stdout)
+    # a wind-down iteration beyond the crossing one is announced as such
+    winddown = len(calls) > len(_TWO_STEPS)
+    deferred = 'winding down for one iteration in reserve mode' in result.stdout
+    assert deferred == winddown, result.stdout
     # it ended via the reserve boundary, not the hard ceiling (spend < max_cost)
     assert 'Total cost budget reserve reached' in result.stdout, result.stdout
     assert 'Subtree cost budget reached' not in result.stdout, result.stdout

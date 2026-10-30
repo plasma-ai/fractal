@@ -5,7 +5,7 @@ desc: |
   run cap, the per-iteration and per-step caps, the reserve window that
   steers wind-down before the ceiling, and how remaining headroom is read.
 created: 2026-07-21T04:49:55Z
-updated: 2026-07-21T04:49:55Z
+updated: 2026-10-30T01:59:09Z
 ---
 
 # features/cost/budgets
@@ -63,9 +63,17 @@ the loop enters **RESERVE** when any of these hold:
 
 RESERVE turns the rest of the iteration into wind-down: land state, hand off,
 finish -- no new build work. At the iteration boundary the loop checks the
-reserve state again and, having just run the wind-down, ends the run rather than
-start another iteration that would only re-enter reserve; this boundary stop
-subsumes the hard ceiling. The finish it sends carries a budget-abort reason
+reserve state again and, when the iteration launched a step in reserve mode,
+ends the run rather than start another iteration that would only re-enter
+reserve; this boundary stop subsumes the hard ceiling. An iteration whose last
+step carried spend into the window launched no such step, so the boundary defers
+the end and the next iteration, started without the pacing wait, runs the
+wind-down whole. The deferral comes once per run, so a wind-down iteration whose
+reserve entry misread spend cannot keep the run going. The boundary ends the run
+at once instead when spend has reached the ceiling (nothing is left to wind down
+with) or when no next iteration can start (max-iters reached, the run deadline
+spent, or a stop pending): deferring there would trade the budget landing for
+that other ending. The finish it sends carries a budget-abort reason
 (`cost budget reserve reached`, `subtree cost budget reached`, or
 `cost budget exceeded in finish wind-down`), and a budget abort books a clean
 `exited` run end with exit code `0` naming that reason -- a designed landing,

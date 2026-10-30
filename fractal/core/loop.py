@@ -428,6 +428,11 @@ class Loop:
         self._resume_step: Optional[int] = None
         self._resume_mode = resume
         self._reserve = False
+        # whether a step of this iteration launched in reserve mode, and the
+        # iteration whose boundary deferred the run's reserve end (at most one
+        # per run) -- both read by the reserve boundary
+        self._reserve_launched = False
+        self._reserve_deferred_at: Optional[int] = None
         self._budget_hit = False
         self._budget_reason = ''
         self._budget_stem = ''
@@ -1703,6 +1708,10 @@ class Loop:
             # path fires the failure pairing for it
             self._iteration_event = iteration_event
 
+            # no step of this iteration has launched in reserve mode yet (a
+            # failed setup launches none)
+            self._reserve_launched = False
+
             # run setup -- setup.sh is the mutable, agent-editable node copy,
             # so a bad edit must record a clean iteration failure (and run the
             # commit backstop + iteration close below), not abort the whole
@@ -1830,12 +1839,13 @@ class Loop:
                 self._setup_abort = True
                 break
 
-            # total-cost reserve stop: the just-finished iteration ran the
-            # RESERVE wind-down, so if the run has entered the reserve window
-            # end it here rather than start another iteration that would only
-            # re-enter reserve (this subsumes the hard ceiling at the
-            # boundary); the finish it sends is caught by the finish check
-            # just below, which drains children and breaks the loop
+            # total-cost reserve stop: in the reserve window, end the run after
+            # an iteration that launched a step in RESERVE rather than start
+            # another that would only re-enter reserve (a crossing in the
+            # iteration's last step defers the end once, for a wind-down
+            # iteration; this subsumes the hard ceiling at the boundary); the
+            # finish it sends is caught by the finish check just below, which
+            # drains children and breaks the loop
             self._check_reserve_boundary()
 
             # check signals after iteration (pause first, mirroring
@@ -1848,6 +1858,12 @@ class Loop:
                 break
             if self._check_stop():
                 break
+
+            # a deferred reserve end starts its wind-down iteration at once: a
+            # pacing wait would let the run deadline or a stop end the run on
+            # another reason first
+            if self._reserve_deferred_at == self._iter:
+                continue
 
             # sleep between iterations -- the pacing knobs re-read at their
             # natural boundary (this sleep call), so a mid-run retune of
@@ -2225,6 +2241,10 @@ class Loop:
                 self._steer_capped = False
                 duration = int(time.monotonic() - step_start)
                 failed = False
+                # a launch in reserve mode is the run's wind-down (the reserve
+                # boundary ends the run only after one)
+                if self._reserve and self._step_launched:
+                    self._reserve_launched = True
 
                 # the first stuck launch ends its row stopped and relaunches
                 # the step on its session; stuck again after the steer, by
@@ -4485,12 +4505,17 @@ class Loop:
     def _check_reserve_boundary(self: Loop) -> bool:
         """Iteration-boundary reserve stop; triggers the run's wind-down.
 
-        End the run once spend enters the total-cost reserve window, so
-        the just-finished wind-down iteration is the last (a new one
-        would only re-enter reserve); keyed on subtree spend (>=
-        ``max_cost`` minus reserve), not the clamped remaining reader,
-        so it also catches an over-ceiling overshoot; subsumes the
-        boundary hard ceiling; soft, recursive.
+        End the run once spend is in the total-cost reserve window and
+        the just-finished iteration launched a step in reserve mode, so
+        that wind-down iteration is the last (a new one would only
+        re-enter reserve). One whose last step crossed into the window
+        launched none, so the end defers once per run for a wind-down
+        iteration -- unless spend is at the ceiling (nothing left to wind
+        down with) or no next iteration can start (the run would end on
+        max-iters, its deadline, or a stop instead of its budget). Keyed
+        on subtree spend (>= ``max_cost`` minus reserve), not the clamped
+        remaining reader, so it also catches an over-ceiling overshoot;
+        subsumes the boundary hard ceiling; soft, recursive.
         """
         # read the caps live: a cap granted (or retuned) mid-iteration must
         # reach this very probe, not wait for the iteration top; a malformed
@@ -4515,6 +4540,29 @@ class Loop:
             if unpriced:
                 self._warn_unpriced_spend(unpriced)
         if spent >= float(self._max_cost) - self._reserve_budget:
+            # the gates a next iteration must pass, read live like the loop
+            # top's (a malformed max_iters keeps the prior value)
+            try:
+                max_iters = int(self.node.config.get('max_iters') or -1)
+            except (TypeError, ValueError, OverflowError):
+                max_iters = self._max_iters
+            last_iter = max_iters > 0 and self._iter >= max_iters
+            expired = self._run_end_epoch > 0 and time.time() >= self._run_end_epoch
+            if (
+                not self._reserve_launched
+                and self._reserve_deferred_at is None
+                and spent < float(self._max_cost)
+                and not last_iter
+                and not expired
+                and not self._signal('stop')
+            ):
+                self._reserve_deferred_at = self._iter
+                print(
+                    f'=== Total cost budget reserve reached'
+                    f' (${spent:.4f} of ${self._max_cost_label} spent),'
+                    f' winding down for one iteration in reserve mode ==='
+                )
+                return False
             self._send_budget_finish(
                 f'Total cost budget reserve reached'
                 f' (${spent:.4f} of ${self._max_cost_label} spent), ending run',
