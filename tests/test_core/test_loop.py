@@ -170,6 +170,7 @@ __all__ = [
     'test_no_budget_margin_for_unseen_spend',
     'test_boundary_checks_read_live_caps',
     'test_reserve_boundary_defers_the_end_once_for_a_winddown',
+    'test_reserve_boundary_rearms_the_deferral_below_the_window',
     'test_reserve_winddown_iteration_starts_without_the_pacing_sleep',
     'test_unpriced_spend_under_caps_warns_once',
     'test_priced_first_step_never_reads_as_untracked',
@@ -5570,8 +5571,8 @@ def test_reserve_boundary_defers_the_end_once_for_a_winddown(
     in reserve mode. One whose last step crossed into the reserve ran
     none, so the boundary leaves the run going for one wind-down
     iteration -- never at the ceiling, never when no next iteration can
-    start, and never twice in a run: the boundary after the wind-down
-    ends the run whatever ran.
+    start, and never twice in one reserve entry: the boundary after the
+    wind-down ends the run whatever ran.
     """
     node = loop_node
     _configure(node, max_iters=3, max_cost=10.0, reserve_budget=1.0)
@@ -5584,11 +5585,44 @@ def test_reserve_boundary_defers_the_end_once_for_a_winddown(
     if state == 'stop-pending':
         node.record.signal_set('stop', 'operator')
     _record_step_cost(node, run_id=loop._run_id, cost=spent)
-    assert loop._check_reserve_boundary() is not defers
+    assert loop._check_reserve_boundary() is (not defers)
     if defers:
         # the deferral is spent: the next boundary ends the run though no
         # step ran in reserve again
         assert loop._check_reserve_boundary() is True
+
+
+def test_reserve_boundary_rearms_the_deferral_below_the_window(
+    loop_node: Node,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Spend back below the reserve window re-arms the deferred end.
+
+    A cap raised during the wind-down iteration leaves spend below the
+    new window, so the run goes on; a later iteration whose last step
+    crosses the new line gets its own wind-down iteration, not an end
+    with no step run in reserve.
+    """
+    node = loop_node
+    notice = 'winding down for one iteration in reserve mode'
+    _configure(node, max_iters=5, max_cost=10.0, reserve_budget=1.0)
+    loop = MockLoop(node)
+    loop._run_id = node.record.run_start()
+    loop._iter = 1
+    _record_step_cost(node, run_id=loop._run_id, cost=9.5)
+    assert loop._check_reserve_boundary() is False
+    assert notice in capsys.readouterr().out
+    # the cap is raised during the wind-down: spend sits below the new
+    # $19.00 line, and the run goes on
+    _configure(node, max_cost=20.0)
+    loop._iter = 2
+    assert loop._check_reserve_boundary() is False
+    assert notice not in capsys.readouterr().out
+    # a later iteration's last step crosses the new line: the end defers again
+    loop._iter = 3
+    _record_step_cost(node, run_id=loop._run_id, cost=9.6, iter=3)
+    assert loop._check_reserve_boundary() is False
+    assert notice in capsys.readouterr().out
 
 
 def test_reserve_winddown_iteration_starts_without_the_pacing_sleep(
@@ -5761,8 +5795,8 @@ def test_failed_cost_reads_hold_the_last_good_reading(
     assert loop._step_budget() == pytest.approx(0.3)
     assert 'WARNING: cost read failed' in capsys.readouterr().out
     # the reserve boundary after a wind-down iteration still trips on the
-    # last good spend, and the attribution stays honest -- no unpriced-steps
-    # (untracked) blame
+    # last good spend, and the attribution stays honest -- no
+    # unpriced-steps (untracked) blame
     loop._reserve_launched = True
     assert loop._check_reserve_boundary() is True
     assert 'untracked' not in capsys.readouterr().out

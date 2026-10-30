@@ -430,7 +430,7 @@ class Loop:
         self._reserve = False
         # whether a step of this iteration launched in reserve mode, and the
         # iteration whose boundary deferred the run's reserve end (at most one
-        # per run) -- both read by the reserve boundary
+        # per reserve entry) -- both read by the reserve boundary
         self._reserve_launched = False
         self._reserve_deferred_at: Optional[int] = None
         self._budget_hit = False
@@ -4509,13 +4509,14 @@ class Loop:
         the just-finished iteration launched a step in reserve mode, so
         that wind-down iteration is the last (a new one would only
         re-enter reserve). One whose last step crossed into the window
-        launched none, so the end defers once per run for a wind-down
-        iteration -- unless spend is at the ceiling (nothing left to wind
-        down with) or no next iteration can start (the run would end on
-        max-iters, its deadline, or a stop instead of its budget). Keyed
-        on subtree spend (>= ``max_cost`` minus reserve), not the clamped
-        remaining reader, so it also catches an over-ceiling overshoot;
-        subsumes the boundary hard ceiling; soft, recursive.
+        launched none, so the end defers once per reserve entry for a
+        wind-down iteration -- unless spend is at the ceiling (nothing
+        left to wind down with) or no next iteration can start (the run
+        would end on max-iters, its deadline, or a stop instead of its
+        budget). Keyed on subtree spend (>= ``max_cost`` minus reserve),
+        not the clamped remaining reader, so it also catches an
+        over-ceiling overshoot; subsumes the boundary hard ceiling; soft,
+        recursive.
         """
         # read the caps live: a cap granted (or retuned) mid-iteration must
         # reach this very probe, not wait for the iteration top; a malformed
@@ -4548,14 +4549,11 @@ class Loop:
                 max_iters = self._max_iters
             last_iter = max_iters > 0 and self._iter >= max_iters
             expired = self._run_end_epoch > 0 and time.time() >= self._run_end_epoch
-            if (
-                not self._reserve_launched
-                and self._reserve_deferred_at is None
-                and spent < float(self._max_cost)
-                and not last_iter
-                and not expired
-                and not self._signal('stop')
-            ):
+            no_next = last_iter or expired or self._signal('stop')
+            # one deferral per reserve entry, and none at the ceiling
+            deferred = self._reserve_deferred_at is not None
+            at_ceiling = spent >= float(self._max_cost)
+            if not (self._reserve_launched or deferred or at_ceiling or no_next):
                 self._reserve_deferred_at = self._iter
                 print(
                     f'=== Total cost budget reserve reached'
@@ -4572,6 +4570,9 @@ class Loop:
                 stem='cost budget reserve reached',
             )
             return True
+        # spend back below the window (a cap raised or the reserve cut
+        # mid-run) re-arms the deferral for the next crossing
+        self._reserve_deferred_at = None
         return False
 
     def _send_budget_finish(
