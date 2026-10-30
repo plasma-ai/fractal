@@ -44,6 +44,9 @@ _ANCHORS = {
     # budget terminals
     'Subtree cost budget reached': 'test_run_modes cost-ceiling assertions',
     'Total cost budget reserve reached': 'test_run_modes reserve assertions',
+    'winding down for one iteration in reserve mode': (
+        'test_run_modes reserve assertions'
+    ),
     'skipped (over budget)': 'test_run_modes wind-down skip assertions',
     # pause/resume choreography
     'Resuming run': 'test_run_modes adoption assertions; operators tailing a pane',

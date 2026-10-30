@@ -7,7 +7,7 @@ desc: |
   billed step, and how the run, iteration, and step cap tiers divide the
   enforcement problem.
 created: 2026-07-21T04:48:14Z
-updated: 2026-07-21T04:48:14Z
+updated: 2026-10-30T01:59:09Z
 ---
 
 # design/budgets
@@ -68,13 +68,15 @@ zero the reserve, never an oversight.
 When remaining budget drains into the reserve window, the loop flips the running
 iteration into wind-down: remaining steps are told to land state rather than
 start new work, and at the iteration's boundary the run ends — starting another
-iteration would only re-enter the reserve (the enforcement mechanics:
-[[features/cost/budgets]]). The per-step leash cooperates: inside the window it
-floors at the full remaining rather than going non-positive, so wind-down steps
-can spend the reserve but never past the ceiling. The reserve is thus not slack
-— it is the budget explicitly priced for the ending: commit, memory, radio
-handoff, the parts that make a budget-ended run resumable and mergeable instead
-of a stranded worktree.
+iteration would only re-enter the reserve. A drain that lands in the iteration's
+last step leaves no step to wind down, so the run gets exactly one more
+iteration, all of it wind-down, before the boundary ends it (the enforcement
+mechanics: [[features/cost/budgets]]). The per-step leash cooperates: inside the
+window it floors at the full remaining rather than going non-positive, so
+wind-down steps can spend the reserve but never past the ceiling. The reserve is
+thus not slack — it is the budget explicitly priced for the ending: commit,
+memory, radio handoff, the parts that make a budget-ended run resumable and
+mergeable instead of a stranded worktree.
 
 How the ending books depends on why the finish was sent. A deliberate, goal-met
 finish landed during wind-down keeps its `completed` — even when the final drain

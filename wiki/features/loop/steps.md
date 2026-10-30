@@ -7,7 +7,7 @@ desc: |
   the checkpoints the loop runs between steps, the retry and model-drop
   re-dispatch policies, and the steer and stall of a stuck step.
 created: 2026-07-21T04:51:13Z
-updated: 2026-07-21T04:51:13Z
+updated: 2026-10-30T01:59:09Z
 ---
 
 # features/loop/steps
@@ -100,8 +100,10 @@ The loop brackets every step with lifecycle and budget checks:
 - **Reserve mode** latches per-iteration when the iteration's own cost cap is
   reached, when total run spend drains into the reserve window below the run
   cap, or when an ancestor's budget abort left a cascaded finish pending; the
-  remaining steps then run as wind-down and the run ends at the iteration
-  boundary.
+  remaining steps then run as wind-down. Inside the run's reserve window the run
+  ends at the first boundary after an iteration that launched a step in reserve,
+  so a crossing in an iteration's last step buys one wind-down iteration
+  ([[features/cost/budgets]]).
 - **Finish drain**: when a finish signal is set, the loop waits for all children
   to end before the final step, clearing the iteration deadline so the wait
   cannot be timed out by it.
