@@ -30,12 +30,15 @@ __all__ = [
     'test_parser_usage_records_tokens_and_no_cost',
     'test_parser_ignores_benign_task_failures',
     'test_parser_surfaces_a_failed_terminal',
+    'test_parser_treats_a_nonstring_tool_name_as_noise',
+    'test_parser_ignores_a_duplicate_terminal',
     'test_parser_tolerates_garbage_muse',
     'test_stream_records_session_and_model_without_cost_muse',
     'test_stream_fails_on_a_failed_terminal_muse',
     'test_invocation_modes_build_the_pinned_argv_muse',
     'test_invocation_fork_refuses_muse',
-    'test_seed_creates_the_agent_dir_without_a_config_file',
+    'test_preflight_refuses_a_cost_capped_run_muse',
+    'test_seed_links_global_auth_into_the_node_home',
     'test_transcript_globs_the_session_log',
 ]
 
@@ -61,9 +64,9 @@ def _frame(
 def _terminal(
     terminal: str = 'completed', reason: Optional[str] = None
 ) -> dict[str, Any]:
-    """The run.terminal close frame."""
+    """The run.terminal close frame (the suffix follows the outcome)."""
     return _frame(
-        'run.terminal.completed',
+        f'run.terminal.{terminal}',
         {'kind': 'run_terminal', 'terminal': terminal, 'reason': reason, 'text': 'ok'},
     )
 
@@ -239,6 +242,28 @@ def test_parser_surfaces_a_failed_terminal() -> None:
     assert events[-1].final
 
 
+def test_parser_treats_a_nonstring_tool_name_as_noise() -> None:
+    """A non-string ``tool_name`` maps to ``?``, never crashes the stream."""
+    parser = MuseParser()
+    frame = _frame(
+        'tool.result',
+        {'kind': 'tool_result', 'correlation_facts': {'tool_name': 123}},
+    )
+    events = parser.feed(json.dumps(frame))
+    tool = next(event for event in events if event.kind == 'tool')
+    assert tool.tool == '?'
+
+
+def test_parser_ignores_a_duplicate_terminal() -> None:
+    """One terminal closes the invocation; a second emits nothing."""
+    parser = MuseParser()
+    first = parser.feed(json.dumps(_terminal()))
+    second = parser.feed(json.dumps(_terminal('failed', 'late failure')))
+    assert first[-1].kind == 'result'
+    assert second == []
+    assert parser.errors == []
+
+
 def test_parser_tolerates_garbage_muse() -> None:
     """Malformed, non-object, and unknown lines yield nothing, never raise."""
     parser = MuseParser()
@@ -326,11 +351,12 @@ def test_invocation_modes_build_the_pinned_argv_muse(node_with_db: Node) -> None
     # a dash-leading message is protected by the sentinel, not parsed as a flag
     dashed = backend.invocation('-1 on that idea')
     assert dashed.argv[-2:] == ('--', '-1 on that idea')
-    # muse runs in the worktree and reserves no env keys of its own (the
-    # public verb may still compose the ambient environment to scrub
-    # model/effort-forcing keys, but adds no XDG relocation)
+    # muse runs in the worktree with its XDG homes relocated to the
+    # node's .muse dir (config, state, and sessions stay per-node)
     assert fresh.cwd == node.worktree
-    assert not fresh.env or 'XDG_DATA_HOME' not in fresh.env
+    assert fresh.env is not None
+    assert fresh.env['XDG_CONFIG_HOME'] == str(node.node_dir / '.muse')
+    assert fresh.env['XDG_DATA_HOME'] == str(node.node_dir / '.muse')
 
 
 def test_invocation_fork_refuses_muse(node_with_db: Node) -> None:
@@ -340,34 +366,61 @@ def test_invocation_fork_refuses_muse(node_with_db: Node) -> None:
         backend.invocation('hi', session=_SESSION, fork=True)
 
 
-def test_seed_creates_the_agent_dir_without_a_config_file(
+def test_preflight_refuses_a_cost_capped_run_muse(node_with_db: Node) -> None:
+    """A cost cap on a muse node is refused at preflight, remedy named."""
+    node_with_db.config.set('max_cost', 5.0)
+    backend = MuseAgent(node_with_db, 'muse')
+    with pytest.raises(RuntimeError, match='remove max_cost'):
+        backend.preflight()
+    # uncapped, the same preflight passes (binary presence only)
+    node_with_db.config.set('max_cost', None)
+    assert backend.preflight() is None
+
+
+def test_seed_links_global_auth_into_the_node_home(
     tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Seeding creates ``.muse`` and its skills link, and no config file."""
+    """Seeding creates ``.muse`` and links (never copies) the auth file."""
+    # a fake user home carrying the global muse credentials
+    home = tmp_path / 'home'
+    global_auth = home / '.config' / 'muse' / 'auth.json'
+    global_auth.parent.mkdir(parents=True)
+    global_auth.write_text('{}', encoding='utf-8')
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.delenv('XDG_CONFIG_HOME', raising=False)
     node_dir = tmp_path / 'node'
     (node_dir / 'skills').mkdir(parents=True)
     MuseAgent.seed(node_dir)
     agent_dir = node_dir / '.muse'
     assert agent_dir.is_dir()
     assert (agent_dir / 'skills').is_symlink()
-    assert list(agent_dir.iterdir()) == [agent_dir / 'skills']
+    link = agent_dir / 'muse' / 'auth.json'
+    assert link.is_symlink()
+    assert link.resolve() == global_auth
 
 
-def test_transcript_globs_the_session_log(
-    node_with_db: Node,
-    tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The session log resolves under muse's date-sharded data home."""
-    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path))
-    session_dir = tmp_path / 'muse' / 'sessions' / '2026' / '11' / '03' / _SESSION
+def test_transcript_globs_the_session_log(node_with_db: Node) -> None:
+    """The session log resolves under the node's own muse data home."""
+    backend = MuseAgent(node_with_db, 'muse')
+    sessions = (
+        node_with_db.node_dir / '.muse' / 'muse' / 'sessions' / '2026' / '11' / '03'
+    )
+    session_dir = sessions / _SESSION
     session_dir.mkdir(parents=True)
     log = session_dir / 'session.jsonl'
     log.write_text('{"schema_version": 1}\n', encoding='utf-8')
-    backend = MuseAgent(node_with_db, 'muse')
     transcript = backend.transcript(_SESSION)
     assert transcript['exists'] is True
     assert transcript['path'] == str(log)
+
+
+def test_transcript_reports_a_missing_session(node_with_db: Node) -> None:
+    """No log yet: the transcript degrades to ``exists: False``."""
+    backend = MuseAgent(node_with_db, 'muse')
+    transcript = backend.transcript(_SESSION)
+    assert transcript['exists'] is False
+    assert transcript['content'] == ''
 
 
 # ------ helpers

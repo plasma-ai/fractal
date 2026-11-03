@@ -261,21 +261,28 @@ muse
 ~~~~
 
 Requires the ``muse`` binary (Muse) installed and logged in.
-``muse`` runs on its own config and data homes (``~/.config/muse`` and
-``~/.local/share/muse``, or under ``$XDG_CONFIG_HOME`` /
-``$XDG_DATA_HOME``) — fractal never touches its auth or session storage,
-so a node shares credentials with the user's interactive sessions, and
-the node's ``.muse`` directory holds no config file, only the skills
-link. Runs headlessly as ``muse exec --json --yolo``: ``--yolo``
-disables approval and sandbox and trusts the worktree, so every tool call
-is auto-approved. Fractal mints the session id and stamps it on the step
-row; ``muse exec --session-id`` adopts it, and a later exec with the same
-id resumes the session in place. ``muse`` sessions cannot be forked —
-resume them in place instead. muse bills by subscription allowance, not
-per call: its stream reports per-model token totals but no dollar
-figure, so steps record no cost, and a cost cap on a muse node fails at
-launch instead of arming a ceiling that could never trip — bound muse
-nodes with iteration and time caps.
+The node's ``.muse`` directory serves as muse's XDG config and data
+home (``XDG_CONFIG_HOME`` and ``XDG_DATA_HOME`` both point there), so
+settings, state, and sessions stay per-node; only credentials are
+shared — ``auth.json`` is symlinked from the global config home
+(``~/.config/muse``, or ``$XDG_CONFIG_HOME/muse``), never copied, so a
+token refresh updates the one global file. There is no per-node config
+file; node pins travel as flags. Runs headlessly as
+``muse exec --json --yolo``: ``--yolo`` disables approval and muse's
+own sandbox and trusts the worktree, so every tool call is
+auto-approved — the same unattended posture as every other backend,
+with the worktree (not a sandbox) as the isolation boundary, so only
+launch muse nodes whose task you would trust unsupervised, preferably
+on a sandboxed or disposable host. Fractal mints the session id and
+stamps it on the step row; ``muse exec --session-id`` adopts it, and a
+later exec with the same id resumes the session in place. ``muse``
+sessions cannot be forked — resume them in place instead. muse bills
+by subscription allowance, not per call: its stream carries per-model
+token totals but no dollar figure (the totals ride the session
+transcript; the ledger has no token column and persists none of them),
+so steps record no cost, and a cost cap on a muse node is refused at
+preflight instead of arming a ceiling that could never trip — bound
+muse nodes with iteration and time caps.
 
 opencode
 ~~~~~~~~
@@ -519,8 +526,7 @@ layout:
    * - ``omp``
      - ``<node_dir>/.omp/sessions/*/*_<session>.jsonl``
    * - ``muse``
-     - ``~/.local/share/muse/sessions/<y>/<m>/<d>/<session>/session.jsonl``
-       (under ``$XDG_DATA_HOME`` when set)
+     - ``<node_dir>/.muse/muse/sessions/<y>/<m>/<d>/<session>/session.jsonl``
    * - ``opencode``
      - none — sessions live in opencode's central database
 

@@ -42,6 +42,7 @@ headless.log
 .claude/
 .codex/
 .grok/
+.muse/
 .opencode/
 .omp/
 
@@ -52,6 +53,7 @@ headless.log
 claude.err
 codex.err
 grok.err
+muse.err
 opencode.err
 omp.err
 

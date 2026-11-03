@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import subprocess
 import time
+from collections.abc import Callable
 from typing import Optional
 
 from fractal.core.agent import Agent, Invocation, StreamEvent, StreamParser
@@ -95,11 +97,14 @@ class MuseParser(StreamParser):
             if isinstance(text, str) and text:
                 events.append(StreamEvent(kind='text', text=text))
         # the exec stream has no tool-call frame: a call surfaces only when
-        # its result lands, named under correlation_facts
+        # its result lands, named under correlation_facts (guarded like
+        # every other field: a non-string name is wire noise, not a crash)
         elif event_type == 'tool.result':
             facts = payload.get('correlation_facts')
             tool = facts.get('tool_name') if isinstance(facts, dict) else None
-            events.append(StreamEvent(kind='tool', tool=tool or '?'))
+            if not isinstance(tool, str) or not tool:
+                tool = '?'
+            events.append(StreamEvent(kind='tool', tool=tool))
         # token usage closes the run: totals are cumulative for the whole
         # invocation (children excluded), so the latest frame replaces, never
         # adds; no cost event is emitted -- there is no USD fact to report
@@ -122,7 +127,7 @@ class MuseParser(StreamParser):
                         'cached_tokens',
                     ):
                         value = entry.get(key)
-                        if isinstance(value, int):
+                        if isinstance(value, int) and not isinstance(value, bool):
                             totals[key] = value
                     self.tokens[served] = totals
         # the terminal frame is the invocation's authoritative end; anything
@@ -131,6 +136,9 @@ class MuseParser(StreamParser):
         # (reminders, judges) fail benignly inside healthy runs, and a real
         # failure still arrives here
         elif isinstance(event_type, str) and event_type.startswith('run.terminal.'):
+            # one terminal closes the invocation; a duplicate is wire noise
+            if self.final:
+                return events
             self.final = True
             wall = time.monotonic() - self._started
             if payload.get('terminal') == 'completed':
@@ -154,19 +162,20 @@ class MuseParser(StreamParser):
 
 
 class MuseAgent(Agent):
-    """Muse backend (token-reporting only, caller-stamped sessions).
+    """Muse backend (no USD reporting, caller-stamped sessions).
 
-    muse bills by subscription allowance, not per call: its stream reports
-    token totals but no USD figure, so steps record no cost and
-    :meth:`tracks_cost` reports ``False`` -- a cost cap on a muse node
-    fails loudly at launch instead of silently never tripping.
+    muse bills by subscription allowance, not per call: its stream carries
+    per-model token totals but no USD figure, so steps record no cost and
+    :meth:`tracks_cost` reports ``False`` -- a cost cap on a muse node is
+    refused at preflight instead of silently never tripping. The token
+    totals ride the parser (and the session transcript); the ledger has
+    no token column, so fractal persists none of them.
     """
 
     name = 'muse'
-    # muse keeps its config, credentials, and sessions in its own XDG
-    # homes, which fractal never relocates; node pins travel as flags, so
-    # there is no per-node config file to seed (the base seed still creates
-    # the .muse dir and its skills link)
+    # node pins travel as flags, so there is no per-node config file to
+    # seed; the node's .muse dir instead serves as muse's XDG config and
+    # data home (see _invocation), with credentials linked in by _seed
     config_file = ''
     can_fork = False
     mints_session = False
@@ -175,7 +184,16 @@ class MuseAgent(Agent):
     cost_scope = 'call'
     enforces_budget = False
     providers = ()
-    effort_levels = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+    effort_levels = (
+        'none',
+        'minimal',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+        'ultra',
+    )
     effort_floor = 'high'
 
     __parser__ = MuseParser
@@ -194,9 +212,12 @@ class MuseAgent(Agent):
         # muse exec cannot fork a session; a later exec re-enters it
         if mode == 'fork':
             raise NotImplementedError(_NO_FORK)
-        # --yolo disables approval and sandbox and trusts the workspace:
-        # mandatory for an unattended run (muse's approval gate otherwise
-        # prompts per tool call, which a headless loop cannot answer)
+        # --yolo is fractal's unattended posture for every backend (an
+        # approval prompt would hang a headless loop); it also drops muse's
+        # own sandbox and trusts the workspace -- deliberate: node steps run
+        # builds, tests, and git unrestricted, sandbox inits fail outright
+        # on hosts whose kernel denies new namespaces, and the worktree --
+        # not the sandbox -- is fractal's isolation boundary (see README)
         argv = [*self.parts, 'exec', '--json', '--yolo']
         argv += ['--workspace', str(self.node.worktree)]
         if model:
@@ -211,15 +232,69 @@ class MuseAgent(Agent):
         # is '-' ('-1 on that', '--continue looks right') is the message,
         # never mistaken for a flag that fails the run
         argv += ['--', prompt]
-        # run in the worktree (muse anchors the workspace at the cwd); no
-        # env keys are reserved -- credentials and settings stay in muse's
-        # own config home, shared with the user's interactive sessions
+        # run in the worktree (muse anchors the workspace at the cwd); the
+        # node's .muse dir serves as both XDG homes, so config, bundled
+        # state, and sessions stay per-node -- only the auth link _seed
+        # plants reaches the user's global credentials
+        env = {
+            'XDG_CONFIG_HOME': str(self.config_dir),
+            'XDG_DATA_HOME': str(self.config_dir),
+        }
         return Invocation(
             agent=self.name,
             argv=tuple(argv),
             cwd=self.node.worktree,
+            env=env,
             session=session,
         )
+
+    @classmethod
+    def _seed(
+        cls: type[MuseAgent],
+        node_dir: pathlib.Path,
+        *,
+        parent_dir: Optional[pathlib.Path] = None,
+    ) -> None:
+        """Link the user's muse credentials into the node's XDG home.
+
+        ``auth.json`` is symlinked from the global config home (never
+        copied), so a token refresh from any node or interactive session
+        updates the one shared file -- the codex pattern.
+        """
+        home = node_dir / f'.{cls.name}' / 'muse'
+        home.mkdir(parents=True, exist_ok=True)
+        global_home = (
+            pathlib.Path(os.environ['XDG_CONFIG_HOME']) / 'muse'
+            if os.environ.get('XDG_CONFIG_HOME')
+            else pathlib.Path.home() / '.config' / 'muse'
+        )
+        auth = global_home / 'auth.json'
+        link = home / 'auth.json'
+        if auth.is_file() and not link.is_symlink() and not link.exists():
+            link.symlink_to(auth)
+
+    def _preflight(
+        self: MuseAgent,
+        model: Optional[str],
+        *,
+        register: Optional[Callable[[subprocess.Popen], None]] = None,
+    ) -> Optional[str]:
+        """Refuse a cost-capped muse run before anything spawns.
+
+        muse records no dollar spend, so a cap could never trip; the
+        loop's per-step priced-model error would send the operator after
+        a priced model that cannot exist for this backend. Name the real
+        remedy here instead.
+        """
+        caps = ('max_cost', 'max_iter_cost', 'max_step_cost')
+        if any(self.node.config.get(key) is not None for key in caps):
+            raise RuntimeError(
+                'muse nodes record no dollar cost (subscription allowance),'
+                ' so a cost cap can never trip; remove max_cost,'
+                ' max_iter_cost, and max_step_cost, and bound the run with'
+                ' max_iters and time caps instead.'
+            )
+        return None
 
     def tracks_cost(self: MuseAgent, model: Optional[str] = None) -> bool:
         """Return whether spend will be recorded: never, in USD terms.
@@ -232,21 +307,18 @@ class MuseAgent(Agent):
         return False
 
     def _transcript(self: MuseAgent, session: str) -> Optional[pathlib.Path]:
-        """Session log under muse's own data home.
+        """Session log under the node's own muse data home.
 
-        muse writes one ``session.jsonl`` per session under
-        ``sessions/<y>/<m>/<d>/<session>/`` in its data home
-        (``$XDG_DATA_HOME/muse``, else ``~/.local/share/muse``); the date
-        shard is muse's own layout, so the lookup wildcards it. ``None``
-        until muse creates the file.
+        ``_invocation`` points muse's XDG homes at the node's ``.muse``
+        dir, so the session log lands at
+        ``.muse/muse/sessions/<y>/<m>/<d>/<session>/session.jsonl`` --
+        inside the node's own territory, like every sibling backend, and
+        never mixed with the user's interactive sessions. The date shard
+        is muse's own layout, so the lookup wildcards it. ``None`` until
+        muse creates the file.
         """
-        data_home = os.environ.get('XDG_DATA_HOME')
-        root = (
-            pathlib.Path(data_home) / 'muse'
-            if data_home
-            else pathlib.Path.home() / '.local' / 'share' / 'muse'
-        )
-        found = sorted((root / 'sessions').glob(f'*/*/*/{session}/session.jsonl'))
+        sessions = self.config_dir / 'muse' / 'sessions'
+        found = sorted(sessions.glob(f'*/*/*/{session}/session.jsonl'))
         if found:
             return found[-1]
         return None
