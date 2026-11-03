@@ -369,7 +369,8 @@ def test_invocation_fork_refuses_muse(node_with_db: Node) -> None:
 def test_preflight_refuses_a_cost_capped_run_muse(node_with_db: Node) -> None:
     """A cost cap on a muse node is refused at preflight, remedy named."""
     node_with_db.config.set('max_cost', 5.0)
-    backend = MuseAgent(node_with_db, 'muse')
+    # `sh` stands in for the muse binary so the PATH check passes anywhere
+    backend = MuseAgent(node_with_db, 'sh')
     with pytest.raises(RuntimeError, match='remove max_cost'):
         backend.preflight()
     # uncapped, the same preflight passes (binary presence only)
