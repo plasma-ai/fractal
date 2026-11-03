@@ -21,8 +21,9 @@ updated: 2026-10-24T04:34:08Z
 Six provider backends ship in `fractal/impl/`, one module per provider, each
 registered in `fractal/core/agent.py` under its base command word: `claude`,
 `codex`, `grok`, `muse`, `opencode`, and `omp`. The base command is the
-backend's identity everywhere: the executable word, the DB agent column, the session-map
-key, and the stem of the node's per-agent config directory (e.g. `.claude`).
+backend's identity everywhere: the executable word, the DB agent column, the
+session-map key, and the stem of the node's per-agent config directory (e.g.
+`.claude`).
 
 An agent owns its own conversation loop inside a provider subprocess. The
 base-class contract is capabilities — invocation building, spawning, stream

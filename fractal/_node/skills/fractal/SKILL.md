@@ -144,28 +144,28 @@ pool a cheaper token rate buys more steps, not a lower bill.
 1. **Init:** run `fractal node init --help` to see available options, then run
    `fractal node init <name> --path="$PROJECT_DIR" [...]`. `--agent` is optional
    (currently `claude`, `codex`, `grok`, `muse`, `opencode`, or `omp`): when
-   omitted, the child automatically inherits your agent -- pass it only to
-   give a child a different agent. `--provider` is optional the same way (e.g. `openrouter`
-   routes claude or codex through OpenRouter; it inherits, and agents without
-   routes ignore it). `--inherit=<surfaces>` (comma-separated: `steps`,
-   `scripts`, `skills`, `config`, or `all`) seeds those surfaces from YOUR node
-   dir instead of the package seed -- steps/scripts/skills copy your live files,
-   `config` snapshots preference keys (model, effort, sync, detached, iter/step
-   timing, retries, pacing) and never budget caps; agent config always inherits.
-   `<name>` uses letters, digits, and `_` only (no `-`). **All run parameters**
-   (budget, depth/children, iters, timing) are set here and stored in the
-   child's `config.json` -- editable before launch. Capture the output for the
-   child's project/node dirs. Init is lockfile-serialized -- run calls
-   sequentially. A worked example of spawn hygiene -- every cap, the model, and
-   the step timeout explicit at init (leaf caps shown -- give a manager child
-   depth/children/descendants; fill every placeholder deliberately -- price the
-   `<usd>` caps per Cost above, and when the tree's NODE.md names exact model
-   recipes, they override this generic guidance), then a registry verify before
-   any configuration; the init call is wrapped to capture the child worktree
-   path from the init output's `Initialized <path>` line -- an unset
-   `$child_worktree` silently reads YOUR OWN config (`--path=` resolves to the
-   current directory; `--path` on `config get` names the child's worktree, not
-   the project root):
+   omitted, the child automatically inherits your agent -- pass it only to give
+   a child a different agent. `--provider` is optional the same way (e.g.
+   `openrouter` routes claude or codex through OpenRouter; it inherits, and
+   agents without routes ignore it). `--inherit=<surfaces>` (comma-separated:
+   `steps`, `scripts`, `skills`, `config`, or `all`) seeds those surfaces from
+   YOUR node dir instead of the package seed -- steps/scripts/skills copy your
+   live files, `config` snapshots preference keys (model, effort, sync,
+   detached, iter/step timing, retries, pacing) and never budget caps; agent
+   config always inherits. `<name>` uses letters, digits, and `_` only (no `-`).
+   **All run parameters** (budget, depth/children, iters, timing) are set here
+   and stored in the child's `config.json` -- editable before launch. Capture
+   the output for the child's project/node dirs. Init is lockfile-serialized --
+   run calls sequentially. A worked example of spawn hygiene -- every cap, the
+   model, and the step timeout explicit at init (leaf caps shown -- give a
+   manager child depth/children/descendants; fill every placeholder deliberately
+   -- price the `<usd>` caps per Cost above, and when the tree's NODE.md names
+   exact model recipes, they override this generic guidance), then a registry
+   verify before any configuration; the init call is wrapped to capture the
+   child worktree path from the init output's `Initialized <path>` line -- an
+   unset `$child_worktree` silently reads YOUR OWN config (`--path=` resolves to
+   the current directory; `--path` on `config get` names the child's worktree,
+   not the project root):
 
    ```bash
    child_worktree="$(fractal node init sub_a --path="$PROJECT_DIR" \
