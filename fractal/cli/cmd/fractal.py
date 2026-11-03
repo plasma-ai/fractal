@@ -140,7 +140,7 @@ def init(app: typer.Typer) -> typer.Typer:
     # agent option
     agent_help = (
         'Default agent command for spawned nodes'
-        ' (e.g. claude, codex, grok, opencode, or omp).'
+        ' (e.g. claude, codex, grok, muse, opencode, or omp).'
     )
     agent = typer.Option(None, '--agent', help=agent_help)
     # provider option

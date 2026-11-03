@@ -101,7 +101,10 @@ directly; others report token usage, priced from published rates -- so a cost
 cap on a token-reporting child requires a (priced) `--model` (the run fails on
 the first step otherwise). claude, grok, opencode, and omp report cost directly;
 codex reports tokens. A claude child routed through openrouter is priced from
-tokens too, so under a cap it also needs an explicit priced `--model`.
+tokens too, so under a cap it also needs an explicit priced `--model`. A muse
+child reports no dollar figure at all (subscription allowance; its steps record
+no cost), so a cost cap on it fails at launch — bound a muse child with
+`--max-iters` and time caps instead.
 
 Every dollar figure you read has a scope; know it before comparing two.
 Budget-guard figures, recorded run-end reasons, and `fractal node cost spent` /
@@ -140,9 +143,9 @@ pool a cheaper token rate buys more steps, not a lower bill.
 
 1. **Init:** run `fractal node init --help` to see available options, then run
    `fractal node init <name> --path="$PROJECT_DIR" [...]`. `--agent` is optional
-   (currently `claude`, `codex`, `grok`, `opencode`, or `omp`): when omitted,
-   the child automatically inherits your agent -- pass it only to give a child a
-   different agent. `--provider` is optional the same way (e.g. `openrouter`
+   (currently `claude`, `codex`, `grok`, `muse`, `opencode`, or `omp`): when
+   omitted, the child automatically inherits your agent -- pass it only to
+   give a child a different agent. `--provider` is optional the same way (e.g. `openrouter`
    routes claude or codex through OpenRouter; it inherits, and agents without
    routes ignore it). `--inherit=<surfaces>` (comma-separated: `steps`,
    `scripts`, `skills`, `config`, or `all`) seeds those surfaces from YOUR node

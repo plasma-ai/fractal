@@ -380,6 +380,18 @@ elif [[ "$SELF" == "omp" ]]; then
     printf '{"type":"session","id":"%s"}\\n' "$SID"
     printf '{"type":"turn_end","message":{"model":"openai/gpt-5.5","usage":{"cost":{"total":%s}}}}\\n' "${STUB_COST:-0.001}"
     printf '{"type":"agent_end","messages":[]}\\n'
+elif [[ "$SELF" == "muse" ]]; then
+    # muse: muse exec --json --yolo ... <PROMPT> -- the prompt is the final
+    # argument; the caller-minted session rides --session-id (fresh and
+    # resume alike) and echoes back in every frame's stream envelope
+    PROMPT=""
+    for ARG in "$@"; do PROMPT="$ARG"; done
+    printf '%s' "$PROMPT" > "$CAPTURE_DIR/prompt_$N.txt"
+    SID="${SESSION##* }"
+    [[ -n "$SID" ]] || SID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    printf '{"stream":{"kind":"session","id":"%s"},"payload_type":"run.output.delta","payload":{"kind":"run_output_delta","text":"ok"}}\\n' "$SID"
+    printf '{"stream":{"kind":"session","id":"%s"},"payload_type":"run.usage","payload":{"kind":"run_usage","models":[{"model":"muse-wonder-1.0","input_tokens":10,"output_tokens":2,"reasoning_tokens":0,"cached_tokens":0}]}}\\n' "$SID"
+    printf '{"stream":{"kind":"session","id":"%s"},"payload_type":"run.terminal.completed","payload":{"kind":"run_terminal","terminal":"completed","text":"ok"}}\\n' "$SID"
 elif [[ "$SELF" == "opencode" ]]; then
     # opencode: opencode run ... <PROMPT> -- the prompt is the final argument;
     # the agent mints its own session unless --session resumes one
@@ -530,7 +542,7 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     # one recording stub, installed under every agent name
     bindir = root / 'bin'
     bindir.mkdir()
-    for name in ('claude', 'codex', 'grok', 'opencode', 'omp'):
+    for name in ('claude', 'codex', 'grok', 'muse', 'opencode', 'omp'):
         agent = bindir / name
         agent.write_text(_AGENT_STUB, encoding='utf-8')
         agent.chmod(0o755)
@@ -641,7 +653,12 @@ def test_continuous_reuses_one_session_and_detached_never_resumes(
 
 @pytest.mark.parametrize(
     argnames=('agent', 'resume_flag'),
-    argvalues=[('grok', '-r '), ('opencode', '--session '), ('omp', '-r ')],
+    argvalues=[
+        ('grok', '-r '),
+        ('muse', '--session-id '),
+        ('opencode', '--session '),
+        ('omp', '-r '),
+    ],
 )
 def test_new_dialects_thread_sessions_through_the_loop(
     repo: dict,
@@ -651,11 +668,12 @@ def test_new_dialects_thread_sessions_through_the_loop(
     """A new-dialect worker weaves one session across a continuous run.
 
     Drives the loop end to end over each new wire dialect: grok launches
-    on a caller-minted ``-s`` id and the loop resumes it with ``-r``;
-    opencode and omp mint their own id on the first call (no session flag)
-    and the loop captures it off the stream and resumes it (``--session``
-    for opencode, ``-r`` for omp). Both calls land under the dialect's own
-    agent name and carry one continuous session.
+    on a caller-minted ``-s`` id and the loop resumes it with ``-r``; muse
+    launches on a caller-minted ``--session-id`` and the same flag re-enters
+    it; opencode and omp mint their own id on the first call (no session
+    flag) and the loop captures it off the stream and resumes it
+    (``--session`` for opencode, ``-r`` for omp). Both calls land under the
+    dialect's own agent name and carry one continuous session.
     """
     node = _make_node(
         repo=repo,
@@ -670,6 +688,11 @@ def test_new_dialects_thread_sessions_through_the_loop(
     if agent == 'grok':
         # caller-minted fresh id, resumed in place with the same id
         assert calls[1]['session'].startswith('-s ')
+        assert calls[2]['session'].startswith(resume_flag)
+        assert calls[1]['session'].split()[1] == calls[2]['session'].split()[1]
+    elif agent == 'muse':
+        # caller-minted fresh id; the same --session-id flag re-enters it
+        assert calls[1]['session'].startswith(resume_flag)
         assert calls[2]['session'].startswith(resume_flag)
         assert calls[1]['session'].split()[1] == calls[2]['session'].split()[1]
     else:

@@ -184,7 +184,8 @@ node's `skills/fractal/SKILL.md` Cost section; read it there when advising the
 user or reading a capped node's status.
 
 Nodes run their agent with elevated permissions by design (Claude
-`bypassPermissions`, Codex `danger-full-access`, Grok `always-approve`, opencode
+`bypassPermissions`, Codex `danger-full-access`, Grok `always-approve`, Muse
+`--yolo`, opencode
 `"permission": "allow"` plus `--auto`, omp `approvalMode: yolo` plus `--yolo`)
 so they can work unattended — only launch nodes whose task you trust to run
 autonomously.
@@ -251,8 +252,11 @@ Determine the node's state and proceed accordingly:
       the repo root. `--agent` sets the default agent that spawned nodes
       inherit; if the user didn't specify one, default to `--agent=claude` if
       you are Claude, `--agent=codex` if you are Codex, `--agent=grok` if you
-      are Grok, `--agent=opencode` if you are opencode, or `--agent=omp` if you
-      are Oh My Pi. `--provider` sets the default provider route the same way
+      are Grok, `--agent=muse` if you are Muse, `--agent=opencode` if
+      you are opencode, or `--agent=omp` if you are Oh My Pi. A `muse` node
+      records no dollar cost (subscription allowance; token totals only), so
+      never arm it with `--max-cost` — cap it with iterations and time
+      instead. `--provider` sets the default provider route the same way
       (e.g. `openrouter` routes claude or codex through OpenRouter on
       `OPENROUTER_API_KEY`; agents without routes ignore it, and omitting it
       means each agent's own endpoint). Route mechanics to know: an inherited

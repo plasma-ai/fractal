@@ -89,8 +89,8 @@ Prerequisites
   older versions the loop's preflight reports the missing key instead.
 - **A provider CLI** — the agent command a node is configured with must be on
   ``PATH``: ``claude`` (Claude Code), ``codex`` (Codex), ``grok`` (Grok
-  Build), ``opencode`` (OpenCode), or ``omp`` (Oh My Pi). See
-  :doc:`/guide/agents`.
+  Build), ``muse`` (Muse), ``opencode`` (OpenCode), or ``omp`` (Oh My
+  Pi). See :doc:`/guide/agents`.
 - **The ``wiki`` CLI** — from ``plasma-wiki``; ``fractal init`` shells out to
   it to scaffold the project wiki (and refuses when it cannot find it),
   ``fractal node init`` uses it to seed each node's memory wiki, and the
@@ -122,7 +122,7 @@ options:
 
 ``--agent`` (default: unset)
    The default agent command spawned nodes inherit: ``claude``, ``codex``,
-   ``grok``, ``opencode``, or ``omp``. An unknown name refuses at init.
+   ``grok``, ``muse``, ``opencode``, or ``omp``. An unknown name refuses at init.
 
 ``--provider`` (default: the vendor-native endpoint)
    The default provider route spawned nodes inherit (e.g. ``openrouter``).

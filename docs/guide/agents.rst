@@ -38,6 +38,12 @@ These backends ship built in:
      - —
      - yes
      - no
+   * - ``muse``
+     - Muse
+     - —
+     - —
+     - no
+     - no
    * - ``opencode``
      - opencode
      - ``opencode.json``
@@ -75,7 +81,7 @@ the full key reference):
 ``provider``
    Provider route for the agent (``openrouter``). Unset means the
    vendor-native endpoint. Inherited from the nearest ancestor when
-   unset; backends with no route axis (``grok``, ``opencode``, ``omp``)
+   unset; backends with no route axis (``grok``, ``muse``, ``opencode``, ``omp``)
    ignore the key entirely, so a routed ancestor never mis-routes them.
 
 ``model``
@@ -149,6 +155,8 @@ Each backend spells the effort flag its own way; fractal translates:
    * - ``codex``
      - ``-c model_reasoning_effort="<level>"``
    * - ``grok``
+     - ``--reasoning-effort``
+   * - ``muse``
      - ``--reasoning-effort``
    * - ``opencode``
      - ``--variant``
@@ -248,6 +256,26 @@ pricing only as a fallback, so a run with a ``grok`` step refreshes a price
 table older than a day at run start. ``grok`` reports no tool activity on its
 stream and suppresses reasoning output, so a quiet pane during a ``grok``
 step is normal.
+
+muse
+~~~~
+
+Requires the ``muse`` binary (Muse) installed and logged in.
+``muse`` runs on its own config and data homes (``~/.config/muse`` and
+``~/.local/share/muse``, or under ``$XDG_CONFIG_HOME`` /
+``$XDG_DATA_HOME``) — fractal never touches its auth or session storage,
+so a node shares credentials with the user's interactive sessions, and
+the node's ``.muse`` directory holds no config file, only the skills
+link. Runs headlessly as ``muse exec --json --yolo``: ``--yolo``
+disables approval and sandbox and trusts the worktree, so every tool call
+is auto-approved. Fractal mints the session id and stamps it on the step
+row; ``muse exec --session-id`` adopts it, and a later exec with the same
+id resumes the session in place. ``muse`` sessions cannot be forked —
+resume them in place instead. muse bills by subscription allowance, not
+per call: its stream reports per-model token totals but no dollar
+figure, so steps record no cost, and a cost cap on a muse node fails at
+launch instead of arming a ceiling that could never trip — bound muse
+nodes with iteration and time caps.
 
 opencode
 ~~~~~~~~
@@ -415,7 +443,8 @@ From the user's point of view:
   stream; ``codex`` — and ``claude`` behind ``openrouter`` — are priced
   from token counts against the pricing cache
   (``~/.fractal/pricing.json``, LiteLLM's public price table, fetched at
-  run start and refreshed daily during long runs).
+  run start and refreshed daily during long runs); ``muse`` reports no
+  dollar figure at all, so its steps record no cost.
 - **Only claude enforces the per-step cap in-flight.** The loop enforces
   ``max_cost`` and ``max_iter_cost`` between launches for every backend,
   but ``max_step_cost`` is a hard limit only for ``claude``
@@ -467,9 +496,9 @@ The reply's closing line shows the turn's own cost: a resumed or forked
 ``claude`` session's result figure counts on from the total Claude Code
 saved for the session, which the chat takes off as the loop does (``$?``
 when that total cannot be read).
-Because ``codex`` cannot fork, ``--current`` and the forking
-``--session`` form fail on ``codex`` nodes; continue a ``codex`` thread
-with ``--session <id> --resume``.
+Because ``codex`` and ``muse`` cannot fork, ``--current`` and the forking
+``--session`` form fail on ``codex`` and ``muse`` nodes; continue such a
+thread with ``--session <id> --resume``.
 
 For direct inspection, each backend persists transcripts in its own
 layout:
@@ -489,6 +518,9 @@ layout:
      - ``<node_dir>/.grok/sessions/<encoded-worktree-path>/<session>/events.jsonl``
    * - ``omp``
      - ``<node_dir>/.omp/sessions/*/*_<session>.jsonl``
+   * - ``muse``
+     - ``~/.local/share/muse/sessions/<y>/<m>/<d>/<session>/session.jsonl``
+       (under ``$XDG_DATA_HOME`` when set)
    * - ``opencode``
      - none — sessions live in opencode's central database
 
@@ -502,7 +534,7 @@ Adding a backend
 A backend is one implementation module — invocation argv, stream parser,
 transcript layout, capability attributes — registered by name in the
 `fractal.core.agent` registry, alongside the built-in
-``fractal/impl/{claude,codex,grok,opencode,omp}.py`` modules. An embedding
+``fractal/impl/{claude,codex,grok,muse,opencode,omp}.py`` modules. An embedding
 application registers in process with `fractal.core.agent.register`; a
 tree can also carry an ``agents.py`` hook file in its root node's data
 directory, whose exported `fractal.core.agent.Agent` subclasses register

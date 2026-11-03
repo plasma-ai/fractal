@@ -47,6 +47,7 @@ _AGENTS: dict[str, Union[str, type[Agent]]] = {
     'claude': 'fractal.impl.claude:ClaudeAgent',
     'codex': 'fractal.impl.codex:CodexAgent',
     'grok': 'fractal.impl.grok:GrokAgent',
+    'muse': 'fractal.impl.muse:MuseAgent',
     'opencode': 'fractal.impl.opencode:OpencodeAgent',
     'omp': 'fractal.impl.omp:OmpAgent',
 }
