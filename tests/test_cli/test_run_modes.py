@@ -4512,6 +4512,9 @@ def _path_without_timeout(bindir: pathlib.Path, tmp: pathlib.Path) -> str:
     sandbox = tmp / 'no_timeout_bin'
     sandbox.mkdir(parents=True, exist_ok=True)
     out_dirs = [str(bindir)]
+    # the same directory may appear twice on PATH (on Ubuntu /bin is a
+    # symlink to usr/bin), so mirror each resolved directory once
+    mirrored: set[str] = set()
     for entry in os.environ['PATH'].split(os.pathsep):
         directory = pathlib.Path(entry)
         holds_timeout = any(
@@ -4520,12 +4523,23 @@ def _path_without_timeout(bindir: pathlib.Path, tmp: pathlib.Path) -> str:
         if not entry or holds_timeout:
             # mirror the dir minus the timeout binaries (skip an empty entry too)
             if entry:
+                resolved = str(directory.resolve())
+                if resolved in mirrored:
+                    continue
+                mirrored.add(resolved)
                 for tool in directory.iterdir():
                     if tool.name in ('timeout', 'gtimeout'):
                         continue
                     link = sandbox / tool.name
-                    if not link.exists():
+                    # is_symlink first: exists() misses a dangling link,
+                    # whose re-creation would raise FileExistsError
+                    if link.is_symlink() or link.exists():
+                        continue
+                    try:
                         link.symlink_to(tool)
+                    except FileExistsError:
+                        # a sibling builder sharing the dir won the race
+                        continue
             continue
         out_dirs.append(entry)
     out_dirs.append(str(sandbox))
