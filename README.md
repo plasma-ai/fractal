@@ -93,7 +93,7 @@ for the current project only):
 fractal install [--link]
 ```
 
-After upgrading the package, re-run `fractal install` to refresh the copied
+After upgrading the package, re-run the install command to refresh the copied
 skills (pass `--link` for symlinked install).
 
 ## Usage
@@ -192,9 +192,9 @@ Run `./install.sh --help` for all options. Alternatively, run
 Installing a dependency as editable (e.g. a sibling package) is left to the
 caller: `uv pip install --editable <path>`.
 
-With an editable install, `fractal install --link` symlinks the bundled skill
-into the agent skill directories instead of copying it, so skill edits apply
-without re-running the install.
+With an editable install, the install command's `--link` option symlinks the
+bundled skill into the agent skill directories instead of copying it, so skill
+edits apply without re-running the install.
 
 Once installed, run tools with `uv run --no-sync <command>`, or activate the
 environment first (`source .venv/bin/activate`).
