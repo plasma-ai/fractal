@@ -24,12 +24,12 @@ with live in a terminal UI.
 > **Nodes run their agent without permission prompts by default.** Unattended
 > loops cannot stop to ask, so every seeded agent config disables the approval
 > gate — Claude `bypassPermissions`, Codex `danger-full-access`, Grok
-> `--always-approve`, opencode `--auto`, omp `--yolo`. A node can therefore run
-> any command its agent decides to run, with your credentials and your machine's
-> reach. The per-node `git worktree` isolates the *branch* it commits to, not
-> the filesystem, the network, or anything else outside it. Only launch nodes
-> whose task you would trust to run unsupervised, and prefer a sandboxed or
-> otherwise disposable host for anything else.
+> `--always-approve`, Muse `--yolo`, opencode `--auto`, omp `--yolo`. A node can
+> therefore run any command its agent decides to run, with your credentials and
+> your machine's reach. The per-node `git worktree` isolates the *branch* it
+> commits to, not the filesystem, the network, or anything else outside it. Only
+> launch nodes whose task you would trust to run unsupervised, and prefer a
+> sandboxed or otherwise disposable host for anything else.
 
 ______________________________________________________________________
 
@@ -105,12 +105,13 @@ parent. Agents iterate in tmux sessions (or, with `--headless`, in detached
 process groups), and all state (runs, iters, steps, costs, signals) is tracked
 in a local SQLite database.
 
-Five agent backends are supported — Claude Code (`claude`), Codex (`codex`),
-Grok Build (`grok`), OpenCode (`opencode`), and Oh My Pi (`omp`) — selected per
-node with `--agent` (children inherit it). Claude and Codex can additionally
-route through OpenRouter with `--provider=openrouter`, which authenticates via
-`OPENROUTER_API_KEY` from the launching shell; OpenCode and Oh My Pi reach
-OpenRouter natively through their own `openrouter/<author>/<model>` model ids.
+Six agent backends are supported — Claude Code (`claude`), Codex (`codex`), Grok
+Build (`grok`), Muse (`muse`), OpenCode (`opencode`), and Oh My Pi (`omp`) —
+selected per node with `--agent` (children inherit it). Claude and Codex can
+additionally route through OpenRouter with `--provider=openrouter`, which
+authenticates via `OPENROUTER_API_KEY` from the launching shell; OpenCode and Oh
+My Pi reach OpenRouter natively through their own `openrouter/<author>/<model>`
+model ids.
 
 Use the `/fractal` skill to spawn and manage agent nodes. The `fractal` CLI is
 also available directly — run `fractal --help` and `fractal <command> --help` to

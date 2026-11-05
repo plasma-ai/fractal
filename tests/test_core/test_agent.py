@@ -98,8 +98,8 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def test_supported_defaults_to_the_shipped_backends() -> None:
-    """The registry ships the five provider backends, registration order."""
-    assert agent.supported() == ('claude', 'codex', 'grok', 'opencode', 'omp')
+    """The registry ships the six provider backends, registration order."""
+    assert agent.supported() == ('claude', 'codex', 'grok', 'muse', 'opencode', 'omp')
 
 
 def test_register_and_resolve_an_injected_backend(
@@ -108,7 +108,15 @@ def test_register_and_resolve_an_injected_backend(
     """A registered class resolves by base command and joins the set."""
     agent.register('sample', SampleAgent)
     assert agent.resolve('sample') is SampleAgent
-    assert agent.supported() == ('claude', 'codex', 'grok', 'opencode', 'omp', 'sample')
+    assert agent.supported() == (
+        'claude',
+        'codex',
+        'grok',
+        'muse',
+        'opencode',
+        'omp',
+        'sample',
+    )
 
 
 def test_resolve_rejects_an_unknown_agent(registry: dict[str, Any]) -> None:
@@ -149,7 +157,7 @@ def test_deployment_hook_file_overrides_a_default(
     resolved = agent.resolve('claude', root=tmp_path)
     assert resolved.__name__ == 'CloudClaudeAgent'
     # the sibling defaults are untouched
-    assert agent.supported() == ('claude', 'codex', 'grok', 'opencode', 'omp')
+    assert agent.supported() == ('claude', 'codex', 'grok', 'muse', 'opencode', 'omp')
 
 
 def test_explicit_registration_beats_the_hook_file(

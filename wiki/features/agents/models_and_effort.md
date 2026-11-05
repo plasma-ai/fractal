@@ -40,6 +40,7 @@ Each backend translates the same two overrides into its own CLI dialect:
 | `claude`   | `--model`  | `--effort`                          |
 | `codex`    | `-m`       | `-c model_reasoning_effort="<lvl>"` |
 | `grok`     | `-m`       | `--reasoning-effort`                |
+| `muse`     | `--model`  | `--reasoning-effort`                |
 | `opencode` | `-m`       | `--variant` (a model variant)       |
 | `omp`      | `--model`  | `--thinking` (a thinking level)     |
 
@@ -95,6 +96,8 @@ malformed file simply names no model:
   than a top-level key.
 - opencode reads the top-level model from its JSON config file.
 - omp reads its `config.yml` default once a YAML parser is available.
+- muse names no configured default; the served model rides the stream's
+  `run.model.configured` frame (and each `run.usage` entry).
 
 The iteration row records the served model too: when every step's
 stream-reported model agrees, it wins over the config-seeded pin at the

@@ -18,11 +18,12 @@ updated: 2026-10-24T04:34:08Z
 
 ## Supported backends
 
-Five provider backends ship in `fractal/impl/`, one module per provider, each
+Six provider backends ship in `fractal/impl/`, one module per provider, each
 registered in `fractal/core/agent.py` under its base command word: `claude`,
-`codex`, `grok`, `opencode`, and `omp`. The base command is the backend's
-identity everywhere: the executable word, the DB agent column, the session-map
-key, and the stem of the node's per-agent config directory (e.g. `.claude`).
+`codex`, `grok`, `muse`, `opencode`, and `omp`. The base command is the
+backend's identity everywhere: the executable word, the DB agent column, the
+session-map key, and the stem of the node's per-agent config directory (e.g.
+`.claude`).
 
 An agent owns its own conversation loop inside a provider subprocess. The
 base-class contract is capabilities — invocation building, spawning, stream
@@ -67,7 +68,8 @@ that tree. See [[features/agents/extending]] for the full extension seam.
 A backend may list *provider routes* — alternate API endpoints beside the
 vendor-native one. An empty route list means the backend has no route axis;
 `None` always means the vendor-native endpoint. `claude` and `codex` each
-support one route, `openrouter`; `grok`, `opencode`, and `omp` are route-less.
+support one route, `openrouter`; `grok`, `muse`, `opencode`, and `omp` are
+route-less.
 
 The bound route is validated at the spawn verbs: asking for a route the backend
 does not list raises an error naming the supported routes. Both openrouter
