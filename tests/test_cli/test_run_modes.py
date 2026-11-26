@@ -4501,7 +4501,9 @@ def _path_without_timeout(bindir: pathlib.Path, tmp: pathlib.Path) -> str:
                     if tool.name in ('timeout', 'gtimeout'):
                         continue
                     link = sandbox / tool.name
-                    if not link.exists():
+                    # a broken symlink is no tool: skipped, it leaves the name
+                    # to a same-named tool in a later dir
+                    if tool.exists() and not link.exists():
                         link.symlink_to(tool)
             continue
         out_dirs.append(entry)
