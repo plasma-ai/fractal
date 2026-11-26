@@ -25,11 +25,19 @@ jobs:
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
-      - name: Install package with lint dependencies
-        run: ./install.sh --groups=lint
       - name: Run pre-commit
         run: uvx pre-commit run --all-files --show-diff-on-failure --color=always
       - name: Check that project is up-to-date with template
-        run: uv run --no-sync cruft check
+        run: |
+          template=$(jq -r .template .cruft.json)
+          commit=$(jq -r .commit .cruft.json)
+          directory=$(jq -r .directory .cruft.json)
+          git clone --quiet --filter=blob:none --no-checkout "$template" "$RUNNER_TEMP/template"
+          pinned=$(git -C "$RUNNER_TEMP/template" rev-parse --quiet --verify "$commit:$directory") || true
+          latest=$(git -C "$RUNNER_TEMP/template" rev-parse --quiet --verify "HEAD:$directory") || true
+          if [[ -z "$pinned" || "$pinned" != "$latest" ]]; then
+            echo "::error::the $directory template changed after $commit: run cruft update"
+            exit 1
+          fi
       - name: Reject forbidden file patterns
         run: test -z "$(find . -name "*.rej" -print -quit)" || exit 1
