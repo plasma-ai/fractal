@@ -5,7 +5,7 @@ desc: |
   of the whole tree, radio and chat from the keyboard, and a read-only window
   onto any node's session.
 created: 2026-07-21T05:08:54Z
-updated: 2026-07-21T05:08:54Z
+updated: 2026-11-27T22:49:51Z
 ---
 
 # features/tui
@@ -17,8 +17,8 @@ explicit radio writes acting as the user node, a read-only attach onto a node's
 live tmux session, and the chat door into the message pane.
 
 [[features/tui/panes|panes]]: The cockpit's four-pane grid -- tree, radio, node,
-and message -- and the focus-ring navigation that moves between them and drills
-into each pane's interior zones.
+and message -- the focus-ring navigation that moves between them and drills into
+each pane's interior zones, and the keyboard mode machine behind it.
 
 [[features/tui/polling|polling]]: How the cockpit stays live: cheap mtime change
 detection over the tree, an off-thread snapshot builder with per-branch caches,

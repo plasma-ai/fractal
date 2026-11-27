@@ -5,7 +5,7 @@ desc: |
   config key, step files and their frontmatter overrides, the node scripts,
   and what children inherit.
 created: 2026-07-21T04:35:35Z
-updated: 2026-10-18T23:37:13Z
+updated: 2026-11-27T22:49:51Z
 ---
 
 # configuration
@@ -30,8 +30,9 @@ lint: when each runs, what the loop and the commit pipeline do with their
 results, and the rules for extending them per node.
 
 [[configuration/steps|steps]]: The step files that define a node's iteration:
-discovery and ordering rules, the seed step sequence, the SYNC pseudo-step,
-every supported frontmatter override, and how to customize a node's step list.
+discovery and ordering rules, the seed step sequence, the SYNC pseudo-step, the
+naming and headings of step and mode files, every supported frontmatter
+override, and how to customize a node's step list.
 
 [[configuration/templates|templates]]: Node templates carry committed source,
 config presets, and optional defaults, and may include shared files from the
