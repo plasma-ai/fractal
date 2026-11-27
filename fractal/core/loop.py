@@ -873,6 +873,7 @@ class Loop:
         self._needs_pricing = False
         wants_pricing = False
         priced: list[tuple[pathlib.Path, Agent, str]] = []
+        unrecorded: list[tuple[pathlib.Path, Agent]] = []
         for path in sorted((node.node_dir / 'steps').glob('*.md')):
             # step files are hand-edited: a bad byte must abort through the
             # machinery below -- a bare UnicodeDecodeError names a byte
@@ -889,7 +890,9 @@ class Loop:
                 backend = node.agent(command, step.provider)
             except ValueError:
                 continue
-            if not backend.tracks_cost():
+            if not backend.records_cost:
+                unrecorded.append((path, backend))
+            elif not backend.tracks_cost():
                 if backend.needs_pricing or backend.provider is not None:
                     self._needs_pricing = True
                     priced.append((path, backend, step.model or self._node_model))
@@ -932,6 +935,19 @@ class Loop:
         # instant zero-cost failures would read as a billing outage
         caps = (self._max_cost, self._max_iter_cost, self._max_step_cost)
         if any(cap is not None for cap in caps):
+            # a backend that records no spend can never trip a cap, whatever
+            # its model
+            for path, backend in unrecorded:
+                gap = (
+                    f'{backend.name} in {path.name} records no dollar cost,'
+                    f' so a cost cap can never trip'
+                )
+                remedy = (
+                    'remove the cost caps and bound the run with iteration and'
+                    ' time caps'
+                )
+                print(f'Error: {gap}; {remedy}', file=sys.stderr)
+                self._abort_preflight(gap)
             for path, backend, model in priced:
                 if backend.tracks_cost(model or None):
                     continue
@@ -2814,10 +2830,21 @@ class Loop:
 
         # a cost cap requires spend the loop can track: token-priced and
         # routed agents price from token counts, so a cap needs a priceable
-        # model (cost-reporting natives always track)
+        # model (cost-reporting natives always track; an agent that records
+        # no spend never does, and a cap armed mid-run reaches it here)
         caps = (self._max_cost, self._max_iter_cost, self._max_step_cost)
         any_cap = any(cap is not None for cap in caps)
         if not agent.tracks_cost(step_model or None) and any_cap:
+            if not agent.records_cost:
+                msg = (
+                    f'{agent.name} records no dollar cost, so a cost cap can'
+                    f' never trip; remove the cost caps and bound the run with'
+                    f' iteration and time caps'
+                )
+                print(f'Error: {msg}', file=sys.stderr)
+                return close(
+                    StepResult(status='failed', exit_code=1, reason=_one_line(msg))
+                )
             if not step_model:
                 msg = (
                     f'a cost cap requires a model for {agent.name} in'

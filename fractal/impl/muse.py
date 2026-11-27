@@ -5,9 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import subprocess
 import time
-from collections.abc import Callable
 from typing import Optional
 
 from fractal.core.agent import Agent, Invocation, StreamEvent, StreamParser
@@ -166,8 +164,8 @@ class MuseAgent(Agent):
 
     muse bills by subscription allowance, not per call: its stream carries
     per-model token totals but no USD figure, so steps record no cost and
-    :meth:`tracks_cost` reports ``False`` -- a cost cap on a muse node is
-    refused at preflight instead of silently never tripping. The token
+    ``records_cost`` is ``False`` -- every cost-cap path refuses a muse
+    node instead of arming a ceiling that could never trip. The token
     totals ride the parser (and the session transcript); the ledger has
     no token column, so fractal persists none of them.
     """
@@ -180,6 +178,7 @@ class MuseAgent(Agent):
     mints_session = False
     needs_pricing = False
     wants_pricing = False
+    records_cost = False
     cost_scope = 'call'
     enforces_budget = False
     providers = ()
@@ -240,39 +239,6 @@ class MuseAgent(Agent):
             cwd=self.node.worktree,
             session=session,
         )
-
-    def _preflight(
-        self: MuseAgent,
-        model: Optional[str],
-        *,
-        register: Optional[Callable[[subprocess.Popen], None]] = None,
-    ) -> Optional[str]:
-        """Refuse a cost-capped muse run before anything spawns.
-
-        muse records no dollar spend, so a cap could never trip; the
-        loop's per-step priced-model error would send the operator after
-        a priced model that cannot exist for this backend. Name the real
-        remedy here instead.
-        """
-        caps = ('max_cost', 'max_iter_cost', 'max_step_cost')
-        if any(self.node.config.get(key) is not None for key in caps):
-            raise RuntimeError(
-                'muse nodes record no dollar cost (subscription allowance),'
-                ' so a cost cap can never trip; remove max_cost,'
-                ' max_iter_cost, and max_step_cost, and bound the run with'
-                ' max_iters and time caps instead.'
-            )
-        return None
-
-    def tracks_cost(self: MuseAgent, model: Optional[str] = None) -> bool:
-        """Return whether spend will be recorded: never, in USD terms.
-
-        The stream reports tokens against a subscription allowance, so no
-        dollar figure exists to record; reporting ``False`` makes a cost
-        cap fail the launch loudly (the loop's priced-model error) rather
-        than arm a ceiling that can never trip.
-        """
-        return False
 
     def _transcript(self: MuseAgent, session: str) -> Optional[pathlib.Path]:
         """No expected path: muse shards its session logs by date.

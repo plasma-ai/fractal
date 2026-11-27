@@ -446,6 +446,10 @@ class Agent:
     # refused figure) via the LiteLLM cache; the run start refreshes a cache
     # past the loop's refresh age, and a failed fetch only warns
     wants_pricing: bool = False
+    # False when no launch can record spend (the stream carries no dollar
+    # figure and no pricing applies): a cost cap on it could never trip, so
+    # every cap path refuses the backend by name
+    records_cost: bool = True
     # 'call' (per-invocation figures) or 'thread' (cumulative totals settled
     # against prior sibling steps)
     cost_scope: str = 'call'
@@ -1227,8 +1231,10 @@ class Agent:
 
         Never conflates zero with unknowable: cost-reporting agents
         always track; token-priced agents track only a model present in
-        the pricing cache.
+        the pricing cache; an agent that records no spend never tracks.
         """
+        if not self.records_cost:
+            return False
         # cost-reporting agents carry their own figures on the stream
         if not self.needs_pricing:
             return True

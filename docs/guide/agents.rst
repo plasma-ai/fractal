@@ -281,8 +281,8 @@ sessions cannot be forked — resume them in place instead. muse bills
 by subscription allowance, not per call: its stream carries per-model
 token totals but no dollar figure (the totals ride the session
 transcript; the ledger has no token column and persists none of them),
-so steps record no cost, and a cost cap on a muse node is refused at
-preflight instead of arming a ceiling that could never trip — bound
+so steps record no cost, and every cost cap on a muse node is refused
+instead of arming a ceiling that could never trip (see `Costs`_) — bound
 muse nodes with iteration and time caps.
 
 opencode
@@ -337,7 +337,8 @@ Before its first iteration, a run fails fast when the node cannot
 possibly work:
 
 - under a cost cap, every token-priced step's effective model must be in
-  the price table (the first gap names its step);
+  the price table (the first gap names its step), and no step may run an
+  agent that records no dollar cost (``muse``);
 - the agent binary must be on ``PATH``;
 - an ``openrouter``-routed node must have ``OPENROUTER_API_KEY`` set;
 - ``codex`` with an explicit model runs its acceptance probe, and a probe
@@ -461,7 +462,12 @@ From the user's point of view:
 - **A cost cap requires trackable spend.** On a token-priced or routed
   agent the model must be set and present in the pricing table, or the
   run aborts at preflight naming the step; a step file edited mid-run to
-  such a model fails at launch with a specific error.
+  such a model fails at launch with a specific error. On ``muse``, which
+  records no dollar figure at all, every cost cap is refused: ``node init``
+  and ``node update`` refuse the cap, a capped node cannot spawn a muse
+  child (its children must each carry a cap), ``node start`` refuses a cap
+  written into the config by hand, the run aborts at preflight on a muse
+  step, and a cap armed mid-run fails the next muse step at launch.
 
 Sessions and transcripts
 ------------------------

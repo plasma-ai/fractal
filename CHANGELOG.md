@@ -15,8 +15,9 @@ may include breaking changes, each listed under a Breaking heading.
   interactive muse sessions; sessions resume in place and cannot be forked. muse
   bills by subscription allowance, so its stream carries per-model token totals
   but no dollar figure: muse steps record no cost, and a cost cap on a muse node
-  is refused at preflight instead of arming a ceiling that could never trip —
-  bound muse nodes with iteration and time caps.
+  is refused (at init, on a retune, at launch, at preflight, and at each step)
+  instead of arming a ceiling that could never trip; a capped node cannot spawn
+  a muse child — bound muse nodes with iteration and time caps.
 
 ### Breaking
 

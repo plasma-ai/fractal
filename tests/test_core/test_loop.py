@@ -158,6 +158,7 @@ __all__ = [
     'test_a_malformed_offline_mode_aborts_the_boot',
     'test_preflight_logs_what_a_passed_probe_spent',
     'test_preflight_refuses_a_cap_over_an_unpriced_model',
+    'test_cost_caps_refuse_an_agent_that_records_no_cost',
     'test_park_if_latched_walks_ancestors_with_resume_exemption',
     'test_step_budget_math_binds_the_tightest_cap',
     'test_run_spent_counts_recorded_cost_only',
@@ -5191,6 +5192,58 @@ def test_preflight_refuses_a_cap_over_an_unpriced_model(
     _configure(loop_node, model='gpt-5-codex')
     boot()._preflight()
     assert probes == ['gpt-5-codex']
+
+
+@pytest.mark.parametrize(
+    argnames='step_override',
+    argvalues=[False, True],
+    ids=['node-agent', 'step-override'],
+)
+def test_cost_caps_refuse_an_agent_that_records_no_cost(
+    loop_node: Node,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    step_override: bool,
+) -> None:
+    """A cost cap refuses muse by name, at boot and at every step launch.
+
+    muse's stream carries no dollar figure and no pricing applies, so a cap
+    could never trip, whatever the model. The boot aborts on the node's own
+    muse agent or a step's ``agent: muse`` override before the run row
+    commits; the per-step check refuses a cap armed after the boot (a
+    mid-run retune) the same way, never with the priced-model remedy.
+    """
+    # a stand-in muse binary satisfies the step's install check
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'muse').write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+    (bindir / 'muse').chmod(0o755)
+    monkeypatch.setenv('PATH', f'{bindir}{os.pathsep}{os.environ["PATH"]}')
+    monkeypatch.setattr(pricing, 'update', lambda max_age=None: 'fresh')
+    if step_override:
+        step = loop_node.node_dir / 'steps' / '01-PLAN.md'
+        step.write_text('---\nagent: muse\n---\n# PLAN\n', encoding='utf-8')
+        _configure(loop_node, agent='claude', max_cost=5.0, step_retries=0)
+    else:
+        _configure(loop_node, agent='muse', max_cost=5.0, step_retries=0)
+    # the boot names the step and the gap
+    loop = Loop(loop_node)
+    loop._read_run_parameters()
+    with pytest.raises(_Abort):
+        loop._preflight()
+    reason = 'muse in 01-PLAN.md records no dollar cost, so a cost cap can never trip'
+    assert loop_node.record.runs(limit=1)[0]['metadata'] == reason
+    err = capsys.readouterr().err
+    assert f'Error: {reason}; remove the cost caps' in err
+    assert 'priced model' not in err
+    # a cap the boot never saw is refused at the step launch
+    loop = MockLoop(loop_node)
+    loop.run()
+    assert loop.launched == []
+    err = capsys.readouterr().err
+    assert 'muse records no dollar cost, so a cost cap can never trip' in err
+    assert 'priced model' not in err
 
 
 # ------ boot latch

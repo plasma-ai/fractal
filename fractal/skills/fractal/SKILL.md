@@ -253,12 +253,13 @@ Determine the node's state and proceed accordingly:
       you are Claude, `--agent=codex` if you are Codex, `--agent=grok` if you
       are Grok, `--agent=muse` if you are Muse, `--agent=opencode` if you are
       opencode, or `--agent=omp` if you are Oh My Pi. A `muse` node records no
-      dollar cost (subscription allowance; token totals only), so never arm it
-      with `--max-cost` — cap it with iterations and time instead. `--provider`
-      sets the default provider route the same way (e.g. `openrouter` routes
-      claude or codex through OpenRouter on `OPENROUTER_API_KEY`; agents without
-      routes ignore it, and omitting it means each agent's own endpoint). Route
-      mechanics to know: an inherited route is cleared per node with
+      dollar cost, so fractal refuses any cost cap on it, and a capped node
+      cannot spawn one (its children must each carry a cap) — bound muse nodes
+      with iterations and time instead. `--provider` sets the default provider
+      route the same way (e.g. `openrouter` routes claude or codex through
+      OpenRouter on `OPENROUTER_API_KEY`; agents without routes ignore it, and
+      omitting it means each agent's own endpoint). Route mechanics to know: an
+      inherited route is cleared per node with
       `fractal node config set provider=null`; the key is captured into the
       node's tmux session at launch (tmux >= 3.2), so rotating it requires a
       node restart; routed spend is audited on the OpenRouter dashboard (the

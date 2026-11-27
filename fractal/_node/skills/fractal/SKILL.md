@@ -102,9 +102,10 @@ cap on a token-reporting child requires a (priced) `--model` (the run fails on
 the first step otherwise). claude, grok, opencode, and omp report cost directly;
 codex reports tokens. A claude child routed through openrouter is priced from
 tokens too, so under a cap it also needs an explicit priced `--model`. A muse
-child reports no dollar figure at all (subscription allowance; its steps record
-no cost), so a cost cap on it fails at launch — bound a muse child with
-`--max-iters` and time caps instead.
+child reports no dollar figure at all, so its steps record no cost and every
+cost cap on it is refused. A capped node's children must each carry a cost cap,
+so a capped node cannot spawn a muse child; bound muse children of an uncapped
+node with `--max-iters` and time caps instead.
 
 Every dollar figure you read has a scope; know it before comparing two.
 Budget-guard figures, recorded run-end reasons, and `fractal node cost spent` /

@@ -39,7 +39,6 @@ __all__ = [
     'test_invocation_modes_build_the_pinned_argv_muse',
     'test_invocation_keeps_the_user_xdg_homes_muse',
     'test_invocation_fork_refuses_muse',
-    'test_preflight_refuses_a_cost_capped_run_muse',
     'test_transcript_serves_only_sessions_recorded_for_the_node',
 ]
 
@@ -92,6 +91,7 @@ def test_capability_flags_report_provider_facts_muse(node_with_db: Node) -> None
     assert not backend.mints_session
     assert not backend.needs_pricing
     assert not backend.wants_pricing
+    assert not backend.records_cost
     assert backend.cost_scope == 'call'
     assert not backend.enforces_budget
     # muse reports tokens against a subscription allowance, never a dollar
@@ -378,18 +378,6 @@ def test_invocation_fork_refuses_muse(node_with_db: Node) -> None:
     backend = MuseAgent(node_with_db, 'muse')
     with pytest.raises(NotImplementedError, match='cannot fork'):
         backend.invocation('hi', session=_SESSION, fork=True)
-
-
-def test_preflight_refuses_a_cost_capped_run_muse(node_with_db: Node) -> None:
-    """A cost cap on a muse node is refused at preflight, remedy named."""
-    node_with_db.config.set('max_cost', 5.0)
-    # `sh` stands in for the muse binary so the PATH check passes anywhere
-    backend = MuseAgent(node_with_db, 'sh')
-    with pytest.raises(RuntimeError, match='remove max_cost'):
-        backend.preflight()
-    # uncapped, the same preflight passes (binary presence only)
-    node_with_db.config.set('max_cost', None)
-    assert backend.preflight() is None
 
 
 @pytest.mark.parametrize(

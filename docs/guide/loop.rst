@@ -710,7 +710,10 @@ effective model (its own ``model:`` or the node's) is judged against the
 refreshed table, and the first gap names its step — no model set means
 ``a cost cap requires a model``, and a model missing from the price table is
 refused by name. A step that reaches launch unpriced all the same (a step
-file edited mid-run) fails at launch with the same words. When caps are armed
+file edited mid-run) fails at launch with the same words. An agent that
+records no dollar cost at all (``muse``) has no model to set: under any cap,
+a step running it aborts the boot by name, and a cap armed mid-run fails it at
+launch. When caps are armed
 but a run's spend goes entirely untracked, the loop warns once that the
 budget guards cannot trip.
 

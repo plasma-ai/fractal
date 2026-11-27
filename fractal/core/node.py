@@ -1728,6 +1728,18 @@ class Node:
             # typo refuses here with the registry's supported-list error
             base_word = command_base(agent)
             resolved = resolve(base_word, root=parent.db.path.parent)
+            # an agent that records no spend can never trip a cost cap, and a
+            # capped parent requires every child to carry one (the spawn gate)
+            if not resolved.records_cost:
+                caps = (max_cost, max_iter_cost, max_step_cost)
+                if any(cap is not None for cap in caps):
+                    raise self._records_no_cost(base_word)
+                if parent.config.get('max_cost') is not None:
+                    raise ValueError(
+                        f'{base_word} records no dollar cost, so it cannot run'
+                        f' under {parent.branch!r}: a parent with max_cost'
+                        ' requires every child to carry a cost cap.'
+                    )
             # inherit the provider route the same way, materializing it only when
             # the child's agent supports routes -- an openrouter-defaulting
             # ancestor must never pin a route on a route-less backend (no raise
@@ -2651,11 +2663,12 @@ class Node:
         launches a loop (``start``, ``resume``) runs this before it
         changes anything: the launch invariants (:meth:`Config.validate`),
         then the agent resolved against the registry the way the boot
-        resolves it.
+        resolves it, then any cost cap on an agent that records no spend.
 
         Raises:
             ValueError: If the config violates a launch invariant, names
-                no agent, or names one no backend is registered for.
+                no agent, names one no backend is registered for, or caps
+                the cost of an agent that records none.
 
         """
         from .agent import command_base, resolve
@@ -2668,7 +2681,12 @@ class Node:
         if not agent:
             raise ValueError('No agent configured; set --agent at node init.')
         base_word = command_base(agent)
-        resolve(base_word, root=self.db.path.parent)
+        backend = resolve(base_word, root=self.db.path.parent)
+        # the steering path can arm a cost cap the setters would refuse
+        caps = ('max_cost', 'max_iter_cost', 'max_step_cost')
+        if not backend.records_cost:
+            if any(self.config.get(key) is not None for key in caps):
+                raise self._records_no_cost(base_word)
 
     def start(
         self: Node,
@@ -6224,6 +6242,14 @@ class Node:
         """Build the missing-child-worktree error."""
         return ValueError(f'Child worktree not found: {branch!r}')
 
+    def _records_no_cost(self: Node, agent: str) -> ValueError:
+        """Build the cost-cap error for an agent that records no spend."""
+        return ValueError(
+            f'{agent} records no dollar cost, so a cost cap can never trip;'
+            ' remove the cost caps and bound the node with iteration and time'
+            ' caps.'
+        )
+
     def child_update(
         self: Node,
         name: str,
@@ -6360,9 +6386,12 @@ class Node:
 
         Raises:
             ValueError: On a violated cap invariant (user-facing flag
-                spellings), or when the child is missing.
+                spellings), a cost cap on an agent that records no spend,
+                or when the child is missing.
 
         """
+        from .agent import command_base, resolve
+
         # resolve the child's live config for priors and the merged validation
         branch = f'{self.branch}.{name}'
         if not self.db.exists('nodes', where={'node': branch}):
@@ -6371,6 +6400,13 @@ class Node:
         if child_worktree_dir is None:
             raise self._child_worktree_not_found(branch)
         child_config = self.__class__(child_worktree_dir).config
+        # an agent that records no spend can never trip a cost cap
+        child_agent = child_config.get('agent')
+        caps = (max_cost, max_iter_cost, max_step_cost)
+        if child_agent and any(cap is not None for cap in caps):
+            base_word = command_base(child_agent)
+            if not resolve(base_word, root=self.db.path.parent).records_cost:
+                raise self._records_no_cost(base_word)
         # resolve the reserve and its mode before validating; a default
         # reserve retunes to track a new cap instead of going stale, while an
         # explicit one (a flag, a template preset, or config set) keeps its

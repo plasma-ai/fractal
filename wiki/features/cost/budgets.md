@@ -119,6 +119,11 @@ cached (a stale cache degrades to a warning -- see
 judges every token-priced step's effective model before the run row commits and
 before the paid probe: the first gap (no model, or a model the table cannot
 price) aborts the boot naming its step, so a cap never meets the launch-time
-refusal three times over and reads as a billing outage. The refresh runs whether
+refusal three times over and reads as a billing outage. An agent that records no
+spend at all (muse) has no model to set, so every path that would cap it refuses
+by name: init and the retune refuse the cap, a capped parent cannot spawn such a
+child (its children must each carry a cap), start and resume refuse a cap
+written into its config by hand, the boot aborts on any step running it under a
+cap, and a cap armed mid-run fails that step at launch. The refresh runs whether
 or not a model is configured: a token-priced agent with no model set is priced
 at the served model its session record names.

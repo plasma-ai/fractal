@@ -49,6 +49,7 @@ __all__ = [
     'test_max_cost_enforcement',
     'test_max_cost_bounds_child_by_subtree_remaining',
     'test_max_cost_child_bound_re_arms_after_prior_run',
+    'test_cost_caps_refuse_an_agent_that_records_no_cost',
 ]
 
 
@@ -766,3 +767,40 @@ def test_max_cost_child_bound_re_arms_after_prior_run(
     # the next run starts fresh, so the full cap is claimable
     _stub_run_script(monkeypatch, node)
     node.init('fresh', max_cost=10.0)
+
+
+def test_cost_caps_refuse_an_agent_that_records_no_cost(
+    git_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every path that would cap a muse node's cost refuses, naming why.
+
+    muse records no dollar spend, so a cap on it could never trip, and a
+    capped parent requires every child to carry one: a capped init, a
+    spawn under a capped parent, a retune, and a launch over a cap armed by
+    hand all refuse before anything changes.
+    """
+    Node(git_repo).init(agent='muse', user=True)
+    worktrees = git_repo / '.worktrees'
+    # a muse node with its own cap
+    with pytest.raises(ValueError, match='muse records no dollar cost'):
+        Node(git_repo).init(name='capped', max_cost=5.0)
+    assert not (worktrees / 'main.capped').exists()
+    # a muse child under a capped parent
+    Node(git_repo).init(name='parent', agent='claude', max_cost=10.0)
+    parent_dir = worktrees / 'main.parent' / '.fractal' / 'main.parent'
+    monkeypatch.setenv('_NODE', f'{parent_dir}')
+    with pytest.raises(ValueError, match=r"cannot run under 'main\.parent'"):
+        Node(git_repo).init(name='kid', agent='muse')
+    monkeypatch.delenv('_NODE')
+    assert not (worktrees / 'main.parent.kid').exists()
+    # an uncapped muse node takes no cap on a retune
+    Node(git_repo).init(name='svc')
+    with pytest.raises(ValueError, match='muse records no dollar cost'):
+        Node(git_repo).child_retune('svc', max_cost=5.0)
+    svc = Node(worktrees / 'main.svc')
+    assert svc.config.get('max_cost') is None
+    # nor at launch, over a cap the steering path wrote into its config
+    svc.config.set('max_cost', 5.0)
+    with pytest.raises(ValueError, match='muse records no dollar cost'):
+        svc.start()
