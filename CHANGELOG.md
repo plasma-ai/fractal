@@ -7,6 +7,18 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Added
+
+- A `muse` agent backend (Muse): nodes can run `muse exec --json --yolo`
+  headlessly with fractal-minted session ids (`fractal init --agent=muse`). The
+  node's `.muse` directory serves as muse's XDG config and data home, with
+  `auth.json` symlinked from the global config home; sessions resume in place
+  and cannot be forked. muse bills by subscription allowance, so its stream
+  carries per-model token totals but no dollar figure: muse steps record no
+  cost, and a cost cap on a muse node is refused at preflight instead of arming
+  a ceiling that could never trip — bound muse nodes with iteration and time
+  caps.
+
 ### Breaking
 
 - `Invocation` carries a claude or codex prompt in its new `stdin` field, and

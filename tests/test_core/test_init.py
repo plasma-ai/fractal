@@ -160,7 +160,15 @@ def test_init_creates_node_structure(initialized_node: dict[str, Any]) -> None:
         assert (node_dir / 'skills' / skill / 'SKILL.md').is_file()
 
     # skills symlinked into agent discovery dirs
-    for agent_dir in ('.claude', '.codex', '.grok', '.opencode', '.omp', '.agents'):
+    for agent_dir in (
+        '.claude',
+        '.codex',
+        '.grok',
+        '.muse',
+        '.opencode',
+        '.omp',
+        '.agents',
+    ):
         link = node_dir / agent_dir / 'skills'
         assert link.is_symlink()
         assert (link / 'fractal' / 'SKILL.md').is_file()
