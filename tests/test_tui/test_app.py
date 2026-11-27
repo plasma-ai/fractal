@@ -35,6 +35,7 @@ from ._tree import NOW_EPOCH
 __all__ = [
     'test_focus_ring_walks_every_pane',
     'test_q_quits_from_the_ring',
+    'test_tab_outside_the_composer_leaves_real_focus_alone',
     'test_dragged_tree_width_survives_a_rescope_rebuild',
     'test_tree_opens_no_wider_than_the_node_pane',
     'test_tool_and_error_events_land_in_the_transcript',
@@ -92,6 +93,36 @@ async def test_q_quits_from_the_ring(
         await pilot.press('q')
         await pilot.pause()
     assert app.return_code == 0
+
+
+@pytest.mark.parametrize(
+    argnames=('keys', 'mode'),
+    argvalues=[
+        # the ring: nothing holds real focus
+        pytest.param((), 'ring', id='ring'),
+        # an open filter drop: the picker holds real focus
+        pytest.param(('right', 'enter', 'down', 'enter'), 'rdrop', id='rdrop'),
+    ],
+)
+async def test_tab_outside_the_composer_leaves_real_focus_alone(
+    cockpit_app: Callable[..., FractalApp],
+    keys: tuple[str, ...],
+    mode: str,
+) -> None:
+    """``tab`` and ``shift+tab`` outside the composer change neither mode nor focus.
+
+    Real focus belongs only to a field being edited or an open picker; a
+    framework focus step would hand the keys to a compose field while the mode
+    still drives another pane.
+    """
+    app = cockpit_app(branch='main.alpha')
+    async with app.run_test(size=(150, 48)) as pilot:
+        await pilot.press(*keys)
+        assert app.mode == mode
+        focused = app.focused
+        for key in ('tab', 'shift+tab'):
+            await pilot.press(key)
+            assert (app.mode, app.focused) == (mode, focused), key
 
 
 # ------ pane geometry (the canonical tree)

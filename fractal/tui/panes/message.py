@@ -448,7 +448,7 @@ class MessagePane:
         if self.app.mode == 'edit':
             self.end_edit()
         elif self.app.mode == 'combo':
-            self._close_combo(commit=True)
+            self.combo_pick()
         visible = self._visible_fields()
         index = visible.index(self.cursor) if self.cursor in visible else 0
         self.cursor = visible[(index + step) % len(visible)]

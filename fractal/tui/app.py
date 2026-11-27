@@ -116,9 +116,11 @@ class FractalApp(App):
 
     CSS_PATH = 'app.tcss'
     AUTO_FOCUS = None
+    # priority: the screen binds tab to framework focus and resolves ahead of
+    # the app, so a plain binding here never runs
     BINDINGS = [
-        Binding('tab', 'field_next', show=False),
-        Binding('shift+tab', 'field_prev', show=False),
+        Binding('tab', 'field_next', show=False, priority=True),
+        Binding('shift+tab', 'field_prev', show=False, priority=True),
     ]
     # the focus ring's top row; `message` sits below it (bottom-left)
     TOP = ['fractal', 'radio', 'node']
