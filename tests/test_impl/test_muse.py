@@ -13,6 +13,7 @@ drive the base ``Agent.stream`` driver against a real node ledger.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from typing import Any, Optional
 
@@ -36,10 +37,10 @@ __all__ = [
     'test_stream_records_session_and_model_without_cost_muse',
     'test_stream_fails_on_a_failed_terminal_muse',
     'test_invocation_modes_build_the_pinned_argv_muse',
+    'test_invocation_keeps_the_user_xdg_homes_muse',
     'test_invocation_fork_refuses_muse',
     'test_preflight_refuses_a_cost_capped_run_muse',
-    'test_seed_links_global_auth_into_the_node_home',
-    'test_transcript_globs_the_session_log',
+    'test_transcript_serves_only_sessions_recorded_for_the_node',
 ]
 
 # muse sessions are caller-stamped uuids
@@ -351,12 +352,25 @@ def test_invocation_modes_build_the_pinned_argv_muse(node_with_db: Node) -> None
     # a dash-leading message is protected by the sentinel, not parsed as a flag
     dashed = backend.invocation('-1 on that idea')
     assert dashed.argv[-2:] == ('--', '-1 on that idea')
-    # muse runs in the worktree with its XDG homes relocated to the
-    # node's .muse dir (config, state, and sessions stay per-node)
     assert fresh.cwd == node.worktree
-    assert fresh.env is not None
-    assert fresh.env['XDG_CONFIG_HOME'] == str(node.node_dir / '.muse')
-    assert fresh.env['XDG_DATA_HOME'] == str(node.node_dir / '.muse')
+
+
+def test_invocation_keeps_the_user_xdg_homes_muse(
+    node_with_db: Node,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every tool a muse step runs sees the user's own XDG homes.
+
+    muse reads only the generic XDG homes, which git, gh, and uv read too,
+    so relocating them for muse would hide those tools' user config.
+    """
+    monkeypatch.setenv('XDG_CONFIG_HOME', '/home/user/.config')
+    monkeypatch.delenv('XDG_DATA_HOME', raising=False)
+    invocation = MuseAgent(node_with_db, 'muse').invocation('hi')
+    # no env means the launch inherits the ambient environment untouched
+    env = os.environ if invocation.env is None else invocation.env
+    assert env['XDG_CONFIG_HOME'] == '/home/user/.config'
+    assert 'XDG_DATA_HOME' not in env
 
 
 def test_invocation_fork_refuses_muse(node_with_db: Node) -> None:
@@ -378,50 +392,49 @@ def test_preflight_refuses_a_cost_capped_run_muse(node_with_db: Node) -> None:
     assert backend.preflight() is None
 
 
-def test_seed_links_global_auth_into_the_node_home(
+@pytest.mark.parametrize(
+    argnames='xdg_data_home',
+    argvalues=[True, False],
+    ids=['xdg-data-home', 'home-default'],
+)
+def test_transcript_serves_only_sessions_recorded_for_the_node(
+    node_with_db: Node,
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
+    xdg_data_home: bool,
 ) -> None:
-    """Seeding creates ``.muse`` and links (never copies) the auth file."""
-    # a fake user home carrying the global muse credentials
-    home = tmp_path / 'home'
-    global_auth = home / '.config' / 'muse' / 'auth.json'
-    global_auth.parent.mkdir(parents=True)
-    global_auth.write_text('{}', encoding='utf-8')
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.delenv('XDG_CONFIG_HOME', raising=False)
-    node_dir = tmp_path / 'node'
-    (node_dir / 'skills').mkdir(parents=True)
-    MuseAgent.seed(node_dir)
-    agent_dir = node_dir / '.muse'
-    assert agent_dir.is_dir()
-    assert (agent_dir / 'skills').is_symlink()
-    link = agent_dir / 'muse' / 'auth.json'
-    assert link.is_symlink()
-    assert link.resolve() == global_auth
+    """The date-sharded log under muse's data home serves only owned ids.
 
-
-def test_transcript_globs_the_session_log(node_with_db: Node) -> None:
-    """The session log resolves under the node's own muse data home."""
-    backend = MuseAgent(node_with_db, 'muse')
-    sessions = (
-        node_with_db.node_dir / '.muse' / 'muse' / 'sessions' / '2026' / '11' / '03'
-    )
-    session_dir = sessions / _SESSION
-    session_dir.mkdir(parents=True)
-    log = session_dir / 'session.jsonl'
+    muse's data home is the user's own, shared with interactive sessions,
+    so an ungated lookup would expose any muse session of the OS user.
+    """
+    node = node_with_db
+    backend = MuseAgent(node, 'muse')
+    # muse's data home: $XDG_DATA_HOME/muse, else ~/.local/share/muse
+    if xdg_data_home:
+        monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path / 'data'))
+        data_home = tmp_path / 'data' / 'muse'
+    else:
+        monkeypatch.delenv('XDG_DATA_HOME', raising=False)
+        monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+        data_home = tmp_path / 'home' / '.local' / 'share' / 'muse'
+    log = data_home / 'sessions' / '2026' / '11' / '03' / _SESSION / 'session.jsonl'
+    log.parent.mkdir(parents=True)
     log.write_text('{"schema_version": 1}\n', encoding='utf-8')
-    transcript = backend.transcript(_SESSION)
-    assert transcript['exists'] is True
-    assert transcript['path'] == str(log)
-
-
-def test_transcript_reports_a_missing_session(node_with_db: Node) -> None:
-    """No log yet: the transcript degrades to ``exists: False``."""
-    backend = MuseAgent(node_with_db, 'muse')
-    transcript = backend.transcript(_SESSION)
-    assert transcript['exists'] is False
-    assert transcript['content'] == ''
+    # a session not recorded for this node is never served
+    assert backend.transcript(_SESSION)['exists'] is False
+    logged_step, pending_step = _steps(node, 2)
+    node.record.step_session('muse', step_id=logged_step, model=None, session=_SESSION)
+    found = backend.transcript(_SESSION)
+    assert found['exists'] is True
+    assert found['path'] == str(log)
+    assert found['content'] == '{"schema_version": 1}\n'
+    # a recorded session muse has not written yet degrades to absent
+    pending = '0b9d5b2e-4f3c-4d0e-9a61-2f1c7b8e6d40'
+    node.record.step_session('muse', step_id=pending_step, model=None, session=pending)
+    missing = backend.transcript(pending)
+    assert missing['exists'] is False
+    assert missing['content'] == ''
 
 
 # ------ helpers

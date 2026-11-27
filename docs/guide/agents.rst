@@ -260,14 +260,15 @@ step is normal.
 muse
 ~~~~
 
-Requires the ``muse`` binary (Muse) installed and logged in.
-The node's ``.muse`` directory serves as muse's XDG config and data
-home (``XDG_CONFIG_HOME`` and ``XDG_DATA_HOME`` both point there), so
-settings, state, and sessions stay per-node; only credentials are
-shared — ``auth.json`` is symlinked from the global config home
-(``~/.config/muse``, or ``$XDG_CONFIG_HOME/muse``), never copied, so a
-token refresh updates the one global file. There is no per-node config
-file; node pins travel as flags. Runs headlessly as
+Requires the ``muse`` binary (Muse) installed and logged in. muse runs
+on the user's own config, login, and session store (its XDG config and
+data homes, ``~/.config/muse`` and ``~/.local/share/muse`` by default),
+shared with interactive muse sessions as claude nodes share
+``~/.claude``. Fractal sets no environment for it: muse reads only the
+generic XDG homes, which git, gh, and uv read too, so relocating them
+per node would hide those tools' user config from every muse step.
+There is no per-node config file; node pins travel as flags. Runs
+headlessly as
 ``muse exec --json --yolo``: ``--yolo`` disables approval and muse's
 own sandbox and trusts the worktree, so every tool call is
 auto-approved — the same unattended posture as every other backend,
@@ -526,7 +527,8 @@ layout:
    * - ``omp``
      - ``<node_dir>/.omp/sessions/*/*_<session>.jsonl``
    * - ``muse``
-     - ``<node_dir>/.muse/muse/sessions/<y>/<m>/<d>/<session>/session.jsonl``
+     - ``~/.local/share/muse/sessions/<y>/<m>/<d>/<session>/session.jsonl``
+       (under ``$XDG_DATA_HOME/muse`` when set)
    * - ``opencode``
      - none — sessions live in opencode's central database
 

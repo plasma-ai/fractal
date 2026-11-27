@@ -173,9 +173,8 @@ class MuseAgent(Agent):
     """
 
     name = 'muse'
-    # node pins travel as flags, so there is no per-node config file to
-    # seed; the node's .muse dir instead serves as muse's XDG config and
-    # data home (see _invocation), with credentials linked in by _seed
+    # muse keeps its config, login, and sessions in the user's own XDG homes
+    # and node pins travel as flags, so there is no per-node config file
     config_file = ''
     can_fork = False
     mints_session = False
@@ -232,46 +231,15 @@ class MuseAgent(Agent):
         # is '-' ('-1 on that', '--continue looks right') is the message,
         # never mistaken for a flag that fails the run
         argv += ['--', prompt]
-        # run in the worktree (muse anchors the workspace at the cwd); the
-        # node's .muse dir serves as both XDG homes, so config, bundled
-        # state, and sessions stay per-node -- only the auth link _seed
-        # plants reaches the user's global credentials
-        env = {
-            'XDG_CONFIG_HOME': str(self.config_dir),
-            'XDG_DATA_HOME': str(self.config_dir),
-        }
+        # run in the worktree with no reserved env keys: muse reads only the
+        # generic XDG homes, and relocating those would relocate every tool
+        # the agent runs (git, gh, uv) with them
         return Invocation(
             agent=self.name,
             argv=tuple(argv),
             cwd=self.node.worktree,
-            env=env,
             session=session,
         )
-
-    @classmethod
-    def _seed(
-        cls: type[MuseAgent],
-        node_dir: pathlib.Path,
-        *,
-        parent_dir: Optional[pathlib.Path] = None,
-    ) -> None:
-        """Link the user's muse credentials into the node's XDG home.
-
-        ``auth.json`` is symlinked from the global config home (never
-        copied), so a token refresh from any node or interactive session
-        updates the one shared file -- the codex pattern.
-        """
-        home = node_dir / f'.{cls.name}' / 'muse'
-        home.mkdir(parents=True, exist_ok=True)
-        global_home = (
-            pathlib.Path(os.environ['XDG_CONFIG_HOME']) / 'muse'
-            if os.environ.get('XDG_CONFIG_HOME')
-            else pathlib.Path.home() / '.config' / 'muse'
-        )
-        auth = global_home / 'auth.json'
-        link = home / 'auth.json'
-        if auth.is_file() and not link.is_symlink() and not link.exists():
-            link.symlink_to(auth)
 
     def _preflight(
         self: MuseAgent,
@@ -307,18 +275,28 @@ class MuseAgent(Agent):
         return False
 
     def _transcript(self: MuseAgent, session: str) -> Optional[pathlib.Path]:
-        """Session log under the node's own muse data home.
+        """No expected path: muse shards its session logs by date.
 
-        ``_invocation`` points muse's XDG homes at the node's ``.muse``
-        dir, so the session log lands at
-        ``.muse/muse/sessions/<y>/<m>/<d>/<session>/session.jsonl`` --
-        inside the node's own territory, like every sibling backend, and
-        never mixed with the user's interactive sessions. The date shard
-        is muse's own layout, so the lookup wildcards it. ``None`` until
-        muse creates the file.
+        The log lands at ``sessions/<y>/<m>/<d>/<session>/session.jsonl``
+        under muse's data home, and the date folders are unknowable up
+        front, so :meth:`_transcript_fallback` globs for it.
         """
-        sessions = self.config_dir / 'muse' / 'sessions'
-        found = sorted(sessions.glob(f'*/*/*/{session}/session.jsonl'))
+        return None
+
+    def _transcript_fallback(
+        self: MuseAgent,
+        session: str,
+    ) -> Optional[pathlib.Path]:
+        """Data-home-wide glob for the session log."""
+        # the data home is the user's own, shared with interactive sessions
+        # (the base gates this glob on the id being recorded for THIS node)
+        data_home = os.environ.get('XDG_DATA_HOME')
+        root = (
+            pathlib.Path(data_home) / 'muse'
+            if data_home
+            else pathlib.Path.home() / '.local' / 'share' / 'muse'
+        )
+        found = sorted(root.glob(f'sessions/*/*/*/{session}/session.jsonl'))
         if found:
             return found[-1]
         return None
