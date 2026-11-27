@@ -109,14 +109,14 @@ class MuseParser(StreamParser):
         elif event_type == 'run.usage':
             models = payload.get('models')
             if isinstance(models, list):
+                named: list[str] = []
                 for entry in models:
                     if not isinstance(entry, dict):
                         continue
                     served = entry.get('model')
                     if not isinstance(served, str) or not served:
                         continue
-                    if served not in self.models:
-                        self.models.append(served)
+                    named.append(served)
                     totals: dict[str, int] = {}
                     for key in (
                         'input_tokens',
@@ -128,6 +128,11 @@ class MuseParser(StreamParser):
                         if isinstance(value, int) and not isinstance(value, bool):
                             totals[key] = value
                     self.tokens[served] = totals
+                # a multi-entry usage is ambiguous (an auxiliary model beside
+                # the serving one), so only a sole entry is a served-model
+                # fact -- the drop check fails a pinned step on any other
+                if len(named) == 1 and named[0] not in self.models:
+                    self.models.append(named[0])
         # the terminal frame is the invocation's authoritative end; anything
         # but a completed terminal fails the step and names the reason.
         # Internal task.lifecycle.failed frames are NOT surfaced: sub-tasks

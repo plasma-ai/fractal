@@ -29,6 +29,7 @@ __all__ = [
     'test_parser_maps_the_stream_protocol_muse',
     'test_parser_captures_the_session_from_the_envelope_once',
     'test_parser_usage_records_tokens_and_no_cost',
+    'test_stream_reports_only_served_models_muse',
     'test_parser_ignores_benign_task_failures',
     'test_parser_surfaces_a_failed_terminal',
     'test_parser_treats_a_nonstring_tool_name_as_noise',
@@ -45,6 +46,8 @@ __all__ = [
 # muse sessions are caller-stamped uuids
 _SESSION = '60741b6f-1a93-4c02-8a84-85c75afcae5d'
 _MODEL = 'muse-wonder-1.0'
+# a model muse runs beside the serving one (a reminder or judge sub-task)
+_AUXILIARY = 'muse-lite-1.0'
 
 
 def _frame(
@@ -207,6 +210,45 @@ def test_parser_usage_records_tokens_and_no_cost() -> None:
     }
     assert parser.models == [_MODEL]
     assert parser.cost is None
+
+
+@pytest.mark.parametrize(
+    argnames=('configured', 'usage', 'served'),
+    argvalues=[
+        pytest.param(
+            True, [_MODEL, _AUXILIARY], (_MODEL,), id='configured-beside-auxiliary'
+        ),
+        pytest.param(False, [_MODEL], (_MODEL,), id='sole-usage-entry'),
+        pytest.param(False, [_MODEL, _AUXILIARY], (), id='ambiguous-usage'),
+    ],
+)
+def test_stream_reports_only_served_models_muse(
+    node_with_db: Node,
+    configured: bool,
+    usage: list[str],
+    served: tuple[str, ...],
+) -> None:
+    """Only the configured model, or a sole usage entry, reads as served.
+
+    The loop fails a pinned step on any served model off its pin, and a
+    usage frame can list an auxiliary model beside the serving one, so a
+    multi-entry usage names no served model on its own.
+    """
+    frames: list[dict[str, Any]] = []
+    if configured:
+        frames.append(
+            _frame(
+                'run.model.configured',
+                {'kind': 'run_model_configured', 'model_id': _MODEL},
+            )
+        )
+    entries = [
+        {'model': model, 'input_tokens': 10, 'output_tokens': 2} for model in usage
+    ]
+    frames.append(_frame('run.usage', {'kind': 'run_usage', 'models': entries}))
+    frames.append(_terminal())
+    result = MuseAgent(node_with_db, 'muse').stream(_lines(frames))
+    assert result.models == served
 
 
 def test_parser_ignores_benign_task_failures() -> None:

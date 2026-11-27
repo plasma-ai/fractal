@@ -73,9 +73,11 @@ substitute — so the served model is read off each *real top-level* assistant r
 CLI's injected error stand-ins), and non-string wire noise; omp reads it off
 each `turn_end` frame, and grok off its terminal frame's sole `modelUsage` key —
 its only model report, and a multi-entry usage is ambiguous (an auxiliary model
-beside the serving one), so it names no served model; codex's stream never names
-a model, so its served model is read off its session log's `turn_context` once
-the invocation reconciles after exit. Beside the row's last-wins stamp, every
+beside the serving one), so it names no served model; muse off its
+`run.model.configured` frame, and off a `run.usage` frame only when that frame
+names a sole model, by the same ambiguity rule; codex's stream never names a
+model, so its served model is read off its session log's `turn_context` once the
+invocation reconciles after exit. Beside the row's last-wins stamp, every
 distinct model the stream names rides the launch's served-model record
 (`StreamResult.models`), which is what the loop's model-drop enforcement
 compares against a step's pin (see [[features/loop/steps|steps]]) — the row
@@ -96,8 +98,7 @@ malformed file simply names no model:
   than a top-level key.
 - opencode reads the top-level model from its JSON config file.
 - omp reads its `config.yml` default once a YAML parser is available.
-- muse names no configured default; the served model rides the stream's
-  `run.model.configured` frame (and each `run.usage` entry).
+- muse names no configured default.
 
 The iteration row records the served model too: when every step's
 stream-reported model agrees, it wins over the config-seeded pin at the
