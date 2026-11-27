@@ -539,6 +539,10 @@ scope both greps to `fractal/core/` — `tui/` defines Textual message handlers
 (`on_mount`, `on_key`, ...) that match `def on_` but are framework callbacks,
 not event hooks.
 
+Events here name their emitter `source`, not the `resource` of the org pattern:
+`Event.__init__` takes `source`, and every hook passes `source=self`. Keep
+`source=` for a new event, so the set stays uniform.
+
 ### Shell Scripts (`_scripts/`, `_node/scripts/`)
 
 - `set -euo pipefail` at the top
