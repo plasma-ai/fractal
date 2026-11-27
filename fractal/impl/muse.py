@@ -42,8 +42,8 @@ class MuseParser(StreamParser):
         # muse reports no invocation duration, so the close falls back to
         # wall time (an exec launches and exits per invocation)
         self._started = time.monotonic()
-        # per-model token totals from the latest run.usage frame; muse is
-        # subscription-billed, so the stream carries no USD figure at all
+        # per-model token totals from the latest run.usage frame; the stream
+        # carries no USD figure at all
         self.tokens: dict[str, dict[str, int]] = {}
 
     def feed(self: MuseParser, line: str) -> list[StreamEvent]:
@@ -167,10 +167,11 @@ class MuseParser(StreamParser):
 class MuseAgent(Agent):
     """Muse backend (no USD reporting, caller-stamped sessions).
 
-    muse bills by subscription allowance, not per call: its stream carries
-    per-model token totals but no USD figure, so steps record no cost and
-    ``records_cost`` is ``False`` -- every cost-cap path refuses a muse
-    node instead of arming a ceiling that could never trip. The token
+    muse's stream carries per-model token totals but no USD figure (a
+    pay-as-you-go login's spend is real but unreported), so steps record
+    no cost and ``records_cost`` is ``False`` -- every cost-cap path
+    refuses a muse node instead of arming a ceiling that could never
+    trip. The token
     totals ride the parser (and the session transcript); the ledger has
     no token column, so fractal persists none of them.
     """

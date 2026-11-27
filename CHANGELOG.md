@@ -12,12 +12,13 @@ may include breaking changes, each listed under a Breaking heading.
 - A `muse` agent backend (Muse): nodes can run `muse exec --json --yolo`
   headlessly with fractal-minted session ids (`fractal init --agent=muse`). muse
   runs on the user's own config, login, and session store, shared with
-  interactive muse sessions; sessions resume in place and cannot be forked. muse
-  bills by subscription allowance, so its stream carries per-model token totals
-  but no dollar figure: muse steps record no cost, and a cost cap on a muse node
-  is refused (at init, on a retune, at launch, at preflight, and at each step)
-  instead of arming a ceiling that could never trip; a capped node cannot spawn
-  a muse child — bound muse nodes with iteration and time caps.
+  interactive muse sessions; sessions resume in place and cannot be forked.
+  muse's stream carries per-model token totals but no dollar figure, so muse
+  steps record no cost (pay-as-you-go spend on an API key is real but neither
+  recorded nor capped), and a cost cap on a muse node is refused (at init, on a
+  retune, at launch, at preflight, and at each step) instead of arming a ceiling
+  that could never trip; a capped node cannot spawn a muse child — bound muse
+  nodes with iteration and time caps.
 
 ### Breaking
 

@@ -97,8 +97,8 @@ def test_capability_flags_report_provider_facts_muse(node_with_db: Node) -> None
     assert not backend.records_cost
     assert backend.cost_scope == 'call'
     assert not backend.enforces_budget
-    # muse reports tokens against a subscription allowance, never a dollar
-    # figure, so no spend is recordable with or without a model
+    # muse reports tokens, never a dollar figure, so no spend is recordable
+    # with or without a model
     assert not backend.tracks_cost()
     assert not backend.tracks_cost(_MODEL)
 

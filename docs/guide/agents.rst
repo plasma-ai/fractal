@@ -277,11 +277,13 @@ launch muse nodes whose task you would trust unsupervised, preferably
 on a sandboxed or disposable host. Fractal mints the session id and
 stamps it on the step row; ``muse exec --session-id`` adopts it, and a
 later exec with the same id resumes the session in place. ``muse``
-sessions cannot be forked — resume them in place instead. muse bills
-by subscription allowance, not per call: its stream carries per-model
-token totals but no dollar figure (the totals ride the session
-transcript; the ledger has no token column and persists none of them),
-so steps record no cost, and every cost cap on a muse node is refused
+sessions cannot be forked — resume them in place instead. muse's
+stream carries per-model token totals but no dollar figure (the totals
+ride the session transcript; the ledger has no token column and persists
+none of them), so steps record no cost. That matches a subscription
+login; a pay-as-you-go login (an API key) spends real money per token,
+which fractal neither records nor caps. Every cost cap on a muse node is
+refused
 instead of arming a ceiling that could never trip (see `Costs`_) — bound
 muse nodes with iteration and time caps.
 
