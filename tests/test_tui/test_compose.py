@@ -24,7 +24,9 @@ from fractal.tui.data import TuiData, leaf_of
 __all__ = [
     'test_kind_toggle_flips_visible_fields',
     'test_field_grid_navigation_walks_rows_and_body',
-    'test_field_cursor_cycles_through_the_visible_fields',
+    'test_tab_steps_the_field_cursor_through_the_visible_fields',
+    'test_tab_ends_an_edit_and_steps_the_field_cursor',
+    'test_tab_commits_the_highlighted_combo_option_and_steps',
     'test_type_to_edit_a_free_text_field',
     'test_combo_pick_sets_the_node_field',
     'test_combo_cancel_restores_the_prior_value',
@@ -100,26 +102,118 @@ async def test_field_grid_navigation_walks_rows_and_body(
         assert app.mode == 'ring'
 
 
-async def test_field_cursor_cycles_through_the_visible_fields(
+@pytest.mark.parametrize(
+    argnames=('kind', 'fields'),
+    argvalues=[
+        # chat: the session field, and the transcript spliced in above the body
+        pytest.param(
+            'chat',
+            ['m_kind', 'm_node', 'm_session', 'm_convo', 'm_body'],
+            id='chat',
+        ),
+        # radio: the channel/thread/priority row, and the subject above the body
+        pytest.param(
+            'radio',
+            [
+                'm_kind',
+                'm_node',
+                'm_channel',
+                'm_thread',
+                'm_priority',
+                'm_subject',
+                'm_body',
+            ],
+            id='radio',
+        ),
+    ],
+)
+async def test_tab_steps_the_field_cursor_through_the_visible_fields(
     cockpit_app: Callable[..., FractalApp],
+    kind: str,
+    fields: list[str],
 ) -> None:
-    """The tab/shift+tab actions cycle the cursor through exactly the visible fields.
+    """``tab`` steps the cursor through exactly the visible fields; ``shift+tab`` back.
 
-    Tab is the cockpit's field-cycle accelerator (bound to ``field_next`` /
-    ``field_prev``); the actions drive ``field_cycle`` the binding invokes.
+    The cockpit owns both keys: the cursor wraps at either end and no widget
+    takes real focus, which would strand the keys outside the mode machine.
     """
     app = cockpit_app(branch='main.alpha')
     async with app.run_test(size=(150, 48)) as pilot:
         pane = app.message_pane
+        pane.kind = kind
+        pane.refresh_visibility()
         await pilot.press('down', 'enter', 'escape')  # field mode on the body
-        visible = pane._visible_fields()
-        start = pane.cursor
-        app.action_field_next()
+        assert pane.cursor == 'm_body'
+        # a lap forward: the body is last, so the first tab wraps to the kind
+        forward = []
+        for _ in fields:
+            await pilot.press('tab')
+            forward.append(pane.cursor)
+        assert forward == fields
+        # a lap back retraces it from the body
+        backward = []
+        for _ in fields:
+            await pilot.press('shift+tab')
+            backward.append(pane.cursor)
+        assert backward == [*reversed(fields[:-1]), 'm_body']
+        assert app.mode == 'field'
+        assert app.focused is None
+
+
+async def test_tab_ends_an_edit_and_steps_the_field_cursor(
+    cockpit_app: Callable[..., FractalApp],
+) -> None:
+    """``tab``/``shift+tab`` while typing keep the text, end the edit, and step on."""
+    app = cockpit_app(branch='main.alpha')
+    async with app.run_test(size=(150, 48)) as pilot:
+        pane = app.message_pane
+        pane.kind = 'radio'
+        pane.refresh_visibility()
+        await pilot.press('down', 'enter')  # into the body, edit mode
+        await pilot.press('h', 'i')
+        await pilot.press('shift+tab')  # ends the edit, steps back to the subject
+        assert (app.mode, pane.cursor) == ('field', 'm_subject')
+        assert app.focused is None  # the body released its text-entry focus
+        assert app.query_one('#m_body', TextArea).text == 'hi'
+        await pilot.press('s')  # type-to-edit the subject
+        assert app.mode == 'edit'
+        await pilot.press('tab')  # ends the edit, steps on to the body
+        assert (app.mode, pane.cursor) == ('field', 'm_body')
+        assert app.focused is None
+        assert app.query_one('#m_subject', Input).value == 's'
+
+
+async def test_tab_commits_the_highlighted_combo_option_and_steps(
+    cockpit_app: Callable[..., FractalApp],
+) -> None:
+    """``tab`` out of an open combo picks its highlighted option, then steps on.
+
+    The combo's field holds filter text while the drop is open, so the pick is
+    the highlighted option -- the top match once typed, else the current value.
+    """
+    app = cockpit_app(branch='main.alpha')
+    async with app.run_test(size=(150, 48)) as pilot:
+        pane = app.message_pane
+        # field mode -> m_node, then type-to-open the combo seeded with 'g'
+        await pilot.press('down', 'enter', 'escape', 'up', 'up', 'right')
+        await pilot.press('g')
+        assert app.mode == 'combo'
         await pilot.pause()
-        assert pane.cursor == visible[(visible.index(start) + 1) % len(visible)]
-        app.action_field_prev()
+        branches = [row['branch'] for row in app.snapshot.tree]
+        matches = [branch for branch in branches if 'g' in branch.lower()]
+        await pilot.press('tab')  # picks the top match, steps on to the session
+        assert (app.mode, pane.cursor) == ('field', 'm_session')
+        assert not app.query('#m_combodrop')
+        assert pane.node == matches[0]
+        assert app.query_one('#m_node', Input).value == leaf_of(pane.node)
+        # an untouched drop opens on the current value: tabbing through keeps it
+        session = pane.session
+        await pilot.press('enter')  # drop the session combo
+        assert app.mode == 'combo'
         await pilot.pause()
-        assert pane.cursor == start
+        await pilot.press('tab')
+        assert (app.mode, pane.cursor) == ('field', 'm_convo')
+        assert pane.session == session
 
 
 async def test_type_to_edit_a_free_text_field(

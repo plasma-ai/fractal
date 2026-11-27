@@ -5,7 +5,7 @@ desc: |
   focus-ring navigation that moves between them and drills into each pane's
   interior zones, and the keyboard mode machine behind it.
 created: 2026-07-21T05:08:54Z
-updated: 2026-11-27T22:49:51Z
+updated: 2026-11-27T23:33:41Z
 ---
 
 # features/tui/panes
@@ -94,7 +94,9 @@ Textual's focus system:
   make every arrow key both drive the mode machine and scroll the clicked
   container.
 - The app's `BINDINGS` hold only `tab` and `shift+tab`, the keys Textual binds
-  to focus traversal, mapped to the composer's field-cycle actions.
+  to focus traversal, mapped to the composer's field-cycle actions. They are
+  priority bindings: the screen's own `tab` binding resolves ahead of the app's,
+  so a plain binding here never runs.
 - The cockpit gives real focus only to a widget that takes typing or a pick, and
   only while it does: the field or body being edited (`edit`), the field being
   filtered while its picker is open (`combo`), and the radio pickers (`rdrop`,

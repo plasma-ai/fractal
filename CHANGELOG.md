@@ -39,6 +39,11 @@ may include breaking changes, each listed under a Breaking heading.
   or `interval` wait, before it ends: the run ended at that iteration's boundary
   with no step having run the wind-down instructions. It still ends at once when
   spend has reached `max_cost` or no further iteration can start.
+- In the cockpit, `tab` and `shift+tab` step the message composer's field cursor
+  — ending an edit, or committing an open picker's highlighted option, on the
+  way — and do nothing elsewhere: the keys moved keyboard focus into a compose
+  field instead, so the field cursor stayed put and the next keys typed into a
+  field the cockpit was not editing.
 
 ## [1.4.0] - 2026-10-25
 
