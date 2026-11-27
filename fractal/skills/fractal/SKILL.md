@@ -545,11 +545,11 @@ Once the node is running, briefly explain how to interact with it:
   `kill`, `chat`, and `merge` (committed work only; the node stays paused) act
   on it (ask a paused node what it was doing — `chat --current` forks the
   interrupted claude, grok, opencode, or omp session, and the TUI's chat does so
-  by default; a codex node gets a fresh session). Note the distinction: `resume`
-  continues a *paused* run in place, while `start --continue` opens a *fresh*
-  run (worktree restored — uncommitted project files need `--clean`, and a
-  budget-ended run refuses without an explicit `--max-cost`) on a stopped/exited
-  node.
+  by default; a codex or muse node gets a fresh session). Note the distinction:
+  `resume` continues a *paused* run in place, while `start --continue` opens a
+  *fresh* run (worktree restored — uncommitted project files need `--clean`, and
+  a budget-ended run refuses without an explicit `--max-cost`) on a
+  stopped/exited node.
 
 - **Worktree:** The node runs in a git worktree at
   `<repo>/.worktrees/<branch>/`. The user's repo is untouched. When done, from
@@ -643,9 +643,9 @@ Work the tree through the CLI — run it from the repo root, or name a branch
 positionally. Monitor with `fractal node list`/`status`/`activity`/`cost`, and
 `chat <branch> "<q>" --current` to ask a running agent without disrupting its
 loop — `--current` forks the live loop session (claude, grok, opencode, or omp);
-for codex nodes ask via a fresh chat (omit `--current`) or continue one in place
-with `--session ... --resume`. The root auto-subscribes to its children's
-`outbox` but has no auto-sync, so poll its radio yourself —
+for codex and muse nodes ask via a fresh chat (omit `--current`) or continue one
+in place with `--session ... --resume`. The root auto-subscribes to its
+children's `outbox` but has no auto-sync, so poll its radio yourself —
 `fractal radio read --channel=inbox --unread` (its inbox) and
 `read --feed --unread` (children, one hop); the `messages`/`feed` listings
 survey metadata without consuming unread state, and your reads receipt as you,

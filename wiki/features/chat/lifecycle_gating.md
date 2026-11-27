@@ -5,7 +5,7 @@ desc: |
   in every state, but the live loop session exists only while a node is
   active or paused, and paused is the flagship interrogation case.
 created: 2026-07-21T04:35:35Z
-updated: 2026-07-21T04:35:35Z
+updated: 2026-11-27T23:15:11Z
 ---
 
 # features/chat/lifecycle_gating
@@ -47,8 +47,8 @@ it touches nothing live.
 ## Agent-shape gates
 
 Two gates come from the agent rather than the lifecycle. A non-forking agent
-(codex) cannot fork any session: on such a node `--current` is refused with the
-remedy in the error, and the cockpit's automatic transport falls back to a fresh
-session with a warning instead of forking a live or paused thread. And a node
-with no agent configured anywhere up its ancestry refuses every chat shape,
-pointing at `fractal init --agent`.
+(codex, muse) cannot fork any session: on such a node `--current` is refused
+with the remedy in the error, and the cockpit's automatic transport falls back
+to a fresh session with a warning instead of forking a live or paused thread.
+And a node with no agent configured anywhere up its ancestry refuses every chat
+shape, pointing at `fractal init --agent`.

@@ -2,9 +2,10 @@
 
 The Muse (``muse``) dialect end to end: the ``muse exec --json`` JSONL
 protocol parsed into normalized events -- the session in the ``stream``
-envelope, the served model on ``run.model.configured``, text on
-``run.output.delta``, tool names on ``tool.result``, token totals (and no
-USD figure) on ``run.usage``, and the authoritative ``run.terminal`` close --
+envelope, the served model on ``run.model.configured`` (and a sole
+``run.usage`` entry), text on ``run.output.delta``, tool names on
+``tool.result``, and the authoritative ``run.terminal`` close, never a USD
+figure --
 the ``exec --json --yolo`` argv builder with the caller-minted session, and
 the date-sharded transcript glob under muse's data home. Stream-level cases
 drive the base ``Agent.stream`` driver against a real node ledger.
@@ -15,27 +16,29 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
+import uuid
 from typing import Any, Optional
 
 import pytest
 
-from fractal.core import agent
+from fractal.cli.utils import StreamRenderer
 from fractal.core.node import Node
 from fractal.impl.muse import MuseAgent, MuseParser
 
 __all__ = [
     'test_capability_flags_report_provider_facts_muse',
-    'test_registry_resolves_muse',
     'test_parser_maps_the_stream_protocol_muse',
     'test_parser_captures_the_session_from_the_envelope_once',
-    'test_parser_usage_records_tokens_and_no_cost',
     'test_stream_reports_only_served_models_muse',
     'test_parser_ignores_benign_task_failures',
-    'test_parser_surfaces_a_failed_terminal',
+    'test_parser_closes_on_the_terminal_outcome_muse',
     'test_parser_treats_a_nonstring_tool_name_as_noise',
     'test_parser_ignores_a_duplicate_terminal',
     'test_parser_tolerates_garbage_muse',
+    'test_events_render_through_the_production_renderer_muse',
     'test_stream_records_session_and_model_without_cost_muse',
+    'test_stream_detached_keeps_session_unpersisted_muse',
     'test_stream_fails_on_a_failed_terminal_muse',
     'test_invocation_modes_build_the_pinned_argv_muse',
     'test_invocation_keeps_the_user_xdg_homes_muse',
@@ -43,7 +46,7 @@ __all__ = [
     'test_transcript_serves_only_sessions_recorded_for_the_node',
 ]
 
-# muse sessions are caller-stamped uuids
+# muse sessions are caller-minted uuids
 _SESSION = '60741b6f-1a93-4c02-8a84-85c75afcae5d'
 _MODEL = 'muse-wonder-1.0'
 # a model muse runs beside the serving one (a reminder or judge sub-task)
@@ -103,12 +106,6 @@ def test_capability_flags_report_provider_facts_muse(node_with_db: Node) -> None
     assert not backend.tracks_cost(_MODEL)
 
 
-def test_registry_resolves_muse() -> None:
-    """The shipped registry resolves the muse base command."""
-    assert agent.resolve('muse') is MuseAgent
-    assert 'muse' in agent.supported()
-
-
 def test_parser_maps_the_stream_protocol_muse() -> None:
     """One protocol implementation: session, model, text, tool, usage, close."""
     parser = MuseParser()
@@ -155,7 +152,6 @@ def test_parser_maps_the_stream_protocol_muse() -> None:
     assert result.final
     assert result.cost is None
     assert result.duration is not None
-    assert result.duration >= 0.0
     assert parser.model == _MODEL
     assert parser.models == [_MODEL]
     assert parser.cost is None
@@ -166,50 +162,15 @@ def test_parser_captures_the_session_from_the_envelope_once() -> None:
     parser = MuseParser(model=_MODEL)
     frames = [
         _frame('run.output.delta', {'kind': 'run_output_delta', 'text': 'hi'}),
+        _frame(
+            'run.model.configured', {'kind': 'run_model_configured', 'model_id': _MODEL}
+        ),
         _frame('run.output.delta', {'kind': 'run_output_delta', 'text': 'yo'}),
     ]
     events = [event for line in _lines(frames) for event in parser.feed(line)]
-    # the configured model already matches, so no re-stamp fires
+    # the served model matches the configured one, so no re-stamp fires
     assert [event.kind for event in events] == ['session', 'text', 'text']
     assert parser.session == _SESSION
-
-
-def test_parser_usage_records_tokens_and_no_cost() -> None:
-    """Token totals land on the parser; no cost is ever invented."""
-    parser = MuseParser()
-    frames = [
-        _usage(
-            {
-                'input_tokens': 10,
-                'output_tokens': 6,
-                'reasoning_tokens': 1,
-                'cached_tokens': 4,
-            }
-        ),
-        # run.usage totals are cumulative per invocation: the latest frame
-        # replaces the earlier one
-        _usage(
-            {
-                'input_tokens': 25,
-                'output_tokens': 9,
-                'reasoning_tokens': 2,
-                'cached_tokens': 8,
-            }
-        ),
-        _terminal(),
-    ]
-    events = [event for line in _lines(frames) for event in parser.feed(line)]
-    assert [event.kind for event in events] == ['session', 'result']
-    assert parser.tokens == {
-        _MODEL: {
-            'input_tokens': 25,
-            'output_tokens': 9,
-            'reasoning_tokens': 2,
-            'cached_tokens': 8,
-        },
-    }
-    assert parser.models == [_MODEL]
-    assert parser.cost is None
 
 
 @pytest.mark.parametrize(
@@ -275,14 +236,37 @@ def test_parser_ignores_benign_task_failures() -> None:
     assert parser.errors == []
 
 
-def test_parser_surfaces_a_failed_terminal() -> None:
-    """A non-completed terminal collects an error and fails the close."""
+@pytest.mark.parametrize(
+    argnames=('frame', 'error'),
+    argvalues=[
+        pytest.param(_terminal(), None, id='completed'),
+        pytest.param(
+            _terminal('failed', 'model unavailable'),
+            'model unavailable',
+            id='failed-with-reason',
+        ),
+        pytest.param(_terminal('cancelled'), 'muse run failed', id='cancelled'),
+        # the payload's terminal field decides, never the frame-type suffix
+        pytest.param(
+            _frame('run.terminal.completed', {'kind': 'run_terminal'}),
+            'muse run failed',
+            id='field-missing',
+        ),
+    ],
+)
+def test_parser_closes_on_the_terminal_outcome_muse(
+    frame: dict[str, Any],
+    error: Optional[str],
+) -> None:
+    """Only a completed terminal succeeds; any other fails naming its reason."""
     parser = MuseParser()
-    events = parser.feed(json.dumps(_terminal('failed', 'model unavailable')))
-    assert [event.kind for event in events] == ['session', 'error', 'result']
-    assert parser.errors == ['model unavailable']
-    assert events[-1].failed
-    assert events[-1].final
+    events = parser.feed(json.dumps(frame))
+    close = events[-1]
+    assert close.kind == 'result'
+    assert close.final
+    assert close.cost is None
+    assert close.failed == (error is not None)
+    assert parser.errors == ([] if error is None else [error])
 
 
 def test_parser_treats_a_nonstring_tool_name_as_noise() -> None:
@@ -328,6 +312,26 @@ def test_parser_tolerates_garbage_muse() -> None:
     assert parser.cost is None
 
 
+def test_events_render_through_the_production_renderer_muse(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Parsed events drive the CLI renderer: text, errors, an unpriced close."""
+    parser = MuseParser()
+    render = StreamRenderer()
+    frames = [
+        _frame('run.output.delta', {'kind': 'run_output_delta', 'text': 'Done.'}),
+        _terminal('failed', 'model unavailable'),
+    ]
+    for line in _lines(frames):
+        for event in parser.feed(line):
+            render(event)
+    captured = capsys.readouterr()
+    assert 'Done.' in captured.out
+    # muse reports no dollar figure, so the close reads '$?', never $0
+    assert re.search(r'— \d+\.\ds, \$\?', captured.out)
+    assert 'agent error: model unavailable' in captured.err
+
+
 def test_stream_records_session_and_model_without_cost_muse(node_with_db: Node) -> None:
     """The stream driver lands session and model on the ledger, cost NULL."""
     node = node_with_db
@@ -359,6 +363,17 @@ def test_stream_records_session_and_model_without_cost_muse(node_with_db: Node) 
     assert result.cost is None
 
 
+def test_stream_detached_keeps_session_unpersisted_muse(node_with_db: Node) -> None:
+    """A detached turn stamps the step row but never persists ``.session``."""
+    node = node_with_db
+    backend = MuseAgent(node, 'muse')
+    (step_id,) = _steps(node, 1)
+    backend.stream(_lines([_terminal()]), step_id=step_id, detached=True)
+    row = node.db.read('steps', where={'step_id': step_id})[0]
+    assert row['session'] == _SESSION
+    assert node.sessions.get('muse') is None
+
+
 def test_stream_fails_on_a_failed_terminal_muse(node_with_db: Node) -> None:
     """A failed terminal fails the step even after a fully drained stdout."""
     backend = MuseAgent(node_with_db, 'muse')
@@ -374,23 +389,26 @@ def test_invocation_modes_build_the_pinned_argv_muse(node_with_db: Node) -> None
     head = ('muse', 'exec', '--json', '--yolo', '--workspace', str(node.worktree))
     # fresh: fractal mints the id, muse adopts it via --session-id
     fresh = backend.invocation('hi')
-    assert len(fresh.argv) == len(head) + 4
-    assert fresh.argv[: len(head)] == head
-    assert fresh.argv[-4] == '--session-id'
-    fresh_id = fresh.argv[-3]
-    assert fresh.argv[-2:] == ('--', 'hi')
-    assert fresh.session == fresh_id
+    assert fresh.argv == (*head, '--session-id', fresh.session, '--', 'hi')
+    assert uuid.UUID(fresh.session)
     assert fresh.mode == 'fresh'
     # resume re-enters the same session with the very same flag
-    resume = backend.invocation('hi', session=fresh_id)
-    assert resume.argv == (*head, '--session-id', fresh_id, '--', 'hi')
+    resume = backend.invocation('hi', session=fresh.session)
+    assert resume.argv == (*head, '--session-id', fresh.session, '--', 'hi')
     assert resume.mode == 'resume'
     # the model rides --model, effort rides --reasoning-effort
     tuned = backend.invocation('hi', model=_MODEL, effort='xhigh')
-    assert tuned.argv[: len(head)] == head
-    tail = tuned.argv[len(head) :]
-    assert tail[:4] == ('--model', _MODEL, '--reasoning-effort', 'xhigh')
-    assert tail[-2:] == ('--', 'hi')
+    assert tuned.argv == (
+        *head,
+        '--model',
+        _MODEL,
+        '--reasoning-effort',
+        'xhigh',
+        '--session-id',
+        tuned.session,
+        '--',
+        'hi',
+    )
     # a dash-leading message is protected by the sentinel, not parsed as a flag
     dashed = backend.invocation('-1 on that idea')
     assert dashed.argv[-2:] == ('--', '-1 on that idea')

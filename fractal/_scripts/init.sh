@@ -72,7 +72,7 @@ Options:
                                        bundle; each surface the bundle carries
                                        overrides its inherit-or-package source
     --agent=<agent>                    Agent type
-                                       (currently claude, codex, grok, opencode, or omp)
+                                       (currently claude, codex, grok, muse, opencode, or omp)
     --provider=<provider>              Provider route for the agent (e.g. openrouter)
     --model=<model>                    Model override (passed to agent CLI via --model)
     --effort=<effort>                  Reasoning-effort override (passed to agent CLI)

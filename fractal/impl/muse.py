@@ -1,4 +1,4 @@
-"""Muse (``muse``) CLI agent implementation."""
+"""Muse Code (``muse``) CLI agent implementation."""
 
 from __future__ import annotations
 
@@ -30,7 +30,8 @@ class MuseParser(StreamParser):
     carries the session in its ``stream`` envelope, and the payloads that
     matter are ``run.model.configured`` (served model), ``run.output.delta``
     (assistant text), ``tool.result`` (the only frame naming a tool),
-    ``run.usage`` (per-model token totals), and the ``run.terminal`` close.
+    ``run.usage`` (the models the invocation ran), and the ``run.terminal``
+    close.
     """
 
     def __init__(self: MuseParser, *, model: Optional[str] = None) -> None:
@@ -42,9 +43,6 @@ class MuseParser(StreamParser):
         # muse reports no invocation duration, so the close falls back to
         # wall time (an exec launches and exits per invocation)
         self._started = time.monotonic()
-        # per-model token totals from the latest run.usage frame; the stream
-        # carries no USD figure at all
-        self.tokens: dict[str, dict[str, int]] = {}
 
     def feed(self: MuseParser, line: str) -> list[StreamEvent]:
         """Parse one muse JSONL frame into normalized events."""
@@ -63,7 +61,7 @@ class MuseParser(StreamParser):
             return []
         events: list[StreamEvent] = []
         # every frame's envelope names the session (muse mints the id, or
-        # adopts the caller-stamped --session-id); capture it once
+        # adopts the caller-minted --session-id); capture it once
         stream = event.get('stream')
         if isinstance(stream, dict) and stream.get('kind') == 'session':
             session = stream.get('id')
@@ -103,41 +101,27 @@ class MuseParser(StreamParser):
             if not isinstance(tool, str) or not tool:
                 tool = '?'
             events.append(StreamEvent(kind='tool', tool=tool))
-        # token usage closes the run: totals are cumulative for the whole
-        # invocation (children excluded), so the latest frame replaces, never
-        # adds; no cost event is emitted -- there is no USD fact to report
+        # token usage names the models the invocation ran; no cost event is
+        # emitted -- there is no USD fact to report
         elif event_type == 'run.usage':
             models = payload.get('models')
             if isinstance(models, list):
-                named: list[str] = []
-                for entry in models:
-                    if not isinstance(entry, dict):
-                        continue
-                    served = entry.get('model')
-                    if not isinstance(served, str) or not served:
-                        continue
-                    named.append(served)
-                    totals: dict[str, int] = {}
-                    for key in (
-                        'input_tokens',
-                        'output_tokens',
-                        'reasoning_tokens',
-                        'cached_tokens',
-                    ):
-                        value = entry.get(key)
-                        if isinstance(value, int) and not isinstance(value, bool):
-                            totals[key] = value
-                    self.tokens[served] = totals
+                named = [
+                    entry['model']
+                    for entry in models
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get('model'), str)
+                    and entry['model']
+                ]
                 # a multi-entry usage is ambiguous (an auxiliary model beside
                 # the serving one), so only a sole entry is a served-model
                 # fact -- the drop check fails a pinned step on any other
                 if len(named) == 1 and named[0] not in self.models:
                     self.models.append(named[0])
-        # the terminal frame is the invocation's authoritative end; anything
-        # but a completed terminal fails the step and names the reason.
-        # Internal task.lifecycle.failed frames are NOT surfaced: sub-tasks
-        # (reminders, judges) fail benignly inside healthy runs, and a real
-        # failure still arrives here
+        # the terminal frame alone ends the invocation, and anything but
+        # completed fails the step naming the reason (task.lifecycle.failed
+        # frames stay silent: reminder and judge sub-tasks fail benignly
+        # inside healthy runs)
         elif isinstance(event_type, str) and event_type.startswith('run.terminal.'):
             # one terminal closes the invocation; a duplicate is wire noise
             if self.final:
@@ -165,15 +149,14 @@ class MuseParser(StreamParser):
 
 
 class MuseAgent(Agent):
-    """Muse backend (no USD reporting, caller-stamped sessions).
+    """Muse Code CLI backend (no USD reporting, caller-minted sessions).
 
     muse's stream carries per-model token totals but no USD figure (a
     pay-as-you-go login's spend is real but unreported), so steps record
     no cost and ``records_cost`` is ``False`` -- every cost-cap path
     refuses a muse node instead of arming a ceiling that could never
-    trip. The token
-    totals ride the parser (and the session transcript); the ledger has
-    no token column, so fractal persists none of them.
+    trip. The token totals ride the session transcript only; the ledger
+    has no token column.
     """
 
     name = 'muse'
@@ -188,17 +171,6 @@ class MuseAgent(Agent):
     cost_scope = 'call'
     enforces_budget = False
     providers = ()
-    effort_levels = (
-        'none',
-        'minimal',
-        'low',
-        'medium',
-        'high',
-        'xhigh',
-        'max',
-        'ultra',
-    )
-    effort_floor = 'high'
 
     __parser__ = MuseParser
 
@@ -216,12 +188,9 @@ class MuseAgent(Agent):
         # muse exec cannot fork a session; a later exec re-enters it
         if mode == 'fork':
             raise NotImplementedError(_NO_FORK)
-        # --yolo is fractal's unattended posture for every backend (an
-        # approval prompt would hang a headless loop); it also drops muse's
-        # own sandbox and trusts the workspace -- deliberate: node steps run
-        # builds, tests, and git unrestricted, sandbox inits fail outright
-        # on hosts whose kernel denies new namespaces, and the worktree --
-        # not the sandbox -- is fractal's isolation boundary (see README)
+        # --yolo is the unattended posture of every backend (an approval
+        # prompt would hang a headless loop); it drops muse's own sandbox too,
+        # leaving the worktree as the isolation boundary (see README)
         argv = [*self.parts, 'exec', '--json', '--yolo']
         argv += ['--workspace', str(self.node.worktree)]
         if model:

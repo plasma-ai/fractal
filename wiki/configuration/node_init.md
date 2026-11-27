@@ -5,7 +5,7 @@ desc: |
   and agent selection, tree limits, time and cost budgets, execution modes,
   and the cross-flag rules enforced at initialization.
 created: 2026-07-21T04:48:38Z
-updated: 2026-07-21T04:48:38Z
+updated: 2026-11-27T23:15:11Z
 ---
 
 # configuration/node_init
@@ -106,11 +106,11 @@ exists.
   declaration in the template charter must match it; also fills the `{{pin}}`
   input. It overrides a template default; an explicit `pin` in `--values` or
   `--set` must agree.
-- `--agent` -- agent command (e.g. `claude`, `codex`, `grok`, `opencode`,
-  `omp`). Defaults to the nearest ancestor's configured agent; the user node
-  sets the tree default via `fractal init --agent`. An unknown agent is refused
-  at init against the supported-agent registry rather than killing the loop at
-  boot.
+- `--agent` -- agent command (e.g. `claude`, `codex`, `grok`, `muse`,
+  `opencode`, `omp`). Defaults to the nearest ancestor's configured agent; the
+  user node sets the tree default via `fractal init --agent`. An unknown agent
+  is refused at init against the supported-agent registry rather than killing
+  the loop at boot.
 - `--provider` -- provider route for the agent (e.g. `openrouter`). Defaults to
   the vendor-native endpoint, inherited from the nearest ancestor. An explicit
   route the agent does not support is refused; an inherited one is silently

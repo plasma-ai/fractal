@@ -5,7 +5,7 @@ desc: |
   the tree with fractal init, creating a node with fractal node init,
   authoring the NODE.md contract, and launching with fractal node start.
 created: 2026-07-21T04:47:43Z
-updated: 2026-07-21T04:47:43Z
+updated: 2026-11-27T23:15:11Z
 ---
 
 # user_flow/getting_started
@@ -29,8 +29,8 @@ launches re-export it into their loop runtimes).
 Every node lives in a **git** worktree. **tmux** is the default runtime and
 provides attachable live panes; on a host where tmux is unavailable, launch with
 `fractal node start --headless` instead. You also need at least one agent CLI on
-PATH — `claude`, `codex`, `grok`, `opencode`, or `omp` — since nodes drive an
-agent, not a model API directly.
+PATH — `claude`, `codex`, `grok`, `muse`, `opencode`, or `omp` — since nodes
+drive an agent, not a model API directly.
 
 Then run `fractal install` once. It copies the bundled **fractal** and **wiki**
 skills into the Claude Code (`.claude/skills`) and Codex (`.agents/skills`)

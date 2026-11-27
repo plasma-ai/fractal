@@ -5,7 +5,7 @@ desc: |
   worktree-per-node design, the agent-provider seam, the central per-tree
   database, and the package layout.
 created: 2026-07-21T04:35:35Z
-updated: 2026-07-27T02:49:26Z
+updated: 2026-11-27T23:15:11Z
 ---
 
 # architecture
@@ -14,7 +14,7 @@ updated: 2026-07-27T02:49:26Z
 
 [[architecture/agent_providers|agent_providers]]: The core/impl agent-provider
 seam: what the agent base class owns, the provider name registry, and how the
-backend modules for claude, codex, grok, opencode, and omp slot in.
+backend modules for claude, codex, grok, muse, opencode, and omp slot in.
 
 [[architecture/database|database]]: The central per-tree SQLite database: where
 it lives, how every node resolves it, the WAL discipline, row ownership, what

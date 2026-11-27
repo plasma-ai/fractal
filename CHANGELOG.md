@@ -7,9 +7,17 @@ may include breaking changes, each listed under a Breaking heading.
 
 ## [Unreleased]
 
+### Breaking
+
+- `Invocation` carries a claude or codex prompt in its new `stdin` field, and
+  its argv no longer holds the prompt (see Fixed). A host `_spawn` override that
+  delegates to `super()._spawn` keeps working. One that builds `Popen` itself,
+  or an executor a host ships the invocation to, launches those agents with no
+  prompt: feed the `stdin` text on the process's standard input.
+
 ### Added
 
-- A `muse` agent backend (Muse): nodes can run `muse exec --json --yolo`
+- A `muse` agent backend (Muse Code): nodes can run `muse exec --json --yolo`
   headlessly with fractal-minted session ids (`fractal init --agent=muse`). muse
   runs on the user's own config, login, and session store, shared with
   interactive muse sessions; sessions resume in place and cannot be forked.
@@ -19,14 +27,6 @@ may include breaking changes, each listed under a Breaking heading.
   retune, at launch, at preflight, and at each step) instead of arming a ceiling
   that could never trip; a capped node cannot spawn a muse child — bound muse
   nodes with iteration and time caps.
-
-### Breaking
-
-- `Invocation` carries a claude or codex prompt in its new `stdin` field, and
-  its argv no longer holds the prompt (see Fixed). A host `_spawn` override that
-  delegates to `super()._spawn` keeps working. One that builds `Popen` itself,
-  or an executor a host ships the invocation to, launches those agents with no
-  prompt: feed the `stdin` text on the process's standard input.
 
 ### Fixed
 

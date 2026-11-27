@@ -46,8 +46,9 @@ work-product commit pipeline in `fractal/core/commit.py`.
 Agent invocation is a core/impl seam: `fractal/core/agent.py` defines the
 `Agent` base class (invocation argv, stream parsing, cost and logging hooks)
 plus the name registry (`resolve`/`register`/`supported`), and
-`fractal/impl/{claude,codex,grok,opencode,omp}.py` are the provider backends — a
-new provider slots in as one new `impl/` module registered in `core/agent.py`.
+`fractal/impl/{claude,codex,grok,muse,opencode,omp}.py` are the provider
+backends — a new provider slots in as one new `impl/` module registered in
+`core/agent.py`.
 
 ## Build & Development
 

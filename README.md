@@ -150,7 +150,7 @@ Parameters the skill interprets from the directive:
   `anthropic/claude-sonnet-4.6` when routed through OpenRouter)
 - **`effort`**: reasoning-effort override; when omitted, the Claude and Codex
   seeds' own pinned level (`high`) applies rather than the vendor default, while
-  Grok, OpenCode, and Oh My Pi fall back to the vendor default
+  Grok, Muse Code, OpenCode, and Oh My Pi fall back to the vendor default
 - **`max-iters`**: per-run iteration cap
 - **`max-depth`**: maximum child node nesting depth
 - **`max-children`**: maximum direct child nodes

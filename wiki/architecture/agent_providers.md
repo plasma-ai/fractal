@@ -3,9 +3,9 @@ name: architecture/agent_providers
 desc: |
   The core/impl agent-provider seam: what the agent base class owns, the
   provider name registry, and how the backend modules for claude, codex,
-  grok, opencode, and omp slot in.
+  grok, muse, opencode, and omp slot in.
 created: 2026-07-21T04:47:26Z
-updated: 2026-10-27T18:23:53Z
+updated: 2026-11-27T23:15:11Z
 ---
 
 # architecture/agent_providers
@@ -34,14 +34,14 @@ owns:
   whether it continues the session's spend, and the text the launch feeds the
   process on standard input. Claude and codex put their prompt in that text,
   since a process's argv is readable by anything that lists the host's
-  processes; grok, opencode, and omp pass it in argv. Backends contribute only
-  their reserved provider keys to the environment; the public verb composes the
-  full subprocess environment, and a reserved key valued as unset scrubs routing
-  variables inherited from an ancestor's provider route. The verb always unsets
-  a few ambient variables too: the effort and model-forcing knobs, so a pin
-  reaches the agent only through its flag, and `VIRTUAL_ENV`, which names the
-  launching project's venv rather than the node worktree's. Agent commands split
-  on whitespace only — shell quoting is refused at accept time.
+  processes; grok, muse, opencode, and omp pass it in argv. Backends contribute
+  only their reserved provider keys to the environment; the public verb composes
+  the full subprocess environment, and a reserved key valued as unset scrubs
+  routing variables inherited from an ancestor's provider route. The verb always
+  unsets a few ambient variables too: the effort and model-forcing knobs, so a
+  pin reaches the agent only through its flag, and `VIRTUAL_ENV`, which names
+  the launching project's venv rather than the node worktree's. Agent commands
+  split on whitespace only — shell quoting is refused at accept time.
 
 - **Spawning and stream parsing.** Agents are subprocesses driven line-by-line.
   Each backend ships a parser that turns its own wire format into normalized
@@ -96,6 +96,8 @@ subclass:
 - **codex** — the Codex CLI; mints its own session ids and cannot fork a
   session.
 - **grok** — the Grok Build CLI.
+- **muse** — the Muse Code CLI; records no dollar cost, so every cost cap over
+  it is refused, and cannot fork a session.
 - **opencode** — the opencode CLI; reports per-step cost and emits a result
   frame per step rather than one per turn.
 - **omp** — the Oh My Pi CLI.

@@ -44,6 +44,7 @@ def test_exclude_template_ships_as_package_data() -> None:
         'claude.err',
         'codex.err',
         'grok.err',
+        'muse.err',
         'opencode.err',
         'omp.err',
     ):

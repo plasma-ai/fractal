@@ -5,7 +5,7 @@ desc: |
   packages, the node-machinery seeds, and the shim pointer dist published
   beside the main package.
 created: 2026-07-21T04:47:26Z
-updated: 2026-07-21T04:47:26Z
+updated: 2026-11-27T23:15:11Z
 ---
 
 # architecture/packages
@@ -42,8 +42,8 @@ ship as data, and a separate metadata-only `shim/` dist at the repo root.
   The TUI observes through core; it holds no business logic of its own.
 
 - **`impl/`** — one provider backend module per supported agent CLI (`claude`,
-  `codex`, `grok`, `opencode`, `omp`), each slotting into the registry defined
-  in `core/agent.py`.
+  `codex`, `grok`, `muse`, `opencode`, `omp`), each slotting into the registry
+  defined in `core/agent.py`.
 
 - **`util/`** — shared low-level utilities with no fractal domain knowledge: git
   and tmux wrappers, filesystem helpers, duration and time parsing, system
