@@ -2,10 +2,11 @@
 name: configuration/steps
 desc: |
   The step files that define a node's iteration: discovery and ordering
-  rules, the seed step sequence, the SYNC pseudo-step, every supported
-  frontmatter override, and how to customize a node's step list.
+  rules, the seed step sequence, the SYNC pseudo-step, the naming and headings
+  of step and mode files, every supported frontmatter override, and how to
+  customize a node's step list.
 created: 2026-07-21T04:48:38Z
-updated: 2026-07-21T04:48:38Z
+updated: 2026-11-27T22:49:51Z
 ---
 
 # configuration/steps
@@ -65,13 +66,41 @@ precedes, and a still-open SYNC row reads as a pass only under sync mode (with
 sync off no pass can exist, so a running SYNC step is numbered immediately) --
 so a step named SYNC lists under its own number, never as muted `sync` chrome.
 
+## File names and headings
+
+The seed's step files share one shape: a two-digit zero-padded prefix and a name
+in capitals (`00-PREPARE.md` through `04-COMMIT.md`), a frontmatter block (see
+[[#Frontmatter overrides]]), then a body that opens with a second-level heading
+naming the step (`## Prepare`). The heading is second-level because the body
+renders beneath the `NODE.md` charter, which has no top-level heading and whose
+own sections are second-level (see [[features/loop/prompt_assembly]]). The loop
+enforces only the digit prefix and its single width; the two digits, the
+capitals, and the heading are the seed's convention.
+
+The mode documents in `fractal/_node/modes/` follow a matching convention. A
+mode file is named in capitals with no prefix, its words joined by underscores
+as in the flag that enables it (`GIT_PENDING.md` on `GIT_PENDING_MODE`); the
+name is the wiring, so renaming the file rewires it
+([[features/loop/prompt_assembly#Modes|prompt_assembly]] has the rule). No mode
+file carries frontmatter, and each opens with a second-level heading of the form
+`## <Name> Mode` (`## Resume Mode`, `## Git Pending Mode`). The files the code
+reads by name rather than joining on a flag -- `CHAT.md`, `STALL.md`, and
+`GIT_PENDING.md` ahead of a steer -- are headed the same way. `SYNC.md` is the
+exception: it runs as a step of its own, so it is headed like a step
+(`## Sync`).
+
 ## Frontmatter overrides
 
 The frontmatter grammar is strictly flat: the block opens with `---` on the
 first line and closes at the next `---`, and each line inside matching
 `key: value` (a lowercase key, a non-empty scalar) contributes one override,
 first occurrence winning. Anything else -- including a file with no opening
-fence -- contributes nothing. The supported keys:
+fence -- contributes nothing. No YAML parser reads the block: a key is lowercase
+letters and underscores only, and its value is the rest of the line as written,
+so quotes stay part of the value and there is no nesting or list syntax. The two
+flags, `requires_approval` and `detached`, are set only by the exact lowercase
+`true`: `True` or `yes` does not set one. A well-formed line whose key is not
+one listed below is not an error -- nothing reads it. The supported keys:
 
 - `requires_approval` -- when `true`, the step becomes an approval gate: on
   success the loop holds before proceeding until the parent approves. The parent
@@ -84,7 +113,9 @@ fence -- contributes nothing. The supported keys:
   validated at launch: an unknown agent or an uninstalled command fails the step
   rather than the run.
 - `provider` -- run this step on a different provider route; it must be one the
-  step's agent supports.
+  step's agent supports. An agent with no routes ignores the key when the step
+  runs; a template's step check still refuses it at init (see
+  [[configuration/templates]]).
 - `model` -- model override for this step; takes precedence over the node's
   configured model.
 - `effort` -- reasoning-effort override for this step.
@@ -99,6 +130,13 @@ fence -- contributes nothing. The supported keys:
 
 The effective step time limit is the tightest of the run deadline, the iteration
 deadline, and the step ceiling.
+
+Each of the five seed steps carries one frontmatter line,
+`requires_approval: false`. False is already the default, so the line changes
+nothing: it restates the default so the key is visible where an operator edits
+the file. Both fractal skills that teach step customization -- the operator's
+(`fractal/skills/fractal/SKILL.md`) and the node's
+(`fractal/_node/skills/fractal/SKILL.md`) -- list the same seven keys.
 
 ## Customizing a step list
 

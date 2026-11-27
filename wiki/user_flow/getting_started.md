@@ -5,7 +5,7 @@ desc: |
   the tree with fractal init, creating a node with fractal node init,
   authoring the NODE.md contract, and launching with fractal node start.
 created: 2026-07-21T04:47:43Z
-updated: 2026-07-21T04:47:43Z
+updated: 2026-11-27T22:49:51Z
 ---
 
 # user_flow/getting_started
@@ -118,6 +118,27 @@ fill in:
 Good completion requirements are checkable by the node while it runs (tests
 pass, files exist, lint is clean) — never a gate only the operator can open
 after the fact.
+
+The seed places those two sections inside a fixed layout. `NODE.md` is the
+charter that opens every step's prompt, with the step's text and any mode text
+rendered beneath it (see [[features/loop/prompt_assembly]]). It therefore has no
+top-level heading, its sections are second-level, and it alone carries what
+every step needs once: the role sentence, the variable list, and the closing
+trailer. From the top:
+
+- An opening sentence that tells the agent its role: "You are an autonomous node
+  iterating on a project in a git worktree."
+- `## Context` — the prompt variables in bullet lists labelled `Paths:` and
+  `State:` (`$WORKTREE_DIR`, `$STEP_LABEL`, and the rest), then the common
+  commands. A step or mode file that uses a variable not listed here introduces
+  it in its own text.
+- `## Instructions` and `## Completion Requirements` — each seeded holding only
+  an HTML comment placeholder: the first holds
+  `<!-- Author the node's goals and directions here. -->` and nothing else.
+- `## Rules` — a bullet list of standing rules, each opening with a bold lead
+  (`**Completion.**`, `**Scope.**`).
+- A trailer between two thematic breaks (lines of 70 underscores) telling the
+  agent to execute only the current step, whose text follows it in the prompt.
 
 ## Launch: `fractal node start`
 
